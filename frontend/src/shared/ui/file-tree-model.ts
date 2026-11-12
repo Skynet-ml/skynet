@@ -48,34 +48,10 @@ export function sortTree(node: FileTreeNode): void {
   node.children.forEach(sortTree);
 }
 
-/** A sorted tree of plain entries; an entry without a type is a file. */
-export function buildFileTree(
-  entries: ReadonlyArray<{ path: string; type?: "file" | "dir" }>,
-): FileTreeNode {
-  const { root, ensure } = treeBuilder((base) => base);
-  for (const entry of entries) {
-    if (entry.path) ensure(entry.path, entry.type ?? "file");
-  }
-  sortTree(root);
-  return root;
-}
-
 /** Every folder above a path, nearest the root first. */
 export function ancestors(path: string): string[] {
   const parts = path.split("/");
   return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
-}
-
-/** Every folder in a tree, for a tree that opens them all. */
-export function treeFolders(root: FileTreeNode): Set<string> {
-  const open = new Set<string>();
-  const walk = (node: FileTreeNode) => {
-    if (node.type !== "dir") return;
-    if (node.path) open.add(node.path);
-    node.children.forEach(walk);
-  };
-  walk(root);
-  return open;
 }
 
 /**

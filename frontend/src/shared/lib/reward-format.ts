@@ -41,7 +41,7 @@ export function rewardFormatters() {
 }
 
 /** The translated name of one reward part. */
-export function rewardPartLabel(component: RewardComponent): string {
+function rewardPartLabel(component: RewardComponent): string {
   return msg(`submit.v2.reward.part.${component}` as MessageKey);
 }
 

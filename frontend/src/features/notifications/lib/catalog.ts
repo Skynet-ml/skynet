@@ -54,7 +54,7 @@ export function channelHeld(
  * Channels every server delivers on. Slack is live only where the server has
  * a Slack app set up; elsewhere its column stays visible and disabled.
  */
-export const LIVE_CHANNELS: ReadonlySet<GridChannel> = new Set(["inbox", "email", "chrome"]);
+const LIVE_CHANNELS: ReadonlySet<GridChannel> = new Set(["inbox", "email", "chrome"]);
 
 /** Whether a channel's column is usable on this server. */
 export function channelLive(channel: GridChannel, slackConfigured: boolean): boolean {
@@ -112,11 +112,6 @@ export function channelHeaderTip(
   return off ? [CHANNEL_KEYS[channel], off] : [CHANNEL_KEYS[channel]];
 }
 
-/** In the Mac app, the columns that are not set up on this Mac, in column order. */
-export function localOffChannels(local: LocalNotificationChannels | null): GridChannel[] {
-  return LOCAL_CHANNELS.filter((channel) => localOffReason(channel, local) !== null);
-}
-
 /**
  * Whether the page may be the Mac app. Local mode binds only to loopback, so
  * a hosted page never probes the local-only routes.
@@ -124,19 +119,6 @@ export function localOffChannels(local: LocalNotificationChannels | null): GridC
 export function maybeLocalHost(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }
-
-/** Urgent events skip the hold and go out at once on every enabled channel. */
-export const URGENT_EVENTS: ReadonlySet<NotificationEventType> = new Set([
-  "needs_input",
-  "budget_near",
-]);
-
-export const FOCUSED_EVENTS: ReadonlySet<NotificationEventType> = new Set([
-  "needs_input",
-  "budget_near",
-  "failed",
-  "finished",
-]);
 
 /** Whether a grid cell exists at all: product news only ever lands in the inbox. */
 export function cellExists(event: NotificationEventType, channel: GridChannel): boolean {

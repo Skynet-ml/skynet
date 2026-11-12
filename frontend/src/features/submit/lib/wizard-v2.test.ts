@@ -27,9 +27,7 @@ const {
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
-  workspaceFileText,
   workspacePathIssue,
-  workspacePaths,
   writeWorkspaceFile,
 } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
@@ -283,9 +281,6 @@ test("run.py and metric.py write through to the run and metric code; others are 
   assert.deepEqual(writeWorkspaceFile(ws, "metric.py", "m"), { metricCode: "m" });
   const withHelper = { ...ws, ...writeWorkspaceFile(ws, "lib/helpers.py", "X = 1") };
   assert.deepEqual(withHelper.files, { "lib/helpers.py": "X = 1" });
-  assert.deepEqual(workspacePaths(withHelper), ["run.py", "metric.py", "lib/helpers.py"]);
-  assert.equal(workspaceFileText(withHelper, "lib/helpers.py"), "X = 1");
-  assert.equal(workspaceFileText(withHelper, "missing.py"), null);
 });
 
 test("only extra files can be deleted", () => {

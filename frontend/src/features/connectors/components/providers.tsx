@@ -108,16 +108,8 @@ export const PROVIDER_GROUPS: Array<{
   { category: "traces", providers: ["langfuse", "langsmith", "braintrust"] },
 ];
 
-/** Every provider, in display order. */
-export const ALL_PROVIDERS: ConnectorProvider[] = PROVIDER_GROUPS.flatMap((g) => g.providers);
-
 // GitLab and Bitbucket hold repositories to optimize, not data files, so the import menu skips them.
 const REPO_ONLY_PROVIDERS: ReadonlySet<ConnectorProvider> = new Set(["gitlab", "bitbucket"]);
-
-/** Providers that browse through the generic import dialog (Hugging Face has its own). */
-export const BROWSE_PROVIDERS: ConnectorProvider[] = ALL_PROVIDERS.filter(
-  (id) => id !== "huggingface" && !REPO_ONLY_PROVIDERS.has(id),
-);
 
 /** The sections of the import menu: every provider that has data files to import. */
 export const IMPORT_GROUPS = PROVIDER_GROUPS.map((group) => ({

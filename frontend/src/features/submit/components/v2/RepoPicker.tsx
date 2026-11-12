@@ -138,7 +138,7 @@ function RepoSummary({ repo }: { repo: GithubRepository }) {
  * visibility badge, one description line and the language/pushed line, in the
  * list's own gap, so the swap to real rows shifts nothing.
  */
-export function RepoRowsSkeleton() {
+function RepoRowsSkeleton() {
   return (
     <div className="flex flex-col gap-1.5" aria-busy="true">
       {[0, 1, 2].map((i) => (

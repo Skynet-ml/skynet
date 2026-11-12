@@ -17,12 +17,9 @@ const {
   MAX_TOOL_CALLS_LIMITS,
   minScorerRuns,
   proposerKnobs,
-  submittedProposer,
-  submittedRunProposer,
   supportsIterationLimit,
   usesNativeProposer,
 } = await import("./engine-contract.ts");
-const { DEFAULT_SHINKA_SETTINGS } = await import("./shinka-settings.ts");
 const { BLACKBOX_OPTIMIZERS } = await import(unifiedRunUrl);
 
 test("iteration limits apply only to a version-capped engine", () => {
@@ -57,73 +54,8 @@ test("proposer knobs follow the engine that reads them, and Auto exposes them al
   assert.deepEqual(proposerKnobs("auto"), { candidates: true, ralph: true });
 });
 
-test("submitted proposer resets every knob the form hides, and always runs research rounds", () => {
-  const tuned = {
-    ...DEFAULT_PROPOSER,
-    harness: "pi" as const,
-    max_candidates_per_iter: 4,
-    ralph: false,
-    max_no_eval_seconds: 600,
-  };
-  const stall = DEFAULT_PROPOSER.max_no_eval_seconds;
-  assert.deepEqual(submittedProposer(tuned, "auto"), {
-    ...tuned,
-    ralph: true,
-    max_no_eval_seconds: stall,
-  });
-  assert.deepEqual(submittedProposer(tuned, "autosaddler"), {
-    ...tuned,
-    max_candidates_per_iter: null,
-    ralph: true,
-    max_no_eval_seconds: null,
-  });
-  assert.deepEqual(submittedProposer(tuned, "meta_harness"), {
-    ...tuned,
-    ralph: true,
-    max_no_eval_seconds: null,
-  });
-  assert.deepEqual(submittedProposer(tuned, "autoresearch"), {
-    ...tuned,
-    ralph: true,
-    max_candidates_per_iter: null,
-    max_no_eval_seconds: stall,
-  });
-});
-
-test("the tool-call cap defaults to 100 within the backend range and is always submitted", () => {
+test("the tool-call cap defaults to 100 within the backend range", () => {
   assert.equal(DEFAULT_PROPOSER.max_tool_calls, 100);
   assert.ok(DEFAULT_PROPOSER.max_tool_calls! >= MAX_TOOL_CALLS_LIMITS.min);
   assert.ok(DEFAULT_PROPOSER.max_tool_calls! <= MAX_TOOL_CALLS_LIMITS.max);
-  for (const choice of ["meta_harness", "autoresearch", "autosaddler"] as const)
-    assert.equal(
-      submittedProposer({ ...DEFAULT_PROPOSER, max_tool_calls: 40 }, choice).max_tool_calls,
-      40,
-    );
-  assert.equal(
-    submittedProposer({ ...DEFAULT_PROPOSER, max_tool_calls: null }, "auto").max_tool_calls,
-    100,
-  );
-});
-
-test("ShinkaEvolve sends a proposer only for the agent editor's tool-call cap", () => {
-  const proposer = { ...DEFAULT_PROPOSER, harness: "opencode" as const, max_tool_calls: 250 };
-  const shinka = { ...DEFAULT_SHINKA_SETTINGS };
-  const base = { proposer, choice: "shinka_evolve" as const };
-  assert.equal(submittedRunProposer({ ...base, shinka }), undefined);
-  assert.equal(submittedRunProposer({ ...base, shinka: null }), undefined);
-  assert.deepEqual(submittedRunProposer({ ...base, shinka: { ...shinka, editor: "agent" } }), {
-    harness: DEFAULT_PROPOSER.harness,
-    max_tool_calls: 250,
-  });
-  // Optimizers without a coding agent never send one.
-  for (const choice of ["gepa", "best_of_n"] as const)
-    assert.equal(
-      submittedRunProposer({ ...base, choice, shinka: { ...shinka, editor: "agent" } }),
-      undefined,
-    );
-  // A coding-agent proposer sends its own settings, cap included.
-  assert.deepEqual(
-    submittedRunProposer({ proposer, choice: "auto", shinka }),
-    submittedProposer(proposer, "auto"),
-  );
 });

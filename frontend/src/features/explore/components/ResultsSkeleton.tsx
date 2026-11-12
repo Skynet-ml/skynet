@@ -40,7 +40,7 @@ interface ResultsSkeletonProps {
  * classes, so its title and summary lines take the real line heights; a
  * revisit draws as many rows, with as many lines, as the page last showed.
  */
-export function ResultsSkeleton({ rows = DEFAULT_ROWS }: ResultsSkeletonProps) {
+function ResultsSkeleton({ rows = DEFAULT_ROWS }: ResultsSkeletonProps) {
   return (
     <ul aria-hidden="true" className="divide-y divide-border/55">
       {rows.map(([titleLines, summaryLines], i) => (
@@ -64,7 +64,7 @@ export function ResultsSkeleton({ rows = DEFAULT_ROWS }: ResultsSkeletonProps) {
 }
 
 /** Stand-in for ResultsToolbar: the result count and the sort control. */
-export function ResultsToolbarSkeleton() {
+function ResultsToolbarSkeleton() {
   return (
     <div
       aria-hidden="true"

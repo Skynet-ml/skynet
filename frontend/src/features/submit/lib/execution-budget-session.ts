@@ -47,7 +47,7 @@ function errorNumber(error: unknown, key: string): number | null {
 }
 
 /** Retain safe shared fields when accepting an older or partially written draft. */
-export function readBudgetDraft(raw: WizardBudgetDraft): WizardBudgetDraft {
+function readBudgetDraft(raw: WizardBudgetDraft): WizardBudgetDraft {
   const ref = raw.executionBudgetRef;
   return {
     ...(ref && typeof ref.id === "string" && Number.isInteger(ref.revision)

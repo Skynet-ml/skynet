@@ -33,7 +33,7 @@ import {
   type DraftFile,
 } from "./draft-changes";
 
-export const ADDED_TONE = "text-[#5A7247] dark:text-[#adc899]";
+const ADDED_TONE = "text-[#5A7247] dark:text-[#adc899]";
 // A 2px bar on the start side marks each changed row; the diff body is always LTR.
 const ADDED_FILL =
   "bg-[color-mix(in_oklab,var(--success)_18%,transparent)] shadow-[inset_2px_0_0_var(--success)]";

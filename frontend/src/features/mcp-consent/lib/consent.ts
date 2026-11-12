@@ -10,13 +10,13 @@
  */
 
 // Same order as MCP_SCOPES in backend/core/api/mcp_oauth.py.
-export const MCP_SCOPES = ["runs:read", "runs:write"] as const;
+const MCP_SCOPES = ["runs:read", "runs:write"] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
 
 const CODE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const MAX_FIELD = 512;
 
-export type McpRequest = {
+type McpRequest = {
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
@@ -66,7 +66,7 @@ export function parseMcpRequest(params: URLSearchParams): ParsedMcpRequest {
 }
 
 /** Whether ``uri`` is an absolute http or https URL. */
-export function isHttpUrl(uri: string): boolean {
+function isHttpUrl(uri: string): boolean {
   try {
     const url = new URL(uri);
     return url.protocol === "https:" || url.protocol === "http:";

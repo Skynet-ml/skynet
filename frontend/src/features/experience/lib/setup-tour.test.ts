@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { COLOR_THEMES } from "../../../shared/lib/color-theme.ts";
 import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
-  MAX_SETUP_STOPS,
   SETUP_STOPS,
   THEME_OPTIONS,
   advancesOnAnswer,
@@ -26,6 +25,15 @@ function sources(dir: string): string[] {
     return /\.tsx$/.test(name) ? [readFileSync(path, "utf8")] : [];
   });
 }
+
+/*
+ * The tour stays short: every stop past this is one the user would skip.
+ * Ten covers the two looks the user sees change behind the card (level
+ * and theme), the one stop a billing answer can add (the key)
+ * and the two places the user connects things (data sources and the update
+ * grid).
+ */
+const MAX_SETUP_STOPS = 10;
 
 test("the setup stays short and every stop is unique", () => {
   for (const billing of ["platform", "byok", "subscription"] as const) {

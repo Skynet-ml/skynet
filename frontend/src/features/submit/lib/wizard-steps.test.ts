@@ -7,7 +7,6 @@ import {
   WIZARD_STAGE_ORDER,
   canEnterStep,
   canMoveForward,
-  isWizardStageId,
 } from "./wizard-steps.ts";
 
 test("the four steps run Task → Inputs → Optimizer → Metric", () => {
@@ -19,13 +18,6 @@ test("step positions round-trip through the order", () => {
   for (const [id, index] of Object.entries(WIZARD_STAGE)) {
     assert.equal(WIZARD_STAGE_ORDER[index], id);
   }
-});
-
-test("isWizardStageId accepts step ids only", () => {
-  for (const id of WIZARD_STAGE_ORDER) assert.ok(isWizardStageId(id));
-  assert.equal(isWizardStageId("goal"), false);
-  assert.equal(isWizardStageId(1), false);
-  assert.equal(isWizardStageId(undefined), false);
 });
 
 const steps = WIZARD_STAGE_ORDER;

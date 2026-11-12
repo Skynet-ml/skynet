@@ -10,7 +10,7 @@ import * as React from "react";
  */
 
 /** Size contract shared with the lobehub marks. */
-export interface BrandMarkProps {
+interface BrandMarkProps {
   size: number;
 }
 

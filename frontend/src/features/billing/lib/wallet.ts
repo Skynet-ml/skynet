@@ -31,6 +31,7 @@ export type WalletStatus = "healthy" | "low" | "empty";
 export type LedgerKind = "run" | "topup" | "grant";
 
 /** Value of one cent, in USD. */
+// Exported for the backend parity test (test_billing_constants_parity.py), which reads it.
 export const CENT_USD_VALUE = 0.01;
 
 /**
@@ -43,7 +44,7 @@ export const CUSTOM_CENTS_MIN = 500;
 export const CUSTOM_CENTS_MAX = 100_000;
 
 /** Below this much spendable value the wallet reads as "running low" (calm, not alarming). */
-export const LOW_BALANCE_USD = 0.5;
+const LOW_BALANCE_USD = 0.5;
 
 /**
  * The backend's live pricing terms, served on the wallet response so estimates
@@ -78,7 +79,7 @@ export const DEFAULT_PRICING_TERMS: PricingTerms = {
  * `purchase_fee_cents`. The buyer pays the top-up amount plus this fee; only the
  * top-up amount is added to the balance.
  */
-export function purchaseFeeUsd(cents: number, terms: PricingTerms = DEFAULT_PRICING_TERMS): number {
+function purchaseFeeUsd(cents: number, terms: PricingTerms = DEFAULT_PRICING_TERMS): number {
   return (Math.ceil(cents * terms.purchaseFeeRate) + terms.purchaseFeeFixedCents) / 100;
 }
 
@@ -91,7 +92,7 @@ export function purchaseTotalUsd(
 }
 
 /** The one-time free grant that lets a new account try the platform. */
-export interface FreeGrant {
+interface FreeGrant {
   centsRemaining: number;
   centsTotal: number;
 }

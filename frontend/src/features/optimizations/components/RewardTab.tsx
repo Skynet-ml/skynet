@@ -10,7 +10,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** The metric code a run saved, from its workspace, scorer or top-level field. */
-export function runMetricCode(payload: unknown): string | null {
+function runMetricCode(payload: unknown): string | null {
   const saved = savedMetricCode(payload);
   if (saved) return saved;
   const top = isRecord(payload) ? payload.metric_code : null;

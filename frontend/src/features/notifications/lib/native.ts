@@ -10,7 +10,7 @@ import type { NativeNotification } from "@/shared/lib/api";
 import type { PushPermission } from "./push-state";
 
 /** Whether this window can show notifications at all. */
-export function nativeSupported(): boolean {
+function nativeSupported(): boolean {
   return typeof window !== "undefined" && "Notification" in window;
 }
 

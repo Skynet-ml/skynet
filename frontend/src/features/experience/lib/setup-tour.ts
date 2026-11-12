@@ -34,15 +34,6 @@ export interface SetupStop {
 }
 
 /*
- * The tour stays short: every stop past this is one the user would skip.
- * Ten covers the two looks the user sees change behind the card (level
- * and theme), the one stop a billing answer can add (the key)
- * and the two places the user connects things (data sources and the update
- * grid).
- */
-export const MAX_SETUP_STOPS = 10;
-
-/*
  * The dashboard comes first because the level reshapes it (Guided hides its
  * analytics and the technical columns), so the user sees the answer land.
  * The last stop is the new-optimization entry, which finishing then opens.

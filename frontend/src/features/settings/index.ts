@@ -7,4 +7,4 @@ export {
   readPref,
   rememberComposerPick,
 } from "./lib/prefs";
-export { SETTINGS_TABS, visibleSettingsTabs, type SettingsTab } from "./lib/tabs";
+export { SETTINGS_TABS, visibleSettingsTabs } from "./lib/tabs";

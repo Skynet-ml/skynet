@@ -1,7 +1,4 @@
-import type {
-  BlackboxProposer,
-  BlackboxShinkaSettings,
-} from "@/shared/types/api";
+import type { BlackboxProposer } from "@/shared/types/api";
 import { resolveOptimizer, type OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
@@ -43,43 +40,6 @@ export function proposerKnobs(choice: OptimizerChoice): { candidates: boolean; r
   return {
     candidates: auto || resolved === "meta_harness",
     ralph: auto || resolved === "autoresearch",
-  };
-}
-
-/** The proposer block to submit: knobs the form hides for this choice go back to their defaults. */
-export function submittedProposer(
-  proposer: BlackboxProposer,
-  choice: OptimizerChoice,
-): BlackboxProposer {
-  const knobs = proposerKnobs(choice);
-  return {
-    ...proposer,
-    max_candidates_per_iter: knobs.candidates ? (proposer.max_candidates_per_iter ?? null) : null,
-    // Research rounds always run until the budget is spent; stop-at-score ends them early.
-    ralph: true,
-    max_no_eval_seconds: knobs.ralph ? DEFAULT_PROPOSER.max_no_eval_seconds : null,
-    max_tool_calls: proposer.max_tool_calls ?? DEFAULT_PROPOSER.max_tool_calls,
-  };
-}
-
-/**
- * The run's whole proposer block. A coding-agent proposer sends its settings;
- * ShinkaEvolve has none of its own, so it sends a block only for the agent
- * editor's tool-call cap, with the backend's default harness unused. A null
- * `shinka` means the panel was never touched, which is the single-call editor.
- */
-export function submittedRunProposer(input: {
-  proposer: BlackboxProposer;
-  choice: OptimizerChoice;
-  shinka: BlackboxShinkaSettings | null;
-}): BlackboxProposer | undefined {
-  const { proposer, choice, shinka } = input;
-  if (usesNativeProposer(choice)) return submittedProposer(proposer, choice);
-  if (resolveOptimizer(choice) !== "shinka_evolve" || shinka?.editor !== "agent")
-    return undefined;
-  return {
-    harness: DEFAULT_PROPOSER.harness,
-    max_tool_calls: proposer.max_tool_calls ?? DEFAULT_PROPOSER.max_tool_calls,
   };
 }
 

@@ -10,10 +10,10 @@
  */
 
 /** `[old name, new name]`. */
-export type NameRename = readonly [string, string];
+type NameRename = readonly [string, string];
 
 /** `[old name, new name, max-age seconds for the copied cookie]`. */
-export type CookieRename = readonly [string, string, number];
+type CookieRename = readonly [string, string, number];
 
 export interface LegacyNamesPlan {
   /** Written to each storage area once its keys are copied, so a later run is a no-op. */

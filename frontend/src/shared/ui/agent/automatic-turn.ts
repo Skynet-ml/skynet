@@ -7,19 +7,6 @@
 export const AUTOMATIC_TURN_PREFIX = "[Automatic setup check]";
 
 /**
- * Build an automatic turn's message.
- *
- * Args:
- *   body: What the turn reports.
- *
- * Returns:
- *   The message, prefixed.
- */
-export function automaticTurn(body: string): string {
-  return `${AUTOMATIC_TURN_PREFIX}\n${body}`;
-}
-
-/**
  * Read an automatic turn's body back from a message.
  *
  * Args:
