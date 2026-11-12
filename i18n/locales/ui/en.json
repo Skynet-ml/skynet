@@ -2517,7 +2517,6 @@
   "tooltip.submit.name": "A short name that identifies this {term.optimization} in the list and in comparisons — say what you're trying to improve",
   "tooltip.submit.description": "Free-text notes on what this optimization is trying to achieve; shown in its details so the context isn't lost",
   "tooltip.submit.privacy": "Private keeps the optimization out of public search; public lets anyone find it and browse the results",
-  "tooltip.submit.optimization_type": "A single {term.optimizationTypeRun} uses one model pair; a {term.optimizationTypeGrid} repeats it for every task × optimization model combination and compares them",
   "tooltip.submit.column_roles": "Input is what the {term.program} receives for each example, output is the expected answer the {term.metric} compares against, and ignored columns stay out of the optimization",
   "tooltip.submit.models": "The models that take part in the optimization: the {term.generationModel} answers the examples, and the optional {term.reflectionModel} reviews mistakes and rewrites the instructions",
   "tooltip.submit.generation_models": "Every task model picked here is paired with every optimization model — the number of optimizations is the product of the two lists",

@@ -57,8 +57,7 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 │   │   ├── telemetry/           Server-side telemetry events
 │   │   └── worker/              Job orchestration, preflight, recovery,
 │   │                            scoped relay, and Vercel DSPy dispatch
-│   ├── tests/                   Integration, load, and release-gate tests
-│   └── usage_guide/             Notebooks and API-client examples
+│   └── tests/                   Integration, load, and release-gate tests
 │
 ├── frontend/
 │   ├── package.json             Dev/build/typecheck/lint/unit commands

@@ -225,10 +225,6 @@ conflicts = [
 [tool.ruff]
 target-version = "py311"
 line-length = 120
-# Notebook cells get rewritten by Jupyter and have non-standard import order
-# from kernel context; skip them. ``skynet_client.py`` is regular Python and
-# stays in scope.
-extend-exclude = ["usage_guide/*.ipynb"]
 
 [tool.ruff.lint]
 # Lean modern set: PEP 8 errors/style + naming + import order + pyupgrade,
@@ -269,7 +265,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["core", "skynet_client"]
+known-first-party = ["core"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests intentionally violate some rules for clarity:
@@ -300,7 +296,7 @@ classmethod-decorators = [
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["usage_guide/", ".venv/"]
+exclude = [".venv/"]
 
 [tool.pytest.ini_options]
 # Unit tests live next to the code they cover under ``core/<subpkg>/tests/``

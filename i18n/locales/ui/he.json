@@ -2797,7 +2797,6 @@
   "tooltip.submit.name": "שם קצר שמזהה את ה{term.optimization} ברשימת האופטימיזציות ובהשוואות — כדאי לציין מה מנסים לשפר",
   "tooltip.submit.description": "הערות חופשיות על מה האופטימיזציה מנסה להשיג; מוצג בפרטי האופטימיזציה כדי שההקשר לא ילך לאיבוד",
   "tooltip.submit.privacy": "פרטי — האופטימיזציה לא מופיעה בחיפוש הציבורי; ציבורי — כל אחד יכול למצוא אותה ולעיין בתוצאות",
-  "tooltip.submit.optimization_type": "{term.optimizationTypeRun} בודדת משתמשת בזוג מודלים אחד; {term.optimizationTypeGrid} חוזרת עליה לכל צירוף של {term.generationModel} ו{term.reflectionModel} ומשווה ביניהם",
   "tooltip.submit.column_roles": "קלט — מה שה{term.program} מקבלת בכל דוגמה; פלט — התשובה הנכונה שה{term.metric} משווה אליה; התעלמות — העמודה לא נכנסת לאופטימיזציה",
   "tooltip.submit.models": "המודלים שמשתתפים באופטימיזציה: ה{term.generationModel} עונה על הדוגמאות, ו{term.reflectionModel} (לא חובה) בודק טעויות ומשכתב את ההנחיות",
   "tooltip.submit.generation_models": "כל {term.generationModel} שנבחר כאן מוצמד לכל {term.reflectionModel} — מספר האופטימיזציות הוא מכפלת שתי הרשימות",

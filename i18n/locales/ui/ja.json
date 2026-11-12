@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "実行一覧や比較でこの最適化を見分けるための短い名前。何を改善したいのかを書いておきましょう",
   "tooltip.submit.description": "この実行で何を達成したいかの自由なメモ。文脈が失われないよう実行の詳細に表示されます",
   "tooltip.submit.privacy": "非公開にすると公開検索に表示されません。公開にすると誰でも見つけて結果を閲覧できます",
-  "tooltip.submit.optimization_type": "{term.optimizationTypeRun}は1組のモデルペアで1回だけ最適化します。{term.optimizationTypeGrid}はタスクモデル×最適化モデルのすべての組み合わせで最適化を繰り返し、比較します",
   "tooltip.submit.column_roles": "入力は各例でプログラムが受け取るもの、出力はメトリックが比較する期待される答え、無視した列は実行に含まれません",
   "tooltip.submit.models": "実行に参加するモデル。タスクモデルが例に回答し、任意の最適化モデルが誤りを検討して指示を書き換えます",
   "tooltip.submit.generation_models": "ここで選んだ各タスクモデルは各最適化モデルと組み合わされます。実行数は2つのリストの積になります",

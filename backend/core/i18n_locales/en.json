@@ -29,7 +29,6 @@
     "optimization": "optimization",
     "optimizationPlural": "optimizations",
     "optimizationTypeBlackbox": "black-box",
-    "optimizationTypeGrid": "grid search",
     "optimizationTypeRun": "optimization",
     "optimizationTypeRunPlural": "optimizations",
     "optimizedScore": "optimized score",

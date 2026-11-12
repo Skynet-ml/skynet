@@ -3214,7 +3214,6 @@
   "tooltip.submit.name": "喺執行清單同比較入面用嚟識別呢次最佳化嘅簡短名稱，寫低你想改善啲乜",
   "tooltip.submit.description": "關於呢次執行想達成乜嘢嘅自由備註；會喺執行詳情度顯示，等上下文唔會唔見咗",
   "tooltip.submit.privacy": "私人：執行唔會出現喺公開搜尋；公開：任何人都搵到並且睇到結果",
-  "tooltip.submit.optimization_type": "{term.optimizationTypeRun}只會用一對模型最佳化一次；{term.optimizationTypeGrid}會對每一種任務模型 × 最佳化模型嘅組合重複最佳化再互相比較",
   "tooltip.submit.column_roles": "輸入係程式喺每個例子收到嘅內容，輸出係指標用嚟比較嘅預期答案，忽略咗嘅欄唔會參與執行",
   "tooltip.submit.models": "參與執行嘅模型：任務模型回答例子，可選嘅最佳化模型檢查錯誤並重寫指令",
   "tooltip.submit.generation_models": "喺度揀嘅每個任務模型都會同每個最佳化模型配對，執行數量係兩個清單嘅乘積",

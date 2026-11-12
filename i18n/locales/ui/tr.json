@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "Bu optimizasyonu çalıştırma listesinde ve karşılaştırmalarda tanıtan kısa bir ad — neyi iyileştirmeye çalıştığınızı belirtin",
   "tooltip.submit.description": "Bu çalıştırmanın neyi hedeflediğine dair serbest notlar; bağlam kaybolmasın diye çalıştırma ayrıntılarında gösterilir",
   "tooltip.submit.privacy": "Özel, çalıştırmayı herkese açık aramanın dışında tutar; herkese açık ise herkesin bulup sonuçlara göz atmasına izin verir",
-  "tooltip.submit.optimization_type": "Bir {term.optimizationTypeRun} tek bir model çiftiyle bir kez optimize eder; {term.optimizationTypeGrid} her görev modeli × optimizasyon modeli kombinasyonu için optimizasyonu yineler ve bunları karşılaştırır",
   "tooltip.submit.column_roles": "Girdi, programın her örnekte aldığı şeydir; çıktı, metriğin karşılaştırdığı beklenen yanıttır; yok sayılan sütunlar çalıştırmanın dışında kalır",
   "tooltip.submit.models": "Çalıştırmaya katılan modeller: görev modeli örnekleri yanıtlar, isteğe bağlı optimizasyon modeli hataları inceleyip talimatları yeniden yazar",
   "tooltip.submit.generation_models": "Burada seçilen her görev modeli her optimizasyon modeliyle eşleştirilir — çalıştırma sayısı iki listenin çarpımıdır",

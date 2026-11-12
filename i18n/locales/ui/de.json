@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "Ein kurzer Name, der diese Optimierung in der Laufliste und in Vergleichen kennzeichnet – am besten angeben, was verbessert werden soll",
   "tooltip.submit.description": "Freie Notizen dazu, was dieser Lauf erreichen soll; werden in den Laufdetails angezeigt, damit der Kontext nicht verloren geht",
   "tooltip.submit.privacy": "Privat hält den Lauf aus der öffentlichen Suche heraus; öffentlich lässt jeden ihn finden und die Ergebnisse ansehen",
-  "tooltip.submit.optimization_type": "Ein {term.optimizationTypeRun} optimiert einmal mit einem Modellpaar; eine {term.optimizationTypeGrid} wiederholt die Optimierung für jede Kombination aus Aufgaben- und Optimierungsmodell und vergleicht sie",
   "tooltip.submit.column_roles": "Eingabe ist, was das Programm bei jedem Beispiel erhält; Ausgabe ist die erwartete Antwort, mit der die Metrik vergleicht; ignorierte Spalten bleiben außen vor",
   "tooltip.submit.models": "Die Modelle, die am Lauf teilnehmen: Das Aufgabenmodell beantwortet die Beispiele, und das optionale Optimierungsmodell prüft Fehler und schreibt die Anweisungen um",
   "tooltip.submit.generation_models": "Jedes hier gewählte Aufgabenmodell wird mit jedem Optimierungsmodell gepaart – die Anzahl der Läufe ist das Produkt beider Listen",

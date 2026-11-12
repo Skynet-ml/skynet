@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "실행 목록과 비교에서 이 최적화를 알아볼 수 있는 짧은 이름입니다. 무엇을 개선하려는지 적어 두세요",
   "tooltip.submit.description": "이 실행이 무엇을 이루려는지에 대한 자유 메모입니다. 맥락이 사라지지 않도록 실행 상세에 표시됩니다",
   "tooltip.submit.privacy": "비공개는 실행을 공개 검색에서 제외하고, 공개는 누구나 찾아서 결과를 볼 수 있게 합니다",
-  "tooltip.submit.optimization_type": "{term.optimizationTypeRun}은 모델 한 쌍으로 한 번 최적화합니다. {term.optimizationTypeGrid}은 작업 모델 × 최적화 모델의 모든 조합에 대해 최적화를 반복하고 비교합니다",
   "tooltip.submit.column_roles": "입력은 각 예제에서 프로그램이 받는 값, 출력은 메트릭이 비교하는 기대 답변이며, 무시된 열은 실행에 포함되지 않습니다",
   "tooltip.submit.models": "실행에 참여하는 모델입니다. 작업 모델이 예제에 답하고, 선택적인 최적화 모델이 오류를 검토해 지시문을 다시 작성합니다",
   "tooltip.submit.generation_models": "여기서 고른 각 작업 모델은 각 최적화 모델과 짝지어집니다. 실행 수는 두 목록의 곱입니다",

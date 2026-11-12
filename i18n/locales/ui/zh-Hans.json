@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "在运行列表和对比中标识这次优化的简短名称，写明你想改进什么",
   "tooltip.submit.description": "关于这次运行想达成什么的自由备注；会显示在运行详情中，避免上下文丢失",
   "tooltip.submit.privacy": "私有：运行不会出现在公开搜索中；公开：任何人都能找到并查看结果",
-  "tooltip.submit.optimization_type": "{term.optimizationTypeRun}只用一对模型优化一次；{term.optimizationTypeGrid}会对每一种任务模型 × 优化模型的组合重复优化并进行比较",
   "tooltip.submit.column_roles": "输入是程序在每个示例中收到的内容，输出是指标用来比较的期望答案，忽略的列不参与运行",
   "tooltip.submit.models": "参与运行的模型：任务模型回答示例，可选的优化模型检查错误并重写指令",
   "tooltip.submit.generation_models": "这里选择的每个任务模型都会与每个优化模型配对，运行数量是两个列表的乘积",

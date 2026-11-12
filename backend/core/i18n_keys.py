@@ -445,7 +445,6 @@ class TermKey(StrEnum):
     OPTIMIZATION = 'optimization'
     OPTIMIZATION_PLURAL = 'optimizationPlural'
     OPTIMIZATION_TYPE_BLACKBOX = 'optimizationTypeBlackbox'
-    OPTIMIZATION_TYPE_GRID = 'optimizationTypeGrid'
     OPTIMIZATION_TYPE_RUN = 'optimizationTypeRun'
     OPTIMIZATION_TYPE_RUN_PLURAL = 'optimizationTypeRunPlural'
     OPTIMIZED_SCORE = 'optimizedScore'

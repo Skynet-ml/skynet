@@ -1620,7 +1620,6 @@
   "tooltip.submit.name": "Un nombre corto que identifica esta optimización en la lista de ejecuciones y en las comparaciones; indica qué intentas mejorar",
   "tooltip.submit.description": "Notas libres sobre lo que esta ejecución intenta lograr; se muestran en los detalles de la ejecución para que el contexto no se pierda",
   "tooltip.submit.privacy": "Privada mantiene la ejecución fuera de la búsqueda pública; pública permite que cualquiera la encuentre y explore los resultados",
-  "tooltip.submit.optimization_type": "Una {term.optimizationTypeRun} optimiza una vez con un par de modelos; una {term.optimizationTypeGrid} repite la optimización para cada combinación de modelo de tarea y modelo de optimización y las compara",
   "tooltip.submit.column_roles": "Entrada es lo que recibe el programa en cada ejemplo, salida es la respuesta esperada con la que compara la métrica, y las columnas ignoradas quedan fuera de la ejecución",
   "tooltip.submit.models": "Los modelos que participan en la ejecución: el modelo de tarea responde a los ejemplos y el modelo de optimización opcional revisa los errores y reescribe las instrucciones",
   "tooltip.submit.generation_models": "Cada modelo de tarea elegido aquí se empareja con cada modelo de optimización; el número de ejecuciones es el producto de ambas listas",
