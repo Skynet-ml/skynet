@@ -12,7 +12,6 @@
   "app.shell.search.kw.wizard": "optimisation assistant génération de code jeu de données découpage registre de paquets modèles optimization wizard split package registry pip models",
   "auth.login.email": "Courriel",
   "auth.login.invalid_credentials": "Courriel ou mot de passe incorrect",
-  "auto.features.agent.panel.components.toolscarousel.literal.17": "Ouvre un formulaire dans le clavardage où vous saisissez une entrée et l'exécutez via le programme optimisé d'une exécution terminée.",
   "auto.features.submit.components.steps.codestep.template.2": "L'agent a écrit le code à partir de votre {p1}. Vous pouvez demander une modification dans le clavardage ou passer en mode manuel.",
   "common.empty": "—",
   "optimizations.duration.lt_0_1s": "<0.1s",

@@ -21,8 +21,6 @@
   "app.submit.title": "New Optimization",
   "auth.login.meta_description": "Sign in to {term.appName}, a code-optimisation platform",
   "auto.app.submit.layout.template.1": "Start a new optimisation of your code — choose {p1}, upload {p2}, and improve performance",
-  "auto.features.agent.panel.components.toolscarousel.literal.17": "Opens a form in the chat where you enter input and run it through the optimised program of a completed run.",
-  "auto.features.agent.panel.components.toolscarousel.template.8": "Analyses {p1} to identify columns, types, and examples.",
   "auto.features.agent.panel.lib.tool.meta.literal.23": "Analyse",
   "auto.features.agent.panel.lib.tool.meta.literal.64": "Shows live log lines from the optimiser while it runs, to explain progress and spot issues.",
   "auto.features.agent.panel.lib.tool.meta.literal.70": "Run the optimised program",

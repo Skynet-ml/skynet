@@ -216,7 +216,6 @@ export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
             newestId={newestId}
             onSelectCandidate={handleSelectCandidate}
             onSelectRejected={handleSelectRejected}
-            ringMode="score"
           />
           <TrajectoryDrawer
             selection={drawerSelection}

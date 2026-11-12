@@ -16,7 +16,6 @@
   "app.shell.search.kw.usage": "usage spend cost dollars spent tokens runs by model activity",
   "app.shell.search.kw.wizard": "optimisation optimization wizard code generation dataset split package registry pip models",
   "app.submit.title": "New Optimization",
-  "auto.features.agent.panel.components.toolscarousel.template.8": "Analyses {p1} to identify columns, types, and examples.",
   "auto.features.agent.panel.lib.tool.meta.literal.23": "Analyse",
   "auto.features.agent.panel.lib.tool.meta.template.12": "The {p1} will be marked as a favourite and placed at the top of the list.",
   "auto.features.agent.panel.lib.tool.meta.template.15": "Analyse {p1}",

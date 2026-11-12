@@ -17,7 +17,6 @@ import {
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,

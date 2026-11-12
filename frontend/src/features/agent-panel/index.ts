@@ -6,9 +6,7 @@ export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
 export { SharedChatView } from "./components/SharedChatView";
 export { shareLinkTypeLabel } from "./components/ShareChatDialog";
-export { ToolsCarousel } from "./components/ToolsCarousel";
 export { Carousel, CarouselNav } from "./components/Carousel";
-export { ToolHeader } from "./components/ToolHeader";
 export { TrustToggle } from "./components/TrustToggle";
 export {
   GeneralistPanelProvider,

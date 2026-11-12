@@ -150,8 +150,6 @@
   "submit.validation.name_required": "Insira um nome para a otimização",
   "submit.validation.signature_required": "Insira o código da Assinatura",
   "submit.validation.username_required": "Insira um nome de usuário",
-  "trajectory.chat.recorded_label": "Conversa registrada",
-  "trajectory.chat.recorded_label.explain": "Um registro guardado da troca de mensagens mostrada ao candidato — apenas de leitura, não é uma conversa ao vivo.",
   "trajectory.controls.fullscreen_enter": "Entrar em tela inteira",
   "trajectory.controls.fullscreen_exit": "Sair da tela inteira",
   "trajectory.scrubber.live": "Ao vivo",
