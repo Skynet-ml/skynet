@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "Il dataset è molto piccolo ({total} esempi). Insufficiente per set di val/test separati: GEPA si addestrerà su tutti gli esempi e li riutilizzerà come giudici durante l'ottimizzazione.",
     "filter.invalid_optimization_type": "Filtro per tipo di ottimizzazione non valido '{value}'. Valori consentiti: {allowed}",
     "filter.invalid_status": "Filtro di stato non valido '{value}'. Valori consentiti: {allowed}",
-    "grid_search.pair_failed_error": "La coppia in posizione {pair_index} non è riuscita: {error}",
-    "grid_search.pair_submission_grid_only": "L'invio per singola coppia è disponibile solo per le esecuzioni di grid search.",
     "hardening.job_not_found": "Attività di hardening non trovata.",
     "hardening.exploit_not_found": "Questa vulnerabilità non fa parte di questa attività di hardening.",
     "hardening.wrong_state": "L'attività di hardening non può farlo ora. Aggiornala e riprova.",

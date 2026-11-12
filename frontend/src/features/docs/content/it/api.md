@@ -48,7 +48,6 @@ Il riferimento legge il documento OpenAPI all'indirizzo `https://api.skynetml.co
 | `POST /blackbox/run`                            | Avvia un'esecuzione su un repository GitHub.                        |
 | `GET /optimizations`                            | Elenca le tue esecuzioni.                                           |
 | `GET /optimizations/{optimization_id}`          | Restituisce un'esecuzione: stato, avanzamento, log e risultato.     |
-| `GET /optimizations/{optimization_id}/artifact` | Restituisce la versione migliore trovata dall'esecuzione.           |
 | `POST /optimizations/{optimization_id}/cancel`  | Arresta un'esecuzione.                                              |
 | `POST /serve/{optimization_id}`                 | Esegue la versione migliore su un nuovo input.                      |
 | `GET /health`                                   | Indica se il servizio è attivo.                                     |
@@ -155,7 +154,7 @@ Il [riferimento API](https://api.skynetml.com/scalar) elenca ogni campo della ri
 Quando lo stato è `success`, recupera la versione migliore:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

@@ -1,4 +1,4 @@
-"""Delete the retired DSPy, grid search and pair runs, and drop their columns (SKY-656).
+"""Delete the retired DSPy, grid search and pair runs, and drop their table (SKY-656).
 
 Revision ID: f3a9c2d81b56
 Revises: c4d1e8a2f6b3
@@ -22,18 +22,22 @@ that keep a job id with no FK are cleared here: ``job_logs``,
 ``optimization_share_links``, ``optimization_share_grants``,
 ``run_folder_items``, ``continuous_cycles`` and ``continuous_plans`` (with the
 cycles of a deleted plan). ``wallet_ledger`` and ``execution_budgets`` are
-billing records, so they keep their rows.
+billing records, so they keep their rows. Each budget of a deleted job is
+closed and detached the same way ``BudgetService.close_for_deleted_jobs``
+does it: its unstarted reservations are released, so no money stays held.
 
-Then it drops ``grid_pair_results``, the self FK and index on
-``jobs.parent_optimization_id``, that column, ``jobs.pair_index`` and
-``job_logs.pair_index``. ``gepa_checkpoints.pair_index`` stays: it is part of
-that table's primary key and a repository run uses it.
+Then it drops ``grid_pair_results``. It keeps ``jobs.parent_optimization_id``
+(with its self FK and index), ``jobs.pair_index`` and ``job_logs.pair_index``:
+aws-deploy migrates before the rollout, and the old pods still map those
+columns. The new ORM does not map them, and they are nullable, so new rows
+leave them empty. A later revision drops them after this deploy.
+``gepa_checkpoints.pair_index`` stays for good: it is part of that table's
+primary key and a repository run uses it.
 
 Every step uses ``IF EXISTS`` or matches no rows on a second run, so the
 revision is idempotent. Postgres only, like the revisions that added these
 columns: the SQLite test schema comes from the ORM models. The downgrade
-restores the empty columns, FK, index and table. It cannot bring the deleted
-rows back.
+restores the empty table. It cannot bring the deleted rows back.
 """
 
 from __future__ import annotations
@@ -113,6 +117,49 @@ def _collect_dead_jobs() -> None:
         )
 
 
+def _close_dead_budgets() -> None:
+    """Release the holds of the dead jobs' budgets, then close and detach those budgets.
+
+    This is ``BudgetService.close_for_deleted_jobs`` in SQL. A reserved
+    operation never started, so its units go back to the budget and the
+    wallet reserve. Dispatched work keeps its coverage until its usage
+    reconciles. A blocked budget keeps its state and reason.
+    """
+    if not (_has_table("execution_budgets") and _has_table("execution_operations")):
+        return
+    dead_budgets = f"SELECT id FROM execution_budgets WHERE job_id IN (SELECT optimization_id FROM {_DEAD_JOBS})"
+    op.execute(
+        f"""
+        UPDATE execution_budgets AS budget
+        SET reserved_units = budget.reserved_units - held.units,
+            wallet_reserved_units = budget.wallet_reserved_units - held.wallet_units
+        FROM (
+            SELECT budget_id, SUM(max_units) AS units, SUM(max_wallet_units) AS wallet_units
+            FROM execution_operations
+            WHERE state = 'reserved' AND budget_id IN ({dead_budgets})
+            GROUP BY budget_id
+        ) AS held
+        WHERE budget.id = held.budget_id
+        """
+    )
+    op.execute(
+        f"""
+        UPDATE execution_operations SET state = 'released', updated_at = now()
+        WHERE state = 'reserved' AND budget_id IN ({dead_budgets})
+        """
+    )
+    op.execute(
+        f"""
+        UPDATE execution_budgets
+        SET blocked_reason = CASE WHEN state = 'blocked' THEN blocked_reason ELSE 'job_deleted' END,
+            state = CASE WHEN state = 'blocked' THEN state ELSE 'closed' END,
+            job_id = NULL,
+            updated_at = now()
+        WHERE id IN ({dead_budgets})
+        """
+    )
+
+
 def _delete_dead_rows() -> None:
     """Delete the dead jobs and every row that names one of them."""
     if _has_table("continuous_plans"):
@@ -134,50 +181,22 @@ def _delete_dead_rows() -> None:
 
 
 def upgrade() -> None:
-    """Delete the retired DSPy, grid and pair jobs and drop their schema."""
+    """Delete the retired DSPy, grid and pair jobs and drop the grid pair table."""
     if op.get_bind().dialect.name != "postgresql":
         return
     _collect_dead_jobs()
+    _close_dead_budgets()
     _delete_dead_rows()
     op.execute("DROP TABLE IF EXISTS grid_pair_results")
-    # The FK name depends on how the column was made (inline REFERENCES or the
-    # ORM), so drop every FK on the column by its catalog name.
-    op.execute(
-        """
-        DO $$
-        DECLARE fk record;
-        BEGIN
-            FOR fk IN
-                SELECT con.conname FROM pg_constraint con
-                JOIN pg_attribute att
-                  ON att.attrelid = con.conrelid AND att.attnum = ANY (con.conkey)
-                WHERE con.conrelid = 'jobs'::regclass AND con.contype = 'f'
-                  AND att.attname = 'parent_optimization_id'
-            LOOP
-                EXECUTE format('ALTER TABLE jobs DROP CONSTRAINT %I', fk.conname);
-            END LOOP;
-        END $$
-        """
-    )
-    op.execute("DROP INDEX IF EXISTS ix_jobs_parent_optimization_id")
-    op.execute("ALTER TABLE jobs DROP COLUMN IF EXISTS parent_optimization_id, DROP COLUMN IF EXISTS pair_index")
-    op.execute("ALTER TABLE job_logs DROP COLUMN IF EXISTS pair_index")
+    # Old pods still map jobs.parent_optimization_id, jobs.pair_index and
+    # job_logs.pair_index during the rollout. A later revision drops them
+    # after this deploy.
 
 
 def downgrade() -> None:
-    """Restore the empty grid columns, FK, index and table; the deleted rows stay gone."""
+    """Restore the empty grid table; the deleted rows stay gone."""
     if op.get_bind().dialect.name != "postgresql":
         return
-    op.execute(
-        """
-        ALTER TABLE jobs
-            ADD COLUMN IF NOT EXISTS parent_optimization_id VARCHAR(36)
-                REFERENCES jobs (optimization_id) ON DELETE CASCADE,
-            ADD COLUMN IF NOT EXISTS pair_index INTEGER
-        """
-    )
-    op.execute("CREATE INDEX IF NOT EXISTS ix_jobs_parent_optimization_id ON jobs (parent_optimization_id)")
-    op.execute("ALTER TABLE job_logs ADD COLUMN IF NOT EXISTS pair_index INTEGER")
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS grid_pair_results (

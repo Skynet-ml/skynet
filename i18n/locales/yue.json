@@ -214,8 +214,6 @@
     "dataset.split.rationale.tiny": "數據集極細（共 {total} 個範例）。數量唔足以分拆獨立嘅驗證/測試集——GEPA 會用晒全部範例進行訓練，並喺最佳化期間重複使用佢哋嚟做評判。",
     "filter.invalid_optimization_type": "無效嘅最佳化類型篩選條件「{value}」。允許嘅值：{allowed}",
     "filter.invalid_status": "無效嘅狀態篩選條件「{value}」。允許嘅值：{allowed}",
-    "grid_search.pair_failed_error": "位於位置 {pair_index} 嘅組合失敗：{error}",
-    "grid_search.pair_submission_grid_only": "限定組合嘅提交只適用於網格搜尋執行。",
     "hardening.job_not_found": "搵唔到強化任務。",
     "hardening.exploit_not_found": "呢個漏洞唔喺呢個強化任務入面。",
     "hardening.wrong_state": "強化任務而家做唔到呢樣嘢。請重新整理再試。",

@@ -48,7 +48,6 @@ Authorization: Bearer skyd_...
 | `POST /blackbox/run`                            | یک اجرا روی یک مخزن GitHub شروع می‌کند.                     |
 | `GET /optimizations`                            | اجراهای شما را فهرست می‌کند.                                |
 | `GET /optimizations/{optimization_id}`          | یک اجرا را برمی‌گرداند: وضعیت، پیشرفت، لاگ‌ها و نتیجه.      |
-| `GET /optimizations/{optimization_id}/artifact` | بهترین نسخه‌ای را که اجرا پیدا کرده برمی‌گرداند.            |
 | `POST /optimizations/{optimization_id}/cancel`  | یک اجرا را متوقف می‌کند.                                    |
 | `POST /serve/{optimization_id}`                 | بهترین نسخه را روی یک ورودی جدید اجرا می‌کند.               |
 | `GET /health`                                   | نشان می‌دهد سرویس در دسترس است یا نه.                       |
@@ -155,7 +154,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 وقتی وضعیت `success` است، بهترین نسخه را بگیرید:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

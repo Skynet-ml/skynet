@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "ReAct 에이전트가 도구를 어디서 가져오고 어떻게 연결하는지입니다. 모듈이 ReAct 에이전트일 때만 적용됩니다",
   "tooltip.submit.dataset_file": "업로드한 파일입니다. 각 행은 실행이 학습하거나 측정에 사용하는 예제 하나입니다",
   "tooltip.submit.dataset_size": "파일에서 감지된 행과 열의 수입니다. 행은 학습, 검증, 테스트로 나뉩니다",
-  "tooltip.submit.total_pairs": "그리드 탐색이 시작하는 실행 수입니다. 각 작업 모델 × 각 최적화 모델",
   "tooltip.submit.estimate": "예상 비용은 선택한 모델, {term.dataset} 크기 및 {term.optimizer} 호출 횟수에 따라 달라집니다.",
   "tooltip.submit.cost_ceiling": "이 실행이 쓸 수 있는 금액의 상한입니다. 누적 청구액이 상한을 넘으려 하면 더 이상 지출하지 않고 실행을 중지합니다",
   "tooltip.submit.blackbox.seed": "탐색이 시작되는 지점입니다. 새 버전은 모두 이것을 다시 쓴 것입니다. 비워 두면 엔진이 처음부터 시작합니다",

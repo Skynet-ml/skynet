@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "Le jeu de données est très petit ({total} exemples). Pas assez pour des ensembles de validation/test distincts — GEPA s'entraînera sur tous les exemples et les réutilisera comme juges pendant l'optimisation.",
     "filter.invalid_optimization_type": "Filtre de type d'optimisation invalide '{value}'. Valeurs autorisées : {allowed}",
     "filter.invalid_status": "Filtre de statut invalide '{value}'. Valeurs autorisées : {allowed}",
-    "grid_search.pair_failed_error": "La paire à la position {pair_index} a échoué : {error}",
-    "grid_search.pair_submission_grid_only": "La soumission par paire n'est disponible que pour les exécutions de recherche par grille.",
     "hardening.job_not_found": "Tâche de durcissement introuvable.",
     "hardening.exploit_not_found": "Cette faille ne fait pas partie de cette tâche de durcissement.",
     "hardening.wrong_state": "La tâche de durcissement ne peut pas faire cela maintenant. Actualisez-la et réessayez.",

@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "ReAct ajanının araçlarını nereden aldığı ve onlara nasıl bağlandığı; yalnızca modül bir ReAct ajanıysa geçerlidir",
   "tooltip.submit.dataset_file": "Yüklenen dosya — her satır, çalıştırmanın öğrendiği ya da üzerinde ölçüldüğü bir örnektir",
   "tooltip.submit.dataset_size": "Dosyada kaç satır ve sütun algılandığı; satırlar eğitim, doğrulama ve test arasında paylaştırılır",
-  "tooltip.submit.total_pairs": "Izgara aramasının kaç çalıştırma başlatacağı: her görev modeli × her optimizasyon modeli",
   "tooltip.submit.estimate": "Beklenen maliyet, seçilen modellere, {term.dataset} boyutuna ve {term.optimizer} çağrılarının sayısına bağlıdır.",
   "tooltip.submit.cost_ceiling": "Bu çalıştırmanın harcayabileceği tutara sert bir üst sınır — birikmiş ücret sınırı aşacağı anda çalıştırma bakiyeden daha fazla harcamak yerine durur",
   "tooltip.submit.blackbox.seed": "Aramanın başladığı yer: her yeni sürüm bunun yeniden yazımıdır. Motorun sıfırdan başlaması için boş bırakın",

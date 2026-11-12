@@ -1887,6 +1887,17 @@ def _picks(*ranked: str) -> continuous.ModelPicker:
     """
 
     def pick(job_store: Any, username: str, current: dict[str, Any], skip: frozenset[str]) -> dict[str, Any] | None:
+        """Return the best ranked model that is not skipped and not the current one.
+
+        Args:
+            job_store: The job store; not read.
+            username: The plan owner; not read.
+            current: The current model, with its ``name``.
+            skip: Model names the plan skips.
+
+        Returns:
+            The picked model, or ``None`` when no model is left.
+        """
         name = next((name for name in ranked if name not in skip and name != current["name"]), None)
         return None if name is None else {"name": name, "byok_provider": None}
 

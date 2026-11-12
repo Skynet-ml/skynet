@@ -291,6 +291,11 @@ def repo_serve(
 def test_repo_serve_runs_the_best_version_once_per_key(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]],
 ) -> None:
+    """Run the best version in the sandbox once, and replay the same answer for the same key.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+    """
     client, harness, state = repo_serve
     body = {"inputs": {"question": "hello"}, "max_cost_cents": 10}
 
@@ -317,6 +322,11 @@ def test_repo_serve_runs_the_best_version_once_per_key(
 def test_repo_serve_requires_an_idempotency_key(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]],
 ) -> None:
+    """Refuse a serve call with no idempotency key before any fetch or sandbox work.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+    """
     client, _harness, state = repo_serve
 
     response = client.post("/serve/repo-run", json={"inputs": {"question": "hello"}, "max_cost_cents": 10})
@@ -330,6 +340,11 @@ def test_repo_serve_requires_an_idempotency_key(
 def test_repo_serve_cannot_replay_a_key_with_other_inputs(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]],
 ) -> None:
+    """Refuse a reused idempotency key with other inputs, and run the sandbox only once.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+    """
     client, _harness, state = repo_serve
     headers = {"Idempotency-Key": "repo-call"}
 
@@ -343,6 +358,12 @@ def test_repo_serve_cannot_replay_a_key_with_other_inputs(
 def test_repo_serve_reports_a_sandbox_failure(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Return a 502 when the repository fetch for the sandbox fails.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+        monkeypatch: Replaces the GitHub fetch.
+    """
     client, _harness, _state = repo_serve
 
     def broken_fetch(*_args: Any) -> Any:
@@ -406,6 +427,15 @@ def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
 def test_repo_serve_refuses_a_run_it_cannot_serve(
     serve_client: TestClient, serve_store: _FakeJobStore, status: str, commit: str | None, code: str
 ) -> None:
+    """Refuse to serve a run that is not finished or has no result commit.
+
+    Args:
+        serve_client: Client for the serve router.
+        serve_store: The fake job store.
+        status: The run status.
+        commit: The run's result commit, or ``None``.
+        code: The expected error code.
+    """
     serve_store.seed_job("repo-run", **_repo_job(status=status, commit=commit))
 
     response = serve_client.post(
@@ -417,6 +447,12 @@ def test_repo_serve_refuses_a_run_it_cannot_serve(
 
 
 def test_repo_serve_info_reports_serve_py(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """Report ``serve.py``, the optimizer and the model for a repository run.
+
+    Args:
+        serve_client: Client for the serve router.
+        serve_store: The fake job store.
+    """
     serve_store.seed_job("repo-run", **_repo_job())
 
     response = serve_client.get("/serve/repo-run/info")

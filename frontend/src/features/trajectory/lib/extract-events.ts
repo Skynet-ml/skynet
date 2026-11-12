@@ -174,8 +174,7 @@ function coerceValsetRow(raw: unknown): ValsetRow | null {
   };
 }
 
-// Valset rows are universal across grid pairs (one split for the whole run),
-// so this extractor ignores pair_index and returns the last-seen snapshot.
+// A run has one valset split, so this returns the last-seen snapshot.
 export function extractValset(events: ProgressEvent[]): ValsetRow[] {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];

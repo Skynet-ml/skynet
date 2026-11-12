@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "مجموعه‌داده بسیار کوچک است ({total} نمونه). برای مجموعه‌های اعتبارسنجی/آزمون جداگانه کافی نیست — GEPA روی همه‌ی نمونه‌ها آموزش می‌بیند و در حین بهینه‌سازی از آن‌ها به‌عنوان داور دوباره استفاده می‌کند.",
     "filter.invalid_optimization_type": "فیلتر نوع بهینه‌سازی نامعتبر '{value}'. مقادیر مجاز: {allowed}",
     "filter.invalid_status": "فیلتر وضعیت نامعتبر '{value}'. مقادیر مجاز: {allowed}",
-    "grid_search.pair_failed_error": "جفت در موقعیت {pair_index} ناموفق بود: {error}",
-    "grid_search.pair_submission_grid_only": "ارسال محدود به جفت تنها برای اجراهای جستجوی شبکه‌ای در دسترس است.",
     "hardening.job_not_found": "کار مقاوم‌سازی پیدا نشد.",
     "hardening.exploit_not_found": "این رخنه در این کار مقاوم‌سازی نیست.",
     "hardening.wrong_state": "کار مقاوم‌سازی اکنون نمی‌تواند این کار را انجام دهد. صفحه را تازه کنید و دوباره تلاش کنید.",

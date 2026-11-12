@@ -13,7 +13,6 @@ const row = (over: Partial<RunUsageRow>): RunUsageRow => ({
   role: "task",
   model: "openai/gpt-5",
   stage: null,
-  pair: null,
   candidate: null,
   billing: "skynet",
   charged_cents: 0,

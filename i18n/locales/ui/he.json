@@ -2806,7 +2806,6 @@
   "tooltip.submit.react_section": "מאיפה סוכן ה-ReAct מקבל את הכלים שלו ואיך הוא מתחבר אליהם; חל רק כשה{term.module} הוא סוכן ReAct",
   "tooltip.submit.dataset_file": "הקובץ שהועלה — כל שורה בו היא דוגמה אחת שהאופטימיזציה לומדת ממנה או נמדדת עליה",
   "tooltip.submit.dataset_size": "כמה שורות ועמודות זוהו בקובץ; השורות מתחלקות בין אימון, ולידציה ובדיקה",
-  "tooltip.submit.total_pairs": "כמה אופטימיזציות תשגר ה{term.optimizationTypeGrid}: כל {term.generationModel} × כל {term.reflectionModel}",
   "tooltip.submit.estimate": "העלות הצפויה תלויה במודלים שנבחרו, בגודל {term.dataset} ובמספר הקריאות של {term.optimizer}.",
   "tooltip.submit.cost_ceiling": "תקרה קשיחה להוצאה של האופטימיזציה — כשהחיוב המצטבר עומד לחרוג ממנה האופטימיזציה נעצרת במקום להמשיך להוציא",
   "tooltip.submit.blackbox.seed": "נקודת המוצא של החיפוש: כל גרסה חדשה היא שכתוב של זה. אפשר להשאיר ריק ולתת למנוע להתחיל מאפס",

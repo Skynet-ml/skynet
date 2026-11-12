@@ -2526,7 +2526,6 @@
   "tooltip.submit.react_section": "Where the ReAct agent gets its tools and how it connects to them; applies only when the {term.module} is a ReAct agent",
   "tooltip.submit.dataset_file": "The uploaded file — every row is one example the optimization learns from or is measured on",
   "tooltip.submit.dataset_size": "How many rows and columns were detected in the file; the rows are shared out between train, validation and test",
-  "tooltip.submit.total_pairs": "How many optimizations the grid search launches: every task model × every optimization model",
   "tooltip.submit.estimate": "The expected cost depends on the selected models, the size of {term.dataset}, and the number of calls made by {term.optimizer}.",
   "tooltip.submit.cost_ceiling": "A hard cap on what this optimization may spend — once its accumulated charge would exceed the ceiling, it stops instead of spending more",
   "tooltip.submit.blackbox.seed": "Where the search starts: every new version is a rewrite of this. Leave it empty to let the engine start from scratch",

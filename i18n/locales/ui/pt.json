@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "De onde o agente ReAct obtém as suas ferramentas e como se liga a elas; aplica-se apenas quando o módulo é um agente ReAct",
   "tooltip.submit.dataset_file": "O ficheiro carregado — cada linha é um exemplo com que a execução aprende ou em que é medida",
   "tooltip.submit.dataset_size": "Quantas linhas e colunas foram detetadas no ficheiro; as linhas são repartidas entre treino, validação e teste",
-  "tooltip.submit.total_pairs": "Quantas execuções a pesquisa em grelha lança: cada modelo de tarefa × cada modelo de otimização",
   "tooltip.submit.estimate": "O custo esperado depende dos modelos escolhidos, do tamanho de {term.dataset} e do número de chamadas de {term.optimizer}.",
   "tooltip.submit.cost_ceiling": "Um limite rígido para o que esta execução pode gastar — quando a cobrança acumulada estiver prestes a ultrapassá-lo, a execução para em vez de continuar a gastar",
   "tooltip.submit.blackbox.seed": "Onde a pesquisa começa: cada nova versão é uma reescrita disto. Deixe vazio para o motor começar do zero",

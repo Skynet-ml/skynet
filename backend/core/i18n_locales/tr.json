@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "Veri kümesi çok küçük ({total} örnek). Ayrı doğrulama/test kümeleri için yeterli değil — GEPA tüm örnekler üzerinde eğitim yapacak ve optimizasyon sırasında bunları değerlendirici olarak yeniden kullanacak.",
     "filter.invalid_optimization_type": "Geçersiz optimizasyon türü filtresi '{value}'. İzin verilen değerler: {allowed}",
     "filter.invalid_status": "Geçersiz durum filtresi '{value}'. İzin verilen değerler: {allowed}",
-    "grid_search.pair_failed_error": "{pair_index} konumundaki çift başarısız oldu: {error}",
-    "grid_search.pair_submission_grid_only": "Çift kapsamlı gönderim yalnızca ızgara arama çalıştırmaları için kullanılabilir.",
     "hardening.job_not_found": "Sağlamlaştırma işi bulunamadı.",
     "hardening.exploit_not_found": "Bu açık, bu sağlamlaştırma işinde yok.",
     "hardening.wrong_state": "Sağlamlaştırma işi bunu şu anda yapamaz. Yenileyip tekrar deneyin.",

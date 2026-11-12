@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "数据集非常小（{total} 个样例）。不足以划分出单独的验证集/测试集——GEPA 将在所有样例上进行训练，并在优化期间复用它们作为评判依据。",
     "filter.invalid_optimization_type": "优化类型筛选条件 '{value}' 无效。允许的取值：{allowed}",
     "filter.invalid_status": "状态筛选条件 '{value}' 无效。允许的取值：{allowed}",
-    "grid_search.pair_failed_error": "位置 {pair_index} 处的组合失败：{error}",
-    "grid_search.pair_submission_grid_only": "按组合提交仅适用于网格搜索运行。",
     "hardening.job_not_found": "未找到加固任务。",
     "hardening.exploit_not_found": "该漏洞不在此加固任务中。",
     "hardening.wrong_state": "加固任务现在无法执行此操作。请刷新后重试。",

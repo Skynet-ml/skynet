@@ -190,8 +190,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "dataset.split.rationale.tiny": "Dataset is very small ({total} examples). Not enough for separate val/test sets — GEPA will train on all examples and reuse them as judges during optimization.",
     "filter.invalid_optimization_type": "Invalid optimization-type filter '{value}'. Allowed values: {allowed}",
     "filter.invalid_status": "Invalid status filter '{value}'. Allowed values: {allowed}",
-    "grid_search.pair_failed_error": "Pair at position {pair_index} failed: {error}",
-    "grid_search.pair_submission_grid_only": "Pair-scoped submission is only available for grid-search optimizations.",
     "hardening.job_not_found": "Hardening job not found.",
     "hardening.exploit_not_found": "That exploit is not in this hardening job.",
     "hardening.wrong_state": "The hardening job cannot do this now. Refresh it and try again.",

@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "Der Datensatz ist sehr klein ({total} Beispiele). Nicht genug für separate Validierungs-/Testmengen — GEPA trainiert mit allen Beispielen und verwendet sie während der Optimierung erneut als Bewerter.",
     "filter.invalid_optimization_type": "Ungültiger Optimierungstyp-Filter '{value}'. Zulässige Werte: {allowed}",
     "filter.invalid_status": "Ungültiger Statusfilter '{value}'. Zulässige Werte: {allowed}",
-    "grid_search.pair_failed_error": "Das Paar an Position {pair_index} ist fehlgeschlagen: {error}",
-    "grid_search.pair_submission_grid_only": "Die paarbezogene Übermittlung ist nur für Rastersuche-Durchläufe verfügbar.",
     "hardening.job_not_found": "Härtungsauftrag nicht gefunden.",
     "hardening.exploit_not_found": "Diese Schwachstelle gehört nicht zu diesem Härtungsauftrag.",
     "hardening.wrong_state": "Der Härtungsauftrag kann das gerade nicht ausführen. Aktualisiere ihn und versuche es erneut.",

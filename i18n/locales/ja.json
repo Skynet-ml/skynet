@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "データセットが非常に小さいです（{total} サンプル）。検証用／テスト用のセットを別々に設けるには足りないため、GEPA はすべてのサンプルで学習し、最適化中はそれらをジャッジとして再利用します。",
     "filter.invalid_optimization_type": "最適化種類フィルター '{value}' が無効です。使用できる値: {allowed}",
     "filter.invalid_status": "ステータスフィルター '{value}' が無効です。使用できる値: {allowed}",
-    "grid_search.pair_failed_error": "位置 {pair_index} のペアが失敗しました: {error}",
-    "grid_search.pair_submission_grid_only": "ペア単位の送信はグリッドサーチの実行でのみ利用できます。",
     "hardening.job_not_found": "強化ジョブが見つかりません。",
     "hardening.exploit_not_found": "そのエクスプロイトはこの強化ジョブに含まれていません。",
     "hardening.wrong_state": "強化ジョブは現在この操作を実行できません。更新してもう一度お試しください。",

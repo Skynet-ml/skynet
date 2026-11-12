@@ -4,9 +4,7 @@ Provides DSPyServiceClient (HTTP client), JobMonitor (progress polling),
 and serialize_source (signature/metric serialization).
 """
 
-import base64
 import inspect
-import pickle
 import textwrap
 import time
 from typing import Any
@@ -110,45 +108,6 @@ class DSPyServiceClient:
         resp.raise_for_status()
         return resp.json()
 
-    def artifact(self, optimization_id: str) -> dict:
-        """Fetch the full program artifact (including pickled program).
-
-        Args:
-            optimization_id: The optimization job identifier.
-
-        Returns:
-            The ``GET /optimizations/{id}/artifact`` response payload.
-        """
-        resp = requests.get(f"{self.base_url}/optimizations/{optimization_id}/artifact")
-        resp.raise_for_status()
-        return resp.json()
-
-    def dataset(self, optimization_id: str) -> dict:
-        """Fetch the dataset stored for an optimization.
-
-        Args:
-            optimization_id: The optimization job identifier.
-
-        Returns:
-            The ``GET /optimizations/{id}/dataset`` response payload.
-        """
-        resp = requests.get(f"{self.base_url}/optimizations/{optimization_id}/dataset")
-        resp.raise_for_status()
-        return resp.json()
-
-    def test_results(self, optimization_id: str) -> dict:
-        """Fetch the baseline/optimized test-set predictions.
-
-        Args:
-            optimization_id: The optimization job identifier.
-
-        Returns:
-            The ``GET /optimizations/{id}/test-results`` response payload.
-        """
-        resp = requests.get(f"{self.base_url}/optimizations/{optimization_id}/test-results")
-        resp.raise_for_status()
-        return resp.json()
-
     def cancel(self, optimization_id: str) -> dict:
         """Request cancellation of a running optimization.
 
@@ -214,25 +173,6 @@ class DSPyServiceClient:
         resp = requests.post(f"{self.base_url}/serve/{optimization_id}", json=inputs)
         resp.raise_for_status()
         return resp.json()
-
-    def load_program(self, optimization_id: str) -> dspy.Module:
-        """Download and unpickle the optimized program.
-
-        Args:
-            optimization_id: The optimization job identifier.
-
-        Returns:
-            The live ``dspy.Module`` instance ready for inference.
-
-        Security:
-            This unpickles bytes returned by the configured Skynet service.
-            ``pickle.loads`` runs arbitrary code during deserialization, so
-            only call this against a service whose artifact store you trust.
-            Treat a shared/multi-tenant Skynet instance as untrusted.
-        """
-        art = self.artifact(optimization_id)
-        pickle_b64 = art["program_artifact"]["program_pickle_base64"]
-        return pickle.loads(base64.b64decode(pickle_b64))
 
     def list_optimizations(self, **params) -> dict:
         """List optimization jobs matching the given filters.

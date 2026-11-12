@@ -6,8 +6,8 @@ repositories (SKY-316).
 ``GET /optimizers`` — the optimizers that fit a setup, with availability.
 ``GET /blackbox/engines`` — the engine catalog with per-deployment availability.
 
-Stored grid-search, DSPy and legacy black-box runs stay readable; the worker
-still executes legacy payloads already queued or resumed.
+Migration f3a9c2d81b56 deletes the stored grid-search and DSPy runs (SKY-656).
+Stored black-box repository runs stay readable.
 """
 
 from __future__ import annotations
@@ -109,7 +109,6 @@ logger = logging.getLogger(__name__)
 # Repository runs keep the legacy black-box family, which the preflight and
 # worker still read.
 _BLACKBOX_WORKFLOW = "anything"
-# The DSPy optimizer that bootstraps demos from the task model alone.
 
 
 class SubmissionInProgressError(DomainError):

@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "Woher der ReAct-Agent seine Werkzeuge bezieht und wie er sich mit ihnen verbindet; gilt nur, wenn das Modul ein ReAct-Agent ist",
   "tooltip.submit.dataset_file": "Die hochgeladene Datei – jede Zeile ist ein Beispiel, aus dem der Lauf lernt oder an dem er gemessen wird",
   "tooltip.submit.dataset_size": "Wie viele Zeilen und Spalten in der Datei erkannt wurden; die Zeilen werden auf Training, Validierung und Test verteilt",
-  "tooltip.submit.total_pairs": "Wie viele Läufe die Rastersuche startet: jedes Aufgabenmodell × jedes Optimierungsmodell",
   "tooltip.submit.estimate": "Die erwarteten Kosten hängen von den gewählten Modellen, der Größe von {term.dataset} und der Anzahl der Aufrufe von {term.optimizer} ab.",
   "tooltip.submit.cost_ceiling": "Eine harte Obergrenze für die Ausgaben dieses Laufs – sobald die aufgelaufenen Kosten sie überschreiten würden, stoppt der Lauf, statt weiter Guthaben zu verbrauchen",
   "tooltip.submit.blackbox.seed": "Wo die Suche beginnt: Jede neue Version ist eine Umschreibung davon. Leer lassen, damit die Engine von Grund auf startet",

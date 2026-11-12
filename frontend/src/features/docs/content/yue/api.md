@@ -48,7 +48,6 @@ Authorization: Bearer skyd_...
 | `POST /blackbox/run`                            | 喺一個 GitHub 倉庫上開始一次運行。                   |
 | `GET /optimizations`                            | 列出你嘅運行。                                         |
 | `GET /optimizations/{optimization_id}`          | 回傳一次運行：狀態、進度、日誌同結果。                 |
-| `GET /optimizations/{optimization_id}/artifact` | 回傳運行搵到嘅最佳版本。                               |
 | `POST /optimizations/{optimization_id}/cancel`  | 停止一次運行。                                         |
 | `POST /serve/{optimization_id}`                 | 用最佳版本處理一個新輸入。                             |
 | `GET /health`                                   | 顯示服務係咪正常運作。                                 |
@@ -155,7 +154,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 當狀態係 `success`，就攞最佳版本：
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

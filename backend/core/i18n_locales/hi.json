@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "डेटासेट बहुत छोटा है ({total} उदाहरण)। अलग मान्यकरण/परीक्षण सेटों के लिए पर्याप्त नहीं — GEPA सभी उदाहरणों पर प्रशिक्षण देगा और ऑप्टिमाइज़ेशन के दौरान उन्हें न्यायाधीशों के रूप में पुन: उपयोग करेगा।",
     "filter.invalid_optimization_type": "अमान्य ऑप्टिमाइज़ेशन-प्रकार फ़िल्टर '{value}'। अनुमत मान: {allowed}",
     "filter.invalid_status": "अमान्य स्थिति फ़िल्टर '{value}'। अनुमत मान: {allowed}",
-    "grid_search.pair_failed_error": "स्थिति {pair_index} पर जोड़ी विफल हुई: {error}",
-    "grid_search.pair_submission_grid_only": "जोड़ी-स्कोप्ड सबमिशन केवल ग्रिड-खोज रन के लिए उपलब्ध है।",
     "hardening.job_not_found": "हार्डनिंग जॉब नहीं मिला।",
     "hardening.exploit_not_found": "यह एक्सप्लॉइट इस हार्डनिंग जॉब में नहीं है।",
     "hardening.wrong_state": "हार्डनिंग जॉब अभी यह नहीं कर सकता। इसे रीफ़्रेश करें और फिर से कोशिश करें।",

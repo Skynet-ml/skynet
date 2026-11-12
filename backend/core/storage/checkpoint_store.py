@@ -29,7 +29,7 @@ SINGLE_RUN_PAIR_INDEX = -1
 
 @dataclass(frozen=True)
 class GepaCheckpoint:
-    """One run/pair's saved GEPA state plus the iteration it was taken at."""
+    """One run's saved GEPA state plus the iteration it was taken at."""
 
     optimization_id: str
     pair_index: int
@@ -60,13 +60,13 @@ class PostgresCheckpointBlobStore:
         manifest: dict[str, Any] | None = None,
         expected_generation: int | None = None,
     ) -> bool:
-        """Insert or replace the GEPA state bytes for one run or grid pair.
+        """Insert or replace the GEPA state bytes for one run.
 
         Args:
             optimization_id: Owning job id.
             data: The raw ``gepa_state.bin`` bytes for the latest iteration.
             iteration: The iteration index the state was saved at.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
             manifest: Exact source, task, runtime, and integrity evidence for recovery.
             expected_generation: Worker epoch allowed to replace this checkpoint.
 
@@ -111,11 +111,11 @@ class PostgresCheckpointBlobStore:
             return True
 
     def get(self, optimization_id: str, pair_index: int = SINGLE_RUN_PAIR_INDEX) -> GepaCheckpoint | None:
-        """Return the saved checkpoint for one run/pair, or ``None``.
+        """Return the saved checkpoint for one run, or ``None``.
 
         Args:
             optimization_id: Job whose checkpoint is read.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
 
         Returns:
             The :class:`GepaCheckpoint`, or ``None`` when no row exists.
@@ -125,7 +125,7 @@ class PostgresCheckpointBlobStore:
             return self._to_checkpoint(row) if row is not None else None
 
     def list_for_optimization(self, optimization_id: str) -> list[GepaCheckpoint]:
-        """Return every saved checkpoint for a job (all grid pairs, or the single run).
+        """Return every saved checkpoint for a job.
 
         Args:
             optimization_id: Job whose checkpoints are read.
@@ -140,11 +140,11 @@ class PostgresCheckpointBlobStore:
             return [self._to_checkpoint(row) for row in rows]
 
     def delete(self, optimization_id: str, pair_index: int = SINGLE_RUN_PAIR_INDEX) -> None:
-        """Remove one run/pair's checkpoint if present.
+        """Remove one run's checkpoint if present.
 
         Args:
             optimization_id: Owning job id.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
         """
         with Session(self._engine) as session:
             session.execute(
@@ -156,7 +156,7 @@ class PostgresCheckpointBlobStore:
             session.commit()
 
     def delete_all(self, optimization_id: str) -> None:
-        """Remove every checkpoint for a job (e.g. once a grid succeeds).
+        """Remove every checkpoint for a job.
 
         Args:
             optimization_id: Job whose checkpoints are dropped.
@@ -166,7 +166,7 @@ class PostgresCheckpointBlobStore:
             session.commit()
 
     def has_any(self, optimization_id: str) -> bool:
-        """Return whether the job has any saved checkpoint (single run or any pair).
+        """Return whether the job has any saved checkpoint.
 
         Args:
             optimization_id: Job to test.

@@ -144,6 +144,12 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
 
     @event.listens_for(engine, "connect")
     def _register_jsonb_typeof(dbapi_conn, _record) -> None:
+        """Add the Postgres ``jsonb_typeof`` function to each new SQLite connection.
+
+        Args:
+            dbapi_conn: The new DBAPI connection.
+            _record: The pool record; not read.
+        """
         dbapi_conn.create_function("jsonb_typeof", 1, _sqlite_jsonb_typeof)
 
     with engine.begin() as conn:
@@ -288,6 +294,14 @@ def test_search_optimizations_forces_lexical_when_embeddings_table_absent(monkey
     monkeypatch.setattr(dashboard, "_job_embeddings_table_present", lambda _store: False)
 
     def _must_not_run(**_kwargs: object) -> dict[str, object]:
+        """Fail the test if a search that needs the embeddings table runs.
+
+        Args:
+            **_kwargs: The search arguments; not read.
+
+        Returns:
+            Never returns.
+        """
         raise AssertionError("semantic/bm25 search must not run without the table")
 
     monkeypatch.setattr(dashboard, "_search_semantic", _must_not_run)

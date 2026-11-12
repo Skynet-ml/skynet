@@ -48,7 +48,6 @@ Başvuru belgesi `https://api.skynetml.com/openapi.public.json` adresindeki Open
 | `POST /blackbox/run`                            | Bir GitHub deposu üzerinde çalıştırma başlatır.                       |
 | `GET /optimizations`                            | Çalıştırmalarınızı listeler.                                          |
 | `GET /optimizations/{optimization_id}`          | Tek bir çalıştırmayı döndürür: durum, ilerleme, günlükler ve sonuç.   |
-| `GET /optimizations/{optimization_id}/artifact` | Çalıştırmanın bulduğu en iyi sürümü döndürür.                         |
 | `POST /optimizations/{optimization_id}/cancel`  | Bir çalıştırmayı durdurur.                                            |
 | `POST /serve/{optimization_id}`                 | En iyi sürümü yeni bir girdi üzerinde çalıştırır.                     |
 | `GET /health`                                   | Hizmetin çalışıp çalışmadığını gösterir.                              |
@@ -155,7 +154,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 Durum `success` olduğunda en iyi sürümü alın:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

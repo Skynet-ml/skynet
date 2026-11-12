@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "ReAct エージェントがツールをどこから取得し、どう接続するか。モジュールが ReAct エージェントの場合にのみ適用されます",
   "tooltip.submit.dataset_file": "アップロードしたファイル。各行が、実行が学習または評価に使う1つの例です",
   "tooltip.submit.dataset_size": "ファイルで検出された行数と列数。行は学習・検証・テストに分配されます",
-  "tooltip.submit.total_pairs": "グリッドサーチが起動する実行の数。各タスクモデル×各最適化モデル",
   "tooltip.submit.estimate": "予想コストは、選択したモデル、{term.dataset}のサイズ、{term.optimizer}の呼び出し回数によって異なります。",
   "tooltip.submit.cost_ceiling": "この実行が使える金額の上限。累積請求が上限を超えそうになると、実行はそれ以上支払うことなく停止します",
   "tooltip.submit.blackbox.seed": "探索の出発点。新しいバージョンはすべてこれの書き換えです。空のままにするとエンジンはゼロから始めます",

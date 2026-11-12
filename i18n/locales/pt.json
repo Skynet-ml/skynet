@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "O conjunto de dados é muito pequeno ({total} exemplos). Não há exemplos suficientes para conjuntos de validação/teste separados — o GEPA treinará com todos os exemplos e reutilizá-los-á como juízes durante a otimização.",
     "filter.invalid_optimization_type": "Filtro de tipo de otimização inválido '{value}'. Valores permitidos: {allowed}",
     "filter.invalid_status": "Filtro de estado inválido '{value}'. Valores permitidos: {allowed}",
-    "grid_search.pair_failed_error": "O par na posição {pair_index} falhou: {error}",
-    "grid_search.pair_submission_grid_only": "A submissão por par só está disponível para execuções de pesquisa em grelha.",
     "hardening.job_not_found": "Tarefa de reforço não encontrada.",
     "hardening.exploit_not_found": "Essa falha não faz parte desta tarefa de reforço.",
     "hardening.wrong_state": "A tarefa de reforço não pode fazer isso agora. Atualize-a e tente novamente.",

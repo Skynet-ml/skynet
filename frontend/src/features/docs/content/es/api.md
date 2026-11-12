@@ -48,7 +48,6 @@ La referencia lee el documento OpenAPI en `https://api.skynetml.com/openapi.publ
 | `POST /blackbox/run`                            | Inicia una ejecución sobre un repositorio de GitHub.           |
 | `GET /optimizations`                            | Enumera tus ejecuciones.                                       |
 | `GET /optimizations/{optimization_id}`          | Devuelve una ejecución: estado, progreso, registros y resultado. |
-| `GET /optimizations/{optimization_id}/artifact` | Devuelve la mejor versión que encontró la ejecución.           |
 | `POST /optimizations/{optimization_id}/cancel`  | Detiene una ejecución.                                         |
 | `POST /serve/{optimization_id}`                 | Ejecuta la mejor versión con una entrada nueva.                |
 | `GET /health`                                   | Indica si el servicio está activo.                             |
@@ -155,7 +154,7 @@ La [referencia de la API](https://api.skynetml.com/scalar) enumera todos los cam
 Cuando el estado es `success`, obtén la mejor versión:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

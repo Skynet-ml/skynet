@@ -136,8 +136,6 @@
     "optimization.pair_not_rerunnable": "לא ניתן להריץ מחדש זוג כשה{term.optimization} במצב '{status}'.",
     "optimization.pair_not_resumable": "לזוג זה אין נקודת המשך שמורה — ניתן להריץ אותו מחדש במקום.",
     "optimization.pairs_label": "{count, plural, one {{term.pair} אחד} two {שני {term.pairPlural}} other {# {term.pairPlural}}}",
-    "grid_search.pair_failed_error": "הזוג במיקום {pair_index} נכשל: {error}",
-    "grid_search.pair_submission_grid_only": "הגשה לפי זוג זמינה רק בסריקות.",
     "hardening.job_not_found": "משימת ההקשחה לא נמצאה.",
     "hardening.exploit_not_found": "הפרצה הזו לא נמצאת במשימת ההקשחה.",
     "hardening.wrong_state": "משימת ההקשחה לא יכולה לעשות את זה עכשיו. רעננו ונסו שוב.",

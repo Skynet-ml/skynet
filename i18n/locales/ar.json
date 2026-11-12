@@ -223,8 +223,6 @@
     "dataset.split.rationale.tiny": "مجموعة البيانات صغيرة جدًا ({total} مثال). لا تكفي لمجموعتَي تحقّق/اختبار منفصلتين — سيتدرّب GEPA على جميع الأمثلة ويعيد استخدامها كحَكَم أثناء التحسين.",
     "filter.invalid_optimization_type": "مرشّح نوع التحسين غير صالح '{value}'. القيم المسموح بها: {allowed}",
     "filter.invalid_status": "مرشّح الحالة غير صالح '{value}'. القيم المسموح بها: {allowed}",
-    "grid_search.pair_failed_error": "فشل الزوج في الموضع {pair_index}: {error}",
-    "grid_search.pair_submission_grid_only": "إرسال محدّد بزوج متاح فقط لعمليات تشغيل البحث الشبكي.",
     "hardening.job_not_found": "لم يتم العثور على مهمة التحصين.",
     "hardening.exploit_not_found": "هذه الثغرة ليست ضمن مهمة التحصين هذه.",
     "hardening.wrong_state": "لا يمكن لمهمة التحصين تنفيذ هذا الآن. حدّث الصفحة وحاول مرة أخرى.",

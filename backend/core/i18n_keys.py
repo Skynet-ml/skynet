@@ -206,8 +206,6 @@ class I18nKey(StrEnum):
     EMAIL_SPENT_OF_LIMIT = 'email.spent.of_limit'
     FILTER_INVALID_OPTIMIZATION_TYPE = 'filter.invalid_optimization_type'
     FILTER_INVALID_STATUS = 'filter.invalid_status'
-    GRID_SEARCH_PAIR_FAILED_ERROR = 'grid_search.pair_failed_error'
-    GRID_SEARCH_PAIR_SUBMISSION_GRID_ONLY = 'grid_search.pair_submission_grid_only'
     HARDENING_EXPLOIT_NOT_FOUND = 'hardening.exploit_not_found'
     HARDENING_FIX_CHECKS_FAILED = 'hardening.fix_checks_failed'
     HARDENING_JOB_ACTIVE = 'hardening.job_active'

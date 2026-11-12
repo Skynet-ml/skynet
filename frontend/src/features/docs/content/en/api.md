@@ -48,7 +48,6 @@ The reference reads the OpenAPI document at `https://api.skynetml.com/openapi.pu
 | `POST /blackbox/run`                            | Starts a run on a GitHub repository.                   |
 | `GET /optimizations`                            | Lists your runs.                                       |
 | `GET /optimizations/{optimization_id}`          | Returns one run: status, progress, logs and result.    |
-| `GET /optimizations/{optimization_id}/artifact` | Returns the best version that the run found.           |
 | `POST /optimizations/{optimization_id}/cancel`  | Stops a run.                                           |
 | `POST /serve/{optimization_id}`                 | Runs the best version on a new input.                  |
 | `GET /health`                                   | Shows if the service is up.                            |
@@ -155,7 +154,7 @@ The [API reference](https://api.skynetml.com/scalar) lists every field of the ru
 When the status is `success`, get the best version:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

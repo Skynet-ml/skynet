@@ -1,7 +1,7 @@
 """Run the SKY-656 migration on seeded rows in a real PostgreSQL database.
 
 The migration deletes the retired DSPy, grid and pair jobs with their rows,
-and drops the grid columns and table. Only PostgreSQL runs it, so this module
+closes their budgets and drops the grid pair table. Only PostgreSQL runs it, so this module
 needs a disposable database in ``APP_BUDGET_TEST_DB_URL`` and skips without
 one. Each test works in its own schema and drops it afterwards. Never point
 the URL at staging or production.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
@@ -239,24 +240,129 @@ def test_upgrade_deletes_only_the_dspy_grid_and_pair_rows(conn: Connection) -> N
     assert _ids(conn, "continuous_cycles", "id") == {"cycle-live"}
 
 
-def test_upgrade_drops_the_grid_schema_and_keeps_the_checkpoint_pair_index(conn: Connection) -> None:
-    """Drop the grid table, columns, FK and index, and leave the checkpoint key alone."""
+def test_upgrade_drops_the_grid_table_and_keeps_the_columns_for_the_rollout(conn: Connection) -> None:
+    """Drop the grid table, and keep the grid columns, FK and index that old pods still map."""
     _seed(conn)
 
     _upgrade(conn)
 
     inspector = inspect(conn)
     assert not inspector.has_table("grid_pair_results")
-    job_columns = {column["name"] for column in inspector.get_columns("jobs")}
-    assert not {"parent_optimization_id", "pair_index"} & job_columns
-    assert "pair_index" not in {column["name"] for column in inspector.get_columns("job_logs")}
-    assert not inspector.get_foreign_keys("jobs")
-    assert "ix_jobs_parent_optimization_id" not in {index["name"] for index in inspector.get_indexes("jobs")}
+    assert {"parent_optimization_id", "pair_index"} <= {column["name"] for column in inspector.get_columns("jobs")}
+    assert "pair_index" in {column["name"] for column in inspector.get_columns("job_logs")}
+    assert [fk["referred_table"] for fk in inspector.get_foreign_keys("jobs")] == ["jobs"]
+    assert "ix_jobs_parent_optimization_id" in {index["name"] for index in inspector.get_indexes("jobs")}
     assert "pair_index" in {column["name"] for column in inspector.get_columns("gepa_checkpoints")}
 
 
+def _seed_budget(connection: Connection, budget_id: str, job_id: str, state: str) -> None:
+    """Write a budget for ``job_id`` with one reserved and one dispatched operation.
+
+    The reserved operation holds 10 units and 4 wallet units. The dispatched
+    one holds 5 units and 2 wallet units.
+
+    Args:
+        connection: The test schema connection.
+        budget_id: The budget id.
+        job_id: The job the budget belongs to.
+        state: The budget state.
+    """
+    tables = Base.metadata.tables
+    now = datetime.now(UTC)
+    connection.execute(
+        tables["execution_budgets"].insert(),
+        [
+            {
+                "id": budget_id,
+                "username": "u",
+                "creation_key": budget_id,
+                "creation_fingerprint": "f",
+                "total_cents": 100,
+                "state": state,
+                "blocked_reason": "manual" if state == "blocked" else None,
+                "job_id": job_id,
+                "reserved_units": 15,
+                "wallet_reserved_units": 6,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+    operation = {
+        "budget_id": budget_id,
+        "attempt": 1,
+        "generation": 0,
+        "phase": "run",
+        "cost_kind": "model",
+        "request_fingerprint": "r",
+        "admission_fingerprint": "a",
+        "price_snapshot": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection.execute(
+        tables["execution_operations"].insert(),
+        [
+            operation
+            | {
+                "id": f"{budget_id}-reserved",
+                "operation_key": "reserved",
+                "state": "reserved",
+                "max_units": 10,
+                "max_wallet_units": 4,
+            },
+            operation
+            | {
+                "id": f"{budget_id}-dispatched",
+                "operation_key": "dispatched",
+                "state": "dispatched",
+                "max_units": 5,
+                "max_wallet_units": 2,
+            },
+        ],
+    )
+    connection.commit()
+
+
+def test_upgrade_releases_and_closes_the_budgets_of_deleted_jobs(conn: Connection) -> None:
+    """Release the unstarted holds of dead jobs' budgets, close and detach them, and keep live budgets."""
+    _seed(conn)
+    _seed_budget(conn, "budget-dead", "dspy-run", "open")
+    _seed_budget(conn, "budget-dead-blocked", "grid-pair", "blocked")
+    _seed_budget(conn, "budget-live", "repo-run", "open")
+
+    _upgrade(conn)
+
+    budgets = {
+        row.id: row
+        for row in conn.execute(
+            text(
+                "SELECT id, state, blocked_reason, job_id, reserved_units, wallet_reserved_units FROM execution_budgets"
+            )
+        )
+    }
+    dead = budgets["budget-dead"]
+    assert (dead.state, dead.blocked_reason, dead.job_id) == ("closed", "job_deleted", None)
+    assert (dead.reserved_units, dead.wallet_reserved_units) == (5, 2)
+    blocked = budgets["budget-dead-blocked"]
+    assert (blocked.state, blocked.blocked_reason, blocked.job_id) == ("blocked", "manual", None)
+    assert (blocked.reserved_units, blocked.wallet_reserved_units) == (5, 2)
+    live = budgets["budget-live"]
+    assert (live.state, live.blocked_reason, live.job_id) == ("open", None, "repo-run")
+    assert (live.reserved_units, live.wallet_reserved_units) == (15, 6)
+    states = dict(conn.execute(text("SELECT id, state FROM execution_operations")).all())
+    assert states == {
+        "budget-dead-reserved": "released",
+        "budget-dead-dispatched": "dispatched",
+        "budget-dead-blocked-reserved": "released",
+        "budget-dead-blocked-dispatched": "dispatched",
+        "budget-live-reserved": "reserved",
+        "budget-live-dispatched": "dispatched",
+    }
+
+
 def test_upgrade_runs_twice_and_downgrade_restores_the_empty_schema(conn: Connection) -> None:
-    """Run the upgrade again with no change, then restore the empty grid schema."""
+    """Run the upgrade again with no change, then restore the empty grid table."""
     _seed(conn)
     _upgrade(conn)
 
@@ -266,10 +372,5 @@ def test_upgrade_runs_twice_and_downgrade_restores_the_empty_schema(conn: Connec
     with Operations.context(MigrationContext.configure(conn)):
         migration.downgrade()
     conn.commit()
-    inspector = inspect(conn)
-    assert inspector.has_table("grid_pair_results")
-    assert {"parent_optimization_id", "pair_index"} <= {column["name"] for column in inspector.get_columns("jobs")}
-    assert "pair_index" in {column["name"] for column in inspector.get_columns("job_logs")}
-    assert [fk["referred_table"] for fk in inspector.get_foreign_keys("jobs")] == ["jobs"]
-    assert "ix_jobs_parent_optimization_id" in {index["name"] for index in inspector.get_indexes("jobs")}
+    assert inspect(conn).has_table("grid_pair_results")
     assert _ids(conn, "jobs") == set(_LIVE)

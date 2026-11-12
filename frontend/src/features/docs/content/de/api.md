@@ -48,7 +48,6 @@ Die Referenz liest das OpenAPI-Dokument unter `https://api.skynetml.com/openapi.
 | `POST /blackbox/run`                            | Startet einen Durchlauf auf einem GitHub-Repository.             |
 | `GET /optimizations`                            | Listet Ihre Durchläufe auf.                                      |
 | `GET /optimizations/{optimization_id}`          | Gibt einen Durchlauf zurück: Status, Fortschritt, Logs und Ergebnis. |
-| `GET /optimizations/{optimization_id}/artifact` | Gibt die beste Version zurück, die der Durchlauf gefunden hat.   |
 | `POST /optimizations/{optimization_id}/cancel`  | Stoppt einen Durchlauf.                                          |
 | `POST /serve/{optimization_id}`                 | Führt die beste Version mit einer neuen Eingabe aus.             |
 | `GET /health`                                   | Zeigt, ob der Dienst läuft.                                      |
@@ -155,7 +154,7 @@ Die [API-Referenz](https://api.skynetml.com/scalar) listet jedes Feld der Durchl
 Lautet der Status `success`, rufen Sie die beste Version ab:
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

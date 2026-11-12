@@ -3223,7 +3223,6 @@
   "tooltip.submit.react_section": "ReAct 代理由邊度攞工具同點樣連接；只有模組係 ReAct 代理嘅時候先適用",
   "tooltip.submit.dataset_file": "上載咗嘅檔案，每一行係一個例子，畀執行學習或者用嚟評估",
   "tooltip.submit.dataset_size": "檔案入面偵測到幾多行同幾多欄；啲行會分配去訓練、驗證同測試",
-  "tooltip.submit.total_pairs": "網格搜尋會啟動幾多次執行：每個任務模型 × 每個最佳化模型",
   "tooltip.submit.estimate": "預計成本視乎所選模型、{term.dataset}大小同{term.optimizer}嘅呼叫次數。",
   "tooltip.submit.cost_ceiling": "呢次執行可以花費嘅硬性上限；累計收費一旦就快超過上限，執行就會停低，唔會再扣多啲錢",
   "tooltip.submit.blackbox.seed": "搜尋嘅起點：每個新版本都係佢嘅重寫。留空就等引擎由零開始",

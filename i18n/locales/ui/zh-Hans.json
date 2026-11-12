@@ -1629,7 +1629,6 @@
   "tooltip.submit.react_section": "ReAct 代理从哪里获取工具以及如何连接；仅当模块是 ReAct 代理时适用",
   "tooltip.submit.dataset_file": "上传的文件，每一行是一个示例，供运行学习或用于评估",
   "tooltip.submit.dataset_size": "文件中检测到的行数和列数；行会分配到训练、验证和测试",
-  "tooltip.submit.total_pairs": "网格搜索将启动的运行数量：每个任务模型 × 每个优化模型",
   "tooltip.submit.estimate": "预计费用取决于所选模型、{term.dataset}的大小和{term.optimizer}的调用次数。",
   "tooltip.submit.cost_ceiling": "本次运行可花费金额的硬性上限；一旦累计费用将要超过上限，运行就会停止，而不会继续扣费",
   "tooltip.submit.blackbox.seed": "搜索的起点：每个新版本都是对它的重写。留空则让引擎从零开始",

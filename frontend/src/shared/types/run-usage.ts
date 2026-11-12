@@ -21,7 +21,6 @@ export interface RunUsageRow {
   role: UsageRole | string;
   model: string | null;
   stage: string | null;
-  pair: string | null;
   candidate: string | null;
   // What an engine that makes several sorts of model calls used this one for (ShinkaEvolve).
   kind?: string | null;
