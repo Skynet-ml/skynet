@@ -611,7 +611,6 @@ class RepoScorer:
             unstamped = candidate.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
-            calls = shlex.quote(CALLS_DIR)
             frames: list[str] = []
             forward = relay.output if relay is not None else sandbox_log.ignore_output
             pending = [""]
@@ -632,9 +631,7 @@ class RepoScorer:
 
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
-                    f"/usr/bin/find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec /bin/rm -rf {{}} +"
-                    f'; p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
                     f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
