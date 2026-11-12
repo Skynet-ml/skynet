@@ -11,7 +11,6 @@
 | **Yapay nesne**            | Sonucu olan bir çalıştırma                                    | Deponuzun sürümleri ve en iyi sürüm                                        |
 | **Veri**                   | Vakaları olan bitmiş bir çalıştırma                           | Eğitim, doğrulama ve test kümelerine bölünmüş veri                         |
 | **Kod**                    | Çalıştırmanın gösterilecek kodu olduğunda                     | Puanlayıcı                                                                 |
-| **Ödül**                   | Puanlayıcısı ödül parçaları bildiren bir çalıştırma           | Ödül bileşenleri ve ağırlıkları                                            |
 | **Günlükler**              | Çoğu çalıştırma                                               | Çalıştırma günlüğü                                                         |
 | **Kullanım ve maliyet**    | Oturum açtığınızda                                            | Çalıştırmanın harcadığı tutar                                              |
 | **Zamanlanmış çalıştırma** | Başarılı bir çalıştırma                                       | Optimizasyonu en iyi sürümden yeniden çalıştırmak için bir zamanlama       |

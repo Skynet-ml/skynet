@@ -3,7 +3,6 @@ import {
   CheckCircle,
   Envelope,
   GoogleChromeLogo,
-  HandPalm,
   Hourglass,
   Megaphone,
   ShareNetwork,
@@ -19,7 +18,6 @@ import type { NotificationEventType } from "@/shared/lib/api";
 import type { GridChannel } from "../lib/catalog";
 
 export const EVENT_ICONS: Record<NotificationEventType, Icon> = {
-  needs_input: HandPalm,
   budget_near: Wallet,
   failed: XCircle,
   finished: CheckCircle,

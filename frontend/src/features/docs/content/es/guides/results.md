@@ -11,7 +11,6 @@ La página de la ejecución solo muestra las pestañas que se aplican a la ejecu
 | **Artefacto**            | Una ejecución con resultado                                      | Las versiones de tu repositorio, con la mejor versión                                |
 | **Datos**                | Una ejecución terminada con casos                                | La división de los datos en los conjuntos de entrenamiento, validación y prueba      |
 | **Código**               | Cuando la ejecución tiene código que mostrar                     | El evaluador                                                                         |
-| **Recompensa**           | Una ejecución cuyo evaluador declara partes de recompensa        | Las partes de la recompensa y sus pesos                                              |
 | **Registros**            | La mayoría de las ejecuciones                                    | El registro de la ejecución                                                          |
 | **Uso y coste**          | Cuando has iniciado sesión                                       | Lo que gastó la ejecución                                                            |
 | **Ejecución programada** | Una ejecución correcta                                           | Una programación para volver a ejecutar la optimización desde la mejor versión       |

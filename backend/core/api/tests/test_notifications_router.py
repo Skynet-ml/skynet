@@ -75,19 +75,19 @@ def _seed(engine, events: list[str], user: str = _USER) -> list[str]:
 
 def test_list_pages_and_tabs(harness: SimpleNamespace) -> None:
     """The list is newest first, paginates by cursor and filters the Focused tab."""
-    _seed(harness.engine, ["finished", "new_best", "needs_input"])
+    _seed(harness.engine, ["finished", "new_best", "budget_near"])
     _seed(harness.engine, ["finished"], user="someone-else@example.com")
 
     first = harness.client.get("/notifications", params={"limit": 2}).json()
     second = harness.client.get("/notifications", params={"limit": 2, "cursor": first["next_cursor"]}).json()
     focused = harness.client.get("/notifications", params={"tab": "focused"}).json()
 
-    assert [item["event_type"] for item in first["items"]] == ["needs_input", "new_best"]
+    assert [item["event_type"] for item in first["items"]] == ["budget_near", "new_best"]
     assert first["items"][0]["urgent"] is True
     assert first["items"][0]["focused"] is True
     assert [item["event_type"] for item in second["items"]] == ["finished"]
     assert second["next_cursor"] is None
-    assert [item["event_type"] for item in focused["items"]] == ["needs_input", "finished"]
+    assert [item["event_type"] for item in focused["items"]] == ["budget_near", "finished"]
 
 
 def test_unread_count_and_mark_read(harness: SimpleNamespace) -> None:
