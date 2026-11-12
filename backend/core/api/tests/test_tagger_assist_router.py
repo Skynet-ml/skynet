@@ -1030,3 +1030,29 @@ def test_tagging_guide_routes_enforce_ownership() -> None:
     assert resp.status_code == 404
     with Session(store.engine) as db:
         assert db.get(TaggingSessionModel, session_id).assist["rubric"] == ["Sarcasm counts as negative."]
+
+
+def test_tagging_guide_save_keeps_the_mode_a_provisional_session_chose() -> None:
+    """After a provisional session picks its answer style, later saves keep it."""
+    client, store = _client(_ALICE)
+    session_id = client.post("/tagging-sessions", json=_SYNTHETIC_BODY).json()["id"]
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    spec = {"brief": "Bank support chats", "columns": ["text"], "rows": 20}
+    first = {"rubric": ["Caps lock counts as angry."], "task": {"mode": "binary", "question": "Angry?"}}
+    assert client.put(url, json={**first, "dataset_spec": spec}).status_code == 200
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"mode": "multiclass", "categories": ["a", "b"]}})
+    assert resp.status_code == 422
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"] == {"mode": "binary", "question": "Angry?"}
+        assert row.assist["rubric"] == ["Caps lock counts as angry."]
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"question": "Is the customer angry?"}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "binary"
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"] == {"mode": "binary", "question": "Is the customer angry?"}
+    resp = client.put(url, json={"rubric": ["Only the rule changes."]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "binary"
+    assert resp.json()["question"] == "Is the customer angry?"

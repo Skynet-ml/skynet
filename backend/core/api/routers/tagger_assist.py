@@ -1029,13 +1029,18 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             if not assist:
                 raise DomainError("tagger.assist.not_enabled", status=409)
             refuse_while_autotag_runs(row)
-            config = cast("dict[str, Any]", row.config)
+            # The stored config of a provisional session stays provisional; the
+            # chosen mode lives in the override, so the checks read the merge.
+            config = _effective_config(row)
             rubric, override = tagging.normalize_guide(config, req.rubric, req.task)
             # As in the interview, only a provisional session can pick its answer style.
             asked_mode = str((req.task or {}).get("mode") or "").strip().lower()
             mode_change = not config.get("modeProvisional") and asked_mode not in ("", config.get("mode"))
             if not rubric or mode_change or (req.task is not None and not override):
                 raise DomainError("tagger.assist.invalid_guide", status=422)
+            if override and row.config.get("modeProvisional") and "mode" not in override:
+                # The override replaces the old one, so it must carry the chosen mode.
+                override = {"mode": config["mode"], **override}
             # A provisional session has no answer style until a task gives it one.
             task_override = override if req.task is not None else assist.get("taskOverride") or {}
             if config.get("modeProvisional") and not str(task_override.get("mode") or ""):
