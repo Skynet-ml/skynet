@@ -73,7 +73,7 @@ from ....billing.model_gateway import _tool_target
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
-from ....billing.usage_tags import LANE_KEY, current_tags
+from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
@@ -352,6 +352,10 @@ class RepoScorer:
         self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
+        # The box tag this scorer parked in the run budget, under its own
+        # lock because ``close`` does not take the scoring lock.
+        self._parked: str | None = None
+        self._park_lock = threading.Lock()
         # The stage tree's own snapshot, built from ``stage_archive`` only: a
         # snapshot of the scorer box would carry the metric into candidate code.
         self._stage_snapshot_key = snapshot_cache_key(
@@ -387,7 +391,7 @@ class RepoScorer:
         judge = self._rule_judge
         # Checkout and scoring share one lock: the next version's checkout
         # replaces the tree this one is scored on.
-        with self._lock:
+        with self._lock, self._in_use():
             checkout = self._workspace.checkout(patch)
             if checkout.path is None:
                 if judge is not None and checkout.blocked:
@@ -918,8 +922,36 @@ class RepoScorer:
             RepoSetupError: When the repository cannot be unpacked or set up.
             NetworkCutoffError: When the box's network cannot be switched off and confirmed.
         """
-        with self._lock:
+        with self._lock, self._in_use():
             self._workspace.session()
+
+    @contextlib.contextmanager
+    def _in_use(self) -> Iterator[None]:
+        """Mark the scorer box as working while it is used, and parked between evaluations.
+
+        A pinned box counts as working until its unpin. Between evaluations
+        this box only waits for the next version, so the run budget may stop a
+        run whose other boxes all wait on it (SKY-647). A closing box frees its
+        coverage, so it is never parked.
+
+        Yields:
+            Control to the box work.
+        """
+        park = getattr(self._budget, "park", None)
+        with self._park_lock:
+            if self._parked is not None:
+                self._budget.unpark(self._parked)
+                self._parked = None
+        try:
+            yield
+        finally:
+            # The box can change during the work, so the tag is read again here.
+            key = self._workspace.box_key if park is not None else None
+            if key is not None:
+                with self._park_lock:
+                    if self._parked is None:
+                        self._parked = box_tag(key)
+                        park(self._parked)
 
     def dispatch(self, body: Mapping[str, Any]) -> ModelHTTPResult:
         """Answer one guest scoring request through the evaluator capability.
@@ -980,7 +1012,8 @@ class RepoScorer:
         Raises:
             BudgetReached: And the other budget errors, from a snapshot delete.
         """
-        self._workspace.close()
+        with self._in_use():
+            self._workspace.close()
         self._workspace.release_snapshot()
         with self._stage_snapshot_lock:
             self._stage_snapshot_id = None

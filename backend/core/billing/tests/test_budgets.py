@@ -856,7 +856,7 @@ def test_setup_check_waits_again_once_its_box_is_unpinned(engine: Engine) -> Non
         runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
 
 
-def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = True, running: bool = True) -> Any:
+def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = True, parked: bool = False) -> Any:
     """Reserve and pin one box, tagged by its key, the way a protected sandbox does.
 
     Args:
@@ -864,7 +864,7 @@ def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = Tr
         key: The box's operation key; its box tag is ``box_tag(key)``.
         cents: The box's coverage.
         work: False for a hold that runs no work, such as a snapshot.
-        running: False for a work box that runs no command now, such as an
+        parked: True for a work box that waits for its next use, such as an
             idle repository scorer box between evaluations.
 
     Returns:
@@ -872,8 +872,8 @@ def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = Tr
     """
     box = runtime.reserve(_quote(cents), operation_key=key, cost_kind="sandbox", role="runtime")
     runtime.pin(box.id, cent_units(box.max_cents), box=box_tag(key), work=work)
-    if work and running:
-        runtime.begin_work(box_tag(key))
+    if parked:
+        runtime.park(box_tag(key))
     return box
 
 
@@ -980,12 +980,12 @@ def test_run_stops_at_once_when_a_snapshot_hold_and_a_waiting_box_hold_the_room(
 
 
 def test_repo_run_stops_at_once_when_the_guest_waits_and_the_scorer_box_is_idle(engine: Engine) -> None:
-    """An idle repository scorer box runs no command, so it cannot end and free room while the guest waits."""
+    """A parked repository scorer box cannot end and free room while the guest waits."""
     service = BudgetService(engine=engine)
     budget = service.create("alice", 50, idempotency_key="run-idle-scorer")
     service.attach_to_job(budget.id, "alice", "idle-scorer-job", expected_revision=budget.revision)
     runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
-    _pinned_box(runtime, "repo-scorer:owner", 20, running=False)
+    _pinned_box(runtime, "repo-scorer:owner", 20, parked=True)
     _pinned_box(runtime, "sandbox:dspy:artifact", 20)
 
     started = time.monotonic()
@@ -995,14 +995,61 @@ def test_repo_run_stops_at_once_when_the_guest_waits_and_the_scorer_box_is_idle(
     assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
 
 
-def test_repo_run_waits_while_the_scorer_box_runs_a_command(engine: Engine) -> None:
-    """A scorer box that runs a command can still end, so the guest's call waits for it."""
+def test_repo_run_waits_while_the_scorer_box_is_in_use(engine: Engine) -> None:
+    """A scorer box that is not parked can still end, so the guest's call waits for it."""
     service = BudgetService(engine=engine)
     budget = service.create("alice", 50, idempotency_key="run-busy-scorer")
     service.attach_to_job(budget.id, "alice", "busy-scorer-job", expected_revision=budget.revision)
     runtime = _setup_runtime(service, budget.id, phase="run", wait=1)
     _pinned_box(runtime, "repo-scorer:owner", 20)
     _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+
+    with pytest.raises(UsagePendingError):
+        runtime.reserve(_quote(15), operation_key="proposer", cost_kind="model", box=box_tag("sandbox:dspy:artifact"))
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_a_closing_box_that_is_not_parked_frees_room_for_a_waiting_call(engine: Engine) -> None:
+    """A box between commands or in its stop counts as working until its unpin, so the call waits for it.
+
+    Round 11 probe: a box that ran no command while it closed made the run
+    stop with budget_reached at once, though its unpin made room.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-closing-box")
+    service.attach_to_job(budget.id, "alice", "closing-box-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+    closing = _pinned_box(runtime, "sandbox:case-2", 20)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call = pool.submit(
+            runtime.reserve,
+            _quote(15),
+            operation_key="proposer",
+            cost_kind="model",
+            box=box_tag("sandbox:dspy:artifact"),
+        )
+        time.sleep(1.5)
+        assert not call.done()
+        service.mark_dispatched(closing.id, "alice")
+        service.settle(closing.id, "alice", evidence_key="case-2-usage", actual_cents=1, evidence={"usage": "c2"})
+        runtime.unpin(closing.id)
+        admitted = call.result(timeout=5)
+
+    assert admitted.max_cents == 15
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_an_unparked_scorer_box_counts_as_working_again(engine: Engine) -> None:
+    """A scorer box that the next evaluation unparks can end again, so the guest's call waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-unparked-scorer")
+    service.attach_to_job(budget.id, "alice", "unparked-scorer-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=1)
+    _pinned_box(runtime, "repo-scorer:owner", 20, parked=True)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+    runtime.unpark(box_tag("repo-scorer:owner"))
 
     with pytest.raises(UsagePendingError):
         runtime.reserve(_quote(15), operation_key="proposer", cost_kind="model", box=box_tag("sandbox:dspy:artifact"))

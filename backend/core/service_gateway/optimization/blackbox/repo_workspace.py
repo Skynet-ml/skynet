@@ -369,7 +369,14 @@ class RepoWorkspace:
         self._snapshot_id: str | None = None
         self._snapshots_off = False
         self._opened = 0
+        # The operation key of the last box this workspace asked to open.
+        self._box_key: str | None = None
         self._lock = threading.Lock()
+
+    @property
+    def box_key(self) -> str | None:
+        """Return the operation key of the open box, or None when no box is open."""
+        return self._box_key if self._session is not None else None
 
     @property
     def secrets(self) -> dict[str, str]:
@@ -464,6 +471,7 @@ class RepoWorkspace:
         if restored:
             spec = replace(spec, snapshot_id=self._snapshot_id, network_disabled=True, allowed_hosts=())
         if spec.operation_key is None or number == 0:
+            self._box_key = spec.operation_key
             return spec
         kind = "restored" if restored else "fallback" if self._snapshots_off else "box"
         # The budget ledger ties one key to one request and returns the same
@@ -471,7 +479,8 @@ class RepoWorkspace:
         # key is refused once that box settles. The box name comes from the key
         # too, and the snapshot builder's name (``<box key>:snapshot``) must not
         # match a box that stays open.
-        return replace(spec, operation_key=f"{spec.operation_key}:{kind}-{number}")
+        self._box_key = f"{spec.operation_key}:{kind}-{number}"
+        return replace(spec, operation_key=self._box_key)
 
     def _open_restored(self) -> SandboxSession | None:
         """Open a deny-all box from the workspace's after-setup snapshot.

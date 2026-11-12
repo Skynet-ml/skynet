@@ -121,7 +121,7 @@ class BudgetRuntime:
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
         self._boxes: dict[str, str | None] = {}
         self._waiting: Counter[str] = Counter()
-        self._busy: Counter[str] = Counter()
+        self._parked: Counter[str] = Counter()
 
     def pin(self, operation_id: str, units: int, *, box: str | None = None, work: bool = True) -> None:
         """Record sandbox coverage that stays held until the work that opened it ends.
@@ -150,27 +150,31 @@ class BudgetRuntime:
             self._boxes.pop(operation_id, None)
             self._changed.notify_all()
 
-    def begin_work(self, box: str) -> None:
-        """Count one start or command that runs in a box.
+    def park(self, box: str) -> None:
+        """Mark a box as idle between uses, so it cannot end its own work.
 
-        Only trusted parent code that drives the box calls this, never a guest.
+        A pinned work box counts as working from its start until its unpin,
+        through its commands, file transfers, the gaps between them and its
+        stop. Only trusted parent code that drives the box calls this, never a
+        guest, and only for the time the box really waits for its next use,
+        such as a repository scorer box between evaluations.
 
         Args:
             box: The box tag; see :func:`core.billing.usage_tags.box_tag`.
         """
         with self._changed:
-            self._busy[box] += 1
+            self._parked[box] += 1
 
-    def end_work(self, box: str) -> None:
-        """Stop counting a start or command that :meth:`begin_work` counted.
+    def unpark(self, box: str) -> None:
+        """End the idle time that :meth:`park` started.
 
         Args:
-            box: The box tag that :meth:`begin_work` got.
+            box: The box tag that :meth:`park` got.
         """
         with self._changed:
-            self._busy[box] -= 1
-            if self._busy[box] <= 0:
-                del self._busy[box]
+            self._parked[box] -= 1
+            if self._parked[box] <= 0:
+                del self._parked[box]
 
     def _begin_wait(self, box: str | None, for_box: str | None = None) -> tuple[str, ...]:
         """Count one waiting call as waiting work of the pinned boxes it holds up.
@@ -238,8 +242,8 @@ class BudgetRuntime:
         snapshot hold stays for the whole run. A run therefore refuses early
         only when no pinned work box can end: each one has a model call that
         waits, waits for another pinned box whose call waits (such as a
-        native engine box on its scorer box), or runs no command at all (such
-        as an idle repository scorer box between evaluations). Then waiting
+        native engine box on its scorer box), or is parked between uses (such
+        as an idle repository scorer box between evaluations, see :meth:`park`). Then waiting
         only stalls until the timeout (SKY-647).
         Unpinned in-flight work still settles, so the operation waits
         whenever it would fit once that work is done.
@@ -259,7 +263,7 @@ class BudgetRuntime:
             # With no pinned work box, only run-long holds such as snapshots
             # remain, and they never end during the run, so stopping is correct.
             every_box_waits = all(
-                box is not None and (self._waiting[box] > 0 or self._busy[box] == 0) for box in self._boxes.values()
+                box is not None and (self._waiting[box] > 0 or self._parked[box] > 0) for box in self._boxes.values()
             )
         if self.phase != "setup" and not every_box_waits:
             return None

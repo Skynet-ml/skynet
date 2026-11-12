@@ -25,7 +25,6 @@ from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import _sandbox_failure_kind
 from core.billing.model_mailbox import ModelMailbox
 from core.billing.signals import BudgetReached
-from core.billing.usage_tags import box_tag
 from core.exceptions import DETERMINISTIC_FAILURE
 from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
@@ -2523,20 +2522,4 @@ async def test_a_box_without_a_recorder_starts_no_proxy(client: FakeClient, log:
     box = client.boxes[env.name]
     assert box.current_session.scripts == []
     assert box.create_calls[-1]["env"] is None
-    await env.stop()
-
-
-async def test_a_protected_box_counts_its_start_and_each_command_as_box_work(
-    client: FakeClient, log: list[str]
-) -> None:
-    """Check that the budget runtime sees the box busy only while it starts or runs a command (SKY-647)."""
-    env = make_env(client, log, protected=True)
-    events: list[tuple[str, str]] = []
-    env._budget.begin_work = lambda box: events.append(("begin", box))
-    env._budget.end_work = lambda box: events.append(("end", box))
-    await env.start()
-    assert [event for event, _ in events] == ["begin", "end"]
-    await env.exec("echo hello")
-    box = box_tag("op-1")
-    assert events == [("begin", box), ("end", box), ("begin", box), ("end", box)]
     await env.stop()
