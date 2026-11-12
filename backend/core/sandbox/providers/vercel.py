@@ -1445,29 +1445,6 @@ class VercelEnvironment(SandboxEnvironment):
         )
 
     @classmethod
-    async def find_snapshot(cls, builder_name: str) -> BuiltSnapshot | None:
-        """Find a live snapshot that another pod built from a builder box.
-
-        Args:
-            builder_name: The stable name of the builder box.
-
-        Returns:
-            The newest live snapshot, or ``None``. Its hold belongs to the pod
-            that built it.
-        """
-        client = cls._make_client(None)
-        try:
-            now_ms = int(time.time() * 1000)
-            async for found in client.query_snapshots(name=builder_name, sort_order="desc"):
-                if found.status == "created" and (found.expires_at is None or found.expires_at > now_ms):
-                    return BuiltSnapshot(
-                        snapshot_id=found.id, builder_name=builder_name, expires_at_ms=found.expires_at
-                    )
-            return None
-        finally:
-            await _close_client(client)
-
-    @classmethod
     async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
         """Delete a run snapshot, settle its storage, then remove the builder box.
 

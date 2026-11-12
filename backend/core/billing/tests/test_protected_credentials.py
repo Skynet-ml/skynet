@@ -26,7 +26,6 @@ from ...storage.models import (
 from ..budgets import BudgetService
 from ..byok_upstreams import UPSTREAMS, resolve_upstream
 from ..byok_vault import ProviderKeyVault
-from ..operation_pricing import json_fingerprint
 from ..protected_credentials import (
     MCP_CREDENTIAL_REF_FIELD,
     MCP_URL_REF_FIELD,
@@ -40,7 +39,6 @@ from ..protected_credentials import (
     prepare_protected_credentials,
     protect_execution_credentials,
     repo_secret_allowed_hosts,
-    resolve_current_openrouter_key,
     resolve_execution_credentials,
     resolve_repo_secrets,
     scrub_execution_credentials,
@@ -445,81 +443,6 @@ def test_remote_evaluator_ignores_an_unused_python_scorer_model(harness: _Harnes
         }
     }
     assert prepare_protected_credentials(payload, username="alice", vault=harness.vault) == payload
-
-
-def test_reconciliation_accepts_verified_owner_alias_for_the_same_provider_endpoint(harness: _Harness) -> None:
-    """Find the original key stored as a custom connection to the canonical OpenRouter API."""
-    harness.store(provider="custom", api_base=OPENROUTER_API_BASE)
-    assert (
-        resolve_current_openrouter_key("alice", json_fingerprint("fixture-alice-key"), vault=harness.vault)
-        == "fixture-alice-key"
-    )
-
-
-def test_reconciliation_matches_current_managed_or_verified_owner_key(harness: _Harness) -> None:
-    """Keep managed and BYOK receipt lookup bound to the original credential digest."""
-    harness.store()
-    harness.store(username="bob", secret="fixture-bob-key")
-    assert (
-        resolve_current_openrouter_key(
-            "alice", json_fingerprint("fixture-managed"), vault=harness.vault, managed_key="fixture-managed"
-        )
-        == "fixture-managed"
-    )
-    assert (
-        resolve_current_openrouter_key(
-            "alice", json_fingerprint("fixture-alice-key"), vault=harness.vault, managed_key="fixture-managed"
-        )
-        == "fixture-alice-key"
-    )
-    assert resolve_current_openrouter_key("alice", json_fingerprint("fixture-bob-key"), vault=harness.vault) is None
-
-
-@pytest.mark.parametrize("change", ["rotate", "remove", "invalidate", "unverifiable", "custom_endpoint"])
-def test_reconciliation_retains_coverage_when_original_key_is_unavailable(harness: _Harness, change: str) -> None:
-    """Return no substitute credential after a connection changes or becomes unusable.
-
-    Args:
-        harness: Local encrypted vault fixture.
-        change: Mutation that invalidates original-key reconciliation.
-    """
-    harness.store()
-    digest = json_fingerprint("fixture-alice-key")
-    with Session(harness.engine) as session:
-        row = session.scalar(select(BillingProviderKeyModel).where(BillingProviderKeyModel.username == "alice"))
-        if change == "rotate":
-            row.secret_ciphertext = harness.cipher.encrypt(b"fixture-rotated")
-        elif change == "remove":
-            session.delete(row)
-        elif change == "invalidate":
-            row.status = "invalid"
-        elif change == "unverifiable":
-            row.secret_ciphertext = b"cannot-decrypt"
-        else:
-            row.api_base = "https://private.example/v1"
-        session.commit()
-
-    assert resolve_current_openrouter_key("alice", digest, vault=harness.vault, managed_key="unrelated") is None
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "http://openrouter.ai/api/v1",
-        "https://openrouter.ai/other-api",
-        "https://openrouter.ai.evil.invalid/api/v1",
-        "https://key@openrouter.ai/api/v1",
-    ],
-)
-def test_reconciliation_refuses_noncanonical_saved_endpoints(harness: _Harness, endpoint: str) -> None:
-    """Do not reinterpret a different saved service as the provider that owns the original receipt.
-
-    Args:
-        harness: Local encrypted vault fixture.
-        endpoint: Lookalike or noncanonical saved endpoint.
-    """
-    harness.store(api_base=endpoint)
-    assert resolve_current_openrouter_key("alice", json_fingerprint("fixture-alice-key"), vault=harness.vault) is None
 
 
 def _repo_payload(secrets: list[dict[str, Any]]) -> dict[str, Any]:

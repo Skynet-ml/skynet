@@ -21,7 +21,7 @@ from typing import Any
 
 from ..constants import PROGRESS_CANDIDATE, TQDM_N_KEY, TQDM_TOTAL_KEY
 from .catalog import BUDGET_NEAR, NEEDS_INPUT, NEW_BEST, STUCK
-from .notifier import notify_run_budget, notify_run_needs_input, notify_run_new_best, notify_run_stuck
+from .notifier import notify_run_budget, notify_run_new_best, notify_run_stuck
 from .preferences import NotificationSettings, notification_settings
 
 logger = logging.getLogger(__name__)
@@ -235,13 +235,3 @@ class RunNotificationWatcher:
             return
         if spent_cents >= settings.budget_alert_fraction * limit_cents and self._claim("budget"):
             self._dispatch(notify_run_budget, self._optimization_id, self._username, spent_cents, limit_cents)
-
-    def notify_needs_input(self, spent_cents: float | None = None, limit_cents: int | None = None) -> None:
-        """Emit once when the run paused and waits for the owner to act.
-
-        Args:
-            spent_cents: Cents spent when it paused, when known.
-            limit_cents: The limit it hit, when known.
-        """
-        if self._wants(NEEDS_INPUT) and self._claim("needs_input"):
-            self._dispatch(notify_run_needs_input, self._optimization_id, self._username, spent_cents, limit_cents)

@@ -1746,27 +1746,16 @@ async def test_start_after_stop_is_refused(client: FakeClient, log: list[str]) -
 
 
 class SnapshotQueryClient(FakeClient):
-    """Add a snapshot query and a hung close to the fake SDK client."""
+    """Add a snapshot lookup and a hung close to the fake SDK client."""
 
     def __init__(self, log: list[str]) -> None:
-        """Hold one live snapshot.
+        """Hold one deleted snapshot.
 
         Args:
             log: The shared call log.
         """
         super().__init__(log)
         self.snapshot = SimpleNamespace(id="snap-1", status="deleted", expires_at=None)
-
-    async def query_snapshots(self, **kwargs: Any) -> Any:
-        """Yield a live snapshot.
-
-        Args:
-            kwargs: Unused.
-
-        Yields:
-            The snapshot.
-        """
-        yield SimpleNamespace(id="snap-1", status="created", expires_at=None)
 
     async def get_snapshot(self, *, snapshot_id: str) -> Any:
         """Return a snapshot that is already deleted.
@@ -1782,16 +1771,6 @@ class SnapshotQueryClient(FakeClient):
     async def aclose(self) -> None:
         """Never finish the close."""
         await asyncio.Event().wait()
-
-
-async def test_find_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
-    """Check that a hung close ends at the stop timeout and the found snapshot still returns."""
-    client = SnapshotQueryClient(log)
-    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
-    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(lambda capture: client))
-    found = await asyncio.wait_for(VercelEnvironment.find_snapshot("builder"), 5)
-    assert found is not None
-    assert found.snapshot_id == "snap-1"
 
 
 async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:

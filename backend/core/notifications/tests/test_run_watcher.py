@@ -17,7 +17,6 @@ from core.constants import (
 from core.notifications.catalog import BUDGET_NEAR, NEEDS_INPUT, NEW_BEST, STUCK
 from core.notifications.notifier import (
     notify_run_budget,
-    notify_run_needs_input,
     notify_run_new_best,
     notify_run_stuck,
 )
@@ -125,7 +124,6 @@ def test_events_switched_off_everywhere_emit_nothing() -> None:
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.1})
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.9})
     watcher.observe_spend(100, 100)
-    watcher.notify_needs_input()
 
     assert sent.calls == []
     assert watcher.spend_check_due() is False
@@ -219,27 +217,6 @@ def test_budget_alert_fires_once_at_the_fraction() -> None:
     assert sent.calls[0][1] == (_JOB, _USER, 80, 100)
 
 
-def test_needs_input_fires_once() -> None:
-    """A budget pause mails the owner once per run."""
-    sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent)
-
-    watcher.notify_needs_input()
-    watcher.notify_needs_input()
-
-    assert sent.kinds() == [notify_run_needs_input]
-
-
-def test_needs_input_carries_spend_and_limit() -> None:
-    """The pause event passes what was spent and the limit it hit."""
-    sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent)
-
-    watcher.notify_needs_input(120.0, 100)
-
-    assert sent.calls[0][1] == (_JOB, _USER, 120.0, 100)
-
-
 def test_store_without_claim_support_sends_nothing() -> None:
     """Without a durable guard the watcher prefers silence over repeats."""
     sent = _Sent()
@@ -252,7 +229,6 @@ def test_store_without_claim_support_sends_nothing() -> None:
     )
 
     watcher.observe_progress(PROGRESS_BASELINE, {})
-    watcher.notify_needs_input()
 
     assert sent.calls == []
 

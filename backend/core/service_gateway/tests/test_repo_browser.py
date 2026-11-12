@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from ..agents import repo_browser
-from ..agents.kickoff import KICKOFF_CONTEXT_BUDGET_BYTES
 from ..agents.repo_browser import KEY_FILE_BYTES, RepoBrowser
 
 
@@ -53,40 +52,3 @@ def test_preload_skips_unreadable_and_missing_files(monkeypatch) -> None:
     assert "already read for you" not in browser.summary()
 
     _browser(["src/main.go"]).preload_key_files()
-
-
-def _sized_browser(entries: list[dict[str, Any]], *, truncated: bool = False) -> RepoBrowser:
-    """Build a browser over tree entries that carry GitHub's file sizes."""
-    return RepoBrowser(
-        token="t",
-        repository="acme/shop",
-        branch="main",
-        editable_paths=["."],
-        entries=entries,
-        truncated=truncated,
-    )
-
-
-def test_opening_fits_a_small_repository() -> None:
-    """A short tree with a small README is within the opening budget."""
-    browser = _sized_browser(
-        [{"path": "README.md", "type": "file", "size": 2_000}, {"path": "src/app.py", "type": "file", "size": 9}]
-    )
-    assert browser.opening_fits() is True
-
-
-def test_opening_measures_the_whole_readme_not_its_cut() -> None:
-    """A README past the budget makes the repository too large, read or not."""
-    browser = _sized_browser([{"path": "README.md", "type": "file", "size": KICKOFF_CONTEXT_BUDGET_BYTES + 1}])
-    assert browser.opening_fits() is False
-
-
-def test_opening_measures_the_full_file_list() -> None:
-    """Thousands of paths overflow the budget even with no key files."""
-    entries = [{"path": f"src/module_{i:05d}/file.py", "type": "file", "size": 1} for i in range(4_000)]
-    assert _sized_browser(entries).opening_fits() is False
-
-
-def test_opening_never_fits_a_tree_github_cut_short() -> None:
-    """GitHub truncates only huge trees, so a truncated tree is too large."""
-    assert _sized_browser([{"path": "README.md", "type": "file", "size": 10}], truncated=True).opening_fits() is False

@@ -16,7 +16,6 @@ from collections.abc import Callable
 from typing import Any
 
 from ...connectors import github, repo_hosts
-from .kickoff import fits_kickoff_budget, measured_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -270,23 +269,6 @@ class RepoBrowser:
             next((roots[name] for name in names if name in roots), None) for names in (README_NAMES, MANIFEST_NAMES)
         )
         return [path for path in picks if path is not None]
-
-    def opening_fits(self) -> bool:
-        """Tell whether the repository is small enough for the agent's opening look.
-
-        Measured from the tree alone, before anything is read: every path of
-        the full file list plus the README's and manifest's whole sizes. A
-        tree GitHub cut short is too large by definition.
-
-        Returns:
-            ``True`` when the opening may load the repository.
-        """
-        if self._truncated:
-            return False
-        sizes = {str(e.get("path")): e.get("size") for e in self._entries}
-        key_bytes = sum(size for path in self._key_file_paths() if isinstance(size := sizes.get(path), int))
-        listing = "\n".join(str(e.get("path")) for e in self._entries)
-        return fits_kickoff_budget(measured_bytes(listing) + key_bytes)
 
     def preload_key_files(self) -> None:
         """Read the root README and build manifest into the summary, for an opening look.
