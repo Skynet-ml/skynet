@@ -927,7 +927,6 @@ def test_gepa_engine_streams_scorer_feedback(monkeypatch, tmp_path) -> None:
             "example_id": "1",
             "score": 0.5,
             "feedback": "vowels: 2",
-            "prediction": "",
             "iteration": None,
             "images": [],
             "images_dropped": 0,

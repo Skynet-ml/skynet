@@ -33,10 +33,8 @@ import {
   type BlackboxTrajectoryContext,
   type MinibatchEntry,
   type PerExampleScore,
-  type PredictionValue,
   type RejectedNode,
   type TrajectoryNode,
-  type ValsetRow,
 } from "../lib/types";
 import {
   decomposeFlexSource,
@@ -141,12 +139,7 @@ export interface TrajectoryDrawerProps {
   selection: DrawerSelection;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  valsetRows: ValsetRow[];
   minibatch: MinibatchEntry[];
-  // Per-candidate predictions on each valset example. Keyed by candidate_id →
-  // example_id → prediction text. Sparse until each candidate's full eval
-  // sweep arrives over the wire.
-  valsetOutputs: Map<string, Map<string, PredictionValue>>;
   // Tool name → approval severity from the run's persisted react_overlay, so the
   // drawer's tool cards show the same captured severity as the Code tab.
   toolSeverities?: Record<string, string>;
@@ -244,9 +237,7 @@ export function TrajectoryDrawer({
   selection,
   open,
   onOpenChange,
-  valsetRows,
   minibatch,
-  valsetOutputs,
   toolSeverities,
   blackbox = null,
   caseRuns,
@@ -284,9 +275,7 @@ export function TrajectoryDrawer({
       >
         <NodeBody
           view={view}
-          valsetRows={valsetRows}
           minibatch={minibatch}
-          valsetOutputs={valsetOutputs}
           toolSeverities={toolSeverities}
           blackbox={blackbox}
           caseRuns={caseRuns}
@@ -299,18 +288,14 @@ export function TrajectoryDrawer({
 
 function NodeBody({
   view,
-  valsetRows,
   minibatch,
-  valsetOutputs,
   toolSeverities,
   blackbox,
   caseRuns,
   onOpenRun,
 }: {
   view: NodeView;
-  valsetRows: ValsetRow[];
   minibatch: MinibatchEntry[];
-  valsetOutputs: Map<string, Map<string, PredictionValue>>;
   toolSeverities?: Record<string, string>;
   blackbox: BlackboxTrajectoryContext | null;
   caseRuns?: (exampleId: string) => AgentRunSummary[];
@@ -363,18 +348,6 @@ function NodeBody({
     isBlackbox && scorerEntries.length === 0
       ? (blackbox?.renderVersionFeedback?.(view.prompt) ?? null)
       : null;
-  const valsetById = useMemo(() => {
-    const m = new Map<string, ValsetRow>();
-    for (const row of valsetRows) m.set(row.id, row);
-    return m;
-  }, [valsetRows]);
-  const predictionsForView = useMemo(
-    () =>
-      view.kind === "accepted"
-        ? (valsetOutputs.get(view.rawId) ?? new Map<string, PredictionValue>())
-        : new Map<string, PredictionValue>(),
-    [valsetOutputs, view.kind, view.rawId],
-  );
 
   // A black-box run scored against cases has a score per case to break down; a
   // single-task run scores each version once and has nothing to break down.
@@ -512,8 +485,6 @@ function NodeBody({
                   examples={view.perExample}
                   pinnedId={pinnedExampleId}
                   onPin={(id) => setPinnedExampleId((prev) => (prev === id ? null : id))}
-                  valsetById={valsetById}
-                  predictionsForCandidate={predictionsForView}
                 />
               )}
             </Section>
@@ -599,7 +570,6 @@ function NodeBody({
             >
               <MinibatchPanel
                 entries={scorerEntries}
-                valsetRows={valsetRows}
                 iteration={isBlackbox ? null : view.iteration}
                 scorerFeedback={isBlackbox}
                 caseLabels={hasCases}
@@ -677,13 +647,11 @@ function StatTile({
 
 function MinibatchPanel({
   entries,
-  valsetRows,
   iteration,
   scorerFeedback,
   caseLabels,
 }: {
   entries: MinibatchEntry[];
-  valsetRows: ValsetRow[];
   scorerFeedback: boolean;
   // Whether a black-box entry's case is worth naming: a single-task run scores
   // one thing, so its entries carry no case.
@@ -701,11 +669,6 @@ function MinibatchPanel({
       iteration === null ? entries : entries.filter((e) => e.iteration === iteration);
     return filtered.slice(-RECENT).reverse();
   }, [entries, iteration]);
-  const valsetById = useMemo(() => {
-    const m = new Map<string, ValsetRow>();
-    for (const row of valsetRows) m.set(row.id, row);
-    return m;
-  }, [valsetRows]);
 
   if (recent.length === 0) {
     return (
@@ -722,7 +685,6 @@ function MinibatchPanel({
         <MinibatchEntryCard
           key={entry.sequence}
           entry={entry}
-          valsetRow={valsetById.get(entry.example_id) ?? null}
           scorerFeedback={scorerFeedback}
           caseLabels={caseLabels}
         />
@@ -733,26 +695,15 @@ function MinibatchPanel({
 
 function MinibatchEntryCard({
   entry,
-  valsetRow,
   scorerFeedback,
   caseLabels,
 }: {
   entry: MinibatchEntry;
-  valsetRow: ValsetRow | null;
   scorerFeedback: boolean;
   caseLabels: boolean;
 }) {
   // A scorer's score lives on its own scale, so it is neither passed nor failed.
   const passed = !scorerFeedback && entry.score > 0;
-  // Render the example exactly like a validation example (ValsetFieldGroups):
-  // inputs with empty fields dropped, the candidate answer as a ReAct chat turn
-  // with replay metadata folded into a disclosure, and the expected answer. The
-  // subsample id is a valset id, so valsetRow is normally present; when it isn't
-  // (rare), fall back to just the candidate answer rendered the same way.
-  const fallbackPrediction = useMemo(
-    () => predictionToEntries(entry.prediction),
-    [entry.prediction],
-  );
 
   return (
     <li className="overflow-hidden rounded-lg border border-border/60 bg-background/70">
@@ -799,15 +750,6 @@ function MinibatchEntryCard({
       </div>
 
       <div className="space-y-2.5 px-3 pb-3 pt-2.5">
-        {valsetRow !== null ? (
-          <ValsetFieldGroups row={valsetRow} prediction={entry.prediction} />
-        ) : fallbackPrediction !== null && fallbackPrediction.length > 0 ? (
-          <AgentTurnGroup
-            label={msg("trajectory.pareto.cell.prediction_label")}
-            entries={fallbackPrediction}
-          />
-        ) : null}
-
         {entry.feedback.length > 0 ? (
           <FeedbackBlock body={entry.feedback} scorer={scorerFeedback} />
         ) : null}
@@ -1059,8 +1001,8 @@ function isEmptyFieldValue(value: string): boolean {
 // and gate scoring, but which add no signal when reviewing an answer: the
 // turn-start wizard snapshot and the metric's before/after state. New runs omit
 // them server-side (see _HIDDEN_VALSET_FIELDS); this also strips them from runs
-// recorded before that change, so both validation and mini-batch cards stay
-// focused on inputs, the answer and the prediction.
+// recorded before that change, so the field rows stay focused on what is
+// worth reviewing.
 const HIDDEN_FIELD_KEYS: ReadonlySet<string> = new Set([
   "wizard_state",
   "state_before",
@@ -1551,12 +1493,9 @@ function splitAgentTurn(entries: Array<[string, string]>): AgentTurnParts {
   return { userMessages, assistantMessage, toolCalls, transcripts, meta };
 }
 
-// Renders a prediction/expected-answer field group as a chat turn: user turns
-// and embedded transcripts first, then the assistant reply with its tool-call
-// trajectory in one bubble (identical to the live agent), then the replay
-// metadata folded into a collapsed disclosure. Falls back to the plain field
-// list when nothing chat-shaped is present (e.g. a truncated, unparseable
-// prediction) so the raw value still shows.
+// Whether a split turn has anything chat-shaped to render. When it has none
+// (e.g. a truncated, unparseable turn), the caller falls back to the plain
+// field list so the raw value still shows.
 function turnHasChat(turn: AgentTurnParts): boolean {
   return (
     turn.userMessages.length > 0 ||
@@ -1568,8 +1507,8 @@ function turnHasChat(turn: AgentTurnParts): boolean {
 
 // The conversation body of a split turn (no section label): user bubbles, any
 // embedded transcripts, the assistant reply with its tool-call trajectory, and
-// the collapsed replay-metadata disclosure. Shared by the expected/actual
-// answer groups and the recorded history trace.
+// the collapsed replay-metadata disclosure, for one turn of the recorded
+// history trace.
 function AgentTurnConversation({ turn }: { turn: AgentTurnParts }) {
   const agentMsg: AgentMessage | null =
     turn.assistantMessage !== null || turn.toolCalls !== null
@@ -1601,30 +1540,10 @@ function AgentTurnConversation({ turn }: { turn: AgentTurnParts }) {
   );
 }
 
-function AgentTurnGroup({
-  label,
-  entries,
-}: {
-  label: string;
-  entries: Array<[string, string]>;
-}) {
-  const turn = useMemo(() => splitAgentTurn(entries), [entries]);
-  if (!turnHasChat(turn)) {
-    return <ValsetFieldGroup label={label} entries={entries} />;
-  }
-  return (
-    <div className="space-y-1">
-      <SectionLabel label={label} />
-      <AgentTurnConversation turn={turn} />
-    </div>
-  );
-}
-
 // A captured agent ``history`` ({messages: [turn, …]}) rendered as a recorded
 // conversation: each turn's user/assistant bubbles and embedded chat_history,
-// with its reasoning/tool fields folded into the per-turn details disclosure
-// (the same split as the expected/actual answer turns). Several turns get a
-// light per-turn label; a lone turn renders bare.
+// with its reasoning/tool fields folded into the per-turn details disclosure.
+// Several turns get a light per-turn label; a lone turn renders bare.
 function HistoryTraceView({ turns }: { turns: Array<Array<[string, string]>> }) {
   return (
     <div className="space-y-3">
@@ -1731,89 +1650,6 @@ function FeedbackBlock({ body, scorer }: { body: string; scorer: boolean }) {
       </div>
     </div>
   );
-}
-
-// Parses DSPy-style `Prediction(key='value', key2="value2", …)` reprs into
-// [key, value] pairs. Returns null when the input isn't a recognizable
-// `ClassName(...)` call so the caller can fall back to rendering raw text.
-function parsePredictionFields(raw: string): Array<[string, string]> | null {
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return null;
-  const m = /^[A-Za-z_][A-Za-z0-9_]*\((.*)\)$/s.exec(trimmed);
-  if (m === null) return null;
-  const body = m[1] ?? "";
-  const pairs: Array<[string, string]> = [];
-  let i = 0;
-  const n = body.length;
-  while (i < n) {
-    while (i < n && /\s/.test(body[i] ?? "")) i += 1;
-    const keyStart = i;
-    while (i < n && /[A-Za-z0-9_]/.test(body[i] ?? "")) i += 1;
-    const key = body.slice(keyStart, i);
-    // A trailing comma after the final field (`…, history=History(…),`) leaves
-    // an empty key on the next loop — stop and keep the fields parsed so far
-    // rather than discarding the whole prediction.
-    if (key.length === 0) break;
-    while (i < n && /\s/.test(body[i] ?? "")) i += 1;
-    if (body[i] !== "=") return null;
-    i += 1;
-    while (i < n && /\s/.test(body[i] ?? "")) i += 1;
-    const value = readValue(body, i);
-    if (value === null) return null;
-    pairs.push([key, value.text]);
-    i = value.next;
-    while (i < n && /\s/.test(body[i] ?? "")) i += 1;
-    if (i < n && body[i] === ",") i += 1;
-  }
-  return pairs.length > 0 ? pairs : null;
-}
-
-// Reduce a candidate prediction to label/value rows for the structured cells.
-// Object predictions (current runs) map field→value directly — the same shape
-// as ValsetRow.outputs, so nested JSON-string fields render as trees via
-// FieldValue. String predictions (legacy runs) are parsed from their Python
-// repr; an unparseable repr falls back to a single unlabeled row. Returns null
-// when there's nothing to show.
-function predictionToEntries(prediction: PredictionValue | null): Array<[string, string]> | null {
-  if (prediction === null) return null;
-  if (typeof prediction === "object") return Object.entries(prediction);
-  const parsed = parsePredictionFields(prediction);
-  if (parsed !== null && parsed.length > 0) return parsed;
-  return prediction.length > 0 ? [["", prediction]] : null;
-}
-
-function readValue(s: string, start: number): { text: string; next: number } | null {
-  const ch = s[start];
-  if (ch === "'" || ch === '"') {
-    let i = start + 1;
-    let out = "";
-    while (i < s.length) {
-      const c = s[i] ?? "";
-      if (c === "\\" && i + 1 < s.length) {
-        const next = s[i + 1] ?? "";
-        out += next === "n" ? "\n" : next === "t" ? "\t" : next === "r" ? "\r" : next;
-        i += 2;
-        continue;
-      }
-      if (c === ch) return { text: out, next: i + 1 };
-      out += c;
-      i += 1;
-    }
-    return null;
-  }
-  // Unquoted value (number, None, True, nested call) — read until top-level
-  // comma; balance brackets so nested calls don't terminate early.
-  let depth = 0;
-  let i = start;
-  while (i < s.length) {
-    const c = s[i] ?? "";
-    if (depth === 0 && c === ",") break;
-    if (c === "(" || c === "[" || c === "{") depth += 1;
-    else if (c === ")" || c === "]" || c === "}") depth -= 1;
-    i += 1;
-  }
-  const text = s.slice(start, i).trim();
-  return text.length === 0 ? null : { text, next: i };
 }
 
 interface ReactToolView {
@@ -3566,21 +3402,13 @@ interface ParetoGridSectionProps {
   examples: PerExampleScore[];
   pinnedId: string | null;
   onPin: (id: string) => void;
-  valsetById: Map<string, ValsetRow>;
-  predictionsForCandidate: Map<string, PredictionValue>;
 }
 
 function ParetoGridSection({
   examples,
   pinnedId,
   onPin,
-  valsetById,
-  predictionsForCandidate,
 }: ParetoGridSectionProps) {
-  const focused = pinnedId === null ? null : (examples.find((e) => e.id === pinnedId) ?? null);
-  const focusedRow = focused === null ? null : (valsetById.get(focused.id) ?? null);
-  const focusedPrediction =
-    focused === null ? null : (predictionsForCandidate.get(focused.id) ?? null);
   const passed = examples.filter((e) => e.score > 0).length;
 
   return (
@@ -3631,91 +3459,6 @@ function ParetoGridSection({
             </button>
           );
         })}
-      </div>
-      {focused !== null ? (
-        <div className="overflow-hidden rounded-lg border border-border/60 bg-background/70">
-          <div className="flex items-center justify-between gap-2 border-b border-border/30 bg-muted/60 px-3 py-2">
-            <div className="flex items-center gap-2 text-[11px]">
-              <StatusChip passed={focused.score > 0} />
-              <span className="font-mono text-[10px] text-muted-foreground" dir="ltr">
-                #{focused.id}
-              </span>
-            </div>
-            <HelpTip text={msg("trajectory.minibatch.score_label.explain")}>
-              <span className="inline-flex items-baseline gap-1.5">
-                <span className="text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {msg("trajectory.minibatch.score_label")}
-                </span>
-                <span
-                  className={cn(
-                    "font-mono tabular-nums text-[11px]",
-                    focused.score > 0 ? "font-semibold text-foreground" : "text-muted-foreground",
-                  )}
-                >
-                  {focused.score.toFixed(2)}
-                </span>
-              </span>
-            </HelpTip>
-          </div>
-          <div className="space-y-2.5 px-3 pb-3 pt-2.5">
-            {focusedRow === null ? (
-              <div className="text-[11px] text-muted-foreground italic">
-                {msg("trajectory.pareto.cell_detail_pending")}
-              </div>
-            ) : (
-              <ValsetFieldGroups row={focusedRow} prediction={focusedPrediction} />
-            )}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ValsetFieldGroups({
-  row,
-  prediction,
-}: {
-  row: ValsetRow;
-  prediction: PredictionValue | null;
-}) {
-  const inputs = Object.entries(row.inputs);
-  const outputs = Object.entries(row.outputs);
-  const predictionEntries = useMemo(() => predictionToEntries(prediction), [prediction]);
-  return (
-    <div className="space-y-2">
-      {inputs.length > 0 ? (
-        <ValsetFieldGroup
-          label={msg("trajectory.pareto.cell.inputs_label")}
-          entries={inputs}
-        />
-      ) : null}
-      {prediction === null ? (
-        <PendingPredictionRow />
-      ) : predictionEntries !== null && predictionEntries.length > 0 ? (
-        <AgentTurnGroup
-          label={msg("trajectory.pareto.cell.prediction_label")}
-          entries={predictionEntries}
-        />
-      ) : null}
-      {outputs.length > 0 ? (
-        <AgentTurnGroup
-          label={msg("trajectory.pareto.cell.outputs_label")}
-          entries={outputs}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function PendingPredictionRow() {
-  return (
-    <div className="space-y-1">
-      <SectionLabel
-        label={msg("trajectory.pareto.cell.prediction_label")}
-      />
-      <div className="rounded border border-dashed border-border/50 bg-background/60 px-2 py-1.5 text-[11px] italic text-muted-foreground">
-        {msg("trajectory.pareto.cell.prediction_unavailable")}
       </div>
     </div>
   );

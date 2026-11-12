@@ -1,11 +1,9 @@
 """Stream what an engine learns — each scorer call and each scored version — as trajectory events.
 
-DSPy runs feed the metric's feedback text into the candidate tree drawer
-through :data:`PROGRESS_MINIBATCH` events and every accepted program
-through :data:`PROGRESS_CANDIDATE` events. Black-box runs have no metric
-and no DSPy optimizer, so the scorer's side info and the engine's own
-versions stand in: this module puts them on the wire in the same shapes so
-the frontend renders both kinds of run identically, while the run is
+The candidate tree drawer shows the scorer's feedback text through
+:data:`PROGRESS_MINIBATCH` events and every accepted version through
+:data:`PROGRESS_CANDIDATE` events. This module puts the scorer's side info
+and the engine's own versions on the wire in those shapes, while the run is
 still going.
 """
 
@@ -228,9 +226,8 @@ def emit_scorer_feedback(
 ) -> None:
     """Forward one scorer call as a mini-batch feedback event, if it said anything.
 
-    The event mirrors what DSPy runs emit per metric call, including the
-    proposal iteration the call belongs to, so the drawer can show a
-    candidate the feedback that led to it. Renders ride along whole under
+    The event carries the proposal iteration the call belongs to, so the
+    drawer can show a candidate the feedback that led to it. Renders ride along whole under
     ``images``, outside the feedback text cap.
 
     Args:
@@ -259,7 +256,6 @@ def emit_scorer_feedback(
                 "example_id": example_id,
                 "score": score,
                 "feedback": feedback,
-                "prediction": "",
                 "iteration": iteration,
                 "images": images,
                 "images_dropped": images_dropped,

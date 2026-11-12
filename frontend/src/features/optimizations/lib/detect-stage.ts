@@ -24,15 +24,10 @@ export function detectStage(job: OptimizationStatusResponse): PipelineStage {
   if (eventNames.includes("lane_handoff")) return "refining";
   if (eventNames.includes("optimizer_progress")) return "optimizing";
   if (eventNames.includes("baseline_evaluated")) return "optimizing";
-  // Reflective optimizers (GEPA) and black-box engines stream candidate-level
-  // events instead of tqdm "optimizer_progress" bars. Once the seed is scored
-  // on the valset (valset_outputs) or any candidate is recorded, the run is
-  // past baseline measurement and iterating.
-  if (
-    eventNames.includes("valset_outputs") ||
-    eventNames.includes("candidate") ||
-    eventNames.includes("candidate_rejected")
-  )
+  // Engines stream candidate-level events instead of "optimizer_progress"
+  // bars. Once any candidate is recorded, the run is past baseline
+  // measurement and iterating.
+  if (eventNames.includes("candidate") || eventNames.includes("candidate_rejected"))
     return "optimizing";
   const splits = events.find((e) => e.event === "dataset_splits_ready");
   // Black-box runs fall back to the val/train cases for their baseline and

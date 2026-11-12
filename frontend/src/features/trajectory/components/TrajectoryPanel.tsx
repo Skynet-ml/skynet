@@ -15,8 +15,6 @@ import {
   extractMinibatch,
   extractRejected,
   scopeToLatestLane,
-  extractValset,
-  extractValsetOutputs,
 } from "../lib/extract-events";
 import { layoutTrajectory } from "../lib/layout";
 import { rememberTrajectoryView } from "../lib/climb-view-hint";
@@ -54,15 +52,13 @@ export interface TrajectoryPanelProps {
 export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
   const live = isLive(job);
   const blackboxCtx = blackbox ?? (job.optimization_type === "blackbox" ? BLACKBOX_FALLBACK : null);
-  const { candidates, rejected, valsetRows, minibatch, valsetOutputs } = useMemo(() => {
+  const { candidates, rejected, minibatch } = useMemo(() => {
     const events = job.progress_events ?? [];
     const scoped = scopeToLatestLane(events);
     return {
       candidates: extractCandidates(scoped),
       rejected: extractRejected(scoped),
-      valsetRows: extractValset(events),
       minibatch: extractMinibatch(scoped),
-      valsetOutputs: extractValsetOutputs(scoped),
     };
   }, [job.progress_events]);
   const maxGeneration = useMemo(() => {
@@ -234,10 +230,8 @@ export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
             selection={drawerSelection}
             open={drawerOpen}
             onOpenChange={setDrawerOpen}
-            valsetRows={valsetRows}
             minibatch={minibatch}
             blackbox={blackboxCtx}
-            valsetOutputs={valsetOutputs}
           />
           <div ref={liveRegionRef} role="status" aria-live="polite" className="sr-only" />
         </CardContent>

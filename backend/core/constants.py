@@ -47,6 +47,10 @@ PAYLOAD_OVERVIEW_IS_PRIVATE = "is_private"
 # was by-reference. Persisted so the optimization detail surfaces a live link
 # back to the dataset and the dataset page can list the runs that used it.
 PAYLOAD_OVERVIEW_SOURCE_DATASET_ID = "source_dataset_id"
+# Retired unified DSPy runs were stored as black-box runs with
+# ``payload_kind = "unified_v1"``. Older desktop exports can still carry the
+# key, so the run sync refuses those bundles (SKY-656).
+PAYLOAD_OVERVIEW_PAYLOAD_KIND = "payload_kind"
 
 PROGRESS_SPLITS_READY = "dataset_splits_ready"
 PROGRESS_BASELINE = "baseline_evaluated"
@@ -58,8 +62,6 @@ PROGRESS_EVALUATION_STARTED = "evaluation_started"
 PROGRESS_OPTIMIZER = "optimizer_progress"
 PROGRESS_CANDIDATE = "candidate"
 PROGRESS_REJECTED = "candidate_rejected"
-PROGRESS_VALSET = "valset_rows"
-PROGRESS_VALSET_OUTPUTS = "valset_outputs"
 PROGRESS_MINIBATCH = "minibatch_feedback"
 # One scorer call of a version that scores every case, so the run view can
 # fill the version in case by case before it is complete.
@@ -91,8 +93,6 @@ STRUCTURAL_PROGRESS_EVENTS = frozenset(
         PROGRESS_EVALUATION_STARTED,
         PROGRESS_CANDIDATE,
         PROGRESS_REJECTED,
-        PROGRESS_VALSET,
-        PROGRESS_VALSET_OUTPUTS,
         PROGRESS_AGENT_RUN,
         PROGRESS_LANE_STARTED,
         PROGRESS_LANE_COMPLETED,

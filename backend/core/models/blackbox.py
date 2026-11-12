@@ -107,8 +107,7 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
-# Stands in for ``module_name`` in the job overview and notifications. Older
-# stored DSPy jobs hold the program they optimized there.
+# Stands in for ``module_name`` in the job overview and notifications.
 BLACKBOX_MODULE_NAME = "blackbox"
 
 # A text artifact under optimization. ``dict`` form names several parts that

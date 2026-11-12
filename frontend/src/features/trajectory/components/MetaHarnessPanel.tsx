@@ -12,8 +12,6 @@ import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import {
   extractCandidates,
   extractMinibatch,
-  extractValset,
-  extractValsetOutputs,
 } from "../lib/extract-events";
 import { layoutTrajectory } from "../lib/layout";
 import {
@@ -86,16 +84,14 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
   const optimizationId = job.optimization_id;
 
   const blackboxCtx = blackbox ?? BLACKBOX_FALLBACK;
-  const { candidates, caseScores, valsetRows, minibatch, valsetOutputs, agentRuns } =
+  const { candidates, caseScores, minibatch, agentRuns } =
     useMemo(() => {
       const events = job.progress_events ?? [];
       const scoped = scopeToVersionLane(events);
       return {
         candidates: extractCandidates(scoped),
         caseScores: extractCaseScores(scoped),
-        valsetRows: extractValset(events),
         minibatch: extractMinibatch(scoped),
-        valsetOutputs: extractValsetOutputs(scoped),
         agentRuns: extractAgentRuns(scoped),
       };
     }, [job.progress_events]);
@@ -296,10 +292,8 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
             selection={drawerSelection}
             open={drawerOpen}
             onOpenChange={setDrawerOpen}
-            valsetRows={valsetRows}
             minibatch={minibatch}
             blackbox={blackboxCtx}
-            valsetOutputs={valsetOutputs}
             caseRuns={caseRuns}
             onOpenRun={handleOpenRun}
           />

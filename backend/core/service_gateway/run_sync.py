@@ -35,6 +35,7 @@ from ..constants import (
     PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
+    PAYLOAD_OVERVIEW_PAYLOAD_KIND,
     PAYLOAD_OVERVIEW_SOURCE_DATASET_ID,
     PAYLOAD_OVERVIEW_USERNAME,
 )
@@ -343,12 +344,15 @@ def _imported_overview(overview: dict[str, Any], optimization_type: str, usernam
         The overview to store, labelled as imported and owned by ``username``.
 
     Raises:
-        RunSyncError: 422 ``sync.invalid_bundle`` when ``is_private`` is not a
+        RunSyncError: 409 ``sync.unsupported_run_type`` for a retired unified
+            DSPy run. 422 ``sync.invalid_bundle`` when ``is_private`` is not a
             boolean, or when ``model_settings`` is not a valid model config. The
             public dashboard casts ``is_private`` to boolean in SQL, so one bad
             row would fail that page for every user; serve and chat rebuild the
             model from ``model_settings`` and would answer 500.
     """
+    if overview.get(PAYLOAD_OVERVIEW_PAYLOAD_KIND) == "unified_v1":
+        raise RunSyncError("sync.unsupported_run_type", 409, optimization_type="unified_v1")
     if not isinstance(overview.get(PAYLOAD_OVERVIEW_IS_PRIVATE, False), bool):
         raise RunSyncError("sync.invalid_bundle", 422)
     model_settings = overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS)

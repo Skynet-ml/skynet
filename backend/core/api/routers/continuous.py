@@ -141,8 +141,7 @@ def _is_rerunnable(job: dict[str, Any]) -> bool:
     """Say whether a job row is a run a check can copy: a repository run with inline cases.
 
     A repository run qualifies only with inline cases, since a check holds out
-    the same test cases to compare its candidate with the incumbent. A DSPy run
-    never qualifies, because Skynet no longer starts DSPy runs (SKY-316).
+    the same test cases to compare its candidate with the incumbent.
 
     Args:
         job: A job row with its payload.

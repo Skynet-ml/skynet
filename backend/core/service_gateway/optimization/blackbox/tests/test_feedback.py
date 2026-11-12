@@ -102,7 +102,6 @@ def test_emit_mirrors_the_dspy_event_shape() -> None:
                 "example_id": "2",
                 "score": 0.25,
                 "feedback": "closer",
-                "prediction": "",
                 "iteration": 3,
                 "images": [],
                 "images_dropped": 0,

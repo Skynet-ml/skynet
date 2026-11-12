@@ -157,8 +157,7 @@ class DashboardAnalyticsResponse(BaseModel):
     # to that tier via the `access` filter param. Empty when no caller context.
     access_usage: list[DashboardAnalyticsNameValue] = Field(default_factory=list)
 
-    # Module name usage across the filtered runs (``blackbox`` for current
-    # runs, the DSPy program type for older stored runs).
+    # Module name usage across the filtered runs (``blackbox`` for every run).
     module_counts: dict[str, int] = Field(default_factory=dict)
 
     success_count: int = 0

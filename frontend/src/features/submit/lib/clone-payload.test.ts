@@ -16,32 +16,8 @@ registerHooks({
 });
 const { cloneToSlices } = await import("./clone-payload.ts");
 
-test("a DSPy program run clones only its name and privacy", () => {
-  for (const [type, payload] of [
-    [
-      "blackbox",
-      {
-        payload_kind: "unified_v1",
-        name: "stored-name",
-        is_private: true,
-        task: { objective: "Summarize tickets", artifact: { kind: "dspy_program" } },
-        workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): ..." },
-      },
-    ],
-    ["run", { name: "stored-name", is_private: true, metric_code: "def metric(g, p): ..." }],
-  ] as const) {
-    const slices = cloneToSlices(type, payload, "Job name");
-    assert.equal(slices.meta.name, "Job name");
-    assert.equal(slices.meta.isPrivate, true);
-    assert.deepEqual(slices.task, {});
-    assert.deepEqual(slices.inputs, {});
-    assert.deepEqual(slices.optimizer, {});
-    assert.deepEqual(slices.workspace, {});
-  }
-});
-
 test("a metric model equal to reflection is not pinned when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "same" },
     scorer: { metric_code: "llm()", model: { name: "same" } },
   });
@@ -50,7 +26,7 @@ test("a metric model equal to reflection is not pinned when cloning", () => {
 });
 
 test("a code-derived metric model is not pinned when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "r" },
     task_model_config: { name: "a/b" },
     scorer: { metric_code: "llm(model='a/b')", model: { name: "a/b" } },
@@ -59,7 +35,7 @@ test("a code-derived metric model is not pinned when cloning", () => {
 });
 
 test("a legacy metric model the code replaces is dropped when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "r" },
     scorer: { metric_code: "llm(model='a/b')", model: { name: "old" } },
   });
@@ -67,7 +43,7 @@ test("a legacy metric model the code replaces is dropped when cloning", () => {
 });
 
 test("a distinct legacy metric model is dropped when the code names no model", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "r" },
     scorer: { metric_code: "llm('x')", model: { name: "old" } },
   });
@@ -75,7 +51,7 @@ test("a distinct legacy metric model is dropped when the code names no model", (
 });
 
 test("a distinct legacy metric model is pinned when the code names it", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "r" },
     scorer: { metric_code: "llm('x', model='old')", model: { name: "old" } },
   });
@@ -83,7 +59,7 @@ test("a distinct legacy metric model is pinned when the code names it", () => {
 });
 
 test("a legacy metric model is dropped when cloning a metric that never calls llm", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "r" },
     scorer: { metric_code: "def score(example, output):\n    return 1.0\n", model: { name: "old" } },
   });
@@ -92,7 +68,7 @@ test("a legacy metric model is dropped when cloning a metric that never calls ll
 
 test("a black-box clone drops derived models and retains a legacy model the code names", () => {
   const clone = (model: string, code: string, reflection = "r") =>
-    cloneToSlices("blackbox", {
+    cloneToSlices({
       target: { kind: "repo", repo: { repository: "example/site" } },
       reflection_model_config: { name: reflection },
       scorer: { kind: "python", metric_code: code, model: { name: model } },
@@ -107,7 +83,7 @@ test("a black-box clone drops derived models and retains a legacy model the code
 test("a black-box clone keeps same-name models with distinct settings", () => {
   const reflection = { name: "openai/r", token_source: "managed" };
   const clone = (metric: Record<string, unknown>) =>
-    cloneToSlices("blackbox", {
+    cloneToSlices({
       reflection_model_config: reflection,
       scorer: { metric_code: "llm(model='openai/r')", model: metric },
     }).workspace.metricModel;
@@ -210,7 +186,7 @@ const LEGACY_REPO_RUN = {
 };
 
 test("a stored legacy repository run clones every setting the wizard holds", () => {
-  const slices = cloneToSlices("blackbox", LEGACY_REPO_RUN, "Repo check: CV (ShinkaEvolve)");
+  const slices = cloneToSlices(LEGACY_REPO_RUN, "Repo check: CV (ShinkaEvolve)");
   assert.equal(slices.meta.name, "Repo check: CV (ShinkaEvolve)");
   assert.equal(slices.meta.isPrivate, true);
   assert.equal(slices.task.objective, "Make the CV stronger.");
@@ -235,7 +211,7 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
 });
 
 test("a legacy Auto-mode run keeps the default engine", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     strategy: { mode: "auto", engine: "gepa" },
     reflection_model_config: { name: "refl" },
   });
@@ -243,7 +219,7 @@ test("a legacy Auto-mode run keeps the default engine", () => {
 });
 
 test("an older run-wide economy run turns economy on for each managed model", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     economy_mode: true,
     task_model_config: { name: "task", token_source: "byok", byok_provider: "openrouter" },
     reflection_model_config: { name: "refl" },
@@ -258,7 +234,7 @@ test("an older run-wide economy run turns economy on for each managed model", ()
 });
 
 test("a legacy metric economy setting does not change the reflection model", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     reflection_model_config: { name: "refl", extra: { economy_mode: true, temperature_hint: 1 } },
     scorer: { model: { name: "refl" } },
   });
@@ -270,7 +246,7 @@ test("a legacy metric economy setting does not change the reflection model", () 
 test("a clone compares the role actually copied by the resolver", () => {
   const base = { name: "judge", token_source: "managed", extra: { b: 2, a: 1 } };
   const clone = (metric: Record<string, unknown>, code = "llm(model='judge')") =>
-    cloneToSlices("blackbox", {
+    cloneToSlices({
       task_model_config: base,
       reflection_model_config: { name: "judge", token_source: "byok" },
       scorer: { metric_code: code, model: metric },

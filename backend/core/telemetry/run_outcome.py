@@ -1,8 +1,9 @@
 """Derive the structural facts a run-outcome telemetry event carries.
 
 The worker emits ``run_completed`` / ``run_failed`` once per run. This module
-turns the stored black-box result, the stored payload and the terminating exception into flat, PII-free properties, so the
-metric SQL reads plain columns instead of parsing every result shape.
+turns the stored black-box result, the stored payload and the terminating
+exception into flat, PII-free properties, so the metric SQL reads plain
+columns instead of parsing every result shape.
 """
 
 from __future__ import annotations
@@ -126,10 +127,9 @@ def _leaves(value: Any) -> Iterable[str]:
 def row_fingerprint(row: Any) -> str:
     """Fingerprint one row by its values, ignoring keys and nesting.
 
-    A stored payload holds a sample as flat DSPy rows (older runs), as
-    black-box cases or as unified ``{"input", "expected"}`` cases; all three
-    carry the same values, so a value-only fingerprint matches a sample
-    whichever shape staged it.
+    A bundled sample holds flat rows, and a stored payload holds black-box
+    cases that can nest the same values, so a value-only fingerprint matches
+    a sample whichever shape staged it.
 
     Args:
         row: One dataset row or case.
@@ -148,19 +148,12 @@ def payload_rows(payload: Mapping[str, Any] | None) -> list[Any]:
         payload: The stored job payload.
 
     Returns:
-        Black-box ``cases`` or unified ``data.cases``; empty when the
-        payload holds none.
+        The black-box ``cases``; empty when the payload holds none.
     """
     if not isinstance(payload, Mapping):
         return []
-    data = payload.get("data")
-    for rows in (
-        payload.get("cases"),
-        data.get("cases") if isinstance(data, Mapping) else None,
-    ):
-        if isinstance(rows, list) and rows:
-            return rows
-    return []
+    rows = payload.get("cases")
+    return rows if isinstance(rows, list) else []
 
 
 def is_sample_dataset(rows: list[Any], samples: Mapping[str, Mapping[str, Any]]) -> bool:

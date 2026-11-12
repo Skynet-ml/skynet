@@ -37,8 +37,8 @@ export function suggestedRunName(objective: string, maxChars = 60): string {
 
 const TEMPLATE_DOCSTRING = "Describe the task here.";
 
-// A Signature docstring the user wrote names a DSPy run the way the objective
-// names a black-box one; the dataset file's stem is the fallback.
+// A Signature docstring the user wrote names the run; the dataset file's stem
+// is the fallback.
 export function suggestedDspyRunName(
   signatureCode: string,
   datasetFileName: string | null,

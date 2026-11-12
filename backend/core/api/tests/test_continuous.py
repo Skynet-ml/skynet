@@ -519,8 +519,8 @@ def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
         assert no_switch.status_code == 422, permitted
 
 
-def _make_dspy(env: _Env, optimization_id: str) -> None:
-    """Rewrite a stored run as a DSPy run, the kind Skynet stored before it became repository-only.
+def _make_text_target(env: _Env, optimization_id: str) -> None:
+    """Rewrite a stored run as a run whose target is a text, not a repository.
 
     Args:
         env: Test environment.
@@ -529,17 +529,17 @@ def _make_dspy(env: _Env, optimization_id: str) -> None:
     env.store.update_job(
         optimization_id,
         payload={
-            "name": "Old DSPy run",
-            "models": {"task_model": {"name": "fixture/task"}, "reflection_model": {"name": "fixture/text"}},
-            "data": {"cases": [{"question": "Q?", "answer": "A"}]},
+            "name": "Text run",
+            "target": {"kind": "text", "text": "Answer the question."},
+            "cases": [{"question": "Q?", "answer": "A"}],
         },
     )
 
 
-def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
-    """A stored DSPy run is never eligible, since Skynet no longer starts DSPy runs."""
+def test_a_run_without_a_repository_cannot_enable_a_plan(env: _Env) -> None:
+    """A run whose target is not a repository is never eligible, since a check copies a repository run."""
     optimization_id = _incumbent(env)
-    _make_dspy(env, optimization_id)
+    _make_text_target(env, optimization_id)
 
     state = env.client.get(f"/optimizations/{optimization_id}/continuous")
     assert state.status_code == 200
@@ -549,28 +549,6 @@ def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
         json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": CYCLE_BUDGET},
     )
     assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
-
-
-def test_a_plan_on_a_dspy_run_ends_instead_of_starting_a_run(env: _Env) -> None:
-    """A plan whose incumbent is a DSPy run skips its check, starts no run and ends for good."""
-    source_id = _incumbent(env)
-    _enable(env, source_id)
-    _make_dspy(env, source_id)
-    env.better()
-    jobs = env.count(JobModel)
-    budgets = env.count(ExecutionBudgetModel)
-
-    env.sweep(_due(env))
-
-    [cycle] = env.cycles()
-    assert (cycle.status, cycle.detail_code, cycle.optimization_id) == (
-        "skipped",
-        "optimization.dspy_run_retired",
-        None,
-    )
-    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, budgets)
-    plan = env.plan()
-    assert (plan.status, plan.pause_reason, plan.next_check_at) == ("ended", "dspy_retired", None)
 
 
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:

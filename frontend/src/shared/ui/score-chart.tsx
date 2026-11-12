@@ -21,8 +21,9 @@ import {
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 /**
- * What one step along the x-axis is: the prompt (DSPy runs), one named file,
- * one text whose render kind names it, or a bare version when nothing fits.
+ * What one step along the x-axis is: the prompt (the default when a run
+ * names no artifact), one named file, one text whose render kind names it, or
+ * a bare version when nothing fits.
  */
 export type ScoreChartArtifact =
   | { kind: "prompt" }

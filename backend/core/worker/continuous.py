@@ -12,9 +12,6 @@ compares with the current version's saved test score. A candidate that beats
 the current version waits for the customer's approval; nothing is ever
 deployed automatically.
 
-Skynet no longer starts DSPy runs, so a plan whose current version is a DSPy
-run skips its check and ends with the reason ``dspy_retired``.
-
 Each check spends against a monthly allowance and the existing wallet only.
 A new month resets the allowance, keeps every recorded cycle and its spend,
 leaves in-flight budgets untouched, never buys credit, and never lifts a
@@ -74,8 +71,6 @@ PAUSE_FUNDS = "funds"
 PAUSE_FAILING = "failing"
 # An ended plan whose first run kept no test cases apart, so no check could ever replace it.
 END_NO_TEST_SPLIT = "no_test_split"
-# An ended plan whose current version is a DSPy run; Skynet no longer starts DSPy runs (SKY-316).
-END_DSPY_RETIRED = "dspy_retired"
 SYSTEM_PAUSES = frozenset({PAUSE_ALLOWANCE, PAUSE_FUNDS})
 # A waiting plan whose first run did not succeed; kept so the owner sees why it never started.
 PLAN_ENDED = "ended"
@@ -331,19 +326,17 @@ _REPO_MODEL_FIELDS = {"reflection_model": "reflection_model_config"}
 
 
 def run_models(payload: dict[str, Any]) -> dict[str, Any]:
-    """Read a stored request's models as a unified ``models`` block.
+    """Read a stored repository request's models as one ``models`` block.
 
     A repository run has no task model: the code under optimization picks its
     own models, so only the reflection model can be switched.
 
     Args:
-        payload: A stored unified or repository request.
+        payload: A stored repository request.
 
     Returns:
         The model blocks by role, with the other models kept for the billing check.
     """
-    if not is_repo_payload(payload):
-        return payload.get("models") or {}
     models: dict[str, Any] = {role: payload.get(field) for role, field in _REPO_MODEL_FIELDS.items()}
     models["extra_reflection_models"] = payload.get("extra_reflection_model_configs") or []
     models["metric_model"] = (payload.get("scorer") or {}).get("model")
@@ -389,8 +382,8 @@ def held_out_fingerprint(payload: dict[str, Any] | None) -> str | None:
         payload: A stored request.
 
     Returns:
-        The fingerprint, or ``None`` for a DSPy request, or a repository request
-        with no pinned commit, inline cases or test cases.
+        The fingerprint, or ``None`` for a request that is not a repository
+        request, or that has no pinned commit, inline cases or test cases.
     """
     if payload and is_repo_payload(payload):
         return _repo_held_out_fingerprint(payload)
@@ -798,11 +791,6 @@ def process_cycle(
             # Uncaught, the cycle would stay ``checking`` and hold back every later check.
             _fail_cycle(session, plan, cycle, "continuous.run_rejected", reason="the incumbent run was deleted")
             return
-        if not is_repo_payload(incumbent["payload"]):
-            # A DSPy plan can never start a check again, so it ends instead of skipping forever.
-            _finish_cycle(session, cycle, CYCLE_SKIPPED, "optimization.dspy_run_retired")
-            _end_plan(plan, END_DSPY_RETIRED, now)
-            return
         previous = cycle.snapshot or {}
         current_models = run_models(incumbent["payload"])
         if "new_models" in previous:
@@ -1072,20 +1060,6 @@ def next_check_after(plan: ContinuousPlanModel, after: datetime) -> datetime:
         The next check time in UTC.
     """
     return next_runs(plan_rule(plan), after, anchor=plan_anchor(plan) or after)[0]
-
-
-def _end_plan(plan: ContinuousPlanModel, reason: str, now: datetime) -> None:
-    """End a plan for good, with the reason the owner sees.
-
-    Args:
-        plan: The plan, mutated in place.
-        reason: The end reason, kept in ``pause_reason``.
-        now: Current time.
-    """
-    plan.status = PLAN_ENDED
-    plan.pause_reason = reason
-    plan.next_check_at = None
-    plan.updated_at = now
 
 
 def settle_waiting(plan: ContinuousPlanModel, job_status: str | None, now: datetime, *, held_out: bool = True) -> None:

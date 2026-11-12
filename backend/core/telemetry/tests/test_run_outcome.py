@@ -77,17 +77,11 @@ def test_boolean_scores_are_not_numbers() -> None:
     assert score_facts({"baseline_score": True, "best_score": 0.5})["lift"] is None
 
 
-def test_sample_rows_match_in_every_payload_shape() -> None:
-    """A bundled sample is recognised whether staged as cases or unified cases."""
+def test_sample_rows_match_as_cases() -> None:
+    """A bundled sample staged as black-box cases is recognised."""
     rows = _SAMPLES["sentiment"]["rows"]
-    blackbox_payload = {"cases": [dict(row) for row in rows[:2]]}
-    unified_payload = {
-        "data": {
-            "cases": [{"input": {"text": row["text"]}, "expected": {"label": row["label"]}} for row in rows],
-        }
-    }
-    for payload in (blackbox_payload, unified_payload):
-        assert is_sample_dataset(payload_rows(payload), _SAMPLES) is True
+    payload = {"cases": [dict(row) for row in rows[:2]]}
+    assert is_sample_dataset(payload_rows(payload), _SAMPLES) is True
 
 
 def test_user_upload_is_not_a_sample() -> None:

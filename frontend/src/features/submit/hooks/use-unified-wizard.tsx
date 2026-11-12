@@ -778,13 +778,9 @@ export function WizardV2Provider({
     if (!cloneId || cloneRan.current) return;
     cloneRan.current = true;
     Promise.all([getOptimizationPayload(cloneId), getJob(cloneId).catch(() => null)])
-      .then(([{ optimization_type, payload: stored }, job]) => {
+      .then(([{ payload: stored }, job]) => {
         if (!mountedRef.current) return;
-        const slices = cloneToSlices(
-          optimization_type,
-          stored as Record<string, unknown>,
-          job?.name,
-        );
+        const slices = cloneToSlices(stored as Record<string, unknown>, job?.name);
         patchTask(slices.task);
         patchInputs(slices.inputs);
         patchOptimizer(slices.optimizer);

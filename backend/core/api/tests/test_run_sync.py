@@ -383,6 +383,15 @@ def test_too_many_values_are_422(
     assert _count(hosted_store, JobModel) == 1
 
 
+def test_retired_unified_run_is_409(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
+    """A bundle of a retired unified DSPy run is refused, so no hosted copy of it lands (SKY-656)."""
+    bundle["optimization"]["payload_overview"]["payload_kind"] = "unified_v1"
+    resp = _import(hosted_store, bundle)
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == t_en("sync.unsupported_run_type", optimization_type="unified_v1")
+    assert _count(hosted_store, JobModel) == 0
+
+
 @pytest.mark.parametrize(
     "model_settings",
     [{"name": "openai/gpt-4o-mini", "temperature": 9}, ["openai/gpt-4o-mini"]],
