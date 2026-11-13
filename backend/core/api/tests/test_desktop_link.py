@@ -621,7 +621,6 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/datasets/library/{dataset_id}/sharing/members", True),
     ("/folders/{folder_id}/sharing/transfer", True),
     ("/tagging-sessions/{session_id}/sharing/members", True),
-    ("/agent/conversations/{conversation_id}/share", True),
     ("/notifications/push/subscriptions", True),
     ("/notifications/slack", True),
 ]
@@ -654,7 +653,6 @@ _SENSITIVE_SEGMENTS = frozenset(
 # None of them returns a stored credential.
 _REVIEWED_SENSITIVE_OPEN = frozenset(
     {
-        "/agent/conversations/{conversation_id}/share",
         "/datasets/library/{dataset_id}/sharing",
         "/datasets/library/{dataset_id}/sharing/members",
         "/datasets/library/{dataset_id}/sharing/members/{username}",

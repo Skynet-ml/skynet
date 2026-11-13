@@ -210,6 +210,24 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
   assert.deepEqual(slices.inputs, { mode: "single" });
 });
 
+test("a repository run clone keeps the setup draft's files", () => {
+  const drafts = { "optimize.toml": "version = 1\n", "src/app.py": "x = 2\n" };
+  const target = {
+    ...LEGACY_REPO_RUN.target,
+    repo: { ...LEGACY_REPO_RUN.target.repo, draft_files: drafts },
+  };
+  assert.deepEqual(cloneToSlices({ ...LEGACY_REPO_RUN, target }).workspace.files, drafts);
+  assert.equal(cloneToSlices(LEGACY_REPO_RUN).workspace.files, undefined);
+  const base = "c".repeat(40);
+  const pinned = { ...target, repo: { ...target.repo, commit: null, draft_base: base } };
+  assert.equal(cloneToSlices({ ...LEGACY_REPO_RUN, target: pinned }).workspace.filesBase, base);
+  const bare = {
+    ...LEGACY_REPO_RUN.target,
+    repo: { ...LEGACY_REPO_RUN.target.repo, draft_base: base },
+  };
+  assert.equal(cloneToSlices({ ...LEGACY_REPO_RUN, target: bare }).workspace.filesBase, undefined);
+});
+
 test("a legacy Auto-mode run keeps the default engine", () => {
   const slices = cloneToSlices({
     strategy: { mode: "auto", engine: "gepa" },

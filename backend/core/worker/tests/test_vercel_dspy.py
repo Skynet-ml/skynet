@@ -38,6 +38,7 @@ class FakeSession:
         self.path = "gepa_state.bin"
         self.steps: list[str] = []
         self.requirements_error: Exception | None = None
+        self.image_protocol = SANDBOX_PROTOCOL
 
     def write_files(self, files: dict[str, str]) -> None:
         """Record the staged request."""
@@ -55,14 +56,14 @@ class FakeSession:
         self.steps.append("probe" if command == vercel_dspy.PROTOCOL_PROBE else "optimizer")
         if command == vercel_dspy.PROTOCOL_PROBE:
             assert not self.files
-            return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
+            return CommandResult(0, stdout=f"{self.image_protocol}\n")
         [request_path] = [path for path in self.files if path.endswith("/request.json")]
         assert list(self.files) == [request_path]
         assert command.startswith("PYTHONPATH=/app python3 -m core.worker.isolated_runner")
         request = json.loads(self.files[request_path])
         assert "_budget_gateway_descriptor" not in request["payload"]
         assert "runtime_identity" not in request
-        assert request["protocol"] == SANDBOX_PROTOCOL
+        assert request["protocol"] == self.image_protocol
         prefix = f"{vercel_dspy.EVENT_PREFIX}{request['nonce']} "
         events = []
         if request["export_checkpoints"]:
@@ -122,6 +123,34 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert session.closed
     assert events.get_nowait()["type"] == "error"
     assert not (tmp_path.parent / "escaped.bin").exists()
+
+
+@pytest.mark.parametrize("image_protocol", [12, 13])
+def test_an_older_readable_image_gets_its_own_protocol(
+    image_protocol: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned image from before the draft fields still runs, so a deploy need not wait for its rebuild."""
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    vercel_dspy.run_vercel_dspy(
+        {
+            "_gepa_log_dir": str(tmp_path),
+            "_budget_gateway_descriptor": {
+                "url": "http://127.0.0.1:9876",
+                "control_token": "control",
+                "image": "backend@sha256:" + "a" * 64,
+                "lifetime_seconds": 600,
+            },
+        },
+        "job-old-image",
+        events,
+        "spawn",
+    )
+    assert session.steps[:2] == ["probe", "write_files"]
+    assert events.get_nowait() == {"type": "result", "result": {"program": "done"}}
+    assert events.empty()
 
 
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
@@ -410,6 +439,11 @@ class ProbedSession(FakeSession):
         (
             CommandResult(0, stdout=f"{SANDBOX_PROTOCOL + 1}\n"),
             f"The sandbox image speaks protocol {SANDBOX_PROTOCOL + 1}, but this worker speaks {SANDBOX_PROTOCOL};"
+            " rebuild and re-pin the sandbox image.",
+        ),
+        (
+            CommandResult(0, stdout="11\n"),
+            f"The sandbox image speaks protocol 11, but this worker speaks {SANDBOX_PROTOCOL};"
             " rebuild and re-pin the sandbox image.",
         ),
     ],

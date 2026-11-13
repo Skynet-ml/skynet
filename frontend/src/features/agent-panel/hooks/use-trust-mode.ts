@@ -24,7 +24,8 @@ export function useTrustMode(): {
   const next = React.useCallback(() => {
     const idx = MODES.indexOf(mode);
     const nextMode = MODES[(idx + 1) % MODES.length] ?? "ask";
-    setPref("agentTrustMode", nextMode);
+    // The button itself shows the new mode, so a "saved" toast is noise.
+    setPref("agentTrustMode", nextMode, { quiet: true });
   }, [mode, setPref]);
 
   return { mode, setMode, next };

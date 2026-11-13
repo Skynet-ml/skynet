@@ -255,6 +255,59 @@ def _file_response(path: str, fetched: dict[str, Any]) -> BlackboxRepoFileRespon
     )
 
 
+def _run_drafts(job_data: dict[str, Any]) -> dict[str, str]:
+    """Read the setup draft's files that the run wrote over its pinned commit.
+
+    Args:
+        job_data: The stored job row of a repository run.
+
+    Returns:
+        Repository path to file text; empty for a run without draft files.
+    """
+    drafts = job_data["payload"]["target"]["repo"].get("draft_files")
+    return {str(path): str(text) for path, text in drafts.items()} if isinstance(drafts, dict) else {}
+
+
+def _run_readonly_paths(job_data: dict[str, Any]) -> list[str]:
+    """Read the run's recorded submodule and Git LFS paths, which a draft cannot change.
+
+    Args:
+        job_data: The stored job row of a repository run.
+
+    Returns:
+        The recorded read-only paths; empty when the run recorded no environment.
+    """
+    environment = job_data["payload"]["target"]["repo"].get("environment")
+    paths = environment.get("readonly_paths") if isinstance(environment, dict) else None
+    return [str(path) for path in paths] if isinstance(paths, list) else []
+
+
+def _tree_with_drafts(tree: BlackboxRepoTreeResponse, drafts: dict[str, str]) -> BlackboxRepoTreeResponse:
+    """Show the run's draft files in the commit's tree, as the run started from both.
+
+    The cache holds the commit's tree for every run on that commit, so the
+    drafts of one run go on a copy, never into the cached tree.
+
+    Args:
+        tree: The commit's tree.
+        drafts: Repository path to file text.
+
+    Returns:
+        ``tree`` itself without drafts; otherwise a copy that lists each draft
+        file with its size, and each folder above a new one.
+    """
+    if not drafts:
+        return tree
+    entries = {entry.path: entry for entry in tree.entries}
+    for path, text in drafts.items():
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            folder = "/".join(parts[:depth])
+            entries.setdefault(folder, BlackboxRepoTreeEntry(path=folder, type="dir"))
+        entries[path] = BlackboxRepoTreeEntry(path=path, type="file", size=len(text.encode("utf-8")))
+    return tree.model_copy(update={"entries": sorted(entries.values(), key=lambda entry: entry.path)})
+
+
 def recorded_patches(job_data: dict[str, Any]) -> set[str]:
     """Collect every version text a repository run recorded.
 
@@ -304,8 +357,8 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:
-            The repository, the commit, every path sorted, and whether the host
-            truncated the tree.
+            The repository, the commit, every path sorted with the run's draft
+            files added, and whether the host truncated the tree.
 
         Raises:
             DomainError: 404 when the run is unknown, inaccessible or not a
@@ -333,7 +386,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                 repository=repository, commit=commit, entries=entries, truncated=tree["truncated"]
             )
             _trees.put(key, cached)
-        return cached
+        return _tree_with_drafts(cached, _run_drafts(job_data))
 
     @router.get(
         "/optimizations/{optimization_id}/repository/file",
@@ -353,7 +406,8 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             path: Repository-relative, ``/``-separated file path.
 
         Returns:
-            The file's text, or flags for a missing, binary or over-1 MB file.
+            The file's text (the run's draft text for a draft file), or flags
+            for a missing, binary or over-1 MB file.
 
         Raises:
             DomainError: 400 for a path outside the repository; 404 when the
@@ -365,6 +419,9 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         clean = clean_repo_path(path)
         repository, commit = _repo_target(job_data, optimization_id)
         provider = _repo_provider(job_data)
+        # The run started from its draft text, not the commit's, for these paths.
+        if (draft := _run_drafts(job_data).get(clean)) is not None:
+            return BlackboxRepoFileResponse(path=clean, content=draft, size=len(draft.encode("utf-8")))
         owner = job_owner(job_data) or ""
         key = (owner, provider, repository, commit, clean)
         cached = _files.get(key)
@@ -416,7 +473,14 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         workdir = Path(tempfile.mkdtemp(prefix="repo-archive-"))
         try:
             archive = patched_repo_zip(
-                repository, commit, body.patch, token, workdir, **repo_hosts.git_kwargs(provider)
+                repository,
+                commit,
+                body.patch,
+                token,
+                workdir,
+                **repo_hosts.git_kwargs(provider),
+                drafts=_run_drafts(job_data),
+                readonly_paths=_run_readonly_paths(job_data),
             )
         except RepoFetchError as error:
             shutil.rmtree(workdir, ignore_errors=True)

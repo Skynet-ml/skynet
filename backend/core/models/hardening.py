@@ -34,7 +34,9 @@ HardeningStatus = Literal[
 HardeningView = Literal["black_box", "white_box"]
 HardeningPlace = Literal["local", "cloud"]
 CheckResult = Literal["pass", "fail", "pending"]
-RoundStatus = Literal["running", "waiting_review", "waiting_fix", "clean", "approved", "fixed", "rejected", "stopped"]
+RoundStatus = Literal[
+    "running", "waiting_review", "waiting_fix", "clean", "approved", "fixed", "rejected", "stopped", "failed"
+]
 
 SessionStatus = Literal["running", "done", "failed"]
 

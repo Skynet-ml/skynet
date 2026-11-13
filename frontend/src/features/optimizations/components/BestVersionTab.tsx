@@ -50,9 +50,9 @@ import {
   REMOVED_BG,
   REMOVED_EMPHASIS_BG,
   REMOVED_FG,
-} from "./diff-colors";
+} from "@/shared/ui/repo-files/diff-colors";
 import { formatBlackboxScore } from "@/shared/lib";
-import { countChanges, diffRows } from "../lib/blackbox-diff";
+import { countChanges, diffRows } from "@/shared/ui/repo-files/diff-rows";
 import { VersionFeedback } from "./BlackboxFinalScores";
 import {
   buildVersions,

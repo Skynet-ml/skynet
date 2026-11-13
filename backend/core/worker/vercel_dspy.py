@@ -23,7 +23,7 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
-from .sandbox_protocol import SANDBOX_PROTOCOL
+from .sandbox_protocol import READABLE_PROTOCOLS, SANDBOX_PROTOCOL
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def _guest_failure(result: CommandResult) -> Exception:
     )
 
 
-def _require_image_protocol(session: Any, lifetime: float) -> None:
+def _require_image_protocol(session: Any, lifetime: float) -> int:
     """Refuse an image whose optimizer cannot read this worker's request.
 
     The image validates the request with its own copy of the backend models,
@@ -120,14 +120,20 @@ def _require_image_protocol(session: Any, lifetime: float) -> None:
         session: The freshly opened sandbox session.
         lifetime: The sandbox lifetime, bounding the probe.
 
+    Returns:
+        The image's protocol, one of ``READABLE_PROTOCOLS``; the request
+        document carries it, because the image accepts only its own number.
+
     Raises:
-        RuntimeError: When the image lacks the protocol or speaks another one.
+        RuntimeError: When the image lacks the protocol or speaks one that
+            cannot read this worker's request.
     """
     result = session.run(PROTOCOL_PROBE, timeout_seconds=min(lifetime, _PROBE_TIMEOUT_SECONDS))
     if result.ok:
         found = result.stdout.strip()
-        if found == str(SANDBOX_PROTOCOL):
-            return
+        for protocol in READABLE_PROTOCOLS:
+            if found == str(protocol):
+                return protocol
         raise RuntimeError(
             f"The sandbox image speaks protocol {found}, but this worker speaks {SANDBOX_PROTOCOL};"
             " rebuild and re-pin the sandbox image."
@@ -193,7 +199,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
                 operation_key=f"dspy:{artifact_id}",
             )
         )
-        _require_image_protocol(session, lifetime)
+        image_protocol = _require_image_protocol(session, lifetime)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip
@@ -214,7 +220,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             "nonce": nonce,
             "checkpoints": checkpoints,
             "export_checkpoints": checkpoint_root is not None,
-            "protocol": SANDBOX_PROTOCOL,
+            "protocol": image_protocol,
         }
         request_path = f"{session_root}/request.json"
         session.write_files({request_path: json.dumps(document)})

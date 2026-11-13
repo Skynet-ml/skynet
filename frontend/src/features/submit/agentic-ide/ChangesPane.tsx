@@ -2,371 +2,194 @@
 
 import * as React from "react";
 
-import { msg } from "@/shared/lib/messages";
+import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { Button } from "@/shared/ui/primitives/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/primitives/dropdown-menu";
-import { Input } from "@/shared/ui/primitives/input";
 import type { LineComment } from "@/shared/ui/agent/line-comments";
-import { ArrowLeft, CaretDown, FileCode, GitDiff, MagnifyingGlass } from "@/shared/ui/icons";
+import type { FileTreeRowLook } from "@/shared/ui/file-tree";
+import { sortTree, treeBuilder, type FileTreeNode } from "@/shared/ui/file-tree-model";
+import { GitDiff } from "@/shared/ui/icons";
+import { REMOVED_FG } from "@/shared/ui/repo-files/diff-colors";
+import { ChangeCounts, FileExplorer, TreeToggle } from "@/shared/ui/repo-files/repo-files";
 
-import { fileStats, isChanged, isLarge, orderFiles, type DraftFile } from "./draft-changes";
-import { ChangeCounts, FileDiff, type LineMarker } from "./FileDiff";
-import { CheckStateIcon, checkStateLabel } from "./SetupCheckConsole";
-import type { SetupCheckState } from "./setup-check";
+import {
+  body,
+  fileStats,
+  fitDiffCache,
+  isChanged,
+  replaceLine,
+  type DraftFile,
+} from "./draft-changes";
+import { FileDiff } from "./FileDiff";
 
-export type ChangeScope = "last" | "all";
-
-// Below this diff column width the diff goes unified.
-const SPLIT_MIN_PX = 640;
-// Below this pane width the file tree hides.
-const TREE_MIN_PX = 640;
-// A file this close to the visible list already draws its diff.
-const DRAW_MARGIN = "600px 0px";
-
-function useWidth(): [(el: HTMLElement | null) => void, number] {
-  const [el, setEl] = React.useState<HTMLElement | null>(null);
-  const [width, setWidth] = React.useState(0);
-  React.useEffect(() => {
-    if (!el) return;
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry) setWidth(entry.contentRect.width);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [el]);
-  return [setEl, width];
+interface ChangeNode extends FileTreeNode {
+  file?: DraftFile;
 }
 
-function TreeRow({ file, onPick }: { file: DraftFile; onPick: () => void }) {
-  const stats = fileStats(file);
-  const changed = isChanged(file);
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={onPick}
-        className="flex w-full cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-start hover:bg-muted/60"
-      >
-        <FileCode className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        <span
-          dir="ltr"
-          className={cn(
-            "min-w-0 flex-1 truncate font-mono text-[0.6875rem]",
-            !changed && "text-muted-foreground",
-          )}
-        >
-          {file.path}
-        </span>
-        {changed && <ChangeCounts {...stats} />}
-      </button>
-    </li>
-  );
+function changeTree(files: readonly DraftFile[]): ChangeNode {
+  const { root, ensure } = treeBuilder<ChangeNode>((base) => ({ ...base }));
+  for (const file of files) ensure(file.path, "file").file = file;
+  sortTree(root);
+  return root;
+}
+
+/** The folders that hold the given files, so the tree opens on them. */
+function foldersOf(files: readonly DraftFile[]): Set<string> {
+  const dirs = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split("/");
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+  }
+  return dirs;
 }
 
 /**
- * The Changes pane beside the setup chat: the scope
- * (the last turn, or the whole draft), each changed file's diff, a filtered
- * file tree, the setup check, and the editor for direct edits.
+ * The Changes pane beside the setup chat: the draft's files in a tree, and
+ * the open file with its changes, which the user edits in place.
  */
 export function ChangesPane({
-  scope,
-  onScope,
   files,
   loading,
   focus,
   locked,
-  markers,
-  checkState,
-  checkErrors,
-  onRunCheck,
-  onRevertFile,
-  onRevertHunk,
-  onOpenEditor,
-  onCopyPath,
+  onEditFile,
   comments,
   onComment,
   onDeleteComment,
-  editorOpen,
-  editor,
-  onBackToChanges,
-  console: checkConsole,
 }: {
-  scope: ChangeScope;
-  onScope: (scope: ChangeScope) => void;
-  /** Every file in the scope, changed or not. */
+  /** Every file in the draft, changed or not. */
   files: readonly DraftFile[];
   /** Paths whose base still loads from the repository. */
   loading: ReadonlySet<string>;
-  /** Scroll to this file; a new object scrolls again. */
-  focus: { path: string } | null;
+  /**
+   * Open this file; a new object opens it again. `paths`, when given, are
+   * the files of one turn, marked in the tree.
+   */
+  focus: { path: string; paths?: readonly string[] } | null;
   locked: boolean;
-  markers: ReadonlyMap<string, readonly LineMarker[]>;
-  checkState: SetupCheckState;
-  checkErrors: number;
-  onRunCheck: () => void;
-  onRevertFile: (file: DraftFile) => void;
-  onRevertHunk: (file: DraftFile, hunk: number) => void;
-  onOpenEditor: (path: string, line?: number) => void;
-  onCopyPath: (path: string) => void;
+  /** Write a file's new text after an in-place edit. */
+  onEditFile: (file: DraftFile, text: string) => void;
   /** Line comments that wait for the next message. */
   comments: readonly LineComment[];
   /** Leave a comment on a line of a file's current text; absent when no chat takes comments. */
   onComment?: (path: string, line: number, text: string) => void;
   onDeleteComment?: (comment: LineComment) => void;
-  editorOpen: boolean;
-  /** The workbench, kept mounted once opened; null until the first Open in editor. */
-  editor: React.ReactNode;
-  onBackToChanges: () => void;
-  console: React.ReactNode;
 }) {
-  const [setPane, paneWidth] = useWidth();
-  const [filter, setFilter] = React.useState("");
-  // The user's expand or collapse choice; without one, only a large file starts collapsed.
-  const [open, setOpen] = React.useState<ReadonlyMap<string, boolean>>(new Map());
-  // Files that came near the visible list; only they build and draw their diff rows.
-  const [seen, setSeen] = React.useState<ReadonlySet<string>>(new Set());
-  const listRef = React.useRef<HTMLDivElement | null>(null);
-  const [setList, listWidth] = useWidth();
+  const changedFiles = React.useMemo(
+    () => files.filter((file) => loading.has(file.path) || isChanged(file)),
+    [files, loading],
+  );
+  // The tree and the totals read every changed file's diff on each render.
+  fitDiffCache(changedFiles.length);
+  const root = React.useMemo(() => changeTree(files), [files]);
+  const baseOpen = React.useMemo(() => foldersOf(changedFiles), [changedFiles]);
+  const turnFiles = React.useMemo(() => new Set(focus?.paths ?? []), [focus]);
+  const [treeOpen, setTreeOpen] = React.useState(true);
 
-  const shown = files.filter((file) => loading.has(file.path) || isChanged(file));
-  const tree = orderFiles(files, filter);
-  const changedTree = tree.filter(isChanged);
-  const otherTree = tree.filter((file) => !isChanged(file));
-  const totals = shown.reduce(
-    (sum, file) => {
-      if (loading.has(file.path)) return sum;
-      const stats = fileStats(file);
+  // The open file stays the one the user picked, also when the agent turns it
+  // back to its base, so a held save or a comment on it stays in view. With no
+  // pick, the first changed file opens once there is one.
+  const [picked, setPicked] = React.useState<string | null>(null);
+  const file = files.find((f) => f.path === picked) ?? changedFiles[0];
+  const shown = file?.path ?? null;
+  // Effects, not updates in render: React can replay an earlier tree click's
+  // update after a render-time one, and the open file jumps back.
+  React.useEffect(() => {
+    if (shown !== picked) setPicked(shown);
+  }, [shown, picked]);
+  React.useEffect(() => {
+    if (focus) setPicked(focus.path);
+  }, [focus]);
+
+  const look = (node: ChangeNode): FileTreeRowLook | undefined => {
+    const f = node.file;
+    if (!f) return undefined;
+    const turn = turnFiles.has(f.path) && "font-semibold";
+    // A loading file's base is a placeholder: it has no counts yet.
+    if (loading.has(f.path)) return { nameClassName: cn("font-medium text-foreground", turn) };
+    if (!isChanged(f)) return turn ? { nameClassName: turn } : undefined;
+    const removed = f.before !== "" && body(f.after) === "";
+    return {
+      nameClassName: cn(
+        "font-medium text-foreground",
+        removed && "line-through decoration-1",
+        turn,
+      ),
+      nameStyle: removed ? { color: REMOVED_FG } : undefined,
+      trailing: <ChangeCounts {...fileStats(f)} />,
+    };
+  };
+  const totals = changedFiles.reduce(
+    (sum, f) => {
+      if (loading.has(f.path)) return sum;
+      const stats = fileStats(f);
       return { added: sum.added + stats.added, removed: sum.removed + stats.removed };
     },
     { added: 0, removed: 0 },
   );
-  const split = listWidth >= SPLIT_MIN_PX;
-  const showTree = paneWidth >= TREE_MIN_PX;
-
-  // Each diff's first open state, pinned once its base loads, so a change that
-  // grows or shrinks later does not open or close it by itself. The pin holds
-  // only for the base it saw: a scope switch, a new turn or a late repository
-  // base is a new diff and gets a new first state.
-  const [firstOpen, setFirstOpen] = React.useState<
-    ReadonlyMap<string, { before: string; open: boolean }>
-  >(new Map());
-  const pinned = (file: DraftFile) => {
-    const pin = firstOpen.get(file.path);
-    return pin?.before === file.before ? pin.open : undefined;
-  };
-  const unpinned = shown.filter((file) => !loading.has(file.path) && pinned(file) === undefined);
-  if (unpinned.length > 0) {
-    setFirstOpen(
-      new Map([
-        ...firstOpen,
-        ...unpinned.map(
-          (file) => [file.path, { before: file.before, open: !isLarge(file) }] as const,
-        ),
-      ]),
-    );
-  }
-  // A loading file has no real counts yet; it stays open and shows that it loads.
-  const isCollapsed = (file: DraftFile) =>
-    !(open.get(file.path) ?? pinned(file) ?? (loading.has(file.path) || !isLarge(file)));
-
-  const shownPaths = shown.map((file) => file.path).join("\n");
-  React.useEffect(() => {
-    const list = listRef.current;
-    if (!list || !shownPaths) return;
-    const add = (paths: string[]) =>
-      setSeen((prev) =>
-        paths.every((path) => prev.has(path)) ? prev : new Set([...prev, ...paths]),
-      );
-    if (typeof IntersectionObserver === "undefined") {
-      add(shownPaths.split("\n"));
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) =>
-        add(
-          entries
-            .filter((entry) => entry.isIntersecting)
-            .map((entry) => (entry.target as HTMLElement).dataset.path ?? ""),
-        ),
-      { root: list, rootMargin: DRAW_MARGIN },
-    );
-    list.querySelectorAll("[data-path]").forEach((el) => observer.observe(el));
-    return () => observer.disconnect();
-  }, [shownPaths, editorOpen]);
-
-  const scrollTo = React.useCallback((path: string) => {
-    setOpen((prev) => (prev.get(path) ? prev : new Map(prev).set(path, true)));
-    requestAnimationFrame(() => {
-      const target = [
-        ...(listRef.current?.querySelectorAll<HTMLElement>("[data-path]") ?? []),
-      ].find((el) => el.dataset.path === path);
-      target?.scrollIntoView({ block: "start" });
-    });
-  }, []);
-
-  React.useEffect(() => {
-    if (focus && !editorOpen) scrollTo(focus.path);
-  }, [focus, editorOpen, scrollTo]);
-
-  const toggle = (file: DraftFile) =>
-    setOpen((prev) => new Map(prev).set(file.path, isCollapsed(file)));
-
-  // Up and Down move between the tree's files; Enter opens one, as any button does.
-  const moveInTree = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const rows = [...event.currentTarget.querySelectorAll<HTMLElement>("li > button")];
-    const at = rows.indexOf(document.activeElement as HTMLElement);
-    const next = rows[at < 0 ? 0 : at + (event.key === "ArrowDown" ? 1 : -1)];
-    if (!next) return;
-    event.preventDefault();
-    next.focus();
-  };
-
-  const scopeLabel = msg(
-    scope === "last" ? "submit.agentic_ide.scope.last_turn" : "submit.agentic_ide.scope.all",
+  const fileComments = React.useMemo(
+    () => comments.filter((c) => c.path === shown),
+    [comments, shown],
   );
+  const isLoading = !!file && loading.has(file.path);
+  // Stable across renders, so a redraw of the pane does not redraw every line.
+  const editLine = React.useCallback<
+    NonNullable<React.ComponentProps<typeof FileDiff>["onEditLine"]>
+  >((f, line, text) => onEditFile(f, replaceLine(f.after, line, text)), [onEditFile]);
 
+  const empty = (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+      <GitDiff className="size-6 text-muted-foreground/60" aria-hidden />
+      <p className="text-sm font-medium text-foreground">{msg("submit.agentic_ide.empty")}</p>
+      <p className="max-w-xs text-xs text-muted-foreground">
+        {msg("submit.agentic_ide.empty_hint")}
+      </p>
+    </div>
+  );
   return (
-    <div ref={setPane} className="flex h-full min-h-0 flex-col bg-background">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border/70 px-3">
-        {editorOpen ? (
-          <Button size="sm" variant="ghost" className="h-7 gap-1.5 px-2" onClick={onBackToChanges}>
-            <ArrowLeft className="size-3.5 rtl:rotate-180" aria-hidden />
-            {msg("submit.agentic_ide.back_to_changes")}
-          </Button>
-        ) : (
-          <>
-            <DropdownMenu>
-              <DropdownMenuTrigger className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted">
-                {scopeLabel}
-                <CaretDown className="size-3 text-muted-foreground" aria-hidden />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-52">
-                <DropdownMenuItem onSelect={() => onScope("last")}>
-                  {msg("submit.agentic_ide.scope.last_turn")}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onScope("all")}>
-                  {msg("submit.agentic_ide.scope.all")}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {shown.length > 0 && <ChangeCounts {...totals} />}
-          </>
+        {changedFiles.length > 0 && (
+          <span className="flex items-center gap-2 text-xs text-muted-foreground">
+            {formatMsg("agent.edited_files.title", { count: changedFiles.length })}
+            <ChangeCounts {...totals} />
+          </span>
         )}
-        <Button
-          size="sm"
-          variant="outline"
-          className="ms-auto h-7 gap-1.5"
-          onClick={onRunCheck}
-          disabled={checkState === "running"}
-          title={checkStateLabel(checkState, checkErrors)}
-        >
-          <CheckStateIcon state={checkState} className="size-3.5" />
-          {msg("submit.agentic_ide.check.run")}
-        </Button>
+        {files.length > 0 && (
+          <span className="ms-auto">
+            <TreeToggle open={treeOpen} onToggle={() => setTreeOpen((open) => !open)} />
+          </span>
+        )}
       </header>
-      <div className={cn("min-h-0 flex-1", editorOpen ? "flex flex-col" : "hidden")}>{editor}</div>
-      {!editorOpen && (
-        <div className="flex min-h-0 flex-1">
-          <div
-            ref={(el) => {
-              listRef.current = el;
-              setList(el);
-            }}
-            className="min-w-0 flex-1 overflow-y-auto"
+      {files.length === 0 ? (
+        empty
+      ) : (
+        <div className="ide-rise-in min-h-0 flex-1 p-3">
+          <FileExplorer
+            root={root}
+            baseOpen={baseOpen}
+            selected={shown}
+            look={look}
+            open={treeOpen}
+            fill
+            onSelect={setPicked}
           >
-            {shown.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-                <GitDiff className="size-6 text-muted-foreground/60" aria-hidden />
-                <p className="text-sm font-medium text-foreground">
-                  {msg("submit.agentic_ide.empty")}
-                </p>
-                <p className="max-w-xs text-xs text-muted-foreground">
-                  {msg("submit.agentic_ide.empty_hint")}
-                </p>
-              </div>
+            {file ? (
+              <FileDiff
+                // Each file keeps its own editor, comment box and folds.
+                key={file.path}
+                file={file}
+                loading={isLoading}
+                onEditLine={locked || isLoading ? undefined : editLine}
+                comments={fileComments}
+                onComment={onComment}
+                onDeleteComment={onDeleteComment}
+              />
             ) : (
-              shown.map((file) => (
-                <FileDiff
-                  key={file.path}
-                  file={file}
-                  loading={loading.has(file.path)}
-                  split={split}
-                  collapsed={isCollapsed(file)}
-                  onScreen={seen.has(file.path)}
-                  locked={locked}
-                  markers={markers.get(file.path) ?? []}
-                  onToggleCollapse={() => toggle(file)}
-                  onRevertFile={() => onRevertFile(file)}
-                  onRevertHunk={(hunk) => onRevertHunk(file, hunk)}
-                  onOpenEditor={(line) => onOpenEditor(file.path, line)}
-                  onCopyPath={() => onCopyPath(file.path)}
-                  comments={comments.filter((c) => c.path === file.path)}
-                  onComment={onComment && ((line, text) => onComment(file.path, line, text))}
-                  onDeleteComment={onDeleteComment}
-                />
-              ))
+              empty
             )}
-          </div>
-          {showTree && files.length > 0 && (
-            <nav
-              aria-label={msg("submit.agentic_ide.changed_files")}
-              className="flex w-56 shrink-0 flex-col border-s border-border/70"
-            >
-              <div className="relative border-b border-border/60 p-2">
-                <MagnifyingGlass
-                  className="pointer-events-none absolute start-4 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground"
-                  aria-hidden
-                />
-                <Input
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  placeholder={msg("submit.agentic_ide.filter")}
-                  aria-label={msg("submit.agentic_ide.filter")}
-                  className="h-7 ps-7 text-xs"
-                />
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5 text-xs" onKeyDown={moveInTree}>
-                {changedTree.length > 0 && (
-                  <>
-                    <p className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-medium text-muted-foreground">
-                      {msg("submit.agentic_ide.changed_files")}
-                    </p>
-                    <ul>
-                      {changedTree.map((file) => (
-                        <TreeRow key={file.path} file={file} onPick={() => scrollTo(file.path)} />
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {otherTree.length > 0 && (
-                  <>
-                    <p className="px-2 pb-1 pt-3 text-[0.6875rem] font-medium text-muted-foreground">
-                      {msg("submit.agentic_ide.other_files")}
-                    </p>
-                    <ul>
-                      {otherTree.map((file) => (
-                        <TreeRow
-                          key={file.path}
-                          file={file}
-                          onPick={() => onOpenEditor(file.path)}
-                        />
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
-            </nav>
-          )}
+          </FileExplorer>
         </div>
       )}
-      {checkConsole}
     </div>
   );
 }

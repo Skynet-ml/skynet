@@ -102,7 +102,11 @@ function inboxSource(): ApiSource {
  * runs write their alerts to the Mac's own inbox, and an unlinked Mac has
  * only that one.
  */
-function inboxRequest<T>(path: string, init?: RequestInit, source: ApiSource = inboxSource()): Promise<T> {
+function inboxRequest<T>(
+  path: string,
+  init?: RequestInit,
+  source: ApiSource = inboxSource(),
+): Promise<T> {
   return request<T>(path, init, source);
 }
 
@@ -1268,18 +1272,20 @@ export function listNotifications(tab: NotificationTab, cursor?: string | null) 
   const q = new URLSearchParams({ tab });
   if (cursor) q.set("cursor", cursor);
   const source = inboxSource();
-  return inboxRequest<NotificationPage>(`/notifications?${q.toString()}`, undefined, source).then((page) => {
-    if (!isLocalMode() || source !== "hosted") return page;
-    return {
-      ...page,
-      items: page.items.map((item) => {
-        if (!item.link?.startsWith("/optimizations/")) return item;
-        const link = new URL(item.link, "https://skynet.invalid");
-        link.searchParams.set("source", "hosted");
-        return { ...item, link: `${link.pathname}${link.search}${link.hash}` };
-      }),
-    };
-  });
+  return inboxRequest<NotificationPage>(`/notifications?${q.toString()}`, undefined, source).then(
+    (page) => {
+      if (!isLocalMode() || source !== "hosted") return page;
+      return {
+        ...page,
+        items: page.items.map((item) => {
+          if (!item.link?.startsWith("/optimizations/")) return item;
+          const link = new URL(item.link, "https://skynet.invalid");
+          link.searchParams.set("source", "hosted");
+          return { ...item, link: `${link.pathname}${link.search}${link.hash}` };
+        }),
+      };
+    },
+  );
 }
 
 export function getNotificationUnreadCount() {
@@ -1615,9 +1621,7 @@ export function getBillingTransactions(start?: string, end?: string) {
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return accountRequest<BillingTransactionsResponse>(
-    `/billing/transactions${qs ? `?${qs}` : ""}`,
-  );
+  return accountRequest<BillingTransactionsResponse>(`/billing/transactions${qs ? `?${qs}` : ""}`);
 }
 
 /** Start a Stripe Customer Portal session for billing or payment-method management. */
@@ -1973,7 +1977,11 @@ export type RepoHost = "github" | "gitlab" | "bitbucket";
 export const REPO_HOSTS: readonly RepoHost[] = ["github", "gitlab", "bitbucket"];
 
 /** Each repository host's brand name, the same in every language. */
-export const REPO_HOST_NAMES: Record<RepoHost, string> = { github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket" };
+export const REPO_HOST_NAMES: Record<RepoHost, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  bitbucket: "Bitbucket",
+};
 
 /** One row of a connector's browse listing: a folder to descend into or a file to import. */
 export interface ConnectorEntry {
@@ -2373,9 +2381,12 @@ export function setContinuousPaused(planId: string, paused: boolean, source?: Ap
 
 /** Delete a plan and its check history; the runs it started stay. The route returns 204. */
 export async function deleteContinuous(planId: string, source?: ApiSource): Promise<void> {
-  const res = await fetchWithAuthRetry(apiUrl(`/continuous/${encodeURIComponent(planId)}`, source), {
-    method: "DELETE",
-  });
+  const res = await fetchWithAuthRetry(
+    apiUrl(`/continuous/${encodeURIComponent(planId)}`, source),
+    {
+      method: "DELETE",
+    },
+  );
   if (!res.ok) {
     const parsed = parseError(await res.text().catch(() => ""));
     throw new ApiError(
@@ -3349,16 +3360,22 @@ export interface TranscriptionResult {
   provider: string;
 }
 
-/** Transcribe one recorded clip; ``language`` is a soft BCP-47 locale hint. */
+/** Transcribe one recorded clip; ``language`` is a soft BCP-47 locale hint;
+ *  ``signal`` aborts the request. */
 export async function transcribeAudio(
   audio: Blob,
   filename: string,
   language?: string,
+  options?: { signal?: AbortSignal },
 ): Promise<TranscriptionResult> {
   const form = new FormData();
   form.append("audio", audio, filename);
   if (language) form.append("language", language);
-  return request<TranscriptionResult>("/transcribe", { method: "POST", body: form });
+  return request<TranscriptionResult>("/transcribe", {
+    method: "POST",
+    body: form,
+    signal: options?.signal,
+  });
 }
 
 /** Bulk-delete the caller's pending (staged) uploads. */

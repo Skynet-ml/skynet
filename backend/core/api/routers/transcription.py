@@ -5,8 +5,8 @@ optional ``language`` hint from the UI locale) and return its transcript.
 
 Whisper large-v3-turbo through OpenRouter is the platform's sole dictation
 provider: a clip returns in about a second, and running one leg keeps the
-failure surface honest — no key configured answers a typed 503 the
-composer turns into a transient failure notice, a provider error answers 502.
+failure surface honest — no key configured answers a typed 503 whose
+message the composer shows as the reason, a provider error answers 502.
 The ``language`` field is accepted for wire compatibility but never
 forwarded: Whisper treats the param as a directive, and the UI locale isn't
 necessarily the spoken language.
@@ -118,12 +118,12 @@ def _own_openrouter_key(engine: Any, username: str) -> str | None:
         the vault can decrypt and that targets openrouter.ai itself; otherwise
         None, which routes to the platform key.
     """
-    if engine is None:
+    # Without a vault key no stored secret can be decrypted, so skip the read.
+    if engine is None or settings.byok_vault_key is None:
         return None
     vault = ProviderKeyVault(engine=engine)
     try:
-        if not vault.has_verified_connection(username, _BYOK_PROVIDER):
-            return None
+        # One read: ``verified_only`` filters in the same query that picks the key.
         connection = vault.resolve_connection(username, _BYOK_PROVIDER, verified_only=True)
     except DomainError as err:
         logger.warning("openrouter byok key unusable for %s: %s", username, err.code)
@@ -135,6 +135,28 @@ def _own_openrouter_key(engine: Any, username: str) -> str | None:
     if not _openrouter_endpoint(connection.api_base):
         return None
     return connection.secret
+
+
+# One client for the process keeps the TCP and TLS connection to OpenRouter
+# open between clips. A new client per clip paid a new SSL context and a new
+# handshake on every take. The app lifespan closes it at shutdown.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    """Return the shared OpenRouter client, created on first use."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT_S))
+    return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the shared OpenRouter client and forget it, so the next clip opens a new one."""
+    global _http_client
+    client, _http_client = _http_client, None
+    if client is not None:
+        await client.aclose()
 
 
 def create_transcription_router(job_store: Any) -> APIRouter:
@@ -163,7 +185,8 @@ def create_transcription_router(job_store: Any) -> APIRouter:
 
         Args:
             user: Authenticated caller (dictation is login-gated like the
-                composers that host it); keys the hourly clip cap.
+                composers that host it); keys the hourly clip cap and the
+                lookup of the caller's own OpenRouter key.
             audio: The recorded clip (webm/opus everywhere, AAC-in-MP4 on
                 Safari).
             language: Optional BCP-47 tag from the UI locale; accepted but
@@ -196,12 +219,11 @@ def create_transcription_router(job_store: Any) -> APIRouter:
         filename = audio.filename or "take.webm"
         api_key = own_key or settings.transcription_api_key.get_secret_value()
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT_S)) as client:
-            try:
-                text, cost = await _openrouter_transcribe(client, data, filename, api_key)
-            except (RuntimeError, httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError) as err:
-                logger.warning("transcription failed (openrouter): %s", err)
-                raise DomainError("transcription.failed", status=502) from err
+        try:
+            text, cost = await _openrouter_transcribe(_http(), data, filename, api_key)
+        except (RuntimeError, httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError) as err:
+            logger.warning("transcription failed (openrouter): %s", err)
+            raise DomainError("transcription.failed", status=502) from err
         if own_key is None:
             record_spend(_BUDGET_SERVICE, cost, budget)
         return TranscriptionResponse(text=text, provider="openrouter")

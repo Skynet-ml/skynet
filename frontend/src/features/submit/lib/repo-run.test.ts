@@ -453,3 +453,39 @@ test("a draft with a blank secret value still gives the metric step its reposito
 test("allowed hosts lose every trailing dot, as the server's rstrip does", () => {
   assert.deepEqual(parseAllowedHosts("api.example.com.., *.Example.COM."), ["api.example.com", "*.example.com"]);
 });
+
+test("a repository run sends the draft's repository files and omits them when there are none", () => {
+  const none = repoRunRequest(repoState(), options);
+  assert.ok(none);
+  assert.equal("draft_files" in none.target.repo, false);
+
+  const state = repoState();
+  state.workspace.files = { "src/app.py": "x = 2\n", "optimize.toml": "version = 1\n" };
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, {
+    "src/app.py": "x = 2\n",
+    "optimize.toml": "version = 1\n",
+  });
+});
+
+test("a repository run sends the drafts' base commit only with the drafts", () => {
+  const base = "c".repeat(40);
+  const state = repoState();
+  state.workspace.filesBase = base;
+  assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
+
+  state.workspace.files = { "src/app.py": "x = 2\n" };
+  assert.equal(repoRunRequest(state, options)?.target.repo.draft_base, base);
+
+  // Older drafts recorded no base; the run then skips the check.
+  state.workspace.filesBase = undefined;
+  assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
+});
+
+test("a repository run never sends an empty optimize.toml draft", () => {
+  const state = repoState();
+  state.workspace.files = { "optimize.toml": " \n", "src/app.py": "x = 2\n" };
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, { "src/app.py": "x = 2\n" });
+
+  state.workspace.files = { "optimize.toml": "" };
+  assert.equal("draft_files" in repoRunRequest(state, options)!.target.repo, false);
+});

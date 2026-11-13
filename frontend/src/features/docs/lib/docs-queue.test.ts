@@ -29,7 +29,7 @@ test("docs Enter and Tab queue without a steering channel", () => {
   assert.equal(queue.getSnapshot().canSteer, false);
   for (const key of ["Enter", "Tab"]) {
     assert.equal(midTurnKeyAction({ key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, {
-      streaming: true, draft: "follow-up", canSteer: queue.getSnapshot().canSteer, queuedCount: 0,
+      streaming: true, draft: "follow-up", queuedCount: 0,
     }), "queue");
   }
 });

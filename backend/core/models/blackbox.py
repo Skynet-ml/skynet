@@ -14,6 +14,7 @@ above each class, not in class bodies.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -173,6 +174,67 @@ REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 # An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
 # would let a secret go to any host of a top-level domain.
 REPO_SECRET_HOST_PATTERN = re.compile(r"^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$")
+# Caps on the setup draft's files that a repository run writes over its checkout.
+DRAFT_FILES_MAX = 100
+DRAFT_FILE_BYTES = 200_000
+DRAFT_FILES_TOTAL_BYTES = 2_000_000
+DRAFT_PATH_MAX_CHARS = 512
+DRAFT_PATH_MAX_PARTS = 16
+
+
+def clean_draft_path(raw: str) -> str:
+    """Normalize one draft file path and refuse any path that could leave the repository.
+
+    The setup agent and the run request share this rule. It strips the
+    surrounding space and slashes and keeps ``/`` as the only separator.
+
+    Args:
+        raw: The path the agent or the request names.
+
+    Returns:
+        The clean relative path.
+
+    Raises:
+        ValueError: When the path is empty, absolute, has a backslash or a
+            control character, has an empty, ``.`` or ``..`` part, names the
+            ``.git`` folder, or is too long or too deep.
+    """
+    path = raw.strip()
+    if path.startswith("/"):
+        raise ValueError(f"The file path {raw[:100]!r} must be relative to the repository root.")
+    path = path.strip("/")
+    if not path:
+        raise ValueError("The file path is empty.")
+    if "\\" in path or any(ord(char) < 32 or ord(char) == 127 for char in path):
+        raise ValueError(f"The file path {raw[:100]!r} has a character that is not allowed.")
+    if len(path) > DRAFT_PATH_MAX_CHARS:
+        raise ValueError(f"The file path is longer than {DRAFT_PATH_MAX_CHARS} characters.")
+    parts = path.split("/")
+    if len(parts) > DRAFT_PATH_MAX_PARTS:
+        raise ValueError(f"The file path {raw[:100]!r} is more than {DRAFT_PATH_MAX_PARTS} folders deep.")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"The file path {raw[:100]!r} must stay inside the repository.")
+    # A case-insensitive file system treats ``.GIT`` as ``.git``.
+    if any(part.lower() == ".git" for part in parts):
+        raise ValueError("Files in the .git folder cannot be written.")
+    return path
+
+
+def path_inside(path: str, folders: Iterable[str]) -> bool:
+    """Say whether a path is one of the folders or lies inside one.
+
+    Args:
+        path: A clean repository path.
+        folders: Repository paths, such as other draft files or the read-only submodules.
+
+    Returns:
+        ``True`` when ``path`` equals or lies under one of ``folders``.
+    """
+    for folder in folders:
+        clean = folder.strip("/")
+        if clean and (path == clean or path.startswith(f"{clean}/")):
+            return True
+    return False
 
 
 # One environment variable a repository needs to build or score. ``value`` is
@@ -252,6 +314,15 @@ class BlackboxRepoSource(BaseModel):
     # name this map does not hold binds to ``user``.
     secret_bindings: dict[str, Literal["user", "managed"]] = Field(default_factory=dict, max_length=100)
     created_by_skynet: bool = False
+    # The setup draft's files (``optimize.toml`` and any file the setup agent
+    # wrote or edited), keyed by repository path. The trusted parent writes
+    # them over the fetched checkout before the run starts; the user's
+    # repository stays unchanged. ``metric.py`` travels as the scorer instead.
+    draft_files: dict[str, str] = Field(default_factory=dict, max_length=DRAFT_FILES_MAX)
+    # The commit the setup agent read when it wrote the first draft file. The
+    # drafts are whole-file copies of that tree, so a run that would start from
+    # another commit is refused. ``None`` (older drafts) skips the check.
+    draft_base: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -263,7 +334,8 @@ class BlackboxRepoSource(BaseModel):
         Raises:
             ValueError: When a path is absolute, empty, or walks out with ``..``,
                 when two secrets share a name, when a binding name is invalid,
-                or when the repository path does not fit its host.
+                when the repository path does not fit its host, or when a draft
+                file path fails :func:`clean_draft_path` or the drafts are too large.
         """
         if self.provider != "gitlab" and not re.fullmatch(REPO_NAME_PATTERN, self.repository):
             raise ValueError("The repository must be written as 'owner/name'.")
@@ -290,6 +362,30 @@ class BlackboxRepoSource(BaseModel):
         for name in self.secret_bindings:
             if not re.fullmatch(REPO_SECRET_NAME_PATTERN, name):
                 raise ValueError(f"The secret binding name '{name[:100]}' must use only letters, digits and '_'.")
+        drafts: dict[str, str] = {}
+        total = 0
+        for raw, text in self.draft_files.items():
+            path = clean_draft_path(raw)
+            if path in drafts:
+                raise ValueError(f"The draft file {path!r} is named twice.")
+            try:
+                size = len(text.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"The draft file {path!r} is not valid text.") from exc
+            if size > DRAFT_FILE_BYTES:
+                raise ValueError(f"The draft file {path!r} is larger than {DRAFT_FILE_BYTES} bytes.")
+            total += size
+            drafts[path] = text
+        if total > DRAFT_FILES_TOTAL_BYTES:
+            raise ValueError(f"The draft files are larger than {DRAFT_FILES_TOTAL_BYTES} bytes together.")
+        for path in drafts:
+            # A file cannot also be a folder of another draft; the trusted parent would fail to write both.
+            if path_inside(path, [other for other in drafts if other != path]):
+                raise ValueError(f"The draft file {path!r} lies under another draft file.")
+        # An empty optimize.toml would replace the repository's file with one that names no run entry.
+        if not drafts.get("optimize.toml", "x").strip():
+            raise ValueError("The draft optimize.toml is empty. Remove it or write its settings.")
+        self.draft_files = drafts
         return self
 
 
@@ -533,6 +629,16 @@ class BlackboxRunRequest(BaseModel):
         description=(
             "A shorter run deadline in seconds for this run only. The deployment's sandbox "
             "lifetime still caps it, so it can only shorten the run."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=36,
+        description=(
+            "The setup chat that created this run. The run keeps it only when the submitter owns "
+            "the chat; any other id is ignored. Only the chat's own user reads it unmasked, admins "
+            "read it masked, and anyone else, also a new owner after a transfer, gets 404."
         ),
     )
     # The setup's metric-hardening job (SKY-356). A finished job of the same

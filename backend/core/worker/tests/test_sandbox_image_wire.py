@@ -17,14 +17,16 @@ from core.billing import guest_model_proxy
 from core.billing.model_gateway import ROUTE_KEY
 from core.billing.usage_tags import LEGACY_USAGE_TAGS_HEADER, USAGE_TAGS_HEADER, with_tags_header
 from core.worker import isolated_runner, vercel_dspy
-from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
+from core.worker.sandbox_protocol import READABLE_PROTOCOLS, SANDBOX_PROTOCOL
 
 
 def test_guest_event_framing_and_protocol_keep_their_image_names() -> None:
     """The guest frames events with the prefix older images print and the worker parses."""
     assert isolated_runner.EVENT_PREFIX == "SKYNET_JOB_EVENT "
     assert vercel_dspy.EVENT_PREFIX == isolated_runner.EVENT_PREFIX
-    assert SANDBOX_PROTOCOL == 12
+    assert SANDBOX_PROTOCOL == 14
+    # A bump must decide again which older images can read the new request.
+    assert {12, 13, 14} == READABLE_PROTOCOLS
 
 
 def test_payload_route_keys_keep_their_image_names() -> None:

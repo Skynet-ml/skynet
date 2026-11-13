@@ -34,7 +34,7 @@ import { auth } from "@/shared/lib/auth";
 import "@fontsource-variable/heebo/index.css";
 import "@fontsource-variable/onest/index.css";
 import "@fontsource-variable/bricolage-grotesque/opsz.css";
-import "@fontsource-variable/jetbrains-mono/index.css";
+import "@fontsource-variable/geist-mono/index.css";
 // Script-matched faces for locales Onest/Heebo don't cover. Each ships
 // unicode-range subsets, so a font's glyphs download only when that script is
 // actually on screen — an English visitor never fetches the CJK/Arabic bytes.
@@ -131,7 +131,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // dedupes to a single hoisted <link> per resource — a raw <link rel=preload> in
   // <head> gets emitted twice (literal + React's resource hoist). URLs are the
   // stable public/ copies the globals.css overrides point at; crossOrigin is
-  // required since fonts fetch in CORS mode. JetBrains Mono stays non-preloaded.
+  // required since fonts fetch in CORS mode. Geist Mono stays non-preloaded.
   // Onest sits ahead of Heebo in --font-ui, so Heebo's Latin subset never paints
   // and its Hebrew subset only paints on Hebrew pages; preloading either
   // elsewhere wastes bandwidth and trips Chrome's unused-preload warning.

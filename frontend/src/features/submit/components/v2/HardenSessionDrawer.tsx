@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ToolCallRow, hideKickoffs } from "@/features/agent-panel";
+import { ToolCallRow } from "@/features/agent-panel";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import type { HardeningExploit } from "@/shared/types/hardening";
@@ -164,7 +164,7 @@ export function HardenSessionDrawer({
 }) {
   const session = round.sessions.find((s) => s.index === node) ?? null;
   const cards = React.useMemo(() => reviewOrder(sessionExploits(round.exploits, node)), [round.exploits, node]);
-  const messages = React.useMemo(() => hideKickoffs([...(session?.transcript ?? [])]), [session]);
+  const messages = session?.transcript ?? [];
   // The page owns the focused card, so its "to review" step starts from the card
   // the user is on, also after J or K in here.
   const focus = focusCard ? cards.findIndex((c) => c.id === focusCard) : -1;

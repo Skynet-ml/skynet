@@ -53,6 +53,7 @@ from ..connectors.github_repo import (
     github_token,
     resolve_commit,
 )
+from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
@@ -97,7 +98,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
-from .repo_gate import RepoGateError, check_hidden, metric_import_warnings, sandbox_place
+from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,9 @@ class StagedRepository:
     # The [sandbox] compose services start only next to the scorer box, read
     # from the base commit, so a version cannot change what scores it.
     compose_services: tuple[ComposeService, ...] = ()
+    # The setup draft's files, kept in the parent only: the guest gets them
+    # inside the packed tree, never as a list, as a draft can be a hidden path.
+    drafts: Mapping[str, str] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -322,7 +326,8 @@ def stage_repository(
         engine: SQLAlchemy engine for the vaults.
 
     Returns:
-        A payload copy that pins the commit, lists no secret entries, names
+        A payload copy that pins the commit, lists no secret entries and no
+        draft files or draft base (the staged tree keeps the files), names
         the packed tree and carries the effective environment under
         ``target.repo.environment``, plus the staged tree and secrets for the parent.
 
@@ -331,13 +336,19 @@ def stage_repository(
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
             uploads cases and the repository defines its own in ``[data] cases``,
-            or when a hidden path is, holds or lies inside a link.
-        RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``.
+            or when a hidden path is, holds or lies inside a link, or when a
+            draft file cannot be written over the tree.
+        RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``,
+            or when the draft files were written on another commit than the one the run starts from.
         RepoFetchError: When the repository cannot be read; without a host
             connection, the message says to connect the host.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
+    # The guest receives this payload, and a draft (often optimize.toml) can be
+    # a hidden scoring path, so only the parent keeps the drafts.
+    drafts = dict(repo.pop("draft_files", None) or {})
+    draft_base = repo.pop("draft_base", None)
     # Resolving the secrets empties their list, so read the relay's inputs first.
     secret_bindings = dict(repo.get("secret_bindings") or {})
     secret_allowed_hosts = repo_secret_allowed_hosts(payload)
@@ -362,6 +373,8 @@ def stage_repository(
         if token is not None or isinstance(error, RepoRateLimitError):
             raise
         raise _anonymous_fetch_error(error, provider) from error
+    if moved := check_draft_base(bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode)):
+        raise RepoGateError(moved)
     workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))
     try:
         try:
@@ -370,6 +383,12 @@ def stage_repository(
             if token is not None:
                 raise
             raise _anonymous_fetch_error(error, provider) from error
+        # The setup draft's files replace the commit's, so every box and the
+        # draft's optimize.toml see the tree the user set up.
+        try:
+            apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
+        except DraftFileError as error:
+            raise ConstraintsError(str(error)) from None
         environment = effective_environment(
             read_constraints(snapshot.archive),
             approved_editable=repo["editable_paths"],
@@ -493,6 +512,7 @@ def stage_repository(
         secret_bindings=secret_bindings,
         secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
         secret_allowed_hosts=secret_allowed_hosts,
+        drafts=drafts,
     )
 
 
@@ -1134,6 +1154,20 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
     )
 
 
+def _drafts_kwargs(staged: StagedRepository) -> dict[str, Any]:
+    """Pass the run's draft files and read-only paths to a push only when it has drafts.
+
+    Args:
+        staged: The staged tree, which keeps the drafts that staging took off the payload.
+
+    Returns:
+        ``{"drafts": ..., "readonly_paths": ...}``, or an empty dict for a run without draft files.
+    """
+    if not staged.drafts:
+        return {}
+    return {"drafts": dict(staged.drafts), "readonly_paths": tuple(staged.snapshot.readonly_paths)}
+
+
 def publish_improvement(
     result: dict[str, Any],
     payload: dict[str, Any],
@@ -1206,6 +1240,7 @@ def publish_improvement(
                 f"Apply the best version from {APP_NAME} run {optimization_id[:12]}",
                 token,
                 **repo_hosts.git_kwargs(provider),
+                **_drafts_kwargs(staged),
             )
             change_fields = {
                 "head": branch,
@@ -1490,7 +1525,14 @@ def publish_candidates(
         versions.append((best_id, ""))
     outcome: dict[str, Any]
     try:
-        pushed = push_candidates(repo["repository"], repo["commit"], versions, best_id, github_token(engine, username))
+        pushed = push_candidates(
+            repo["repository"],
+            repo["commit"],
+            versions,
+            best_id,
+            github_token(engine, username),
+            **_drafts_kwargs(staged),
+        )
         outcome = {
             "repository": repo["repository"],
             "best_branch": BEST_BRANCH,

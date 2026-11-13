@@ -18,6 +18,9 @@
   "submit.budget.byok_note": "O fornecedor cobra os tokens do modelo na sua chave. {term.appName} não cobra taxas pelo modelo. O orçamento da execução cobre apenas a utilização da sandbox.",
   "submit.blackbox.roles.optimization.managed_hint": "Usa as definições de amostragem predefinidas do modelo; o pagamento pode usar o seu saldo {term.appName} ou a sua chave OpenRouter.",
   "submit.nav.screen": "Ecrã {index} de {count}",
+  "submit.nav.slide_to_start": "Deslize para iniciar a otimização",
+  "submit.nav.slide_hint": "Arraste o avião até ao fim da barra ou prima Enter.",
+  "submit.nav.slide_tooltip": "Arraste ou clique no avião para iniciar a execução",
   "shared.agent.worked_for": "Trabalhou durante {duration}",
   "shared.agent.working_for": "A trabalhar há {duration}",
   "shared.agent.pasted_text": "Texto colado",
@@ -45,9 +48,5 @@
   "agent.tool.github_repos.found": "{count} encontrados",
   "agent.tool.github_repos.none": "Nenhum encontrado",
   "agent.tool.github_repos.private": "Privado",
-  "submit.draft.title": "Continuar a configuração anterior?",
-  "submit.draft.continue": "Continuar rascunho",
-  "submit.draft.start_new": "Começar de novo",
-  "submit.draft.left_named": "Você saiu de “{name}” {time}.",
-  "submit.draft.left": "Você saiu de uma configuração {time}."
+  "submit.draft.title": "Continuar a configuração anterior?"
 }

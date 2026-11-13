@@ -1,26 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { toast } from "react-toastify";
 
-import {
-  turnState,
-  useWizardStateOptional,
-  type DraftFiles,
-  type FileEdit,
-} from "@/features/agent-panel";
-import { checkOptimizeToml } from "@/shared/lib/api";
+import { turnState, useWizardStateOptional, type DraftFiles } from "@/features/agent-panel";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { GitDiff } from "@/shared/ui/icons";
 
 import type { RepoSource } from "../ide/repo-files";
 import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
-import { ChangesPane, type ChangeScope } from "./ChangesPane";
-import { isChanged, revertHunk, type DraftFile } from "./draft-changes";
-import type { LineMarker } from "./FileDiff";
-import { SetupCheckConsole } from "./SetupCheckConsole";
-import { checkFeedback, errorLine, setupCheckState, type SetupCheckRun } from "./setup-check";
+import { ChangesPane } from "./ChangesPane";
+import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
 
 const OPTIMIZE_TOML = "optimize.toml";
 // The entry files are new in the draft; the repository never holds them.
@@ -29,12 +19,6 @@ const DRAFT_ONLY = new Set([RUN_FILE, METRIC_FILE]);
 const TABS_BELOW_PX = 1024;
 const CHAT_MIN = 0.25;
 const CHAT_MAX = 0.75;
-
-/** Where the editor opens: a file, and a line in it. */
-export interface OpenRequest {
-  path: string;
-  line?: number;
-}
 
 /**
  * Read each file's text in the repository, the base the draft changes.
@@ -107,8 +91,8 @@ function useWidth(): [(el: HTMLElement | null) => void, number] {
 /**
  * The submission step of a repository run as an agentic IDE: the setup chat
  * on one side and, from its first edit, the Changes pane on the other. The
- * pane shows what the last turn or the whole draft changed, reverts files and
- * hunks, runs the setup check, and opens the editor.
+ * pane shows what the draft changed and edits the files in place. The chat
+ * header's Changes button opens and closes it.
  */
 export function AgenticIde({
   chat,
@@ -116,27 +100,26 @@ export function AgenticIde({
   repo,
   busy,
   onWrite,
-  renderEditor,
 }: {
   /** The setup agent's chat, docked here. */
   chat: React.ReactNode;
   /** The draft's files, by path. */
   texts: Readonly<Record<string, string>>;
   repo: RepoSource | null;
-  /** The agent is on a turn; reverts wait for it. */
+  /** The agent is on a turn; edits wait for it. */
   busy: boolean;
   /** Write a draft file, or drop it with null. */
   onWrite: (path: string, text: string | null) => void;
-  /** The workbench, opened at a file and line. */
-  renderEditor: (request: OpenRequest | null) => React.ReactNode;
 }) {
   const agent = useWizardStateOptional();
-  const lastTurn: readonly FileEdit[] = agent?.lastTurnEdits ?? [];
   const setViewChanges = agent?.setViewChanges;
-  const setSetupCheckIssue = agent?.setSetupCheckIssue;
   const setRepoBase = agent?.setRepoBase;
   const setDraftFiles = agent?.setDraftFiles;
   const addLineComment = agent?.addLineComment;
+  const moveLineComments = agent?.moveLineComments;
+  const removeLineComment = agent?.removeLineComment;
+  const lineComments = agent?.lineComments;
+  const setChangesToggle = agent?.setChangesToggle;
 
   const [setRoot, width] = useWidth();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -144,12 +127,11 @@ export function AgenticIde({
   const [tab, setTab] = React.useState<"chat" | "changes">("chat");
   const [paneOpen, setPaneOpen] = React.useState(false);
   const [chatShare, setChatShare] = React.useState(0.45);
-  const [scope, setScope] = React.useState<ChangeScope>("last");
-  const [focus, setFocus] = React.useState<{ path: string } | null>(null);
-  const [editorOpen, setEditorOpen] = React.useState(false);
-  const [openRequest, setOpenRequest] = React.useState<OpenRequest | null>(null);
-  // The workbench mounts on the first Open in editor and then stays, hidden, so it never reboots.
-  const [editorMounted, setEditorMounted] = React.useState(false);
+  const [focus, setFocus] = React.useState<{ path: string; paths?: readonly string[] } | null>(
+    null,
+  );
+  // The chat's width follows the divider at once while it is dragged, and eases otherwise.
+  const [dragging, setDragging] = React.useState(false);
 
   const draftPaths = React.useMemo(() => Object.keys(texts).sort(), [texts]);
   const basePaths = React.useMemo(
@@ -158,34 +140,26 @@ export function AgenticIde({
     [repo, draftPaths],
   );
   const base = useRepoBase(repo, basePaths);
-  // The chat's "Edited N files" card and "Last turn" diff a file the draft
+  // The chat's "Edited N files" card diffs a file the draft
   // did not hold yet (the repository's optimize.toml) against this base.
   React.useEffect(() => {
     setRepoBase?.(base);
   }, [setRepoBase, base]);
   React.useEffect(() => () => setRepoBase?.(null), [setRepoBase]);
 
-  const lastFiles = React.useMemo<DraftFile[]>(
-    () =>
-      lastTurn.map((edit) => ({
-        path: edit.path,
-        before: edit.before,
-        after: texts[edit.path] ?? "",
-      })),
-    [lastTurn, texts],
+  // A file whose text did not change keeps its object, so an agent write to
+  // another file does not redraw the rows of the open one.
+  const [fileCache, setFileCache] = React.useState<readonly DraftFile[]>([]);
+  const allFiles = keepFiles(
+    fileCache,
+    draftPaths.map((path) => ({ path, before: base.get(path) ?? "", after: texts[path] ?? "" })),
   );
-  const allFiles = React.useMemo<DraftFile[]>(
-    () =>
-      draftPaths.map((path) => ({ path, before: base.get(path) ?? "", after: texts[path] ?? "" })),
-    [draftPaths, base, texts],
-  );
-  const files = scope === "last" ? lastFiles : allFiles;
+  if (allFiles !== fileCache) setFileCache(allFiles);
   const loading = React.useMemo(
-    () => new Set(scope === "all" ? draftPaths.filter((path) => !base.has(path)) : []),
-    [scope, draftPaths, base],
+    () => new Set(draftPaths.filter((path) => !base.has(path))),
+    [draftPaths, base],
   );
-  const anyChange =
-    lastFiles.some(isChanged) || allFiles.some((f) => base.has(f.path) && isChanged(f));
+  const anyChange = allFiles.some((f) => base.has(f.path) && isChanged(f));
 
   // The pane opens by itself once, on the first change; after that the user decides.
   const autoOpened = React.useRef(false);
@@ -195,12 +169,10 @@ export function AgenticIde({
     setPaneOpen(true);
   }, [anyChange]);
 
-  const showChanges = React.useCallback((path?: string) => {
+  const showChanges = React.useCallback((path?: string, paths?: readonly string[]) => {
     setPaneOpen(true);
     setTab("changes");
-    setEditorOpen(false);
-    setScope("last");
-    if (path) setFocus({ path });
+    if (path) setFocus({ path, paths });
   }, []);
   React.useEffect(() => {
     if (!setViewChanges) return;
@@ -208,77 +180,43 @@ export function AgenticIde({
     return () => setViewChanges(null);
   }, [setViewChanges, showChanges]);
 
-  // The setup check reads the draft's optimize.toml, or the repository's when the draft has none.
-  const tomlText = texts[OPTIMIZE_TOML] ?? base.get(OPTIMIZE_TOML) ?? "";
-  const [run, setRun] = React.useState<SetupCheckRun | null>(null);
-  const [running, setRunning] = React.useState(false);
-  const [requestFailed, setRequestFailed] = React.useState(false);
-  const [consoleOpen, setConsoleOpen] = React.useState(false);
-  const checkState = setupCheckState(run, running, tomlText);
-
-  const runCheck = React.useCallback(async () => {
-    const text = tomlText;
-    setRunning(true);
-    setRequestFailed(false);
-    setConsoleOpen(true);
-    try {
-      const result = await checkOptimizeToml(text);
-      setRun({ text, ok: result.ok, errors: result.errors });
-      if (result.ok) setConsoleOpen(false);
-    } catch {
-      setRequestFailed(true);
-    } finally {
-      setRunning(false);
-    }
-  }, [tomlText]);
-
-  const failedRun = checkState === "failed" ? run : null;
+  // The chat header holds the pane's button beside the pane; narrow screens use the tabs.
   React.useEffect(() => {
-    if (!setSetupCheckIssue) return;
-    setSetupCheckIssue(
-      failedRun
-        ? {
-            count: failedRun.errors.length,
-            feedback: checkFeedback(failedRun, msg("submit.agentic_ide.check.feedback_intro")),
-          }
-        : null,
-    );
-  }, [setSetupCheckIssue, failedRun]);
-  React.useEffect(() => () => setSetupCheckIssue?.(null), [setSetupCheckIssue]);
+    if (!setChangesToggle) return;
+    setChangesToggle(tabs ? null : { open: paneOpen, toggle: () => setPaneOpen((open) => !open) });
+  }, [setChangesToggle, tabs, paneOpen]);
+  React.useEffect(() => () => setChangesToggle?.(null), [setChangesToggle]);
 
-  const markers = React.useMemo(() => {
-    const map = new Map<string, LineMarker[]>();
-    if (!failedRun) return map;
-    const lines: LineMarker[] = [];
-    for (const error of failedRun.errors) {
-      const line = errorLine(failedRun.text, error);
-      if (line !== null) lines.push({ line, message: error.message });
+  // A write that moves lines moves the file's comments with them, so each
+  // stays on its line and the agent gets the right number. The agent's writes
+  // reach only `texts`, so the move follows `texts`, not the pane's writes. A
+  // layout effect moves them before the browser paints the old line.
+  const prevTexts = React.useRef(texts);
+  React.useLayoutEffect(() => {
+    const prev = prevTexts.current;
+    prevTexts.current = texts;
+    if (prev === texts || !moveLineComments) return;
+    for (const path of Object.keys(texts)) {
+      const before = prev[path];
+      const after = texts[path];
+      if (before === undefined || after === undefined || before === after) continue;
+      if (!(lineComments ?? []).some((c) => c.path === path)) continue;
+      moveLineComments(path, lineMap(before, after));
     }
-    map.set(OPTIMIZE_TOML, lines);
-    return map;
-  }, [failedRun]);
-
-  // A file the draft does not hold opens read-only from the repository's folder.
-  const openEditor = React.useCallback(
-    (path: string, line?: number) => {
-      const inDraft = path in texts;
-      setOpenRequest({ path: inDraft || !repo ? path : `${repo.folder}/${path}`, line });
-      setEditorOpen(true);
-      setEditorMounted(true);
-      setPaneOpen(true);
-      setTab("changes");
-    },
-    [texts, repo],
-  );
-
-  // A file that was not in the draft before goes away when its change is undone.
+  }, [texts, moveLineComments, lineComments]);
+  // A file that was not in the draft before goes away when its change is
+  // undone, and its comments go with it: no line is left for them.
   const write = React.useCallback(
     (file: Pick<DraftFile, "path" | "before">, text: string) => {
       if (busy) return;
-      if (text === "" && file.before === "" && !DRAFT_ONLY.has(file.path)) onWrite(file.path, null);
-      else onWrite(file.path, text);
+      if (text === "" && file.before === "" && !DRAFT_ONLY.has(file.path)) {
+        for (const c of lineComments ?? []) if (c.path === file.path) removeLineComment?.(c);
+        onWrite(file.path, null);
+      } else {
+        onWrite(file.path, text);
+      }
     },
-    [busy, onWrite],
+    [busy, onWrite, lineComments, removeLineComment],
   );
 
   // The chat's Undo and Reapply read and write the draft through these. A
@@ -301,58 +239,43 @@ export function AgenticIde({
   }, [setDraftFiles, draftFiles]);
   React.useEffect(() => () => setDraftFiles?.(null), [setDraftFiles]);
 
-  const copyPath = (path: string) => {
-    void navigator.clipboard
-      ?.writeText(path)
-      .then(() => toast(msg("submit.agentic_ide.path_copied")));
-  };
+  // Stable, so the pane's lines do not redraw on every render of the IDE.
+  const editFile = React.useCallback(
+    (file: DraftFile, text: string) => {
+      if (busy) return;
+      onWrite(file.path, text);
+    },
+    [busy, onWrite],
+  );
+  const comment = React.useMemo(
+    () =>
+      addLineComment
+        ? (path: string, line: number, text: string) => addLineComment({ path, line, text })
+        : undefined,
+    [addLineComment],
+  );
 
   const pane = (
     <ChangesPane
-      scope={scope}
-      onScope={setScope}
-      files={files}
+      files={allFiles}
       loading={loading}
       focus={focus}
       locked={busy}
-      markers={markers}
-      checkState={checkState}
-      checkErrors={run?.errors.length ?? 0}
-      onRunCheck={() => void runCheck()}
-      onRevertFile={(file) => write(file, file.before)}
-      onRevertHunk={(file, hunk) => write(file, revertHunk(file.before, file.after, hunk))}
-      onOpenEditor={openEditor}
-      onCopyPath={copyPath}
+      // A user's edit that empties a new file keeps the empty file; only an undo removes it.
+      onEditFile={editFile}
       comments={agent?.lineComments ?? []}
       onDeleteComment={agent?.removeLineComment}
-      onComment={
-        addLineComment ? (path, line, text) => addLineComment({ path, line, text }) : undefined
-      }
-      editorOpen={editorOpen}
-      editor={editorMounted ? renderEditor(openRequest) : null}
-      onBackToChanges={() => setEditorOpen(false)}
-      console={
-        <SetupCheckConsole
-          run={run}
-          state={checkState}
-          requestFailed={requestFailed}
-          open={consoleOpen}
-          onToggle={() => setConsoleOpen((open) => !open)}
-          onOpenLine={(line) => openEditor(OPTIMIZE_TOML, line)}
-        />
-      }
+      onComment={comment}
     />
-  );
-
-  const totals = allFiles.reduce(
-    (sum, file) => (!isChanged(file) || !base.has(file.path) ? sum : sum + 1),
-    0,
   );
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     const box = rootRef.current?.getBoundingClientRect();
     if (!box) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+    // The drag drops the transition, so a running ease ends with no end event.
+    setEasing(false);
     const rtl = getComputedStyle(rootRef.current!).direction === "rtl";
     const move = (e: PointerEvent) => {
       const share = rtl ? (box.right - e.clientX) / box.width : (e.clientX - box.left) / box.width;
@@ -360,11 +283,14 @@ export function AgenticIde({
     };
     const target = event.currentTarget;
     const stop = () => {
+      setDragging(false);
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", stop);
+      target.removeEventListener("pointercancel", stop);
     };
     target.addEventListener("pointermove", move);
     target.addEventListener("pointerup", stop);
+    target.addEventListener("pointercancel", stop);
   };
 
   const nudge = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -380,18 +306,32 @@ export function AgenticIde({
       "flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors",
       active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
     );
-  const changesLabel = (
-    <>
-      <GitDiff className="size-3.5" aria-hidden />
-      {msg("submit.agentic_ide.changes_tab")}
-      {totals > 0 && (
-        <span className="rounded-full bg-muted-foreground/15 px-1.5 text-[0.625rem] tabular-nums">
-          {totals}
-        </span>
-      )}
-    </>
-  );
   const showPane = tabs ? tab === "changes" : paneOpen;
+  const ease = "duration-[340ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:duration-150";
+  // The pane's content keeps its open width, so it slides out from the edge
+  // while the chat narrows, and does not reflow on every frame.
+  // Less the 1px separator beside it.
+  const paneWidth = !tabs && width > 0 ? Math.round(width * (1 - chatShare)) - 1 : undefined;
+  // After the close fade, the content leaves the layout, so a clipped pane
+  // does not keep drawing the open file.
+  const [paneGone, setPaneGone] = React.useState(!showPane);
+  if (showPane && paneGone) setPaneGone(false);
+  // The tabs hide the pane at once, with no fade to wait for.
+  if (!showPane && tabs && !paneGone) setPaneGone(true);
+  // Widths ease only when the pane opens, closes or is nudged. A window
+  // resize moves the percent-wide chat at once, so the content must too.
+  const layout = `${tabs}|${showPane}|${chatShare}`;
+  const [easedLayout, setEasedLayout] = React.useState(layout);
+  const [easing, setEasing] = React.useState(false);
+  if (easedLayout !== layout) {
+    setEasedLayout(layout);
+    // The tabs have no width to ease, and the chat's width out of them starts at
+    // auto, which does not animate: no transition would end either ease.
+    setEasing(!dragging && !tabs && easedLayout.startsWith("false|"));
+  }
+  // Under reduced motion the widths move at once; the pane's fade stays.
+  const widthEase =
+    !tabs && easing && !dragging && cn("transition-[width] motion-reduce:transition-none", ease);
 
   return (
     <div
@@ -401,51 +341,44 @@ export function AgenticIde({
       }}
       className="flex h-full min-h-0 flex-col"
     >
-      <div
-        className="flex h-10 shrink-0 items-center gap-1 border-b border-border/60 px-2"
-        role={tabs ? "tablist" : undefined}
-      >
-        {tabs ? (
-          <>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "chat"}
-              className={tabClass(tab === "chat")}
-              onClick={() => setTab("chat")}
-            >
-              {msg("submit.agentic_ide.chat_tab")}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "changes"}
-              className={tabClass(tab === "changes")}
-              onClick={() => setTab("changes")}
-            >
-              {changesLabel}
-            </button>
-          </>
-        ) : (
+      {tabs && (
+        <div
+          className="flex h-10 shrink-0 items-center gap-1 border-b border-border/60 px-2"
+          role="tablist"
+        >
           <button
             type="button"
-            aria-pressed={paneOpen}
-            className={cn(tabClass(paneOpen), "ms-auto")}
-            onClick={() => setPaneOpen((open) => !open)}
+            role="tab"
+            aria-selected={tab === "chat"}
+            className={tabClass(tab === "chat")}
+            onClick={() => setTab("chat")}
           >
-            {changesLabel}
+            {msg("submit.agentic_ide.chat_tab")}
           </button>
-        )}
-      </div>
-      <div className="flex min-h-0 flex-1">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "changes"}
+            className={tabClass(tab === "changes")}
+            onClick={() => setTab("changes")}
+          >
+            <GitDiff className="size-3.5" aria-hidden />
+            {msg("submit.agentic_ide.changes_tab")}
+          </button>
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <section
           aria-label={msg("submit.agentic_ide.chat_tab")}
           className={cn(
             "relative min-w-0",
-            tabs && tab !== "chat" && "hidden",
-            !showPane || tabs ? "flex-1" : "shrink-0",
+            tabs ? cn("flex-1", tab !== "chat" && "hidden") : "shrink-0",
+            widthEase,
           )}
-          style={showPane && !tabs ? { width: `${chatShare * 100}%` } : undefined}
+          style={tabs ? undefined : { width: showPane ? `${chatShare * 100}%` : "100%" }}
+          onTransitionEnd={(e) => {
+            if (e.target === e.currentTarget) setEasing(false);
+          }}
         >
           {chat}
         </section>
@@ -465,9 +398,26 @@ export function AgenticIde({
         )}
         <section
           aria-label={msg("submit.agentic_ide.changes_tab")}
-          className={cn("relative min-w-0 flex-1", !showPane && "hidden")}
+          inert={!showPane}
+          onTransitionEnd={(e) => {
+            if (e.target === e.currentTarget && !showPane) setPaneGone(true);
+          }}
+          className={cn(
+            "relative flex min-w-0 flex-1 justify-end overflow-hidden",
+            tabs ? !showPane && "hidden" : cn("transition-opacity", ease),
+            !tabs && !showPane && "opacity-0",
+          )}
         >
-          {pane}
+          <div
+            className={cn(
+              "h-full min-w-0 flex-1 shrink-0",
+              widthEase,
+              !tabs && paneGone && "hidden",
+            )}
+            style={paneWidth ? { width: paneWidth, flex: "none" } : undefined}
+          >
+            {pane}
+          </div>
         </section>
       </div>
     </div>

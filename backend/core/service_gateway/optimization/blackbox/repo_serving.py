@@ -24,6 +24,7 @@ from typing import Any
 from ....config import settings
 from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, fetch_snapshot, github_token
+from ....connectors.repo_drafts import DraftFileError, apply_to_archive
 from ....constants import TOKEN_SOURCE_MANAGED
 from ....models.common import ModelConfig
 from ....worker.repo_staging import hidden_repo_paths
@@ -115,6 +116,7 @@ def serve_payload(
             "repository": repo["repository"],
             "commit": repo["commit"],
             **repo_hosts.git_kwargs(repo_hosts.provider_of(repo)),
+            **({"draft_files": dict(repo["draft_files"])} if repo.get("draft_files") else {}),
         },
         "patch": patch,
         "inputs": inputs,
@@ -144,12 +146,14 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
 
     Yields:
         The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``,
-        and the patch without its sections for hidden paths.
+        the patch without its sections for hidden paths, and ``repo`` without
+        its draft files, which the packed tree already holds.
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
         ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown,
-            or a hidden path is, holds or lies inside a link, so the strip cannot remove it.
+            or a hidden path is, holds or lies inside a link, so the strip cannot remove it,
+            or a draft file of the run cannot be written over the tree.
     """
     repo = payload["repo"]
     provider = repo_hosts.provider_of(repo)
@@ -165,6 +169,12 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
     workdir = Path(tempfile.mkdtemp(prefix="repo-serve-"))
     try:
         snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir, **repo_hosts.git_kwargs(provider))
+        # The served version was made against the tree with the run's draft files.
+        if drafts := repo.get("draft_files"):
+            try:
+                apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
+            except DraftFileError as error:
+                raise ConstraintsError(str(error)) from None
         hidden = hidden_repo_paths(read_constraints(snapshot.archive))
         # Run start refuses these links since SKY-387; a run started before that can still reach serving.
         if linked := linked_hidden_paths(snapshot.archive, hidden):
@@ -175,7 +185,14 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         archive = strip_archive(snapshot.archive, hidden, workdir / "serve-tree.tgz")
         # A best version from an older run can still edit a now-hidden file, which the stripped tree lacks.
         patch = drop_paths(str(payload.get("patch") or ""), hidden)
-        yield {**payload, "patch": patch, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
+        # The drafts are in the packed tree; as a list they could name a hidden path to the guest.
+        guest_repo = {key: value for key, value in repo.items() if key != "draft_files"}
+        yield {
+            **payload,
+            "repo": guest_repo,
+            "patch": patch,
+            REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit},
+        }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

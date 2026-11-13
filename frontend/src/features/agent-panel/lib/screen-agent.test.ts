@@ -32,6 +32,7 @@ const {
   parseScreenNav,
   registerSetupChatFlush,
   runScreenNav,
+  runSetupChatId,
   SETUP_CHAT_MAX_CHARS,
   setupChatLedger,
   setupChatSnapshot,
@@ -150,6 +151,18 @@ test("a setup chat kept with no messages, as the server once saved it, is not re
   assert.equal(legacySetupChatId('{"id":"c4","kicked":[],"messages":[]}'), null);
   assert.equal(legacySetupChatId(null), null);
   assert.equal(legacySetupChatId("not json"), null);
+});
+
+test("a run keeps only a setup chat saved on the server it starts on", () => {
+  const kept = (id: string) => JSON.stringify({ id, kicked: [], messages: [] });
+  assert.equal(runSetupChatId(kept("c1"), "local"), "c1");
+  assert.equal(runSetupChatId(kept("c1"), "hosted"), null);
+  assert.equal(runSetupChatId(kept("hosted:c2"), "hosted"), "c2");
+  assert.equal(runSetupChatId(kept("hosted:c2"), "local"), null);
+  assert.equal(runSetupChatId(kept("setup-abc"), "local"), null);
+  assert.equal(runSetupChatId('{"id":"c3","kicked":[]}', "local"), null);
+  assert.equal(runSetupChatId(null, "local"), null);
+  assert.equal(runSetupChatId("not json", "local"), null);
 });
 
 test("a mid-turn copy keeps the user's message and the reply so far, without an empty bubble", () => {

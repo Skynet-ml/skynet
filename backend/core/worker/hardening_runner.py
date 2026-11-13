@@ -57,9 +57,14 @@ from ..models.hardening import (
     HardeningView,
 )
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
-from ..service_gateway.optimization.blackbox.hardening import AttackResult, Candidate, HardeningRunner
+from ..service_gateway.optimization.blackbox.hardening import (
+    AttackFailedError,
+    AttackResult,
+    Candidate,
+    HardeningRunner,
+)
 from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
-from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer, _for_proposer
+from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
@@ -409,6 +414,9 @@ class RepoHardeningRunner(HardeningRunner):
         self.open_scorer = open_scorer
         self.fixes: list[str] = list(workspace.applied_fixes)
         self._scorers: dict[tuple[str, ...], RepoScorer] = {}
+        # A box that failed to open is not opened again: a new box would reuse
+        # its operation key, so its paid setup would run under the old hold.
+        self._score_failures: dict[tuple[str, ...], Exception] = {}
         self._routes: dict[str, dict[str, str]] = {}
         self._managed_key = managed_key
         self._pi_binary = pi_binary
@@ -452,7 +460,8 @@ class RepoHardeningRunner(HardeningRunner):
             The claims, the dollars spent, the briefs and the sessions.
 
         Raises:
-            RuntimeError: When every session failed.
+            AttackFailedError: When every session failed; it keeps the cost,
+                the briefs and the sessions.
         """
         before = self.meter.spent_usd
         known = sorted(p.name for p in exploits_path.iterdir() if p.is_dir()) if exploits_path.is_dir() else []
@@ -510,6 +519,7 @@ class RepoHardeningRunner(HardeningRunner):
                 The session's scorer.
             """
             box: list[RepoScorer] = []
+            failed: list[Exception] = []
 
             def score(patch: str) -> dict[str, Any]:
                 """Score one patch on the trusted metric with the approved fixes.
@@ -520,15 +530,28 @@ class RepoHardeningRunner(HardeningRunner):
                 Returns:
                     What a run's proposer gets: the score, the feedback
                     without hidden metric frames, and the named scores.
+
+                Raises:
+                    Exception: The box's first open failure, again on each
+                        later call.
                 """
+                if failed:
+                    # A new box would reuse the failed box's operation key, so its
+                    # paid setup would run under the old hold (as RepoWorkspace.prepare).
+                    raise failed[0]
                 if not box:
                     fixes = tuple(self.fixes)
-                    box.append(self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}"))
+                    try:
+                        opened = self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}")
+                    except Exception as exc:
+                        failed.append(exc)
+                        raise
+                    box.append(opened)
                     with lanes_lock:
                         lanes.append(box[0])
                 # The same filter as RepoScorer.dispatch: a metric traceback
                 # must not name hidden metric files to the attacker (SKY-353).
-                return _for_proposer(box[0].score(patch), box[0]._root, box[0]._hidden)
+                return box[0].for_proposer(box[0].score(patch))
 
             return score
 
@@ -559,14 +582,16 @@ class RepoHardeningRunner(HardeningRunner):
                 # The gateway still stops a box that fails to close.
                 with contextlib.suppress(Exception):
                     lane.close()
-        if outcome.sessions and all(s.status == "failed" for s in outcome.sessions):
-            raise RuntimeError("Every attacker session failed.")
-        return AttackResult(
+        result = AttackResult(
             candidates=outcome.candidates,
             cost_usd=self.meter.spent_usd - before,
             briefs=briefs,
             sessions=outcome.sessions,
+            stopped=should_stop(),
         )
+        if outcome.sessions and all(s.status == "failed" for s in outcome.sessions):
+            raise AttackFailedError(result)
+        return result
 
     def judge(self, *, candidate: Candidate, model: str, budget_usd: float | None) -> tuple[Any, float]:
         """Ask the judge model whether one candidate games the metric.
@@ -749,8 +774,14 @@ class RepoHardeningRunner(HardeningRunner):
 
         Returns:
             The metric score, or NaN when ``fix_diff`` does not apply.
+
+        Raises:
+            Exception: The box's first open failure, again on each later call
+                with the same fixes.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
+        if fixes in self._score_failures:
+            raise self._score_failures[fixes]
         scorer = self._scorers.get(fixes)
         if scorer is None:
             try:
@@ -764,7 +795,11 @@ class RepoHardeningRunner(HardeningRunner):
                 # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
                 return float("nan")
-            scorer = self.open_scorer(archive, fixes)
+            try:
+                scorer = self.open_scorer(archive, fixes)
+            except Exception as exc:
+                self._score_failures[fixes] = exc
+                raise
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 
@@ -948,7 +983,13 @@ def open_hardening_runner(
                 run_entry=constraints.run_entry if constraints is not None else None,
                 run_timeout=constraints.run_timeout if constraints is not None else 60.0,
             )
-            scorer.prepare()
+            try:
+                scorer.prepare()
+            except BaseException:
+                # The caller never gets this scorer, so only this close frees its snapshots and folder.
+                with contextlib.suppress(Exception):
+                    scorer.close()
+                raise
             return scorer
 
         runner = RepoHardeningRunner(
@@ -1015,6 +1056,10 @@ def claim_hardening_job(
             row = session.get(HardeningJobModel, job_id)
             assert row is not None
             session.refresh(row)
+            if row.job.get("live_sessions"):
+                # A pass whose lease lapsed may have left its live sessions; they are not running now.
+                row.job = {**row.job, "live_sessions": []}
+                session.commit()
             return row.id, row.username, HardeningJob.model_validate(row.job), row.budget_operation_id, claim
         return None
 

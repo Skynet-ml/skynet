@@ -18,6 +18,8 @@ from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
+from sqlalchemy import exists, update
+from sqlalchemy.orm import Session
 
 from ...billing import (
     ProviderKeyVault,
@@ -82,6 +84,7 @@ from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
 from ...sandbox.bridge import default_provider
 from ...service_gateway.optimization.blackbox.registry import ENGINES
 from ...service_gateway.optimization.blackbox.service import engine_catalog, validate_blackbox_payload
+from ...storage.models import AgentConversationModel, JobModel
 from ...storage.preflights import PreflightStore, setup_seed
 from ...storage.usage import json_byte_size
 from ...worker.engine import get_worker
@@ -735,6 +738,32 @@ def _optimizer_option(
     )
 
 
+def _bind_setup_chat(job_store, optimization_id: str, username: str, conversation_id: str) -> None:
+    """Bind a new run to its setup chat when ``username`` owns that chat.
+
+    Only the chat's own user reads the bound chat unmasked, admins read it
+    masked, and anyone else, also a new owner after a transfer, gets 404. A
+    chat of another user, or an unknown id, leaves the run unbound.
+
+    Args:
+        job_store: Job store whose engine holds the jobs and chats.
+        optimization_id: The new run.
+        username: The run's owner.
+        conversation_id: The chat id that the request names.
+    """
+    engine = getattr(job_store, "engine", None)
+    if engine is None:
+        return
+    owned = exists().where(AgentConversationModel.id == conversation_id, AgentConversationModel.username == username)
+    with Session(engine) as session:
+        session.execute(
+            update(JobModel)
+            .where(JobModel.optimization_id == optimization_id, owned)
+            .values(conversation_id=conversation_id)
+        )
+        session.commit()
+
+
 def submit_repo_payload(
     payload: BlackboxRunRequest,
     *,
@@ -764,6 +793,9 @@ def submit_repo_payload(
     if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
         raise DomainError("submission.validation_failed", status=400)
     payload.username = current_user.username
+    # The job column holds the chat only after the ownership check, so the
+    # stored payload and the replay keys never carry an unchecked id.
+    conversation_id, payload.conversation_id = payload.conversation_id, None
     _materialize_repo_cases(payload, job_store=job_store, username=payload.username)
 
     replay_keys = resolve_submission_replay_keys(
@@ -833,6 +865,8 @@ def submit_repo_payload(
     enforce_storage_quota(job_store, payload.username, incoming_bytes=json_byte_size(payload_dump))
 
     _create_submission_job(job_store, optimization_id, payload, normalized_key, verified)
+    if conversation_id is not None:
+        _bind_setup_chat(job_store, optimization_id, payload.username, conversation_id)
     payload_dump["execution_budget_generation"] = payload.execution_budget_generation
     job_store.set_payload_overview(
         optimization_id,

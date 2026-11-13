@@ -5,10 +5,12 @@ routers' pattern: a ``RemoteDBJobStore`` subclass that skips the pgvector
 bootstrap so ``Base.metadata.create_all`` stands up the conversation tables).
 Covers the per-id outcomes of ``POST /agent/conversations/bulk-delete``: owned
 rows delete, duplicates collapse, unknown and other-users' ids are skipped, and
-an empty request is a no-op.
+an empty request is a no-op. Also covers ``POST /agent/conversations/{id}/fork``.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -17,7 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...storage.models import AgentConversationModel, Base
+from ...storage.models import AgentConversationModel, AgentMessageModel, Base
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -138,3 +140,86 @@ def test_bulk_delete_empty_is_noop() -> None:
     resp = client.post("/agent/conversations/bulk-delete", json={"ids": []})
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"deleted": [], "skipped": []}
+
+
+def _seed_turns(store: _MemStore, conversation_id: str, turns: list[tuple[str, str]]) -> None:
+    """Insert ordered ``(role, content)`` turns into one conversation.
+
+    Args:
+        store: The in-memory store to seed.
+        conversation_id: The conversation that gets the turns.
+        turns: ``(role, content)`` pairs, oldest first.
+    """
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with store._session_factory() as session:
+        session.add_all(
+            AgentMessageModel(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                router_metadata={
+                    "stats": {"cents": index},
+                    "side_cents": 2,
+                    "served_model": "m",
+                    "compaction": {"summary": "s", "cents": 3},
+                },
+                wizard_state_before={"step": index},
+                created_at=start + timedelta(seconds=index),
+            )
+            for index, (role, content) in enumerate(turns)
+        )
+        session.commit()
+
+
+def test_fork_saves_a_copy_that_loads_again() -> None:
+    """A fork saves the turns before the chosen user turn in a new owned chat."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    _seed_turns(
+        store,
+        "c-1",
+        [("user", "first"), ("assistant", "one"), ("user", "second"), ("assistant", "two")],
+    )
+
+    resp = client.post("/agent/conversations/c-1/fork", json={"user_turns": 1})
+    assert resp.status_code == 200, resp.text
+    forked = resp.json()
+    assert forked["id"] != "c-1"
+    assert forked["title"] == "c-1"
+    assert forked["pinned"] is False
+    assert forked["preview"] == "first"
+
+    detail = client.get(f"/agent/conversations/{forked['id']}")
+    assert detail.status_code == 200, detail.text
+    messages = detail.json()["messages"]
+    assert [(m["role"], m["content"]) for m in messages] == [("user", "first"), ("assistant", "one")]
+    with store._session_factory() as session:
+        copies = session.query(AgentMessageModel).filter_by(conversation_id=forked["id"]).all()
+        assert all(m.wizard_state_before is None for m in copies)
+        # The source chat paid for these turns; the fork keeps the summary but no cost.
+        assert [m.router_metadata for m in copies] == [
+            {"served_model": "m", "compaction": {"summary": "s", "cents": None}}
+        ] * 2
+    assert len(client.get("/agent/conversations/c-1").json()["messages"]) == 4
+
+
+def test_fork_past_the_last_user_turn_copies_every_turn() -> None:
+    """A user-turn count past the end copies the whole chat."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    _seed_turns(store, "c-1", [("user", "only"), ("assistant", "reply")])
+
+    resp = client.post("/agent/conversations/c-1/fork", json={"user_turns": 5})
+    assert resp.status_code == 200, resp.text
+    detail = client.get(f"/agent/conversations/{resp.json()['id']}").json()
+    assert [m["content"] for m in detail["messages"]] == ["only", "reply"]
+
+
+def test_fork_checks_the_owner() -> None:
+    """A fork of another user's chat is 403, and of an unknown chat is 404."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-bob", "bob"))
+
+    assert client.post("/agent/conversations/c-bob/fork", json={"user_turns": 0}).status_code == 403
+    assert client.post("/agent/conversations/nope/fork", json={"user_turns": 0}).status_code == 404
+    assert _ids(store) == {"c-bob"}

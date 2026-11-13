@@ -149,6 +149,7 @@ from .routers.tagger_assist import create_tagger_assist_router
 from .routers.tagging_session_share import create_tagging_session_share_router
 from .routers.tagging_sessions import create_tagging_session_router
 from .routers.telemetry import create_telemetry_router
+from .routers.transcription import close_http_client as close_transcription_http_client
 from .routers.transcription import create_transcription_router
 from .routers.usage import create_usage_router
 from .routers.user_preferences import create_user_preferences_router
@@ -602,9 +603,6 @@ def _cache_control_for(path: str, query_string: bytes) -> str | None:
         return "private, max-age=5"
     if path == "/optimizations" and b"status" not in query_string:
         return "private, max-age=2, stale-while-revalidate=10"
-    # A revoked share link must stop working at once, so no cache may keep a copy.
-    if path.startswith("/agent/shared-conversations/"):
-        return "no-store"
     return None
 
 
@@ -906,6 +904,7 @@ def create_app(
                 continuous_sweeper.stop()
             if loop_lag_monitor:
                 loop_lag_monitor.stop()
+            await close_transcription_http_client()
 
     app = FastAPI(
         title=APP_NAME,

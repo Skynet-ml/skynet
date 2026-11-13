@@ -65,6 +65,13 @@ interface ComposerModelMenuProps {
    * side is hidden, not cleared, so it comes back when the user switches.
    */
   side?: MenuSide;
+  /** Lets /model and /thinking open the menu: on the model list, or on the effort slider. */
+  openRef?: React.Ref<ModelMenuHandle>;
+}
+
+/** Opens the model menu from outside, as the slash commands do. */
+export interface ModelMenuHandle {
+  open: (view: "models" | "effort") => void;
 }
 
 // Caps the fallback list when the catalog flags no featured models (a
@@ -100,6 +107,7 @@ export function ComposerModelMenu({
   models,
   allModels,
   side,
+  openRef,
 }: ComposerModelMenuProps) {
   const savedValue = rawValue === RETIRED_AUTO_MODEL ? null : rawValue;
   // A saved "ultra" or "ultracode" runs at Max, so the menu shows and keeps Max.
@@ -223,6 +231,19 @@ export function ComposerModelMenu({
     if (!modelsOpen) return;
     searchRef.current?.focus({ preventScroll: true });
   }, [modelsOpen]);
+
+  React.useImperativeHandle(
+    openRef,
+    () => ({
+      open: (view) => {
+        if (disabled || available.length === 0) return;
+        setSearch("");
+        setModelsOpen(view === "models");
+        setOpen(true);
+      },
+    }),
+    [disabled, available.length],
+  );
 
   const pick = (model: string | null) => {
     onChange(model);
@@ -453,7 +474,8 @@ export function ComposerModelMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        align="start"
+        // The trigger sits at the inline end of the composer row, so the menu grows toward the start.
+        align="end"
         side="top"
         sideOffset={6}
         className="model-panel w-80 gap-0 overflow-visible p-0"

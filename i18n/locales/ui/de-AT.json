@@ -18,6 +18,9 @@
   "submit.budget.byok_note": "Ihr Anbieter rechnet Modell-Tokens über Ihren Schlüssel ab. {term.appName} erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab.",
   "submit.blackbox.roles.optimization.managed_hint": "Verwendet die Standard-Sampling-Einstellungen des Modells; die Abrechnung kann über Ihr {term.appName}-Guthaben oder Ihren OpenRouter-Schlüssel erfolgen.",
   "submit.nav.screen": "Ansicht {index} von {count}",
+  "submit.nav.slide_to_start": "Zum Starten der Optimierung schieben",
+  "submit.nav.slide_hint": "Ziehen Sie das Flugzeug bis zum Ende der Leiste oder drücken Sie die Eingabetaste.",
+  "submit.nav.slide_tooltip": "Flugzeug ziehen oder klicken, um den Lauf zu starten",
   "shared.agent.worked_for": "Gearbeitet: {duration}",
   "shared.agent.working_for": "Arbeitet seit {duration}",
   "shared.agent.pasted_text": "Eingefügter Text",
@@ -45,9 +48,5 @@
   "agent.tool.github_repos.found": "{count} gefunden",
   "agent.tool.github_repos.none": "Keine gefunden",
   "agent.tool.github_repos.private": "Privat",
-  "submit.draft.title": "Mit der vorherigen Einrichtung fortfahren?",
-  "submit.draft.continue": "Entwurf fortsetzen",
-  "submit.draft.start_new": "Neu beginnen",
-  "submit.draft.left_named": "Du hast „{name}“ {time} verlassen.",
-  "submit.draft.left": "Du hast eine Lauf-Einrichtung {time} verlassen."
+  "submit.draft.title": "Mit der vorherigen Einrichtung fortfahren?"
 }

@@ -1057,12 +1057,24 @@ class RepoScorer:
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
             return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
-        document = _for_proposer(document, self._root, self._hidden)
+        document = self.for_proposer(document)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
             document["feedback"] = "\n\n".join([*notes, *([str(feedback)] if feedback else [])])
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
+
+    def for_proposer(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Return what a proposer may see of one scoring result.
+
+        Args:
+            document: What :meth:`score` returned.
+
+        Returns:
+            The score, the feedback without hidden metric frames or box paths,
+            the status and the named scores (SKY-353).
+        """
+        return _for_proposer(document, self._root, self._hidden)
 
     def close(self) -> None:
         """Delete the workspace's saved states and this scorer's snapshots.

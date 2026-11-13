@@ -231,6 +231,7 @@ def test_read_briefs_keeps_k_briefs_and_fills_the_rest() -> None:
     assert hs.read_briefs(reply, 3) == ["one", "two", "three"]
     assert hs.read_briefs("no json", 2) == list(hs.FALLBACK_BRIEFS[:2])
     assert hs.read_briefs('{"briefs": ["one"]}', 2) == ["one", hs.FALLBACK_BRIEFS[1]]
+    assert hs.read_briefs('{"briefs": "abc"}', 2) == list(hs.FALLBACK_BRIEFS[:2])
 
 
 def test_read_noise_decision() -> None:
@@ -300,6 +301,24 @@ def test_a_session_runs_the_metric_then_writes_its_patch() -> None:
     ]
     assert calls[0]["payload"] == {"score": 0.9}
     assert all(c["endedAt"] is not None for c in calls)
+
+
+def test_a_transcript_entry_keeps_a_cut_text_and_the_model_keeps_it_all() -> None:
+    """The stored step text is cut, so the polled row stays small; the next model step still reads all of it."""
+    long_text = "t" * (hs.MAX_TRANSCRIPT_CHARS + 100)
+    session = _run(_session([{**_PATCH, "text": long_text}]))
+
+    assert session.record.transcript[0]["content"] == long_text[: hs.MAX_TRANSCRIPT_CHARS]
+    assert any(m["role"] == "assistant" and m["content"] == long_text for m in session._messages)
+
+
+@pytest.mark.parametrize("why", ["", "   ", None])
+def test_write_patch_needs_a_why(why: Any) -> None:
+    """A claim without a reason is refused, so the session can try again."""
+    session = _run(_session([_call(hs.WRITE_PATCH_TOOL, kind="case", patch_diff="+x", why_md=why)]))
+
+    assert session.candidate is None
+    assert session._messages[-2]["content"].startswith("write_patch needs")
 
 
 def test_an_invalid_edge_case_keeps_the_claim_without_a_tree() -> None:
@@ -427,6 +446,59 @@ def test_live_writes_commit_in_snapshot_order(monkeypatch: pytest.MonkeyPatch) -
 
     assert written == sorted(written)
     assert written[-1] == 3 * 3 + 3
+
+
+def test_a_skipped_live_write_does_not_wait_for_another_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While one session's final write is slow, another session's skipped writes return at once."""
+    monkeypatch.setattr(hs, "LIVE_WRITE_SECONDS", 1000.0)
+    blocking = threading.Event()
+    release = threading.Event()
+    released: list[bool] = []
+
+    def on_live(sessions: list[HardeningSession]) -> None:
+        """Hold the first write that shows an ended session until the other session moves on.
+
+        Args:
+            sessions: The live sessions.
+        """
+        if not released and any(s.status != "running" for s in sessions):
+            blocking.set()
+            released.append(release.wait(timeout=3))
+
+    slow_steps = [_call(hs.READ_SCORE_TOOL), _call(hs.READ_SCORE_TOOL), _PATCH]
+
+    def ask(messages: list[dict[str, Any]], tools: Any, limit: int) -> dict[str, Any]:
+        """End the fast session at once; step the slow one while the fast one writes.
+
+        Args:
+            messages: The session's messages.
+            tools: The tools.
+            limit: The answer limit.
+
+        Returns:
+            The session's next reply.
+        """
+        if messages[0]["content"] == "fast":
+            return _PATCH
+        if len(slow_steps) == 3:
+            blocking.wait(timeout=3)
+        elif len(slow_steps) == 2:
+            release.set()
+        return slow_steps.pop(0)
+
+    hs.run_sessions(
+        ["fast", "slow"],
+        prompt_for=lambda brief: brief,
+        ask=ask,
+        scorer_for=lambda index: lambda patch: {"score": 1.0},
+        model="m",
+        pi_binary="pi",
+        should_stop=lambda: False,
+        on_live=on_live,
+        run_turn=_fake_turn,
+    )
+
+    assert released == [True]
 
 
 def test_run_sessions_runs_each_brief_in_parallel_and_one_failure_fails_only_its_session() -> None:

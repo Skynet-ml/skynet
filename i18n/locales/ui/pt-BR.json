@@ -143,6 +143,9 @@
   "storage.type.staged_upload": "Arquivo temporário",
   "submit.dataset.file_error": "Erro ao carregar o arquivo",
   "submit.nav.screen": "Tela {index} de {count}",
+  "submit.nav.slide_to_start": "Deslize para iniciar a otimização",
+  "submit.nav.slide_hint": "Arraste o avião até o fim da barra ou pressione Enter.",
+  "submit.nav.slide_tooltip": "Arraste ou clique no avião para iniciar a execução",
   "submit.validation.api_key_required": "Insira uma chave de API — não está definida no ambiente nem foi inserida manualmente",
   "submit.validation.dataset_required": "Carregue um arquivo de conjunto de dados",
   "submit.validation.mcp_url_required": "Insira um URL do MCP para a fonte das ferramentas",
@@ -186,9 +189,5 @@
   "agent.tool.github_repos.found": "{count} encontrados",
   "agent.tool.github_repos.none": "Nenhum encontrado",
   "agent.tool.github_repos.private": "Privado",
-  "submit.draft.title": "Continuar a configuração anterior?",
-  "submit.draft.continue": "Continuar rascunho",
-  "submit.draft.start_new": "Começar de novo",
-  "submit.draft.left_named": "Você saiu de “{name}” {time}.",
-  "submit.draft.left": "Você saiu de uma configuração {time}."
+  "submit.draft.title": "Continuar a configuração anterior?"
 }

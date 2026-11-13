@@ -1,12 +1,11 @@
 "use client";
 
-import { CaretLeft, CaretRight, CircleNotch, RocketLaunch } from "@/shared/ui/icons";
-import { motion, useReducedMotion } from "framer-motion";
+import { CaretLeft, CaretRight } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
-import { TERMS } from "@/shared/lib/terms";
 import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
+import { SlideToStart } from "./SlideToStart";
 import { LAST_WIZARD_STAGE, WIZARD_STAGE } from "../lib/wizard-steps";
 import type { WizardV2Shell } from "../hooks/use-unified-wizard";
 
@@ -59,7 +58,6 @@ export function SubmitNav({
   showSubmit,
   screen,
 }: SubmitNavProps) {
-  const reducedMotion = useReducedMotion();
   const { goPrev, goNext, submit, submitting } = w;
   const step = WIZARD_STAGE[w.state.step];
   const runDisabledReason = w.runDisabledReason ?? null;
@@ -109,32 +107,11 @@ export function SubmitNav({
     <div className="flex flex-col gap-3">
       <div className="flex items-stretch gap-3">
         {backButton}
-        <motion.button
-          type="button"
-          onClick={onSubmit ?? (() => void submit())}
-          disabled={submitting || runDisabledReason !== null}
-          aria-busy={submitting || undefined}
-          aria-disabled={runDisabledReason !== null || undefined}
-          title={runDisabledReason ?? undefined}
-          data-tutorial="submit-button"
-          data-telemetry="submit-run"
-          animate={runDisabledReason || reducedMotion ? { scale: 1 } : { scale: [1, 1.01, 1] }}
-          transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
-          className="min-h-[44px] lg:min-h-0 lg:h-9 min-w-0 flex-1 inline-flex items-center justify-center gap-2 rounded-md bg-primary-fill px-4 text-sm font-semibold text-primary-foreground cursor-pointer transition-colors duration-200 hover:bg-primary-hover active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {submitting ? (
-            <>
-              <CircleNotch className="size-4 animate-spin motion-reduce:animate-none" />
-              {msg("auto.features.submit.components.submitnav.3")}
-            </>
-          ) : (
-            <>
-              <RocketLaunch className="size-4" aria-hidden />
-              {msg("auto.features.submit.components.submitnav.4")}
-              {TERMS.optimization}
-            </>
-          )}
-        </motion.button>
+        <SlideToStart
+          onStart={onSubmit ?? (() => void submit())}
+          starting={submitting}
+          disabledReason={runDisabledReason}
+        />
       </div>
     </div>
   );

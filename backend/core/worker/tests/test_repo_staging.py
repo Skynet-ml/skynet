@@ -33,6 +33,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
+from core.i18n_keys import I18nKey
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import runner
@@ -61,7 +62,7 @@ from core.service_gateway.optimization.blackbox.service import legacy_case_split
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
 from core.worker import repo_staging, scoped_relay
-from core.worker.repo_gate import check_hidden
+from core.worker.repo_gate import RepoGateError, check_hidden
 from core.worker.scoped_relay import McpRelay
 
 
@@ -205,6 +206,74 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
     assert "secret-value" not in repr(staged_payload)
     assert "Pick the place the sender means." in staged_payload["background"]
     assert "`src/geocode/eval`" in staged_payload["background"]
+    staged.cleanup()
+
+
+def test_staging_writes_the_draft_files_over_the_tree_before_it_reads_the_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft optimize.toml takes effect, and every box starts from the drafted tree."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
+
+    staged_payload, staged = _stage_with({"src/geocode/app.py": "x = 1\n"}, monkeypatch, payload)
+
+    assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
+    assert staged.intent == "Pick the place the sender means."
+    with tarfile.open(staged.snapshot.archive) as packed:
+        assert packed.extractfile("src/geocode/app.py").read() == b"drafted = True\n"  # type: ignore[union-attr]
+    staged.cleanup()
+
+
+def test_staging_keeps_the_draft_files_off_the_guest_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guest gets the drafts only inside the tree, as a draft optimize.toml names the hidden paths."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
+
+    staged_payload, staged = _stage_with({"src/geocode/app.py": "x = 1\n"}, monkeypatch, payload)
+
+    assert "draft_files" not in staged_payload["target"]["repo"]
+    assert "drafted = True" not in json.dumps(staged_payload)
+    assert staged.drafts == {**_FILES, "src/geocode/app.py": "drafted = True\n"}
+    assert payload["target"]["repo"]["draft_files"], "staging must not change the stored payload"
+    staged.cleanup()
+
+
+def test_staging_refuses_a_draft_file_through_a_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft that would write through a link in the tree fails setup in plain words."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
+
+    with pytest.raises(ConstraintsError, match="link"):
+        _stage_with({"a.py": "1"}, monkeypatch, payload, links={"src": (tarfile.SYMTYPE, "/etc")})
+
+
+def test_staging_refuses_drafts_written_on_another_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drafts read at an older commit would undo the branch's new commits, so the run stops with a code."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
+    payload["target"]["repo"]["draft_base"] = "d" * 40
+
+    with pytest.raises(RepoGateError) as refused:
+        _stage_with({"src/app.py": "x = 1\n"}, monkeypatch, payload)
+
+    assert refused.value.code == I18nKey.REPO_GATE_DRAFT_BASE_MOVED
+    assert refused.value.params == {"base": "ddddddd", "commit": "ccccccc"}
+
+
+@pytest.mark.parametrize("base", ["c" * 40, None], ids=["same-commit", "no-recorded-base"])
+def test_staging_keeps_drafts_on_their_own_commit_or_with_no_base(
+    monkeypatch: pytest.MonkeyPatch, base: str | None
+) -> None:
+    """Drafts on the run's commit stage, and older drafts that record no base still stage."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
+    payload["target"]["repo"]["draft_base"] = base
+
+    staged_payload, staged = _stage_with({"src/app.py": "x = 1\n"}, monkeypatch, payload)
+
+    assert "draft_base" not in staged_payload["target"]["repo"]
+    assert staged.drafts == {"src/app.py": "x = 2\n"}
     staged.cleanup()
 
 
@@ -1786,6 +1855,30 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
         "branch": "skynet/optimize-0123456789ab",
         "draft": True,
     }
+
+
+def test_publishing_pushes_the_drafts_the_staged_tree_keeps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The push writes the drafts that staging took off the guest payload, and refuses read-only ones."""
+    pushed: list[dict[str, Any]] = []
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args, **kwargs: pushed.append(kwargs))
+    monkeypatch.setattr(
+        repo_staging,
+        "open_pull_request",
+        lambda token, repository, **fields: PublishedChange(
+            branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True
+        ),
+    )
+    staged = repo_staging.StagedRepository(
+        snapshot=_staged(tmp_path, readonly=("vendor/lib",)).snapshot,
+        secrets={},
+        workdir=tmp_path,
+        drafts={"optimize.toml": "x = 1\n"},
+    )
+
+    _publish(_result(0.5, 0.8), staged)
+
+    assert pushed == [{"drafts": {"optimize.toml": "x = 1\n"}, "readonly_paths": ("vendor/lib",)}]
 
 
 def test_publishing_rechecks_the_editing_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

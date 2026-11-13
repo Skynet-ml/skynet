@@ -49,6 +49,15 @@ export function budgetContinueBlock(
   return budgetShortfall(floorCents, choice);
 }
 
+/**
+ * Whether `screen` sets the limit and the user left it empty or unreadable.
+ * The card fills a default on mount, so an unset capped limit means the
+ * user cleared the field.
+ */
+export function limitMissing(screen: string, { uncapped, limit }: BudgetChoice): boolean {
+  return LIMIT_SCREENS.has(screen) && !uncapped && limit == null;
+}
+
 /** A saved setup's spending limit: the draft slice fields a reload restores. */
 export interface SavedLimit {
   maxCostCents: number | null;

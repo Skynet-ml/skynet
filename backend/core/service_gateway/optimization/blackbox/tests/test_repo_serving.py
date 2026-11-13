@@ -107,6 +107,7 @@ def _guest_payload(chunks: list[str], patch: str, inputs: dict[str, Any]) -> dic
 
 
 def test_serve_runs_the_best_version_not_the_starting_code(tmp_path: Path) -> None:
+    """Serving applies the best patch, so the edited serve() and its imports run."""
     files = {"serve.py": _SERVE, "lib.py": "X = 1\n"}
     best = "from lib import X\n\ndef serve(input):\n    return {'answer': input['question'][::-1], 'x': X}\n"
     patch = _patch(tmp_path, files, {"serve.py": best})
@@ -125,6 +126,7 @@ def test_serve_runs_the_best_version_not_the_starting_code(tmp_path: Path) -> No
 
 
 def test_serve_without_a_patch_serves_the_starting_code(tmp_path: Path) -> None:
+    """An empty patch serves the starting tree unchanged."""
     result = run_repo_serve(
         _guest_payload(_chunks(tmp_path, {"serve.py": _SERVE}), "", {"question": "hi"}),
         {"optimization_id": "opt-1"},
@@ -134,6 +136,7 @@ def test_serve_without_a_patch_serves_the_starting_code(tmp_path: Path) -> None:
 
 
 def test_a_non_dict_return_is_wrapped_as_output(tmp_path: Path) -> None:
+    """A serve() that returns a non-dict value gets it under the ``output`` key."""
     chunks = _chunks(tmp_path, {"serve.py": "def serve(input):\n    return len(input)\n"})
 
     result = run_repo_serve(_guest_payload(chunks, "", {"a": 1, "b": 2}), {"optimization_id": "o"})
@@ -142,6 +145,7 @@ def test_a_non_dict_return_is_wrapped_as_output(tmp_path: Path) -> None:
 
 
 def test_a_failing_serve_reports_its_error(tmp_path: Path) -> None:
+    """An exception in serve() becomes a RuntimeError that names its type."""
     chunks = _chunks(tmp_path, {"serve.py": "def serve(input):\n    raise KeyError('missing')\n"})
 
     with pytest.raises(RuntimeError, match="serve\\(\\) failed: KeyError"):
@@ -149,6 +153,7 @@ def test_a_failing_serve_reports_its_error(tmp_path: Path) -> None:
 
 
 def test_a_missing_tree_is_refused() -> None:
+    """A payload with no staged repository tree is refused."""
     with pytest.raises(ValueError, match="did not reach the sandbox"):
         run_repo_serve({"patch": "", "inputs": {}}, {"optimization_id": "o"})
 
@@ -163,6 +168,13 @@ def test_a_missing_tree_is_refused() -> None:
     ],
 )
 def test_the_serve_contract_is_checked(tmp_path: Path, files: dict[str, str], message: str) -> None:
+    """Each broken serve.py contract gives its own error message.
+
+    Args:
+        tmp_path: Pytest temporary directory for the tree.
+        files: The tree's files, by name.
+        message: The expected error text.
+    """
     for name, text in files.items():
         (tmp_path / name).write_text(text)
 
@@ -186,6 +198,7 @@ def _job() -> dict[str, Any]:
 
 
 def test_serve_payload_is_secret_free_and_stable() -> None:
+    """The serve payload holds no secret or snapshot and is the same for the same input."""
     first = serve_payload(_job(), patch="diff", inputs={"q": 1}, optimization_id="opt-1")
     second = serve_payload(_job(), patch="diff", inputs={"q": 1}, optimization_id="opt-1")
 
@@ -199,6 +212,12 @@ def test_serve_payload_is_secret_free_and_stable() -> None:
 def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Staging fetches the tree with the owner's token and deletes the work folder after.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        monkeypatch: Pytest fixture.
+    """
     calls: dict[str, Any] = {}
 
     def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
@@ -286,6 +305,36 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
     assert served == set(_SERVING_SIDE)
     for path in _SCORING_SIDE:
         assert path not in served
+
+
+def test_serving_writes_the_drafts_into_the_tree_and_never_lists_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The served tree holds the run's drafts, and the guest payload names no draft, as one hides the scorer."""
+
+    def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
+        """Pack the serving side only, so the scoring side comes from the drafts."""
+        archive = _archive(workdir, _SERVING_SIDE)
+        return type("Snapshot", (), {"archive": archive, "commit": commit, "readonly_paths": ()})()
+
+    monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
+    job = _job()
+    job["payload"]["target"]["repo"]["draft_files"] = {**_SCORING_SIDE, "src/app.py": "DRAFTED = 1\n"}
+    payload = serve_payload(job, patch="", inputs={}, optimization_id="opt-1")
+
+    with staged_snapshot(payload, engine=None, owner=None) as staged:
+        archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
+        served = _members(archive)
+        with tarfile.open(archive, "r:gz") as packed:
+            member = next(item for item in packed.getmembers() if item.name.removeprefix("./") == "src/app.py")
+            app = packed.extractfile(member).read()  # type: ignore[union-attr]
+        guest = staged
+
+    assert app == b"DRAFTED = 1\n"
+    assert served == set(_SERVING_SIDE)
+    assert "draft_files" not in guest["repo"]
+    assert "eval/scorer.py" not in json.dumps(guest)
 
 
 def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], patch: str = "") -> Any:

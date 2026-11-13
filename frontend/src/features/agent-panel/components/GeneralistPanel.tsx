@@ -9,18 +9,21 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
+  ArrowsInLineVertical,
   Brain,
+  ChartBar,
   ChatText,
   ClockCounterClockwise,
   Copy,
   Cpu,
   DownloadSimple,
   Gear,
+  GitDiff,
+  GitFork,
   SidebarSimple,
   PencilSimple,
   Plus,
   MagicWand,
-  ShareNetwork,
   X,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
@@ -36,9 +39,10 @@ import { Composer } from "@/shared/ui/agent/composer";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
-import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
+import { ComposerModelMenu, type ModelMenuHandle } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import {
+  labelsOnlyValue,
   resolveSlashOption,
   slashEfforts,
   slashKeepsFast,
@@ -85,12 +89,20 @@ import { useLocale } from "@/shared/providers/locale-provider";
 import { useColorTheme } from "@/shared/providers/theme-provider";
 
 import { useConversationStore } from "../hooks/use-conversation-store";
+import { useFork } from "../hooks/use-fork";
+import { latestCompactionIndex } from "../lib/compaction";
+import { forkPoints } from "../lib/fork";
+import { sessionStats } from "../lib/session-stats";
+import { CompactionHold, CompactionMarker, CompactionStatus } from "./CompactionRow";
+import { SessionStatsCard, useSessionCard } from "./SessionStatsCard";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { getConversation, isHostedConversation, loadConversation } from "../lib/conversation-api";
-import { isLocalMode } from "@/shared/lib/runtime-env";
+import {
+  getConversation,
+  isHostedConversation,
+  loadConversation,
+} from "../lib/conversation-api";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
-import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
@@ -124,8 +136,8 @@ import {
   type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
-import { latestTurnEdits, messageEdits, turnState, type FileEdit } from "../lib/turn-edits";
-import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
+import { messageEdits } from "../lib/turn-edits";
+import { isWizardWrite, liveValues, mergedPatch, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
@@ -149,6 +161,7 @@ import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
 import { parseAgentNavigation, parseAppearancePatch } from "../lib/settings-actions";
+import { useTitleReloads } from "../lib/title-reload";
 
 const REQUEST_DATASET_TOOL = "request_user_dataset_datasets_request_upload_post";
 const REQUEST_LIBRARY_TOOL = "request_user_dataset_from_library";
@@ -257,19 +270,18 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
     const back = wizardCtx?.returnScreen;
-    const check = wizardCtx?.setupCheckIssue?.feedback;
     return {
       ...merged,
       wizard_screen: screen,
       ...(issue ? { screen_issue: issue } : {}),
       ...(back ? { return_screen: back } : {}),
-      ...(check ? { setup_check: check } : {}),
     };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
   // starting a new setup drops it from the setup. The server saves it like
-  // any other chat, so it can be shared, and the tab's copy finds it again.
+  // any other chat, the run it starts keeps it, and the tab's copy finds it
+  // again.
   // Each screen the wizard reaches gives the agent a turn of its own; an
   // agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
@@ -420,11 +432,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
       if (Object.keys(patch).length > 0) {
-        // Every write, not only the form's own tool: the coding agent's files
+        // Every write, not only the form's own tool: the workspace tools' files
         // need their before-state for the "Edited N files" card.
         wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
         wizardCtx.applyAgentPatch(patch);
-        liveStateRef.current = { ...liveStateRef.current, ...patch };
+        liveStateRef.current = { ...liveStateRef.current, ...mergedPatch(liveStateRef.current, patch) };
       }
       const nav = ev.status === "ok" ? parseScreenNav(ev.result) : null;
       if (nav) {
@@ -436,6 +448,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
 
   const store = useConversationStore({ enabled: open || panelDock !== null });
+  const reloadTitleLater = useTitleReloads(store.reloadTitle);
 
   const handleConversationMeta = React.useCallback(
     (id: string, title: string, ctx: SessionEventContext) => {
@@ -457,11 +470,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     trustMode,
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
+    onConversationTitle: store.applyTitle,
+    onConversationTitleMissed: reloadTitleLater,
   });
   // Declared before the screen effect: a setup chat's server load reads it.
   const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages, busy: false });
-  // The setup chat whose server copy loads now; it shows no Share until the load ends.
-  const [setupLoad, setSetupLoad] = React.useState<string | null>(null);
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
@@ -630,8 +643,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const openSetupChat = React.useCallback(
     async (saved: { id: string; messages: AgentMessage[] } | null, kickoff: string | null) => {
       const run = ++setupRunRef.current;
-      // An older run's load may still block Share; it no longer clears it.
-      setSetupLoad(null);
       if (!saved) {
         // The first turn saves the chat and gives it the server's id.
         keepSetupChat(newSetupChatId());
@@ -640,9 +651,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         openConversation(null, saved.messages);
       } else if (!activateConversation(saved.id)) {
         openConversation(saved.id, saved.messages);
-        setSetupLoad(saved.id);
         const load = await loadConversation(saved.id);
-        if (run === setupRunRef.current) setSetupLoad(null);
         // A load for a setup that closed or opened again must not touch the
         // new one. A restart to a new id during the load keeps the setup.
         if (run !== setupRunRef.current || setupChatRef.current === null) return;
@@ -711,7 +720,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // The chat that asked for the setup goes on in it, with its turn
         // still running; the screen's kickoff waits for that turn to end.
         setupRunRef.current++;
-        setSetupLoad(null);
         setupMessagesRef.current = handed.messages;
         keepSetupChat(handed.id);
         if (start.kickoff) setKickoffScreen(shownScreen);
@@ -758,14 +766,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const webChat =
     agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const localMenu = useLocalAgentMenuModels(agent.model, webChat);
+  // Not in activeBusy: that also locks the composer, which stays open during /compact.
+  // It counts as busy for the live chat, so a fork that returns during it does not
+  // switch away, and a 404 on a setup chat's load waits for the next turn to restart it.
+  const compacting = agent.compacting?.reason === "manual";
   React.useEffect(() => {
-    liveChatRef.current = { id: agentConversationId, messages: agentMessages, busy: activeBusy };
+    liveChatRef.current = {
+      id: agentConversationId,
+      messages: agentMessages,
+      busy: activeBusy || compacting,
+    };
     kickoffTurnRef.current = trackKickoffTurn(kickoffTurnRef.current, activeBusy);
     const id = setupChatRef.current;
     if (!id || agentConversationId !== id || activeBusy) return;
     setupMessagesRef.current = agentMessages;
     keepSetupChat(id);
-  }, [agentMessages, agentConversationId, activeBusy, keepSetupChat]);
+  }, [agentMessages, agentConversationId, activeBusy, compacting, keepSetupChat]);
   const agentErrorCode = agent.errorCode;
   React.useEffect(() => {
     if (setupChatGone(setupChatRef.current, agentConversationId, agentErrorCode)) {
@@ -800,7 +816,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       setKickoffScreen(null);
       return;
     }
-    if (!panelDock || activeBusy || backgroundBusy) return;
+    if (!panelDock || activeBusy || backgroundBusy || compacting) return;
     setKickoffScreen(null);
     kickedScreensRef.current.add(kickoffScreen);
     kickoffTurnRef.current = {
@@ -817,6 +833,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     panelDock,
     activeBusy,
     backgroundBusy,
+    compacting,
     sendToAgent,
   ]);
 
@@ -828,7 +845,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (!inSetup || !autoFeedback || autoFeedback.id === sentFeedbackRef.current) return;
     const action = autoFeedbackAction({
       docked: panelDock !== null,
-      busy: activeBusy || backgroundBusy,
+      busy: activeBusy || backgroundBusy || compacting,
       silent: cloned && !userSpoke,
     });
     if (action === "wait") return;
@@ -836,7 +853,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (action === "skip") return;
     autoTurnRef.current = { id: autoFeedback.id, started: false };
     sendToAgent(autoFeedback.text);
-  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, cloned, userSpoke, sendToAgent]);
+  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, compacting, cloned, userSpoke, sendToAgent]);
   // The wizard checks the code again only once the agent finished the turn
   // the failed check started, not on the end of some other turn.
   const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
@@ -859,56 +876,17 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   React.useEffect(() => {
     setAgentWritingFields?.(writingKey ? writingKey.split(",") : []);
   }, [writingKey, setAgentWritingFields]);
-  // The Changes pane's "Last turn" reads the newest turn that edited files.
   const writeBefore = wizardCtx?.writeBefore;
   const repoBase = wizardCtx?.repoBase;
-  const setLastTurnEdits = wizardCtx?.setLastTurnEdits;
-  React.useEffect(() => {
-    if (!inSetup || !setLastTurnEdits || !writeBefore) return;
-    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore, repoBase));
-  }, [inSetup, agent.messages, writeBefore, repoBase, setLastTurnEdits]);
-  // Undo and Reapply act on the newest turn that edited files, through the Changes pane.
-  const draftFiles = wizardCtx?.draftFiles ?? null;
-  const ideBusy = wizardCtx?.agentBusy ?? false;
-  const newestEdited = React.useMemo(() => {
-    if (!inSetup || !writeBefore) return null;
-    for (let i = agent.messages.length - 1; i >= 0; i--) {
-      const message = agent.messages[i]!;
-      if (messageEdits(message, writeBefore, repoBase).length > 0) return message;
-    }
-    return null;
-  }, [inSetup, agent.messages, writeBefore, repoBase]);
   const renderEditedFiles = React.useCallback(
     (message: AgentMessage) => {
       if (!writeBefore) return null;
       const edits = messageEdits(message, writeBefore, repoBase);
       if (edits.length === 0) return null;
-      const writeTurn = (turn: readonly FileEdit[], side: "before" | "after") => {
-        if (!draftFiles?.write(turn, side)) return;
-        toast(
-          msg(side === "before" ? "agent.edited_files.reverted" : "agent.edited_files.reapplied"),
-        );
-      };
-      return (
-        <EditedFilesCard
-          edits={edits}
-          onView={wizardCtx?.viewChanges ?? null}
-          undo={
-            draftFiles && message === newestEdited
-              ? {
-                  state: turnState(edits, draftFiles.text),
-                  disabled: ideBusy,
-                  onUndo: () => writeTurn(edits, "before"),
-                  onReapply: () => writeTurn(edits, "after"),
-                }
-              : null
-          }
-        />
-      );
+      return <EditedFilesCard edits={edits} onView={wizardCtx?.viewChanges ?? null} />;
     },
-    [writeBefore, repoBase, wizardCtx?.viewChanges, draftFiles, newestEdited, ideBusy],
+    [writeBefore, repoBase, wizardCtx?.viewChanges],
   );
-  const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
   // Deleting the conversation you're currently viewing must drop you back to a
   // clean slate — otherwise the panel keeps showing the just-deleted thread and
   // the next message would try to append to a row that no longer exists (404).
@@ -924,6 +902,14 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
 
   const [draft, setDraft] = React.useState("");
+  const {
+    open: sessionCardOpen,
+    show: showSessionCard,
+    close: closeSessionCard,
+  } = useSessionCard(chatView.key);
+  const { forking, handleFork } = useFork({ agent, store, liveChatRef, setDraft });
+  // A fork during a manual /compact would copy the rows without the summary.
+  const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const [attachOpen, setAttachOpen] = React.useState(false);
   // The composer's attach button opens the OS file picker; the popover only
   // appears once a dataset file was chosen, already parsed into the
@@ -1168,17 +1154,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
     return !(card && call.status !== "running");
   }, []);
-  // A folded turn hides every tool but the requests the user must answer.
-  const isPinnedCall = React.useCallback(
-    (call: AgentToolCall) => RICH_CARD_TOOLS.has(call.tool),
-    [],
-  );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
-
-  // A share link opens the chat in hosted Skynet, so only the hosted app
-  // shares chats; the Mac app has no share button (SKY-294).
-  const canShare = !isLocalMode();
-  const [shareOpen, setShareOpen] = React.useState(false);
 
   // Pi runs its built-in slash commands only in its own terminal, so the
   // composer runs the ones that fit a hosted chat on this panel's controls
@@ -1225,12 +1201,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         : undefined;
     return extra ? [extra, ...rows] : rows;
   }, [localModels, catalogModels, slashPick]);
-  const canShareChat =
-    canShare &&
-    !webChat &&
-    !!agent.conversationId &&
-    agent.conversationId !== setupLoad &&
-    agent.messages.length > 0;
+  // The /session context window: the catalog's for the chat's model; the
+  // stats fall back to the backend's default without it.
+  const contextWindow = React.useMemo(() => {
+    const effective =
+      slashPick ?? (localModels ? localModels[0] : catalogFallbackModel(slashModels))?.value;
+    return catalogAll?.find((m) => m.value === effective)?.max_input_tokens ?? null;
+  }, [slashPick, localModels, slashModels, catalogAll]);
   const slashCommands = React.useMemo(() => {
     const effective =
       slashPick ??
@@ -1250,6 +1227,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         argHint: "<model>",
         description: msg("agent.slash.model"),
         icon: Cpu,
+        picker: true,
         current: effective ?? undefined,
         options: slashMenuModels.map((m) => ({
           value: m.value,
@@ -1265,10 +1243,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       argHint: "<level>",
       description: msg("agent.slash.thinking"),
       icon: Brain,
+      picker: true,
       hidden: !efforts.length,
       current: shownEffort ?? "default",
       options: [
-          { value: "default", label: msg("agent.model_menu.effort_default") },
+        { value: "default", label: msg("agent.model_menu.effort_default") },
         ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
       ],
     });
@@ -1285,13 +1264,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         argHint: "<name>",
         description: msg("agent.slash.name"),
         icon: PencilSimple,
+        needsText: true,
         hidden: inSetup || !agent.conversationId,
-      },
-      {
-        name: "share",
-        description: msg("agent.slash.share"),
-        icon: ShareNetwork,
-        hidden: !canShareChat,
       },
       {
         name: "copy",
@@ -1306,29 +1280,72 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         hidden: !agent.messages.length,
       },
     );
+    // /fork is hidden while it cannot run, so skip the split on every streamed update.
+    const forks = canFork ? forkPoints(agent.messages) : [];
+    commands.push(
+      {
+        name: "compact",
+        argHint: "<instructions>",
+        description: msg("agent.slash.compact"),
+        icon: ArrowsInLineVertical,
+        // Shown while a reply streams, so a run tells the user to wait for it.
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "session",
+        description: msg("agent.slash.session"),
+        icon: ChartBar,
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "fork",
+        argHint: "<message>",
+        description: msg("agent.slash.fork"),
+        icon: GitFork,
+        hidden: !canFork || !forks.length,
+        labelsOnly: true,
+        options: forks.map((p) => {
+          // Cut by code points, so a surrogate pair is never split in half. Typed
+          // text longer than the cut matches no row; the user picks it from the menu.
+          const chars = Array.from(p.text);
+          const label = chars.length > 80 ? `${chars.slice(0, 80).join("")}…` : p.text;
+          return { value: String(p.index), label };
+        }),
+      },
+    );
     commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
     return commands;
   }, [
     slashPick,
     agent.reasoningEffort,
     agent.conversationId,
-    agent.messages.length,
+    agent.messages,
+    canFork,
     localModels,
     slashModels,
     slashMenuModels,
     inSetup,
-    canShareChat,
     locale,
   ]);
 
+  const modelMenuRef = React.useRef<ModelMenuHandle>(null);
   const runSlash = React.useCallback(
-    (command: SlashCommand, arg: string) => {
+    (command: SlashCommand, arg: string, fromMenu: boolean) => {
       switch (command.name) {
         case "model":
         case "thinking": {
+          if (!arg) {
+            // After the slash menu's keypress, so the menu keeps the focus it takes.
+            requestAnimationFrame(() =>
+              modelMenuRef.current?.open(command.name === "model" ? "models" : "effort"),
+            );
+            return;
+          }
           const value = resolveSlashOption(arg, command.options ?? []);
           if (!value) {
-            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
+            toast.error(
+              formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }),
+            );
             return;
           }
           if (command.name === "thinking") {
@@ -1362,9 +1379,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           }
           void store.rename(agent.conversationId, arg);
           return;
-        case "share":
-          setShareOpen(true);
-          return;
         case "copy": {
           const last = agent.messages.findLast((m) => m.role === "assistant" && m.content.trim());
           if (!last) return;
@@ -1388,12 +1402,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           setTimeout(() => URL.revokeObjectURL(url), 0);
           return;
         }
+        case "compact":
+          agent.compact(arg);
+          return;
+        case "session":
+          agent.syncCost();
+          showSessionCard();
+          return;
+        case "fork": {
+          const value = labelsOnlyValue(command, arg, fromMenu);
+          if (value === null) {
+            toast.error(
+              formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }),
+            );
+            return;
+          }
+          void handleFork(Number(value));
+          return;
+        }
         case "settings":
           setSettingsOpen(true);
           return;
       }
     },
-    [agent, slashModels, handleNewConversation, store, setSettingsOpen],
+    [
+      agent,
+      slashModels,
+      handleNewConversation,
+      handleFork,
+      store,
+      setSettingsOpen,
+      showSessionCard,
+    ],
   );
   const slash = React.useMemo(
     () => ({ commands: slashCommands, run: runSlash }),
@@ -1417,9 +1457,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 leading-tight">
-              <span className="text-[0.8125rem] font-medium">
-                {msg("auto.features.agent.panel.components.generalistpanel.3")}
-              </span>
               <Popover>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1450,6 +1487,27 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <CopyChatMenu messages={agent.messages} />
+          {wizardCtx?.changesToggle && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-pressed={wizardCtx.changesToggle.open}
+                  onClick={wizardCtx.changesToggle.toggle}
+                  className={cn(
+                    "text-muted-foreground hover:text-foreground",
+                    wizardCtx.changesToggle.open && "text-foreground",
+                  )}
+                  aria-label={msg("submit.agentic_ide.changes_tab")}
+                >
+                  <GitDiff className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{msg("submit.agentic_ide.changes_tab")}</TooltipContent>
+            </Tooltip>
+          )}
           {/* The setup's chat is the draft's own: no history or second chat. */}
           {!inSetup && (
           <Tooltip>
@@ -1484,32 +1542,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )}
             </TooltipContent>
           </Tooltip>
-          )}
-          {canShareChat && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={() => setShareOpen(true)}
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={msg("shared.agent.share_conversation")}
-                >
-                  <ShareNetwork className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {msg("shared.agent.share_conversation")}
-              </TooltipContent>
-            </Tooltip>
-          )}
-          {canShare && agent.conversationId && (
-            <ShareChatDialog
-              conversationId={agent.conversationId}
-              open={shareOpen}
-              onOpenChange={setShareOpen}
-            />
           )}
           {!inSetup && agent.messages.length > 0 && (
             <Tooltip>
@@ -1584,13 +1616,44 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               editAndResend={agent.editAndResend}
               renderToolCall={renderToolCall}
               isStepCall={isStepCall}
-              isPinnedCall={isPinnedCall}
               stepKind={stepKind}
               onRunCode={handleRunCode}
               renderAfterContent={inSetup ? renderEditedFiles : undefined}
               animatePairs
+              onFork={canFork ? (index) => void handleFork(index) : undefined}
+              renderCompaction={(entry) => <CompactionMarker entry={entry} />}
+              compacting={
+                agent.compacting?.reason === "threshold" ? (
+                  <CompactionHold
+                    history={agent.messages}
+                    summarizedTurns={agent.compacting.summarizedTurns}
+                    startedAt={agent.compacting.startedAt}
+                  />
+                ) : undefined
+              }
               trailing={({ isEditingAny }) => (
                 <>
+                  <CompactionStatus
+                    active={Boolean(agent.compacting)}
+                    latest={agent.messages[latestCompactionIndex(agent.messages)]?.compaction?.createdAt ?? null}
+                  />
+                  <AnimatePresence>
+                    {agent.compacting?.reason === "manual" && (
+                      <CompactionHold
+                        key="compacting"
+                        history={agent.messages}
+                        summarizedTurns={agent.compacting.summarizedTurns}
+                        startedAt={agent.compacting.startedAt}
+                        header
+                      />
+                    )}
+                  </AnimatePresence>
+                  {sessionCardOpen && (
+                    <SessionStatsCard
+                      stats={sessionStats(agent.messages, contextWindow)}
+                      onClose={closeSessionCard}
+                    />
+                  )}
                   {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
                     <QuestionChoices
                       options={choices}
@@ -1629,21 +1692,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </ChatSourceContext.Provider>
       </AgentThread>
 
-      {setupCheckIssue && !activeBusy && (
-        <div className="mx-3 mb-1.5 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs">
-          <span className="text-destructive">
-            {formatMsg("agent.setup_check.failed_chip", { count: setupCheckIssue.count })}
-          </span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 px-2 text-xs"
-            onClick={() => agent.send(setupCheckIssue.feedback)}
-          >
-            {msg("agent.setup_check.ask_fix")}
-          </Button>
-        </div>
-      )}
       <Composer
         value={draft}
         onChange={setDraft}
@@ -1682,6 +1730,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu
+            openRef={modelMenuRef}
             value={agent.model}
             onChange={agent.setModel}
             effort={agent.reasoningEffort}
@@ -1729,15 +1778,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                 />
               </PopoverContent>
             </Popover>
-            {/* The setup agent works without approvals, so the trust mode does not apply. */}
-            {!inSetup && <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />}
+            {/* Every agent screen, setup too: in Ask mode the setup agent's file writes wait for approval. */}
+            <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
           </>
         }
         sendAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.6")}
         stopAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.7")}
       />
 
-      <PresenceStrip active={streaming} hue={inSetup ? undefined : hue} />
+      <PresenceStrip active={streaming} hue={hue} />
     </div>
   );
 

@@ -30,7 +30,9 @@ type HardeningRoundStatus =
   | "approved"
   | "fixed"
   | "rejected"
-  | "stopped";
+  | "stopped"
+  /** Every attacker session failed; a retry runs the round again. */
+  | "failed";
 
 /** One attacker claim, with the judge's label and the user's verdict. */
 export interface HardeningExploit {

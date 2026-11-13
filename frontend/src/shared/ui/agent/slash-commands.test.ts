@@ -21,13 +21,16 @@ registerHooks({
 
 const {
   completeSlash,
-  enterRunsSlash,
+  labelsOnlyValue,
+  optionsMenu,
   parseSlashCommand,
   resolveSlashOption,
   slashEfforts,
   slashKeepsFast,
   slashMenu,
   slashModels,
+  slashPickAction,
+  slashTokenLength,
   stepSlashMenu,
 } = await import("./slash-commands.ts");
 
@@ -128,6 +131,73 @@ test("resolveSlashOption matches a value, a label, or one partial match", () => 
   assert.equal(resolveSlashOption("", efforts), null);
 });
 
+test("a labelsOnly menu and typed text match labels only", () => {
+  const options = [
+    { value: "2", label: "Fix the build" },
+    { value: "12", label: "Add 2 tests" },
+    { value: "20", label: "Rename the file" },
+  ];
+  const fork = {
+    name: "fork",
+    description: "Fork",
+    argHint: "<message>",
+    labelsOnly: true,
+    options,
+  };
+  const menu = (typed: string) => optionsMenu(fork, typed).items.map((o) => o.value);
+  // The values are hidden message indexes, so "2" lists only a label with a 2.
+  assert.deepEqual(menu("2"), ["12"]);
+  assert.deepEqual(menu("add 2 tests"), ["12"]);
+  // An exact label goes first.
+  assert.deepEqual(
+    optionsMenu({ ...fork, options: [...options, { value: "30", label: "Fix" }] }, "fix").items.map(
+      (o) => o.value,
+    ),
+    ["30", "2"],
+  );
+  // No label has a 9, so the menu stays open and empty instead of hiding.
+  assert.deepEqual(slashMenu("/fork 9", [fork])?.items, []);
+  // A typed value names no row: the user never sees the values.
+  assert.equal(resolveSlashOption("20", options, true), null);
+  assert.equal(resolveSlashOption("2", options, true), "12");
+  assert.equal(resolveSlashOption("20", options), "20");
+  assert.equal(resolveSlashOption("rename", options, true), "20");
+  // Without the flag, "0" would name option 20 by part of its value.
+  assert.equal(resolveSlashOption("0", options, true), null);
+  assert.equal(resolveSlashOption("0", options), "20");
+});
+
+test("labelsOnlyValue sends a picked row's value and matches typed text by label", () => {
+  const fork: SlashCommand = {
+    name: "fork",
+    description: "Fork",
+    labelsOnly: true,
+    options: [
+      { value: "5", label: "hi" },
+      { value: "1", label: "hi" },
+      { value: "3", label: "bye" },
+    ],
+  };
+  // Two rows share "hi", so only a pick names the older one.
+  assert.equal(labelsOnlyValue(fork, "1", true), "1");
+  assert.equal(labelsOnlyValue(fork, "bye", false), "3");
+  assert.equal(labelsOnlyValue(fork, "3", false), null);
+});
+
+test("typed text with runs of spaces still names a fork label, which collapses them", () => {
+  const fork: SlashCommand = {
+    name: "fork",
+    description: "Fork",
+    labelsOnly: true,
+    options: [{ value: "4", label: "fix the bug" }],
+  };
+  assert.equal(labelsOnlyValue(fork, "fix  the   bug", false), "4");
+  assert.deepEqual(
+    slashMenu("/fork fix  the bug", [fork])?.items.map((o) => o.value),
+    ["4"],
+  );
+});
+
 test("stepSlashMenu wraps at both ends", () => {
   assert.equal(stepSlashMenu(0, 3, "ArrowUp"), 2);
   assert.equal(stepSlashMenu(2, 3, "ArrowDown"), 0);
@@ -156,14 +226,39 @@ test("a hidden command stays out of the menu but still parses", () => {
   );
   assert.equal(slashMenu("/thinking ", hidden), null);
   assert.equal(slashMenu("/na", hidden), null);
+  // A hidden command only shows an error, so it gets no token mark.
+  assert.equal(slashTokenLength("/thinking high", hidden), 0);
+  assert.equal(slashTokenLength("/model", hidden), "/model".length);
 });
 
-test("Enter runs only a fully typed command name", () => {
-  const partial = slashMenu("/n", commands)!;
-  assert.equal(enterRunsSlash(partial, 0, "/n"), false);
-  assert.equal(enterRunsSlash(slashMenu("/new", commands)!, 0, "/new"), true);
-  assert.equal(enterRunsSlash(slashMenu("/NEW", commands)!, 0, "/NEW"), true);
-  assert.equal(enterRunsSlash(slashMenu("/thinking h", commands)!, 0, "/thinking h"), true);
+test("a menu pick opens options, runs, or fills the draft by the command", () => {
+  const all = [
+    ...commands,
+    { name: "pick", description: "Pick", options: models, picker: true },
+    { name: "label", description: "Label", argHint: "<text>", needsText: true },
+  ];
+  const menu = slashMenu("/", all)!;
+  const action = (name: string) =>
+    slashPickAction(
+      menu,
+      menu.items.findIndex((c) => "name" in c && c.name === name),
+    );
+  assert.equal(action("model"), "options");
+  assert.equal(action("new"), "run");
+  assert.equal(action("pick"), "run");
+  assert.equal(action("label"), "fill");
+  assert.equal(slashPickAction(optionsMenu(commands[0]!, ""), 0), "run");
+});
+
+test("optionsMenu filters by the typed text and puts the exact match first", () => {
+  const menu = optionsMenu(commands[1]!, "");
+  assert.equal(menu.items.length, 3);
+  const high = optionsMenu(commands[1]!, "HIGH");
+  assert.deepEqual(
+    high.items.map((o) => ("value" in o ? o.value : "")),
+    ["high"],
+  );
+  assert.equal(optionsMenu(commands[1]!, "zzz").items.length, 0);
 });
 
 const row = (value: string, extra: Record<string, unknown> = {}) =>
@@ -195,8 +290,27 @@ test("/thinking offers the model menu's levels, without none", () => {
 
 test("/model keeps fast mode by the model menu's rule", () => {
   // OpenRouter rows carry no fast flag; the menu's fast-mode check decides later.
-  assert.equal(slashKeepsFast("openrouter/openai/gpt-5.5", row("openrouter/openai/gpt-5.5"), false), true);
-  assert.equal(slashKeepsFast("openai/gpt-5.5", row("openai/gpt-5.5", { supports_fast: true }), false), false);
-  assert.equal(slashKeepsFast("claude-cli/opus", row("claude-cli/opus", { supports_fast: true }), true), true);
+  assert.equal(
+    slashKeepsFast("openrouter/openai/gpt-5.5", row("openrouter/openai/gpt-5.5"), false),
+    true,
+  );
+  assert.equal(
+    slashKeepsFast("openai/gpt-5.5", row("openai/gpt-5.5", { supports_fast: true }), false),
+    false,
+  );
+  assert.equal(
+    slashKeepsFast("claude-cli/opus", row("claude-cli/opus", { supports_fast: true }), true),
+    true,
+  );
   assert.equal(slashKeepsFast("claude-cli/sonnet", row("claude-cli/sonnet"), true), false);
+});
+
+test("slashTokenLength marks only a draft that runs as an offered command", () => {
+  assert.equal(slashTokenLength("/thinking high", commands), "/thinking".length);
+  assert.equal(slashTokenLength("/thinking ", commands), "/thinking".length);
+  assert.equal(slashTokenLength("/THINKING", commands), "/THINKING".length);
+  assert.equal(slashTokenLength("/thin", commands), 0);
+  assert.equal(slashTokenLength("/usr/bin is a path", commands), 0);
+  assert.equal(slashTokenLength(" /thinking", commands), 0);
+  assert.equal(slashTokenLength("", commands), 0);
 });

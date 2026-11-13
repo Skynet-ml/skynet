@@ -12,6 +12,7 @@ from core.constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_RO
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningNoise, HardeningSession
 from core.service_gateway.optimization.blackbox.classification import ClassificationError
 from core.service_gateway.optimization.blackbox.hardening import (
+    AttackFailedError,
     AttackResult,
     Candidate,
     ExploitNotFoundError,
@@ -903,3 +904,105 @@ def test_no_budget_skips_the_noise_check(tmp_path: Path) -> None:
     assert job.status == "done"
     assert job.noise == HardeningNoise(skipped=True, reason="No budget was left for the noise check.")
     assert "noise_check" not in runner.names()
+
+
+class StoppedRunner(FakeRunner):
+    """A runner whose sessions all stopped on the round's budget before any claim."""
+
+    def attack(self, **kwargs: Any) -> AttackResult:
+        """Return no claims, marked as stopped.
+
+        Args:
+            **kwargs: The attack arguments.
+
+        Returns:
+            The stopped result.
+        """
+        result = super().attack(**kwargs)
+        return AttackResult(candidates=[], cost_usd=result.cost_usd, briefs=result.briefs, stopped=True)
+
+
+def test_a_round_that_ran_out_of_money_before_any_claim_is_a_budget_stop(tmp_path: Path) -> None:
+    """No claims because the money ran out does not mean the metric is clean (SKY-682)."""
+    job = _run(_job(), StoppedRunner([[]]), tmp_path)
+
+    assert job.status == "budget_stop"
+    assert job.error is None
+    assert [r.status for r in job.rounds_detail] == ["stopped"]
+    assert job.reserved_usd == pytest.approx(job.spent_usd)
+
+
+class FailedSessionsRunner(FakeRunner):
+    """A runner whose attacker sessions all fail until ``fail`` is cleared."""
+
+    fail = True
+
+    def attack(self, **kwargs: Any) -> AttackResult:
+        """Fail like the real runner when every session failed.
+
+        Args:
+            **kwargs: The attack arguments.
+
+        Returns:
+            The scripted result once ``fail`` is False.
+
+        Raises:
+            AttackFailedError: While ``fail`` is True.
+        """
+        result = super().attack(**kwargs)
+        if self.fail:
+            sessions = [HardeningSession(index=1, brief="brief 1", status="failed")]
+            raise AttackFailedError(AttackResult(candidates=[], cost_usd=0.4, briefs=["brief 1"], sessions=sessions))
+        return result
+
+
+def test_a_round_where_every_session_failed_keeps_its_cost_and_sessions(tmp_path: Path) -> None:
+    """The failed round's spend counts and the user sees its sessions; retry runs that round again (SKY-682)."""
+    runner = FailedSessionsRunner([[]])
+    job = _run(_job(), runner, tmp_path)
+
+    assert job.status == "failed"
+    assert job.error == "Every attacker session failed."
+    assert job.spent_usd == pytest.approx(0.4)
+    assert job.round == 0
+    failed = job.rounds_detail[-1]
+    assert (failed.index, failed.status, failed.briefs) == (1, "failed", ["brief 1"])
+    assert [s.status for s in failed.sessions] == ["failed"]
+
+    runner.fail = False
+    job = _run(retry(job), runner, tmp_path)
+    assert job.status == "clean_stop"
+    assert [(r.index, r.status) for r in job.rounds_detail] == [(1, "clean")]
+    assert job.spent_usd == pytest.approx(0.4 + runner.attack_cost)
+
+
+_CLAIMED_TREE = [
+    {"type": "ScoreCompare", "exploit_score": 9.0, "base_score": 9.0},
+    {"type": "Steps", "items": [{"type": "ScoreCompare", "exploit_score": 7.0, "base_score": 7.0}, "Run it."]},
+    {"type": "Steps", "items": [{"type": "ScoreCompare", "exploit_score": 7.0, "base_score": 7.0}]},
+]
+
+
+def test_the_edge_case_shows_the_measured_scores(tmp_path: Path) -> None:
+    """Every ScoreCompare node, also inside Steps, shows the measured scores, not the session's own (SKY-682)."""
+    claim = Candidate(kind="case", patch_diff="p1", why_md="w1", edge_case=_CLAIMED_TREE)
+    job = _run(_job(), FakeRunner([[(claim, _EXPLOIT)]]), tmp_path)
+
+    measured = {"type": "ScoreCompare", "exploit_score": 1.0, "base_score": 0.8}
+    assert job.rounds_detail[0].exploits[0].edge_case == [
+        measured,
+        {"type": "Steps", "items": [measured, "Run it."]},
+        {"type": "Steps", "items": [measured]},
+    ]
+
+
+def test_the_edge_case_drops_score_nodes_without_a_measured_score(tmp_path: Path) -> None:
+    """Without measured scores the ScoreCompare nodes go, and so does a Steps node left empty (SKY-682)."""
+    claim = Candidate(kind="case", patch_diff="p1", why_md="w1", edge_case=_CLAIMED_TREE)
+    job = _run(_job(), BrokenScoreRunner([[(claim, _EXPLOIT)]]), tmp_path)
+
+    assert job.rounds_detail[0].exploits[0].edge_case == [{"type": "Steps", "items": ["Run it."]}]
+
+    only_scores = Candidate(kind="case", patch_diff="p2", why_md="w2", edge_case=_CLAIMED_TREE[:1])
+    job = _run(_job(), BrokenScoreRunner([[(only_scores, _EXPLOIT)]]), tmp_path)
+    assert job.rounds_detail[0].exploits[0].edge_case is None

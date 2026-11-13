@@ -1,14 +1,26 @@
 "use client";
 
+import * as React from "react";
 import { ArrowsClockwise, Info } from "@/shared/ui/icons";
 
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyGlyph, useCopyToClipboard } from "@/shared/ui/copy-button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
+import { ForkButton } from "./fork-button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/shared/ui/primitives/tooltip";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
-import { formatMessageTime } from "./message-time";
+import {
+  formatMessageAge,
+  formatMessageDate,
+  minuteClockNow,
+  subscribeMinuteClock,
+} from "./message-time";
 import { outputTokensPerSecond } from "./turn-stats";
 import type { TurnStats } from "./types";
 
@@ -21,6 +33,8 @@ interface MessageActionsProps {
   /** When the message was sent, in epoch ms; no time shows without it. */
   createdAt?: number;
   onRegenerate?: () => void;
+  /** Start a new chat from this message; no button without it. */
+  onFork?: () => void;
   className?: string;
 }
 
@@ -53,6 +67,7 @@ export function MessageActions({
   stats,
   createdAt,
   onRegenerate,
+  onFork,
   className,
 }: MessageActionsProps) {
   const { copied, copy } = useCopyToClipboard();
@@ -113,69 +128,118 @@ export function MessageActions({
   const regenerateLabel = msg("shared.agent.regenerate");
 
   return (
-    <div className={cn("flex items-center gap-1 -ms-1.5", className)}>
-      {text.length > 0 && (
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          autoTooltip={false}
-          onClick={() => void copy(text)}
-          aria-label={msg(copied ? "shared.agent.copied" : "shared.agent.copy")}
-        >
-          <CopyGlyph copied={copied} className="size-3.5" />
-        </Button>
-      )}
-      {onRegenerate && (
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          autoTooltip={false}
-          onClick={onRegenerate}
-          aria-label={regenerateLabel}
-        >
-          <ArrowsClockwise className="size-3.5" />
-        </Button>
-      )}
-      <span className="sr-only" role="status" aria-live="polite">
-        {copied ? msg("shared.agent.copied") : ""}
-      </span>
-      {rows.length > 0 && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon-xs" aria-label={msg("shared.agent.info.label")}>
-              <Info className="size-3.5" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent
-            side="top"
-            dir={getActiveDir()}
-            className="max-w-(--radix-tooltip-content-available-width) text-start text-pretty"
-          >
-            <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-1">
-              {rows.map((row) => (
-                <InfoRow key={row.label} label={row.label} value={row.value} />
-              ))}
-            </dl>
-          </TooltipContent>
-        </Tooltip>
-      )}
-      <MessageTime createdAt={createdAt} />
-    </div>
+    // The row brings its own provider, as an auto-tooltip Button does, so it
+    // works in any tree.
+    <TooltipProvider>
+      <div className={cn("flex items-center gap-1 -ms-1.5", className)}>
+        {/* Each tooltip opens only on a real hover; a hoverable one stayed open
+          while the pointer moved on to the next button. */}
+        {text.length > 0 && (
+          <Tooltip disableHoverableContent>
+            {/* The tooltip repeats the label, so screen readers must not read it twice. */}
+            <TooltipTrigger asChild aria-describedby={undefined}>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                autoTooltip={false}
+                onClick={() => void copy(text)}
+                aria-label={msg(copied ? "shared.agent.copied" : "shared.agent.copy")}
+              >
+                <CopyGlyph copied={copied} className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" dir={getActiveDir()}>
+              {msg(copied ? "shared.agent.copied" : "shared.agent.copy")}
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {onRegenerate && (
+          <Tooltip disableHoverableContent>
+            {/* The tooltip repeats the label, so screen readers must not read it twice. */}
+            <TooltipTrigger asChild aria-describedby={undefined}>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                autoTooltip={false}
+                onClick={onRegenerate}
+                aria-label={regenerateLabel}
+              >
+                <ArrowsClockwise className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" dir={getActiveDir()}>
+              {regenerateLabel}
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {onFork && <ForkButton onFork={onFork} />}
+        <span className="sr-only" role="status" aria-live="polite">
+          {copied ? msg("shared.agent.copied") : ""}
+        </span>
+        {rows.length > 0 && (
+          // The card is wide and sits over the row. A hoverable card kept it open
+          // while the pointer moved under it to the next button.
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon-xs" aria-label={msg("shared.agent.info.label")}>
+                <Info className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="top"
+              dir={getActiveDir()}
+              className="max-w-(--radix-tooltip-content-available-width) text-start text-pretty"
+            >
+              <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-1">
+                {rows.map((row) => (
+                  <InfoRow key={row.label} label={row.label} value={row.value} />
+                ))}
+              </dl>
+            </TooltipContent>
+          </Tooltip>
+        )}
+        <MessageTime createdAt={createdAt} />
+      </div>
+    </TooltipProvider>
   );
 }
 
-/** The muted send time beside a message's actions; nothing when unknown. */
+/** The secondary "5 minutes ago" beside a message's actions; nothing when unknown. */
 export function MessageTime({ createdAt }: { createdAt?: number }) {
-  const label = formatMessageTime(createdAt, getActiveIntlLocale());
+  const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, minuteClockNow);
+  const locale = getActiveIntlLocale();
+  const label = formatMessageAge(createdAt, now, locale);
   if (!label) return null;
+  const fullDate = formatMessageDate(createdAt as number, locale);
+  // Its own provider: the user bubble renders it outside the actions row.
   return (
-    // dir="auto" keeps "8:05 AM" in order inside an RTL page.
-    <time
-      dir="auto"
-      dateTime={new Date(createdAt as number).toISOString()}
-      className="px-1 text-[0.6875rem] tabular-nums text-muted-foreground"
-    >
-      {label}
-    </time>
+    <TooltipProvider>
+      <Tooltip disableHoverableContent>
+        {/* The hidden text gives screen readers the full date. An explicit undefined
+          replaces the aria-describedby that Radix sets while open, so it is not read twice. */}
+        <TooltipTrigger asChild aria-describedby={undefined}>
+          {/* dir="auto" keeps "Nov 7" and "5 minutes ago" in order inside an RTL page.
+            Focus opens the tooltip. */}
+          <time
+            dir="auto"
+            tabIndex={0}
+            dateTime={new Date(createdAt as number).toISOString()}
+            className="rounded-sm px-1 text-xs font-medium tabular-nums text-foreground/70 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            {label}
+            <span className="sr-only">, {fullDate}</span>
+          </time>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={6}
+          arrow={false}
+          dir={getActiveDir()}
+          className="max-w-none whitespace-nowrap px-2.5 py-1 text-sm leading-5 tabular-nums"
+        >
+          {fullDate}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

@@ -132,6 +132,11 @@ export interface WorkspaceSlice {
   metricModel: ModelConfig | null;
   /** Every other workspace file, relative path to text (helpers `run.py` imports). */
   files: Record<string, string>;
+  /**
+   * The commit the setup agent read when it wrote the first draft file. The
+   * run refuses the drafts when it would start from another commit.
+   */
+  filesBase?: string;
   metricTimeoutSeconds: number;
 }
 
@@ -303,6 +308,49 @@ export function withRepository(repo: RepoDraft, repository: string): RepoDraft {
   if (repo.repository === repository) return repo;
   // Another repository is not the one Skynet created, so the flag must not carry over.
   return { ...repo, repository, branch: "", commit: "", ...(repo.createdBySkynet ? { createdBySkynet: false } : {}) };
+}
+
+/** Whether two drafts name the same repository on the same provider. */
+function sameRepository(before: RepoDraft, after: RepoDraft): boolean {
+  return (
+    before.repository.trim() === after.repository.trim() &&
+    (before.provider ?? "github") === (after.provider ?? "github")
+  );
+}
+
+/** Whether a repository change moves the tree that the draft files were written against. */
+function repoBaseMoved(before: RepoDraft, after: RepoDraft): boolean {
+  return (
+    !sameRepository(before, after) ||
+    before.branch.trim() !== after.branch.trim() ||
+    before.commit.trim() !== after.commit.trim()
+  );
+}
+
+/** Whether a pinned commit names the commit the draft files were read at; a short SHA counts. */
+function pinsDraftBase(commit: string, filesBase: string | undefined): boolean {
+  const sha = commit.trim().toLowerCase();
+  return !!filesBase && sha.length >= 7 && filesBase.toLowerCase().startsWith(sha);
+}
+
+/**
+ * The state with one task patch merged. Another repository, branch or commit
+ * drops the draft files: each is a whole-file copy of the old tree, and on
+ * another tree it would undo that tree's changes. Pinning the commit the
+ * drafts were read at keeps them. The repository card sends a typed branch
+ * or commit only on blur, so typing does not drop them.
+ */
+export function withTaskPatch(state: WizardV2State, patch: Partial<TaskSlice>): WizardV2State {
+  const task = { ...state.task, ...patch };
+  const before = state.task.repo;
+  const after = task.repo;
+  if (
+    Object.keys(state.workspace.files).length === 0 ||
+    !repoBaseMoved(before, after) ||
+    (sameRepository(before, after) && pinsDraftBase(after.commit, state.workspace.filesBase))
+  )
+    return { ...state, task };
+  return { ...state, task, workspace: { ...state.workspace, files: {}, filesBase: undefined } };
 }
 
 /** Whether the models a repository run needs are set. */
@@ -493,7 +541,8 @@ export function deleteWorkspaceFile(
   if (FIXED_FILES.includes(path) || !(path in ws.files)) return null;
   const files = { ...ws.files };
   delete files[path];
-  return { files };
+  // With no draft left, the next draft records the commit it is read at.
+  return Object.keys(files).length === 0 ? { files, filesBase: undefined } : { files };
 }
 
 export interface WizardV2Context {

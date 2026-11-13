@@ -57,8 +57,7 @@ void describe("RunOverview", () => {
     assert.match(html, /aria-selected="true"[^>]*>.*?submit\.v2\.overview\.tab\.general</);
     assert.match(html, /Classify support tickets/);
     assert.match(html, /acme\/agent @ main/);
-    // The server checks the setup at submit, so the overview says so on every tab.
-    assert.match(html, /submit\.v2\.repo\.check_on_submit/);
+    assert.doesNotMatch(html, /submit\.v2\.repo\.check_on_submit/);
     // Each tab carries its icon, as the old summary step did.
     assert.equal(html.match(/role="tab"[^>]*>\s*<svg/g)?.length, 3);
     // General restores the old summary's optimizer, visibility and billing rows.
@@ -227,8 +226,22 @@ const { hardeningDefaultModel } = await import("../../hooks/use-hardening");
 const { subscriptionAgentModel } = await import("@/features/local-runtime");
 
 type Exploit = HardeningJob["rounds_detail"][number]["exploits"][number];
-function claim(id: string, label: Exploit["label"], user_verdict: Exploit["user_verdict"]): Exploit {
-  return { id, kind: "case", label, confidence: 0.9, reason: "", unsure: false, patch_diff: "", why_md: "", user_verdict };
+function claim(
+  id: string,
+  label: Exploit["label"],
+  user_verdict: Exploit["user_verdict"],
+): Exploit {
+  return {
+    id,
+    kind: "case",
+    label,
+    confidence: 0.9,
+    reason: "",
+    unsure: false,
+    patch_diff: "",
+    why_md: "",
+    user_verdict,
+  };
 }
 
 void describe("hardeningSurvived", () => {
@@ -244,7 +257,12 @@ void describe("hardeningSurvived", () => {
   void it("skips confirmed exploits whose round never got its fix at a budget stop", () => {
     const job = hardeningJob("budget_stop");
     job.rounds_detail = [
-      { index: 1, status: "waiting_fix", exploits: [claim("a", "exploit", "confirmed"), claim("b", "exploit", "confirmed")], fix: null },
+      {
+        index: 1,
+        status: "waiting_fix",
+        exploits: [claim("a", "exploit", "confirmed"), claim("b", "exploit", "confirmed")],
+        fix: null,
+      },
     ];
     assert.equal(hardeningSurvived(job), 0);
     const html = render(initialWizardV2State("expert"), job);
@@ -257,29 +275,46 @@ void describe("hardeningSurvived", () => {
       {
         index: 1,
         status: "fixed",
-        exploits: [claim("a", "exploit", "confirmed"), claim("b", "exploit", "rejected"), claim("c", "valid", null)],
+        exploits: [
+          claim("a", "exploit", "confirmed"),
+          claim("b", "exploit", "rejected"),
+          claim("c", "valid", null),
+        ],
         fix: null,
       },
       {
         index: 2,
         status: "waiting_fix",
-        exploits: [claim("d", "exploit", "confirmed"), claim("e", "valid", "rejected"), claim("f", "exploit", null)],
+        exploits: [
+          claim("d", "exploit", "confirmed"),
+          claim("e", "valid", "rejected"),
+          claim("f", "exploit", null),
+        ],
         fix: null,
       },
     ];
     // a (fixed), b (rejected), c (valid), e (rejected); d waits on a fix, f is an unreviewed exploit.
     assert.equal(hardeningSurvived(job), 4);
-    assert.match(render(initialWizardV2State("expert"), job), /submit\.v2\.overview\.hardening_survived/);
+    assert.match(
+      render(initialWizardV2State("expert"), job),
+      /submit\.v2\.overview\.hardening_survived/,
+    );
   });
 });
 
 void describe("hardeningDefaultModel", () => {
   const base = { provider: "p", supports_thinking: false, supports_vision: false, available: true };
   const first: CatalogModel = { ...base, value: "first", label: "First" };
-  const models: CatalogModel[] = [first, { ...base, value: "catalog-default", label: "Default", is_default: true }];
+  const models: CatalogModel[] = [
+    first,
+    { ...base, value: "catalog-default", label: "Default", is_default: true },
+  ];
 
   void it("keeps a managed or untagged reflection model", () => {
-    assert.equal(hardeningDefaultModel({ name: "m1", token_source: "managed" }, models, false, null), "m1");
+    assert.equal(
+      hardeningDefaultModel({ name: "m1", token_source: "managed" }, models, false, null),
+      "m1",
+    );
     assert.equal(hardeningDefaultModel({ name: "m2" }, models, false, null), "m2");
   });
 
@@ -287,16 +322,31 @@ void describe("hardeningDefaultModel", () => {
     const want = subscriptionAgentModel("sonnet", "claude", null);
     assert.ok(want);
     assert.equal(
-      hardeningDefaultModel({ name: "sonnet", token_source: "subscription", cli_provider: "claude" }, models, true, null),
+      hardeningDefaultModel(
+        { name: "sonnet", token_source: "subscription", cli_provider: "claude" },
+        models,
+        true,
+        null,
+      ),
       want,
     );
   });
 
   void it("falls back to the catalog default for BYOK, hosted subscription, empty or missing picks", () => {
-    const sub = { name: "sonnet", token_source: "subscription" as const, cli_provider: "claude" as const };
-    assert.equal(hardeningDefaultModel({ name: "k", token_source: "byok" }, models, false, null), "catalog-default");
+    const sub = {
+      name: "sonnet",
+      token_source: "subscription" as const,
+      cli_provider: "claude" as const,
+    };
+    assert.equal(
+      hardeningDefaultModel({ name: "k", token_source: "byok" }, models, false, null),
+      "catalog-default",
+    );
     assert.equal(hardeningDefaultModel(sub, models, false, null), "catalog-default");
-    assert.equal(hardeningDefaultModel({ name: "  ", token_source: "managed" }, models, false, null), "catalog-default");
+    assert.equal(
+      hardeningDefaultModel({ name: "  ", token_source: "managed" }, models, false, null),
+      "catalog-default",
+    );
     assert.equal(hardeningDefaultModel(null, models, false, null), "catalog-default");
   });
 

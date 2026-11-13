@@ -72,6 +72,55 @@ void describe("Composer", () => {
     assert.ok(!html.includes("opacity-0"), html);
   });
 
+  void it("shows Stop and no Send while an agent chat answers with an empty draft", () => {
+    const store = new SteerQueue();
+    store.setBusy(true);
+    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    assert.ok(!html.includes('type="submit"'), html);
+    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+  });
+
+  void it("shows Stop while an agent chat answers with only line comments waiting", () => {
+    const store = new SteerQueue();
+    store.setBusy(true);
+    const html = render({
+      streaming: true,
+      onStop: () => {},
+      sendsEmpty: true,
+      midTurn: midTurnOf(() => store, store.getSnapshot()),
+    });
+    assert.ok(!html.includes('type="submit"'), html);
+    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+  });
+
+  void it("shows Send and no Stop while an agent chat answers with a draft", () => {
+    const store = new SteerQueue();
+    store.setBusy(true);
+    const html = render({
+      value: "next",
+      streaming: true,
+      onStop: () => {},
+      midTurn: midTurnOf(() => store, store.getSnapshot()),
+    });
+    assert.ok(html.includes('type="submit"'), html);
+    assert.ok(!html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+    // Send queues the draft here, so its name says so.
+    assert.ok(html.includes(`aria-label="${msg("agent.composer.queue")}"`), html);
+  });
+
+  void it("keeps Stop for a streaming composer without mid-turn input", () => {
+    const html = render({ streaming: true, onStop: () => {} });
+    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+  });
+
+  void it("shows Steer on a queued row while an answer that cannot take steers runs", () => {
+    const store = new SteerQueue();
+    store.setBusy(true);
+    store.enqueue("next");
+    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    assert.ok(html.includes(`aria-label="${msg("agent.pending.steer")}"`), html);
+  });
+
   void it("shows the reason an over-limit paused head cannot send", () => {
     const store = new SteerQueue();
     store.setMaxLength(3);
