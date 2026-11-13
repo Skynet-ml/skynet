@@ -30,7 +30,7 @@ interface PendingMessagesProps {
   streaming: boolean;
   queued: readonly PendingMessage[];
   steering: readonly PendingMessage[];
-  /** Queued follow-ups can be steered now: into the running turn, or sent from a paused idle queue. */
+  /** Queued follow-ups can be steered now: sent at once, interrupting a running turn. */
   canPromote: boolean;
   onPromote: (id: string) => void;
   onEdit: (id: string) => void;
