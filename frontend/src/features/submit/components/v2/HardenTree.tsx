@@ -93,11 +93,14 @@ export function reviewOrder(exploits: HardeningExploit[]): HardeningExploit[] {
 }
 
 /**
- * The card one step from the focused card in the review list, wrapping at
- * both ends. With no focused card, the first step goes to the first or last.
+ * The next card that waits for a verdict, one step from the focused card in
+ * the review order, wrapping at both ends. The focused card can be one that
+ * needs no verdict (the drawer's J and K reach every card); the step then
+ * starts from its place in the order. With no focused card, the first step
+ * goes to the first or last waiting card.
  *
  * Args:
- *   pending: The cards that wait for a verdict, in review order.
+ *   order: Every card of the round, in review order.
  *   focusCard: The id of the focused card, or null.
  *   step: 1 for the next card, -1 for the previous card.
  *
@@ -105,14 +108,18 @@ export function reviewOrder(exploits: HardeningExploit[]): HardeningExploit[] {
  *   The card to focus, or null when no card waits.
  */
 export function cardStep(
-  pending: HardeningExploit[],
+  order: HardeningExploit[],
   focusCard: string | null,
   step: 1 | -1,
 ): HardeningExploit | null {
-  if (!pending.length) return null;
-  const at = pending.findIndex((e) => e.id === focusCard);
-  const from = at < 0 ? (step === 1 ? -1 : 0) : at;
-  return pending[(from + step + pending.length) % pending.length] ?? null;
+  const n = order.length;
+  const at = order.findIndex((e) => e.id === focusCard);
+  const from = at < 0 ? (step === 1 ? -1 : n) : at;
+  for (let i = 1; i <= n; i++) {
+    const card = order[(((from + step * i) % n) + n) % n];
+    if (card && needsReview(card)) return card;
+  }
+  return null;
 }
 
 // Text fields, menus and dialogs own their keys: J is typeahead in a menu,

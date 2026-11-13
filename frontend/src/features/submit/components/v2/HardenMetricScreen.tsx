@@ -336,10 +336,10 @@ function ModelSelect({
   );
 }
 
-/** The claims that wait for a verdict, in the order the drawer jumps through them. */
-function pendingCards(round: TreeRound): HardeningExploit[] {
+/** Every claim of the round, by session and then in each drawer's review order. */
+function cardOrder(round: TreeRound): HardeningExploit[] {
   const bySession = new Map<number, HardeningExploit[]>();
-  for (const e of round.exploits.filter(needsReview)) {
+  for (const e of round.exploits) {
     const at = e.session ?? LEAD_NODE;
     bySession.set(at, [...(bySession.get(at) ?? []), e]);
   }
@@ -471,12 +471,13 @@ export function HardenMetricScreen({
   const round = rounds.find((r) => r.index === picked) ?? latest;
   const lastRound = job.rounds_detail.at(-1) ?? null;
   const reviewing = job.status === "waiting_review" && round.index === lastRound?.index;
-  const pending = reviewing ? pendingCards(round) : [];
+  const order = reviewing ? cardOrder(round) : [];
+  const pending = order.filter(needsReview);
   const redrafting =
     job.status === "running" && lastRound !== null && lastRound.fix === null && (lastRound.fix_notes?.length ?? 0) > 0;
 
   const moveCard = (step: 1 | -1) => {
-    const card = cardStep(pending, focusCard, step);
+    const card = cardStep(order, focusCard, step);
     if (!card) return;
     setFocusCard(card.id);
     setNode(card.session ?? LEAD_NODE);

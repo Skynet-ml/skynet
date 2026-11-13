@@ -159,6 +159,22 @@ void describe("cardStep", () => {
 
   void it("returns null with no card to review", () => {
     assert.equal(cardStep([], null, 1), null);
+    assert.equal(cardStep([exploit({ id: "v", label: "valid" })], "v", 1), null);
+  });
+
+  void it("steps to the next waiting card from a card that needs no verdict", () => {
+    const order = [
+      exploit({ id: "a", session: 1 }),
+      exploit({ id: "x", session: 1, user_verdict: "confirmed" }),
+      exploit({ id: "b", session: 2 }),
+      exploit({ id: "v", session: 3, label: "valid" }),
+    ];
+    assert.equal(cardStep(order, "x", 1)!.id, "b");
+    assert.equal(cardStep(order, "x", -1)!.id, "a");
+    assert.equal(cardStep(order, "v", 1)!.id, "a");
+    assert.equal(cardStep(order, "a", -1)!.id, "b");
+    // One waiting card: the step wraps back to it.
+    assert.equal(cardStep(order.slice(0, 2), "a", 1)!.id, "a");
   });
 });
 
@@ -436,19 +452,19 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
     }
   });
 
-  void it("steps the drawer's to-review button from the card that J moved to", async () => {
+  // Mounts the page in review with these claims, one session per claim's session.
+  const reviewPage = async (exploits: HardeningExploit[]) => {
     const dom = new JSDOM("<div id='root'></div>", { url: "https://app.test" });
     Object.assign(globalThis, {
       window: dom.window,
       document: dom.window.document,
       IS_REACT_ACT_ENVIRONMENT: true,
     });
-    // c1 waits for a verdict; c2 is a valid case and needs none.
-    const exploits = [exploit({ id: "c1", session: 1 }), exploit({ id: "c2", session: 1, label: "valid" })];
+    const sessions = [...new Set(exploits.map((e) => e.session ?? 1))].map((i) => session(i, "done"));
     const j = job({
       status: "waiting_review",
       round: 1,
-      rounds_detail: [{ index: 1, status: "waiting_review", exploits, fix: null, briefs: ["Brief"], sessions: [session(1, "done")] }],
+      rounds_detail: [{ index: 1, status: "waiting_review", exploits, fix: null, briefs: ["Brief"], sessions }],
     });
     const hardening = {
       job: j,
@@ -470,15 +486,26 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
           (b.closest('[role="dialog"]') !== null) === inDrawer,
       )!;
     const click = async (button: HTMLButtonElement) => React.act(async () => button.click());
-    try {
-      await React.act(async () =>
-        root.render(<HardenMetricScreen active guided={false} onBack={() => {}} hardening={hardening} reflectionModel={null} />),
-      );
-      await click(toReview(false));
-      assert.equal(active(), "c1");
-      await React.act(async () => {
+    const pressJ = async () =>
+      React.act(async () => {
         document.body.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "j", code: "KeyJ", bubbles: true }));
       });
+    await React.act(async () =>
+      root.render(<HardenMetricScreen active guided={false} onBack={() => {}} hardening={hardening} reflectionModel={null} />),
+    );
+    return { root, active, toReview, click, pressJ };
+  };
+
+  void it("steps the drawer's to-review button from the card that J moved to", async () => {
+    // c1 waits for a verdict; c2 is a valid case and needs none.
+    const { root, active, toReview, click, pressJ } = await reviewPage([
+      exploit({ id: "c1", session: 1 }),
+      exploit({ id: "c2", session: 1, label: "valid" }),
+    ]);
+    try {
+      await click(toReview(false));
+      assert.equal(active(), "c1");
+      await pressJ();
       assert.equal(active(), "c2");
       // The page steps from c2, where the user is, so it lands on the one pending card.
       await click(toReview(true));
@@ -487,6 +514,31 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
       (document.activeElement as HTMLElement).blur();
       await click(toReview(true));
       assert.equal(active(), "c1");
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  });
+
+  void it("steps to-review across sessions from a card that needs no verdict, and wraps", async () => {
+    const { root, active, toReview, click, pressJ } = await reviewPage([
+      exploit({ id: "a", session: 1 }),
+      exploit({ id: "x", session: 1, user_verdict: "confirmed" }),
+      exploit({ id: "b", session: 2 }),
+      exploit({ id: "c", session: 3 }),
+    ]);
+    try {
+      await click(toReview(false));
+      assert.equal(active(), "a");
+      await pressJ();
+      assert.equal(active(), "x");
+      // From x, the next waiting card is b in the next session, not a again.
+      await click(toReview(true));
+      assert.equal(active(), "b");
+      await click(toReview(true));
+      assert.equal(active(), "c");
+      // From the last card, it wraps to the first.
+      await click(toReview(true));
+      assert.equal(active(), "a");
     } finally {
       await React.act(async () => root.unmount());
     }
