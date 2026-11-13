@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -105,7 +106,8 @@ def test_a_tree_of_every_catalog_node_is_valid() -> None:
 
     assert tree is not None
     assert [node["type"] for node in tree] == [node["type"] for node in _FULL_TREE]
-    assert tree[0]["exploit_label"] == "Exploit"
+    # No label keys: the page shows its own translated labels.
+    assert tree[0] == {"type": "ScoreCompare", "exploit_score": 1.0, "base_score": 0.5}
     assert "title" not in tree[5]
     assert hs.validate_edge_case(json.dumps(_FULL_TREE)) == tree
 
@@ -127,6 +129,16 @@ def test_a_tree_of_every_catalog_node_is_valid() -> None:
         [{"type": "Steps", "items": [{"type": "Steps", "items": [{"type": "Text", "text": "too deep"}]}]}],
         [{"type": "Text", "text": "x"}] * 31,
         [{"type": "Steps", "items": [{"type": "Text", "text": "x"}] * 15}] * 2,
+        [{"type": "Steps", "items": [{"type": "Table", "columns": ["a", "b"], "rows": [["only one"]]}]}],
+        [{"type": "Table", "columns": [str(i) for i in range(21)], "rows": []}],
+        [{"type": "Table", "columns": ["x" * 121], "rows": []}],
+        [{"type": "Table", "columns": ["a"], "rows": [["x" * 4_001]]}],
+        [{"type": "Steps", "items": ["x"] * 51}],
+        [{"type": "Steps", "items": [{"type": "Steps", "items": ["x" * 4_001]}]}],
+        [{"type": "Chart", "kind": "bar", "points": [{"x": "x" * 121, "y": 1}]}],
+        [{"type": "ScoreCompare", "exploit_score": float("nan"), "base_score": 0.1}],
+        [{"type": "Chart", "kind": "line", "points": [{"x": 1, "y": float("inf")}]}],
+        [{"type": "Table", "columns": ["a"], "rows": [[float("-inf")]]}],
     ],
     ids=[
         "none",
@@ -143,11 +155,49 @@ def test_a_tree_of_every_catalog_node_is_valid() -> None:
         "depth-3",
         "31-nodes",
         "32-nodes-nested",
+        "row-width-nested",
+        "21-columns",
+        "long-column",
+        "long-cell",
+        "51-steps",
+        "long-inner-step",
+        "long-chart-x",
+        "nan-score",
+        "inf-chart-y",
+        "inf-cell",
     ],
 )
 def test_an_invalid_tree_is_dropped(raw: Any) -> None:
     """A tree outside the catalog schema or its limits gives None, so the card falls back to the patch."""
     assert hs.validate_edge_case(raw) is None
+
+
+def test_score_compare_labels_are_kept_when_given() -> None:
+    """A session's own labels round-trip unchanged."""
+    node = {
+        "type": "ScoreCompare",
+        "exploit_score": 1.0,
+        "base_score": 0.5,
+        "exploit_label": "Hack",
+        "base_label": "Real",
+    }
+
+    assert hs.validate_edge_case([node]) == [node]
+
+
+def test_a_short_or_long_table_row_is_dropped_at_both_depths() -> None:
+    """Every row has exactly one cell for each column, as the frontend parser needs (SKY-683)."""
+    for row in (["a"], ["a", "b", "c"]):
+        table = {"type": "Table", "columns": ["x", "y"], "rows": [["a", "b"], row]}
+        assert hs.validate_edge_case([table]) is None
+        assert hs.validate_edge_case([{"type": "Steps", "items": [table]}]) is None
+    good = {"type": "Table", "columns": ["x", "y"], "rows": [["a", 1.0]]}
+    assert hs.validate_edge_case([{"type": "Steps", "items": [good]}]) is not None
+
+
+def test_fifty_steps_are_valid() -> None:
+    """A Steps node may hold 50 items, the frontend parser's limit (SKY-683)."""
+    assert hs.validate_edge_case([{"type": "Steps", "items": ["x"] * 50}]) is not None
 
 
 def test_parse_message_reads_text_and_tool_calls() -> None:
@@ -165,10 +215,13 @@ def test_parse_message_reads_text_and_tool_calls() -> None:
         }
     )
 
-    assert hs.parse_message(body) == {
-        "text": "hi",
-        "tool_calls": [{"id": "call_0", "function": {"name": "run_metric", "arguments": "{}"}}],
-    }
+    first, second = hs.parse_message(body), hs.parse_message(body)
+
+    assert first["text"] == "hi"
+    assert [c["function"] for c in first["tool_calls"]] == [{"name": "run_metric", "arguments": "{}"}]
+    # A missing id gets a new one each step, so two steps never share an id.
+    assert first["tool_calls"][0]["id"].startswith("call_")
+    assert first["tool_calls"][0]["id"] != second["tool_calls"][0]["id"]
 
 
 def test_read_briefs_keeps_k_briefs_and_fills_the_rest() -> None:
@@ -306,6 +359,74 @@ def test_a_stopped_round_asks_the_model_nothing() -> None:
 
     assert session.record.transcript == []
     assert session.candidate is None
+
+
+def test_a_round_that_stops_during_a_step_does_not_run_the_metric() -> None:
+    """The stop check also runs before a paid metric run, not only before a model call."""
+    checks = iter([False, True])
+    scored: list[str] = []
+    session = hs.AttackSession(
+        HardeningSession(index=1, brief="b"),
+        prompt="p",
+        ask=lambda messages, tools, limit: _call(hs.RUN_METRIC_TOOL, patch_diff="+x"),
+        score=lambda patch: scored.append(patch) or {"score": 1.0},
+        model="m",
+        should_stop=lambda: next(checks, True),
+        publish=lambda: None,
+        lock=threading.Lock(),
+    )
+
+    _run(session)
+
+    assert scored == []
+    assert session._messages[-1]["content"].startswith("The round has no budget left")
+
+
+def test_live_writes_commit_in_snapshot_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow live write never lets an older snapshot land after a newer one."""
+    monkeypatch.setattr(hs, "LIVE_WRITE_SECONDS", 0.0)
+    written: list[int] = []
+
+    def slow(sessions: list[HardeningSession]) -> None:
+        """Record how far the sessions got, slowly.
+
+        Args:
+            sessions: The live sessions.
+        """
+        progress = sum(len(s.transcript) + (s.status != "running") for s in sessions)
+        time.sleep(0.005)
+        written.append(progress)
+
+    replies = [_call(hs.READ_SCORE_TOOL), _call(hs.READ_SCORE_TOOL), _PATCH]
+    queues: dict[str, list[dict[str, Any]]] = {}
+
+    def ask(messages: list[dict[str, Any]], tools: Any, limit: int) -> dict[str, Any]:
+        """Give each session the same three steps.
+
+        Args:
+            messages: The session's messages.
+            tools: The tools.
+            limit: The answer limit.
+
+        Returns:
+            The session's next reply.
+        """
+        return queues.setdefault(messages[0]["content"], list(replies)).pop(0)
+
+    hs.run_sessions(
+        ["one", "two", "three"],
+        prompt_for=lambda brief: brief,
+        ask=ask,
+        scorer_for=lambda index: lambda patch: {"score": 1.0},
+        model="m",
+        pi_binary="pi",
+        should_stop=lambda: False,
+        on_live=slow,
+        run_turn=_fake_turn,
+    )
+
+    assert written == sorted(written)
+    assert written[-1] == 3 * 3 + 3
 
 
 def test_run_sessions_runs_each_brief_in_parallel_and_one_failure_fails_only_its_session() -> None:

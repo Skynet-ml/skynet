@@ -59,7 +59,7 @@ from ..models.hardening import (
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
 from ..service_gateway.optimization.blackbox.hardening import AttackResult, Candidate, HardeningRunner
 from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
-from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
+from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer, _for_proposer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
@@ -96,6 +96,8 @@ _last_sweep = 0.0
 # cost more than a round may spend, so the rest of the tree is cut.
 MAX_TREE_CHARS = 120_000
 MAX_FILE_CHARS = 20_000
+# A monorepo can list many thousands of files; the lead agent needs only an outline.
+MAX_LEAD_FILES = 500
 FIX_ANSWER_TOKENS = 8_000
 # Three base scores show a noisy metric's spread for the price of three runs.
 NOISE_REPEATS = 3
@@ -382,7 +384,7 @@ class RepoHardeningRunner(HardeningRunner):
         pi_binary: str = "pi",
         intent: str = "",
         metric_uses_model: bool = False,
-        on_live: Callable[[list[HardeningSession]], None] = lambda _sessions: None,
+        on_live: Callable[[list[HardeningSession]], object] = lambda _sessions: None,
     ) -> None:
         """Create the runner.
 
@@ -490,7 +492,10 @@ class RepoHardeningRunner(HardeningRunner):
                 body["tools"] = tools
                 body["parallel_tool_calls"] = False
             response = self.gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
-            return parse_message(response.body) if 200 <= response.status < 300 else {"text": "", "tool_calls": []}
+            if 200 <= response.status < 300:
+                return parse_message(response.body)
+            logger.warning("Hardening job %s: an attacker step got HTTP %s.", self.job.id, response.status)
+            return {"text": "", "tool_calls": []}
 
         def scorer_for(index: int) -> Callable[[str], dict[str, Any]]:
             """Return one session's scorer, which opens its own box on first use.
@@ -513,14 +518,17 @@ class RepoHardeningRunner(HardeningRunner):
                     patch: The solution as a git patch.
 
                 Returns:
-                    The scorer's ``{"score", **side_info}``.
+                    What a run's proposer gets: the score, the feedback
+                    without hidden metric frames, and the named scores.
                 """
                 if not box:
                     fixes = tuple(self.fixes)
                     box.append(self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}"))
                     with lanes_lock:
                         lanes.append(box[0])
-                return box[0].score(patch)
+                # The same filter as RepoScorer.dispatch: a metric traceback
+                # must not name hidden metric files to the attacker (SKY-353).
+                return _for_proposer(box[0].score(patch), box[0]._root, box[0]._hidden)
 
             return score
 
@@ -705,8 +713,11 @@ class RepoHardeningRunner(HardeningRunner):
             **(limits if limits is not None else _judge_limits(route["model"])),
         }
         response = self.gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
-        text = _reply_text(response.body) if 200 <= response.status < 300 else None
-        return text, self.meter.spent_usd - before
+        if 200 <= response.status < 300:
+            return _reply_text(response.body), self.meter.spent_usd - before
+        # Callers fall back (the lead agent to fixed briefs), so the log is the only trace.
+        logger.warning("Hardening job %s: the %s call got HTTP %s.", self.job.id, role, response.status)
+        return None, self.meter.spent_usd - before
 
     def _route(self, model: str, role: str) -> dict[str, str]:
         """Register a parent-only route for one model, once.
@@ -818,7 +829,7 @@ def open_hardening_runner(
     lost: threading.Event | None = None,
     exhausted: threading.Event | None = None,
     on_commit: Callable[[str | None], None] = lambda _commit: None,
-    on_live: Callable[[list[HardeningSession]], None] = lambda _sessions: None,
+    on_live: Callable[[list[HardeningSession]], object] = lambda _sessions: None,
 ) -> Iterator[RepoHardeningRunner]:
     """Open the gateway, sandbox broker and runner for one pass, and close them on exit.
 
@@ -1080,7 +1091,8 @@ def store_hardening_result(
             BudgetService(engine=engine), result, row.username, operation_id
         ):
             operation_id = None
-        row.job = result.model_dump(mode="json")
+        # Live sessions are only for a running round; the stored round keeps the final ones.
+        row.job = result.model_copy(update={"live_sessions": []}).model_dump(mode="json")
         row.status = result.status
         row.updated_at = datetime.now(UTC)
         row.claimed_by = None
@@ -1441,10 +1453,14 @@ def _tree_files(archive: Path) -> list[str]:
         archive: The stripped tree.
 
     Returns:
-        The regular files' paths.
+        The regular files' paths, at most :data:`MAX_LEAD_FILES`, then a
+        "(cut)" line when the tree has more.
     """
     with tarfile.open(archive) as tree:
-        return [member.name for member in tree if member.isreg()]
+        files = [member.name for member in tree if member.isreg()]
+    if len(files) <= MAX_LEAD_FILES:
+        return files
+    return [*files[:MAX_LEAD_FILES], f"(cut: {len(files) - MAX_LEAD_FILES} more files)"]
 
 
 def _diff_only(reply: str) -> str:

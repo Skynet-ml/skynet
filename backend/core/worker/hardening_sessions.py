@@ -21,6 +21,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -58,6 +59,10 @@ EDGE_CASE_MAX_NODES = 30
 EDGE_CASE_MAX_DEPTH = 2
 EDGE_CASE_MAX_ROWS = 50
 EDGE_CASE_MAX_POINTS = 200
+EDGE_CASE_MAX_COLUMNS = 20
+# The frontend parser (SKY-683) allows 50 steps and 100,000 characters for
+# each string; the caps here are the same or lower, so every stored tree renders.
+EDGE_CASE_MAX_STEPS = 50
 _TEXT = 4_000
 _DIFF = 20_000
 _LABEL = 120
@@ -69,17 +74,19 @@ Score = Callable[[str], dict[str, Any]]
 # The edge-case catalog nodes (SKY-682). ``frontend/src/shared/types/hardening.ts``
 # mirrors them for the renderer (SKY-683); keep the two in step. Each node names
 # its component in ``type``; only ``Steps`` holds other nodes, which makes the
-# depth limit of 2.
+# depth limit of 2. NaN and infinity are refused: JSON responses and JSONB
+# columns cannot hold them.
 class _Node(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class ScoreCompareNode(_Node):
     type: Literal["ScoreCompare"]
     exploit_score: float
     base_score: float
-    exploit_label: str = Field(default="Exploit", max_length=_LABEL)
-    base_label: str = Field(default="Base", max_length=_LABEL)
+    # Optional, so a tree without labels stores none and the page shows its own translated ones.
+    exploit_label: str | None = Field(default=None, max_length=_LABEL)
+    base_label: str | None = Field(default=None, max_length=_LABEL)
 
 
 class DiffNode(_Node):
@@ -96,8 +103,10 @@ class IOPairNode(_Node):
 
 class TableNode(_Node):
     type: Literal["Table"]
-    columns: list[str] = Field(min_length=1, max_length=20)
-    rows: list[list[str | float | bool | None]] = Field(max_length=EDGE_CASE_MAX_ROWS)
+    columns: list[Annotated[str, Field(max_length=_LABEL)]] = Field(min_length=1, max_length=EDGE_CASE_MAX_COLUMNS)
+    rows: list[list[Annotated[str, Field(max_length=_TEXT)] | float | bool | None]] = Field(
+        max_length=EDGE_CASE_MAX_ROWS
+    )
 
 
 class CalloutNode(_Node):
@@ -107,7 +116,7 @@ class CalloutNode(_Node):
 
 
 class ChartPoint(_Node):
-    x: str | float
+    x: Annotated[str, Field(max_length=_LABEL)] | float
     y: float
 
 
@@ -126,7 +135,7 @@ class TextNode(_Node):
 # A Steps node inside a Steps node is at depth 2, so it holds only text.
 class InnerStepsNode(_Node):
     type: Literal["Steps"]
-    items: list[str] = Field(min_length=1, max_length=EDGE_CASE_MAX_NODES)
+    items: list[Annotated[str, Field(max_length=_TEXT)]] = Field(min_length=1, max_length=EDGE_CASE_MAX_STEPS)
 
 
 _LeafNode = Annotated[
@@ -138,7 +147,7 @@ _LeafNode = Annotated[
 class StepsNode(_Node):
     type: Literal["Steps"]
     items: list[Annotated[str, Field(max_length=_TEXT)] | _LeafNode] = Field(
-        min_length=1, max_length=EDGE_CASE_MAX_NODES
+        min_length=1, max_length=EDGE_CASE_MAX_STEPS
     )
 
 
@@ -175,7 +184,8 @@ def validate_edge_case(raw: Any) -> list[dict[str, Any]] | None:
     )
     if count > EDGE_CASE_MAX_NODES:
         return None
-    for node in nodes:
+    inner = [item for node in nodes if isinstance(node, StepsNode) for item in node.items]
+    for node in [*nodes, *inner]:
         if isinstance(node, TableNode) and any(len(row) != len(node.columns) for row in node.rows):
             return None
     return _TREE.dump_python(nodes, mode="json", exclude_none=True)
@@ -194,12 +204,14 @@ def parse_message(body: bytes | str) -> dict[str, Any]:
     message = choice.get("message") or {}
     text = message.get("content")
     calls = []
-    for index, call in enumerate(message.get("tool_calls") or []):
+    for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
         if isinstance(function.get("name"), str):
             calls.append(
                 {
-                    "id": str(call.get("id") or f"call_{index}"),
+                    # A random id: an index would repeat across steps, and the
+                    # transcript finds each call by its id.
+                    "id": str(call.get("id") or f"call_{uuid.uuid4().hex[:16]}"),
                     "function": {"name": function["name"], "arguments": function.get("arguments") or "{}"},
                 }
             )
@@ -296,12 +308,13 @@ def session_prompt(*, brief: str, round_index: int, tree: str, known: list[str],
         'Call write_patch with: kind ("case" for one concrete input, "method" for a general trick), '
         "patch_diff, why_md (why it games the metric), and edge_case: a JSON list of at most "
         f"{EDGE_CASE_MAX_NODES} nodes that shows the exploit. Node types: "
-        '{"type":"ScoreCompare","exploit_score","base_score","exploit_label","base_label"}, '
+        '{"type":"ScoreCompare","exploit_score","base_score"} (optional "exploit_label" and "base_label"), '
         '{"type":"Diff","diff"}, {"type":"IOPair","input","expected","got"}, '
-        '{"type":"Table","columns":[...],"rows":[[...]]} (at most 50 rows), '
+        '{"type":"Table","columns":[...],"rows":[[...]]} (at most 20 columns and 50 rows; '
+        "each row has one cell for each column), "
         '{"type":"Callout","tone":"info"|"warn"|"danger","text"}, '
         '{"type":"Chart","kind":"bar"|"line","points":[{"x","y"}],"title"} (at most 200 points), '
-        '{"type":"Text","text"}, {"type":"Steps","items":[text or node]}.\n'
+        '{"type":"Text","text"}, {"type":"Steps","items":[text or node]} (at most 50 items).\n'
         f"Call one tool at a time. You have {MAX_SESSION_STEPS} steps.\n\n"
         f"The repository files:\n{tree}"
     )
@@ -501,6 +514,8 @@ class AttackSession:
             return ToolOutcome("run_metric needs a patch_diff.", is_error=True), {}
         if self._runs >= MAX_METRIC_RUNS:
             return ToolOutcome("No metric runs are left. Call write_patch now.", is_error=True), {}
+        if self._should_stop():
+            return ToolOutcome("The round has no budget left. Call write_patch now.", is_error=True), {}
         self._runs += 1
         try:
             result = await asyncio.to_thread(self._score, patch)
@@ -559,7 +574,7 @@ def run_sessions(
     model: str,
     pi_binary: str,
     should_stop: Callable[[], bool],
-    on_live: Callable[[list[HardeningSession]], None],
+    on_live: Callable[[list[HardeningSession]], object],
     run_turn: Callable[..., Any] = run_pi_turn,
 ) -> RoundOutcome:
     """Run one Pi session for each brief, all in parallel, and collect their claims.
@@ -582,6 +597,8 @@ def run_sessions(
         The claims and the session records.
     """
     lock = threading.Lock()
+    # Held across the snapshot and its write, so an older snapshot never commits after a newer one.
+    write_lock = threading.Lock()
     records = [HardeningSession(index=i + 1, brief=brief) for i, brief in enumerate(briefs)]
     last_write = [0.0]
 
@@ -591,15 +608,16 @@ def run_sessions(
         Args:
             force: Send now, whatever the time since the last write.
         """
-        with lock:
-            now = time.monotonic()
-            if not force and now - last_write[0] < LIVE_WRITE_SECONDS:
-                return
-            last_write[0] = now
-            snapshot = [record.model_copy(deep=True) for record in records]
-        # A live write only informs the page; the round goes on without it.
-        with contextlib.suppress(Exception):
-            on_live(snapshot)
+        with write_lock:
+            with lock:
+                now = time.monotonic()
+                if not force and now - last_write[0] < LIVE_WRITE_SECONDS:
+                    return
+                last_write[0] = now
+                snapshot = [record.model_copy(deep=True) for record in records]
+            # A live write only informs the page; the round goes on without it.
+            with contextlib.suppress(Exception):
+                on_live(snapshot)
 
     def run_one(record: HardeningSession) -> AttackSession:
         """Run one session to its end.
