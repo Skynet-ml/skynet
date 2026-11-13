@@ -6,8 +6,34 @@
 /** Rendered lines a collapsed message keeps visible (Codex shows 18). */
 export const COLLAPSED_LINES = 18;
 
-/** Height animation length for Show more / Show less, in milliseconds. */
-export const COLLAPSE_ANIMATION_MS = 220;
+/** The shortest height animation for Show more / Show less, in milliseconds. */
+export const COLLAPSE_ANIMATION_MS = 240;
+
+/** The longest height animation, so a very long message still opens quickly. */
+const COLLAPSE_ANIMATION_MAX_MS = 480;
+
+/**
+ * A soft ease-out (expo-like): fast at the start, a long gentle settle. A
+ * plain `ease-out` stops abruptly at the end of a tall height change.
+ */
+export const COLLAPSE_EASING = "cubic-bezier(0.16, 1, 0.3, 1)";
+
+/**
+ * The height animation length for a given height change.
+ *
+ * One fixed length makes a tall message move much faster than a short one;
+ * a length that grows with the distance keeps the speed even.
+ *
+ * Args:
+ *   distancePx: The height change between collapsed and expanded.
+ *
+ * Returns:
+ *   Milliseconds, from {@link COLLAPSE_ANIMATION_MS} to 480.
+ */
+export function collapseDurationMs(distancePx: number): number {
+  const ms = COLLAPSE_ANIMATION_MS + Math.max(0, distancePx) * 0.3;
+  return Math.round(Math.min(COLLAPSE_ANIMATION_MAX_MS, ms));
+}
 
 // Sub-pixel rounding can leave scrollHeight a fraction above an exact fit, which
 // would put a toggle under a message that has nothing hidden.

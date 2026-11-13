@@ -91,6 +91,7 @@ export function StepRow({
         <Warning
           className={cn("size-3.5 shrink-0", ERROR_TONE)}
           aria-hidden={!errorLabel}
+          role={errorLabel ? "img" : undefined}
           aria-label={errorLabel}
         />
       ) : (
@@ -105,7 +106,10 @@ export function StepRow({
         <CaretRight
           className={cn(
             "size-3 shrink-0 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
-            open ? "rotate-90" : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100",
+            // Keyboard focus and touch screens have no hover, so they show it too.
+            open
+              ? "rotate-90"
+              : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
           )}
           aria-hidden
         />
