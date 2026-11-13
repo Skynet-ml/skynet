@@ -516,6 +516,7 @@ class RepoHardeningRunner(HardeningRunner):
                 The session's scorer.
             """
             box: list[RepoScorer] = []
+            failed: list[Exception] = []
 
             def score(patch: str) -> dict[str, Any]:
                 """Score one patch on the trusted metric with the approved fixes.
@@ -526,10 +527,23 @@ class RepoHardeningRunner(HardeningRunner):
                 Returns:
                     What a run's proposer gets: the score, the feedback
                     without hidden metric frames, and the named scores.
+
+                Raises:
+                    Exception: The box's first open failure, again on each
+                        later call.
                 """
+                if failed:
+                    # A new box would reuse the failed box's operation key, so its
+                    # paid setup would run under the old hold (as RepoWorkspace.prepare).
+                    raise failed[0]
                 if not box:
                     fixes = tuple(self.fixes)
-                    box.append(self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}"))
+                    try:
+                        opened = self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}")
+                    except Exception as exc:
+                        failed.append(exc)
+                        raise
+                    box.append(opened)
                     with lanes_lock:
                         lanes.append(box[0])
                 # The same filter as RepoScorer.dispatch: a metric traceback
@@ -956,7 +970,13 @@ def open_hardening_runner(
                 run_entry=constraints.run_entry if constraints is not None else None,
                 run_timeout=constraints.run_timeout if constraints is not None else 60.0,
             )
-            scorer.prepare()
+            try:
+                scorer.prepare()
+            except BaseException:
+                # The caller never gets this scorer, so only this close frees its snapshots and folder.
+                with contextlib.suppress(Exception):
+                    scorer.close()
+                raise
             return scorer
 
         runner = RepoHardeningRunner(

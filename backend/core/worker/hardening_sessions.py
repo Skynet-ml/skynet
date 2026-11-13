@@ -42,6 +42,9 @@ WRITE_PATCH_TOOL = "write_patch"
 MAX_SESSION_STEPS = 10
 MAX_METRIC_RUNS = 4
 MAX_FEEDBACK_CHARS = 4_000
+# The job row keeps every session's transcript and the page reads it on each
+# poll, so a stored step keeps at most this much text; the model keeps it all.
+MAX_TRANSCRIPT_CHARS = 4_000
 MAX_BRIEF_CHARS = 2_000
 MAX_REASON_CHARS = 200
 SESSION_ANSWER_TOKENS = 8_000
@@ -450,7 +453,12 @@ class AttackSession:
         if calls:
             assistant["tool_calls"] = [{"id": c["id"], "type": "function", "function": c["function"]} for c in calls]
         self._messages.append(assistant)
-        entry: dict[str, Any] = {"role": "assistant", "content": text, "model": self._model, "createdAt": _now_ms()}
+        entry: dict[str, Any] = {
+            "role": "assistant",
+            "content": text[:MAX_TRANSCRIPT_CHARS],
+            "model": self._model,
+            "createdAt": _now_ms(),
+        }
         if calls:
             entry["toolCalls"] = [
                 {
@@ -549,6 +557,7 @@ class AttackSession:
             or not isinstance(patch, str)
             or not patch.strip()
             or not isinstance(why, str)
+            or not why.strip()
         ):
             return ToolOutcome("write_patch needs kind (case or method), patch_diff and why_md.", is_error=True)
         edge_case = validate_edge_case(args.get("edge_case"))
@@ -610,9 +619,14 @@ def run_sessions(
         Args:
             force: Send now, whatever the time since the last write.
         """
+        with lock:
+            # A skipped write must not wait for another thread's write.
+            if not force and time.monotonic() - last_write[0] < LIVE_WRITE_SECONDS:
+                return
         with write_lock:
             with lock:
                 now = time.monotonic()
+                # Checked again: another thread may have written while this one waited.
                 if not force and now - last_write[0] < LIVE_WRITE_SECONDS:
                     return
                 last_write[0] = now

@@ -1283,8 +1283,12 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             keys.append(spec.operation_key)
             services.append(tuple(service.name for service in spec.services))
 
+    closed: list[str] = []
+
     class FakeScorer:
-        """A scorer that prepares nothing."""
+        """A scorer that prepares nothing, or fails to prepare when ``fail`` is set."""
+
+        fail = False
 
         def __init__(self, workspace: FakeWorkspace, *args: Any, **kwargs: Any) -> None:
             """Keep nothing.
@@ -1296,7 +1300,13 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             """
 
         def prepare(self) -> None:
-            """Prepare nothing."""
+            """Prepare nothing.
+
+            Raises:
+                RuntimeError: When ``fail`` is set.
+            """
+            if self.fail:
+                raise RuntimeError("setup broke")
 
         def score(self, patch: str) -> dict[str, float]:
             """Return a fixed score.
@@ -1310,7 +1320,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             return {"score": 1.0}
 
         def close(self) -> None:
-            """Close nothing."""
+            """Record the close."""
+            closed.append("box")
 
     class FakeVault:
         """Returns one saved OpenAI connection."""
@@ -1364,13 +1375,20 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         lane_archive = runner._fixed_archive(())
         runner.open_scorer(lane_archive, (), lane="r1s1")
         runner.open_scorer(lane_archive, (), lane="r1s2")
+        # A box whose setup fails is closed here, since the caller never gets it.
+        FakeScorer.fail = True
+        closed.clear()
+        with pytest.raises(RuntimeError, match="setup broke"):
+            runner.open_scorer(lane_archive, (), lane="r1s3")
+        assert closed == ["box"]
+        FakeScorer.fail = False
 
     assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
     assert job.scorer is not None
     assert "api_key" not in job.scorer["model"]["extra"]
-    assert len(set(keys)) == 5
+    assert len(set(keys)) == 6
     assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
-    assert services == [("db",)] * 5
+    assert services == [("db",)] * 6
 
     with (
         pytest.raises(ValueError, match="vault"),
@@ -1729,6 +1747,58 @@ def test_a_refused_model_call_is_logged_without_its_body(
     assert text is None
     assert "attacker call got HTTP 429" in caplog.text
     assert "sk-123" not in caplog.text
+
+
+def test_a_session_box_that_failed_to_open_is_not_opened_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second box would reuse the failed box's operation key, so later runs get the first error (SKY-682)."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with one brief, and the session with two metric runs then a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        if len(body["messages"]) < 5:
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    opens: list[str] = []
+
+    def broken_open(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Fail like a box whose paid setup failed.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        opens.append(lane)
+        raise RuntimeError("setup broke")
+
+    runner.open_scorer = broken_open
+    try:
+        result = runner.attack(
+            round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=1
+        )
+    finally:
+        runner.close()
+
+    assert opens == ["r1s1"]
+    runs = [c for e in result.sessions[0].transcript for c in e.get("toolCalls") or [] if c["tool"] == "run_metric"]
+    assert [c["status"] for c in runs] == ["error", "error"]
+    assert len(result.candidates) == 1
 
 
 def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
