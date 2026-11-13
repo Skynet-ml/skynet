@@ -308,7 +308,7 @@ class RepoConstraints:
     # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
     compose_file: str | None = None
     compose_services: tuple[ComposeService, ...] = ()
-    # [outcome]: the run stops at the target (SKY-691); the worker's gate still refuses minimums (SKY-692).
+    # [outcome]: the search stops at the target (SKY-691); the run end judges the target and each minimum (SKY-692).
     outcome_target: float | None = None
     outcome_minimums: Mapping[str, float] = field(default_factory=dict)
 
