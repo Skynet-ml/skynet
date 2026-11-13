@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "実際の出力",
   "submit.v2.edge_case.chart": "{n, plural, other {# 個の点があるグラフ}}",
   "submit.v2.edge_case.empty": "この検出結果には詳細がありません。",
+  "submit.v2.edge_case.bool.true": "はい",
+  "submit.v2.edge_case.bool.false": "いいえ",
   "submit.v2.overview.tabs_label": "実行の概要",
   "submit.v2.overview.tab.general": "一般",
   "submit.v2.overview.tab.data": "データ",

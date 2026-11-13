@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "Erhalten",
   "submit.v2.edge_case.chart": "{n, plural, one {Diagramm mit 1 Punkt} other {Diagramm mit # Punkten}}",
   "submit.v2.edge_case.empty": "Zu diesem Befund gibt es keine Details.",
+  "submit.v2.edge_case.bool.true": "Ja",
+  "submit.v2.edge_case.bool.false": "Nein",
   "submit.v2.overview.tabs_label": "Zusammenfassung des Laufs",
   "submit.v2.overview.tab.general": "Allgemein",
   "submit.v2.overview.tab.data": "Daten",

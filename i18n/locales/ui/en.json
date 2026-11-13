@@ -3775,6 +3775,8 @@
   "submit.v2.edge_case.io.got": "Got",
   "submit.v2.edge_case.chart": "{n, plural, one {Chart with 1 point} other {Chart with # points}}",
   "submit.v2.edge_case.empty": "This finding has no details.",
+  "submit.v2.edge_case.bool.true": "Yes",
+  "submit.v2.edge_case.bool.false": "No",
   "submit.v2.overview.tabs_label": "Run summary",
   "submit.v2.overview.tab.general": "General",
   "submit.v2.overview.tab.data": "Data",

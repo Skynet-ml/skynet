@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "Obtido",
   "submit.v2.edge_case.chart": "{n, plural, one {Gráfico com # ponto} other {Gráfico com # pontos}}",
   "submit.v2.edge_case.empty": "Esta descoberta não tem detalhes.",
+  "submit.v2.edge_case.bool.true": "Sim",
+  "submit.v2.edge_case.bool.false": "Não",
   "submit.v2.overview.tabs_label": "Resumo da execução",
   "submit.v2.overview.tab.general": "Geral",
   "submit.v2.overview.tab.data": "Dados",

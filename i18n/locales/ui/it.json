@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "Ottenuto",
   "submit.v2.edge_case.chart": "{n, plural, one {Grafico con 1 punto} other {Grafico con # punti}}",
   "submit.v2.edge_case.empty": "Questo risultato non ha dettagli.",
+  "submit.v2.edge_case.bool.true": "Sì",
+  "submit.v2.edge_case.bool.false": "No",
   "submit.v2.overview.tabs_label": "Riepilogo dell'esecuzione",
   "submit.v2.overview.tab.general": "Generale",
   "submit.v2.overview.tab.data": "Dati",

@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "실제값",
   "submit.v2.edge_case.chart": "{n, plural, other {점 #개가 있는 차트}}",
   "submit.v2.edge_case.empty": "이 발견 사항에는 세부 정보가 없습니다.",
+  "submit.v2.edge_case.bool.true": "예",
+  "submit.v2.edge_case.bool.false": "아니요",
   "submit.v2.overview.tabs_label": "실행 요약",
   "submit.v2.overview.tab.general": "일반",
   "submit.v2.overview.tab.data": "데이터",

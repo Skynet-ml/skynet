@@ -64,12 +64,13 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /bg-chart-5\/15[^>]*>-return score</);
   });
 
-  void it("draws IOPair as three LTR blocks", () => {
+  void it("draws IOPair as three blocks that follow their own text direction", () => {
     const html = render([{ type: "IOPair", input: "2+2", expected: "4", got: "five" }]);
     for (const key of ["input", "expected", "got"]) {
       assert.match(html, new RegExp(`submit\\.v2\\.edge_case\\.io\\.${key}`));
     }
-    assert.equal(html.match(/<pre dir="ltr"/g)?.length, 3);
+    assert.equal(html.match(/<pre dir="auto"/g)?.length, 3);
+    assert.doesNotMatch(html, /<pre dir="ltr"/);
     assert.match(html, />five</);
   });
 
@@ -82,25 +83,31 @@ void describe("EdgeCaseView", () => {
           ["a", 1],
           ["b", 0.5],
           [null, true],
+          ["line one\nline two", false],
+          ["d", 1234567.89],
         ],
       },
     ]);
     assert.equal(html.match(/<th /g)?.length, 2);
-    assert.equal(html.match(/<tr /g)?.length, 4);
+    assert.equal(html.match(/<tr /g)?.length, 6);
     // Each cell isolates its own text, so the th and td keep the table's direction.
     assert.doesNotMatch(html, /<t[hd] [^>]*dir=/);
     assert.match(html, /<th [^>]*><bdi dir="auto">case<\/bdi><\/th>/);
     assert.match(html, /<td [^>]*><bdi dir="auto">a<\/bdi><\/td>/);
-    // A long cell wraps instead of being cut to one line with an ellipsis.
-    for (const td of html.match(/<td [^>]*>/g) ?? []) {
-      assert.match(td, /whitespace-normal/);
-      assert.match(td, /break-words/);
-      assert.doesNotMatch(td, /whitespace-nowrap|text-ellipsis/);
+    // A long or multi-line cell wraps instead of being cut to one line with an ellipsis.
+    for (const cell of html.match(/<t[hd] [^>]*>/g) ?? []) {
+      assert.match(cell, /whitespace-pre-wrap/);
+      assert.match(cell, /break-words/);
+      assert.doesNotMatch(cell, /whitespace-nowrap|text-ellipsis/);
     }
+    assert.match(html, /<bdi dir="auto">line one\nline two<\/bdi>/);
+    // Numbers use the locale format; booleans use translated words; null is an empty cell.
     assert.match(html, /<bdi dir="ltr">0\.5<\/bdi>/);
-    // React drops booleans and null, so the view writes them as text.
-    assert.match(html, /<bdi dir="ltr">true<\/bdi>/);
-    assert.match(html, /<bdi dir="ltr"><\/bdi>/);
+    assert.match(html, /<bdi dir="ltr">1,234,567\.89<\/bdi>/);
+    assert.match(html, /<bdi>submit\.v2\.edge_case\.bool\.true<\/bdi>/);
+    assert.match(html, /<bdi>submit\.v2\.edge_case\.bool\.false<\/bdi>/);
+    assert.doesNotMatch(html, />(true|false)</);
+    assert.match(html, /<td [^>]*><\/td>/);
   });
 
   void it("draws every Callout tone as a note, never as a live region", () => {
@@ -122,15 +129,46 @@ void describe("EdgeCaseView", () => {
     }
   });
 
+  void it("lists the chart values for screen readers", () => {
+    const html = render([
+      {
+        type: "Chart",
+        kind: "bar",
+        points: [
+          { x: "base", y: 0.4 },
+          { x: "exploit", y: 1234.5 },
+        ],
+      },
+    ]);
+    const table = html.match(/<table class="sr-only">.*<\/table>/)?.[0] ?? "";
+    assert.match(table, /<bdi dir="auto">base<\/bdi><\/td><td><bdi dir="ltr">0\.4<\/bdi>/);
+    assert.match(table, /<bdi dir="auto">exploit<\/bdi><\/td><td><bdi dir="ltr">1,234\.5<\/bdi>/);
+  });
+
+  void it("orders a line chart with numeric x values by x", () => {
+    const html = render([
+      {
+        type: "Chart",
+        kind: "line",
+        points: [
+          { x: 10, y: 1 },
+          { x: 2, y: 3 },
+        ],
+      },
+    ]);
+    const xs = [...html.matchAll(/<tr><td><bdi dir="ltr">([^<]*)<\/bdi>/g)].map((m) => m[1]);
+    assert.deepEqual(xs, ["2", "10"]);
+  });
+
   void it("draws Text and Steps, with a child node inside a step", () => {
     const html = render([
       { type: "Text", text: "Plain words." },
       { type: "Steps", items: ["Read the label.", { type: "Diff", diff: "+x" }] },
     ]);
     assert.match(html, /<p [^>]*dir="auto"[^>]*>Plain words\.<\/p>/);
-    assert.match(html, /<ol class="list-decimal[^"]*ps-5/);
+    assert.match(html, /<ol class="[^"]*list-decimal[^"]*ps-5/);
     assert.equal(html.match(/<li>/g)?.length, 2);
-    assert.match(html, /<li><bdi dir="auto">Read the label\.<\/bdi><\/li>/);
+    assert.match(html, /<li><bdi dir="auto" class="[^"]*">Read the label\.<\/bdi><\/li>/);
     assert.match(html, /<li><figure/);
   });
 
@@ -140,7 +178,16 @@ void describe("EdgeCaseView", () => {
     ]);
     assert.equal(html.match(/<ol /g)?.length, 2);
     assert.equal(html.match(/<li>/g)?.length, 4);
-    assert.match(html, /<li><bdi dir="auto">Inner b\.<\/bdi><\/li>/);
+    assert.match(html, /<li><bdi dir="auto" class="[^"]*">Inner b\.<\/bdi><\/li>/);
+  });
+
+  void it("wraps a long multi-line step and keeps its line breaks", () => {
+    const step = `${"x".repeat(500)}\nsecond line`;
+    const html = render([{ type: "Steps", items: [step] }]);
+    const bdi = html.match(/<li><bdi [^>]*>/)?.[0] ?? "";
+    assert.match(bdi, /whitespace-pre-wrap/);
+    assert.match(bdi, /break-words/);
+    assert.ok(html.includes(`>${step}</bdi>`));
   });
 
   void it("falls back to patch.diff and why.md when the tree is invalid", () => {

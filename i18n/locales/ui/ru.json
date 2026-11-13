@@ -258,6 +258,8 @@
   "submit.v2.edge_case.io.got": "Получено",
   "submit.v2.edge_case.chart": "{n, plural, one {График с # точкой} few {График с # точками} many {График с # точками} other {График с # точки}}",
   "submit.v2.edge_case.empty": "У этой находки нет подробностей.",
+  "submit.v2.edge_case.bool.true": "Да",
+  "submit.v2.edge_case.bool.false": "Нет",
   "submit.v2.overview.tabs_label": "Сводка запуска",
   "submit.v2.overview.tab.general": "Общее",
   "submit.v2.overview.tab.data": "Данные",
