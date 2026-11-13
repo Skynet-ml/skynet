@@ -22,6 +22,7 @@ const {
   cardKeyStep,
   cardStep,
   focusLost,
+  keyBelongsElsewhere,
   liveRoundIndex,
   needsReview,
   nodeStatus,
@@ -347,5 +348,90 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
     } finally {
       await React.act(async () => root.unmount());
     }
+  });
+
+  void it("leaves J and Esc to an outside menu, and to a layer that handled them", async () => {
+    const dom = new JSDOM("<div id='root'></div><div role='menu'><button id='item' role='menuitem'>A</button></div>", {
+      url: "https://app.test",
+    });
+    Object.assign(globalThis, {
+      window: dom.window,
+      document: dom.window.document,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    });
+    const cards = [exploit({ id: "e1", session: LEAD_NODE }), exploit({ id: "e2", session: LEAD_NODE })];
+    const round = { index: 1, sessions: [], exploits: cards, briefs: ["Brief"], live: false };
+    let closed = 0;
+    const root = createRoot(document.getElementById("root")!);
+    const active = () => (document.activeElement as HTMLElement | null)?.getAttribute("data-exploit") ?? null;
+    const press = async (target: Element, init: KeyboardEventInit, handled = false) => {
+      const event = new dom.window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+      if (handled) event.preventDefault();
+      await React.act(async () => {
+        target.dispatchEvent(event);
+      });
+      return event;
+    };
+    try {
+      await React.act(async () =>
+        root.render(
+          <HardenSessionDrawer
+            node={LEAD_NODE}
+            round={round}
+            canReview
+            busy={false}
+            toReview={2}
+            focusCard="e1"
+            onVerdict={() => {}}
+            onNextCard={() => {}}
+            onClose={() => closed++}
+            t={t}
+          />,
+        ),
+      );
+      assert.equal(active(), "e1");
+      const item = document.getElementById("item")!;
+      item.focus();
+      // J is the menu's typeahead: the drawer neither takes it nor moves focus.
+      const j = await press(item, { key: "j", code: "KeyJ" });
+      assert.equal(j.defaultPrevented, false);
+      assert.equal(document.activeElement, item);
+      await press(item, { key: "Escape" });
+      assert.equal(closed, 0);
+      // A menu or modal that closed on Esc called preventDefault first.
+      await press(document.body, { key: "Escape" }, true);
+      assert.equal(closed, 0);
+      // Inside the drawer, its own dialog role does not block the keys.
+      const card = document.querySelector('[data-exploit="e1"]')!;
+      await press(card, { key: "j", code: "KeyJ" });
+      assert.equal(active(), "e2");
+      await press(card, { key: "Escape" });
+      assert.equal(closed, 1);
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  });
+});
+
+void describe("keyBelongsElsewhere", () => {
+  const event = (target: unknown, defaultPrevented = false) => ({
+    key: "j",
+    code: "KeyJ",
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    defaultPrevented,
+    target: target as EventTarget,
+  });
+
+  void it("leaves menus, dialogs and handled keys alone, but not the drawer itself", () => {
+    const own = {} as Element;
+    assert.equal(keyBelongsElsewhere(event(null, true)), true);
+    assert.equal(keyBelongsElsewhere(event({ closest: () => ({}) })), true);
+    assert.equal(keyBelongsElsewhere(event({ closest: () => own }), own), false);
+    assert.equal(keyBelongsElsewhere(event({ closest: () => null })), false);
+    // The page's own J and K have no drawer to exempt: any dialog owns the key.
+    assert.equal(cardKeyStep(event({ closest: () => own })), 0);
+    assert.equal(cardKeyStep(event({ closest: () => own }), own), 1);
   });
 });

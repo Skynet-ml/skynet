@@ -115,23 +115,47 @@ export function cardStep(
   return pending[(from + step + pending.length) % pending.length] ?? null;
 }
 
+// Text fields, menus and dialogs own their keys: J is typeahead in a menu,
+// and Esc closes the open menu or dialog, not the drawer under it.
+const KEY_OWNERS =
+  'input, textarea, select, [contenteditable="true"], [role="menu"], [role="menuitem"], [role="listbox"], [role="combobox"], [role="dialog"], [role="alertdialog"]';
+
+type KeyPress = Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey"> &
+  Partial<Pick<KeyboardEvent, "defaultPrevented">> & { target: EventTarget | null };
+
+/**
+ * The key press is not the harden page's: another layer handled it, or focus
+ * sits in a text field, menu or dialog other than the page's own drawer.
+ *
+ * Args:
+ *   event: The key press.
+ *   own: The drawer panel, whose own dialog role does not count; or null.
+ *
+ * Returns:
+ *   True when the page must leave the key alone.
+ */
+export function keyBelongsElsewhere(event: KeyPress, own: Element | null = null): boolean {
+  if (event.defaultPrevented) return true;
+  const target = event.target as HTMLElement | null;
+  const owner = target?.closest?.(KEY_OWNERS) ?? null;
+  return owner !== null && owner !== own;
+}
+
 /**
  * The card step a key press asks for: J is the next card, K the previous.
  * The typed letter wins, so Dvorak and Colemak work. Only when the key types
  * no Latin letter (Hebrew and other layouts) does the physical key decide.
- * A press in a text field or with a modifier is no step.
+ * A press with a modifier, or one that belongs elsewhere, is no step.
  *
  * Args:
  *   event: The key press.
+ *   own: The drawer panel, whose own dialog role does not count; or null.
  *
  * Returns:
  *   1, -1, or 0 for no step.
  */
-export function cardKeyStep(
-  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey"> & { target: EventTarget | null },
-): 1 | -1 | 0 {
-  const target = event.target as HTMLElement | null;
-  if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return 0;
+export function cardKeyStep(event: KeyPress, own: Element | null = null): 1 | -1 | 0 {
+  if (keyBelongsElsewhere(event, own)) return 0;
   if (event.metaKey || event.ctrlKey || event.altKey) return 0;
   const key = event.key.toLowerCase();
   const letter = /^[a-z]$/.test(key) ? key : event.code === "KeyJ" ? "j" : event.code === "KeyK" ? "k" : "";

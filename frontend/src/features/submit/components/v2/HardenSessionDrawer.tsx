@@ -11,7 +11,14 @@ import { UserBubble } from "@/shared/ui/agent/user-bubble";
 import { ArrowLeft, Info, X } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { EdgeCaseView } from "./EdgeCaseView";
-import { LEAD_NODE, cardKeyStep, reviewOrder, sessionExploits, type TreeRound } from "./HardenTree";
+import {
+  LEAD_NODE,
+  cardKeyStep,
+  keyBelongsElsewhere,
+  reviewOrder,
+  sessionExploits,
+  type TreeRound,
+} from "./HardenTree";
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 
@@ -170,10 +177,10 @@ export function HardenSessionDrawer({
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onClose();
+        if (!keyBelongsElsewhere(event, panel.current)) onClose();
         return;
       }
-      const step = cardKeyStep(event);
+      const step = cardKeyStep(event, panel.current);
       if (!step || !count) return;
       event.preventDefault();
       setFocus((i) => Math.min(count - 1, Math.max(0, i + step)));
