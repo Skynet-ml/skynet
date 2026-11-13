@@ -20,6 +20,7 @@ from core.billing.budget_amounts import CENT_SCALE
 from core.billing.budgets import BudgetConflictError, BudgetInFlightError, BudgetService
 from core.config import app_env, settings
 from core.storage.models import (
+    AgentConversationModel,
     Base,
     BillingCustomerModel,
     BillingProviderKeyModel,
@@ -54,6 +55,7 @@ def database() -> Iterator[Engine]:
             ExecutionBudgetModel,
             ExecutionOperationModel,
             ExecutionUsageEvidenceModel,
+            AgentConversationModel,
             JobModel,
         )
     ]
