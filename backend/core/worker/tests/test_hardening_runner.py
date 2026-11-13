@@ -29,8 +29,8 @@ from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
-from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
-from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED
+from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
 from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
@@ -1583,8 +1583,9 @@ def _session_runner(
         return SimpleNamespace(
             score=lambda patch: {"score": 0.5, "feedback": feedback, "hidden": "eval/metric.py"},
             close=lambda: closed.append(lane),
-            _root="/box",
-            _hidden=("eval/metric.py",),
+            for_proposer=functools.partial(
+                RepoScorer.for_proposer, SimpleNamespace(_root="/box", _hidden=("eval/metric.py",))
+            ),
         )
 
     monkeypatch.setattr(
@@ -1754,12 +1755,56 @@ def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeyp
 
     runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
     try:
-        with pytest.raises(RuntimeError, match="Every attacker session failed"):
+        with pytest.raises(AttackFailedError, match="Every attacker session failed") as raised:
             runner.attack(
                 round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=2
             )
     finally:
         runner.close()
+
+    assert len(raised.value.result.briefs) == 2
+    assert [s.status for s in raised.value.result.sessions] == ["failed", "failed"]
+
+
+@pytest.mark.parametrize("case", ["meter_stopped", "round_cap_spent"])
+def test_attack_marks_a_round_that_stopped_on_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A round whose sessions stopped before any write_patch says so, so the job is not called clean (SKY-682)."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent; a session step must not run.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The lead agent's response, or a patch.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    if case == "meter_stopped":
+        runner.meter.stopped = True  # type: ignore[misc]
+    try:
+        result = runner.attack(
+            round_index=1,
+            view="black_box",
+            model="openai/m",
+            exploits_path=tmp_path,
+            budget_usd=0.0 if case == "round_cap_spent" else None,
+            sessions=1,
+        )
+    finally:
+        runner.close()
+
+    assert result.stopped is True
+    assert result.candidates == []
 
 
 @pytest.mark.parametrize("deterministic", [True, False])
@@ -1808,4 +1853,22 @@ def test_the_stored_result_clears_the_live_sessions(engine: Engine) -> None:
     )
 
     assert store_hardening_result(engine, job.id, result, claim=claimed[4], operation_id=None)
+    assert _row(engine, job.id).job["live_sessions"] == []
+
+
+def test_a_reclaim_clears_the_live_sessions_of_a_lapsed_pass(engine: Engine) -> None:
+    """A pass whose lease lapsed leaves its live sessions; the next claim must not show them as running (SKY-682)."""
+    job = _seed(engine, binding_id=None)
+    first = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert first is not None
+    assert store_live_sessions(engine, job.id, [HardeningSession(index=1, brief="b")], claim=first[4])
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, job.id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+
+    second = claim_hardening_job(engine, pod="pod-b", lease_seconds=60, place="cloud")
+    assert second is not None
+    assert second[2].live_sessions == []
     assert _row(engine, job.id).job["live_sessions"] == []

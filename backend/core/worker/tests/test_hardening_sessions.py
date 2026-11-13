@@ -231,6 +231,7 @@ def test_read_briefs_keeps_k_briefs_and_fills_the_rest() -> None:
     assert hs.read_briefs(reply, 3) == ["one", "two", "three"]
     assert hs.read_briefs("no json", 2) == list(hs.FALLBACK_BRIEFS[:2])
     assert hs.read_briefs('{"briefs": ["one"]}', 2) == ["one", hs.FALLBACK_BRIEFS[1]]
+    assert hs.read_briefs('{"briefs": "abc"}', 2) == list(hs.FALLBACK_BRIEFS[:2])
 
 
 def test_read_noise_decision() -> None:

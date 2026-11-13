@@ -57,9 +57,14 @@ from ..models.hardening import (
     HardeningView,
 )
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
-from ..service_gateway.optimization.blackbox.hardening import AttackResult, Candidate, HardeningRunner
+from ..service_gateway.optimization.blackbox.hardening import (
+    AttackFailedError,
+    AttackResult,
+    Candidate,
+    HardeningRunner,
+)
 from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
-from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer, _for_proposer
+from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
@@ -452,7 +457,8 @@ class RepoHardeningRunner(HardeningRunner):
             The claims, the dollars spent, the briefs and the sessions.
 
         Raises:
-            RuntimeError: When every session failed.
+            AttackFailedError: When every session failed; it keeps the cost,
+                the briefs and the sessions.
         """
         before = self.meter.spent_usd
         known = sorted(p.name for p in exploits_path.iterdir() if p.is_dir()) if exploits_path.is_dir() else []
@@ -528,7 +534,7 @@ class RepoHardeningRunner(HardeningRunner):
                         lanes.append(box[0])
                 # The same filter as RepoScorer.dispatch: a metric traceback
                 # must not name hidden metric files to the attacker (SKY-353).
-                return _for_proposer(box[0].score(patch), box[0]._root, box[0]._hidden)
+                return box[0].for_proposer(box[0].score(patch))
 
             return score
 
@@ -559,14 +565,16 @@ class RepoHardeningRunner(HardeningRunner):
                 # The gateway still stops a box that fails to close.
                 with contextlib.suppress(Exception):
                     lane.close()
-        if outcome.sessions and all(s.status == "failed" for s in outcome.sessions):
-            raise RuntimeError("Every attacker session failed.")
-        return AttackResult(
+        result = AttackResult(
             candidates=outcome.candidates,
             cost_usd=self.meter.spent_usd - before,
             briefs=briefs,
             sessions=outcome.sessions,
+            stopped=should_stop(),
         )
+        if outcome.sessions and all(s.status == "failed" for s in outcome.sessions):
+            raise AttackFailedError(result)
+        return result
 
     def judge(self, *, candidate: Candidate, model: str, budget_usd: float | None) -> tuple[Any, float]:
         """Ask the judge model whether one candidate games the metric.
@@ -1015,6 +1023,10 @@ def claim_hardening_job(
             row = session.get(HardeningJobModel, job_id)
             assert row is not None
             session.refresh(row)
+            if row.job.get("live_sessions"):
+                # A pass whose lease lapsed may have left its live sessions; they are not running now.
+                row.job = {**row.job, "live_sessions": []}
+                session.commit()
             return row.id, row.username, HardeningJob.model_validate(row.job), row.budget_operation_id, claim
         return None
 

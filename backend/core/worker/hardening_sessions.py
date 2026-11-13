@@ -275,9 +275,10 @@ def read_briefs(reply: str | None, count: int) -> list[str]:
         Exactly ``count`` briefs.
     """
     document = json_object(reply) or {}
-    briefs = [b.strip()[:MAX_BRIEF_CHARS] for b in document.get("briefs") or [] if isinstance(b, str) and b.strip()][
-        :count
-    ]
+    raw = document.get("briefs")
+    # A string is iterable too; reading it would make one brief of each character.
+    listed = raw if isinstance(raw, list) else []
+    briefs = [b.strip()[:MAX_BRIEF_CHARS] for b in listed if isinstance(b, str) and b.strip()][:count]
     for index in range(len(briefs), count):
         briefs.append(FALLBACK_BRIEFS[index % len(FALLBACK_BRIEFS)])
     return briefs

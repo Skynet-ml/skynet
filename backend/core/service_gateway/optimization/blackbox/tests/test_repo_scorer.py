@@ -751,6 +751,21 @@ def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> No
         scorer.close()
 
 
+def test_for_proposer_gives_the_same_view_as_dispatch(tmp_path: Path) -> None:
+    """The public proposer view drops extra keys and the box's paths, as dispatch does (SKY-682)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n"
+        "    return {'score': 0.5, 'feedback': 'at ' + repo_path, 'weights': {'accuracy': 0.3}}\n",
+    )
+    try:
+        view = scorer.for_proposer(scorer.score(""))
+        assert view == {"score": pytest.approx(0.5), "feedback": "at ."}
+        assert view == json.loads(scorer.dispatch({"candidate": ""}).body)
+    finally:
+        scorer.close()
+
+
 def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> None:
     """A scorer crash tells the agent only that the scorer failed, not its paths or lines (SKY-353)."""
     scorer = _leaky(

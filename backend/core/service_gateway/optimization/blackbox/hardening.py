@@ -76,6 +76,22 @@ class AttackResult:
     cost_usd: float
     briefs: list[str] = field(default_factory=list)
     sessions: list[HardeningSession] = field(default_factory=list)
+    # True when the round's money ran out or the meter refused calls, so a
+    # round without claims did not find the metric clean.
+    stopped: bool = False
+
+
+class AttackFailedError(RuntimeError):
+    """Every attacker session of a round failed; the error keeps what the round spent and did."""
+
+    def __init__(self, result: AttackResult) -> None:
+        """Keep the round's result for the job.
+
+        Args:
+            result: The cost, the briefs and the failed sessions.
+        """
+        super().__init__("Every attacker session failed.")
+        self.result = result
 
 
 class HardeningRunner(Protocol):
@@ -518,25 +534,45 @@ def _attack_round(job: HardeningJob, runner: HardeningRunner, exploits_path: Pat
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
     """
+    if job.rounds_detail and job.rounds_detail[-1].status == "failed":
+        # A failed round stays on the job only until the retry runs it again.
+        job.rounds_detail.pop()
     round_index = job.round + 1
     budget = _round_budget(job, round_index)
     if budget is not None and budget <= 0:
         _budget_stop(job)
         return
-    attack = runner.attack(
-        round_index=round_index,
-        view=job.view,
-        model=job.attacker_model,
-        exploits_path=exploits_path,
-        budget_usd=budget,
-        sessions=job.parallel_sessions,
-    )
+    try:
+        attack = runner.attack(
+            round_index=round_index,
+            view=job.view,
+            model=job.attacker_model,
+            exploits_path=exploits_path,
+            budget_usd=budget,
+            sessions=job.parallel_sessions,
+        )
+    except AttackFailedError as error:
+        # The sessions spent money; the retry's round budget must count it.
+        _spend(job, error.result.cost_usd)
+        job.rounds_detail.append(
+            HardeningRound(
+                index=round_index,
+                status="failed",
+                briefs=list(error.result.briefs),
+                sessions=list(error.result.sessions),
+            )
+        )
+        raise
     _spend(job, attack.cost_usd)
     job.round = round_index
     current = HardeningRound(
         index=round_index, status="running", briefs=list(attack.briefs), sessions=list(attack.sessions)
     )
     job.rounds_detail.append(current)
+    if not attack.candidates and attack.stopped:
+        current.status = "stopped"
+        _budget_stop(job)
+        return
     base_score = _measure(runner, None) if attack.candidates else None
     for candidate in attack.candidates:
         budget = _round_budget(job, round_index)
@@ -561,6 +597,7 @@ def _attack_round(job: HardeningJob, runner: HardeningRunner, exploits_path: Pat
             session=candidate.session,
         )
         exploit.exploit_score = _measure(runner, exploit)
+        exploit.edge_case = _measured_tree(exploit.edge_case, exploit.exploit_score, base_score)
         current.exploits.append(exploit)
     if any(_needs_review(e) for e in current.exploits):
         current.status = "waiting_review"
@@ -692,6 +729,50 @@ def _measure(runner: HardeningRunner, exploit: HardeningExploit | None) -> float
     except Exception:
         return None
     return value if math.isfinite(value) else None
+
+
+def _measured_tree(
+    tree: list[dict[str, Any]] | None, exploit_score: float | None, base_score: float | None
+) -> list[dict[str, Any]] | None:
+    """Put the measured scores into every ScoreCompare node of an edge-case tree.
+
+    The session writes its own numbers, which the card must not show as
+    measured. Without a measured score a ScoreCompare node goes, and a Steps
+    node that loses all its items goes too.
+
+    Args:
+        tree: The validated tree, or None.
+        exploit_score: The claim's measured score.
+        base_score: The base solution's measured score.
+
+    Returns:
+        The tree with measured scores; None when no node is left.
+    """
+    if not tree:
+        return tree
+
+    def fixed(node: Any) -> Any:
+        """Return one node with measured scores, or None when it must go.
+
+        Args:
+            node: A node, or a Steps text item.
+
+        Returns:
+            The node, or None.
+        """
+        if not isinstance(node, dict):
+            return node
+        if node.get("type") == "ScoreCompare":
+            if exploit_score is None or base_score is None:
+                return None
+            return {**node, "exploit_score": exploit_score, "base_score": base_score}
+        if node.get("type") == "Steps":
+            items = [item for item in (fixed(i) for i in node.get("items") or []) if item is not None]
+            return {**node, "items": items} if items else None
+        return node
+
+    kept = [node for node in (fixed(n) for n in tree) if node is not None]
+    return kept or None
 
 
 def _saved_exploits(exploits_path: Path) -> list[HardeningExploit]:
