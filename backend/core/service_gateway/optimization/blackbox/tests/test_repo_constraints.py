@@ -1744,6 +1744,7 @@ def test_the_outcome_block_gives_the_target_and_the_minimums() -> None:
         (b"version = 1\n[outcome.require]\nlatency = 0.5\n", None, {"latency": 0.5}),
         (b"version = 1\n[outcome]\ntarget = 2\n", 2.0, {}),
         (b"version = 1\n[outcome]\ntarget = -3.5\n", -3.5, {}),
+        (b'version = 1\n[outcome.require]\n"rouge.l" = 0.5\n', None, {"rouge.l": 0.5}),
     ],
 )
 def test_the_outcome_block_and_each_of_its_keys_are_optional(
@@ -1799,9 +1800,15 @@ def test_the_outcome_block_and_each_of_its_keys_are_optional(
         ),
         (
             b"version = 1\n[outcome.require.latency]\nmin = 0.5\n",
-            r"\[outcome.require\] latency must be a finite number",
+            r'\[outcome.require\] latency is a table\. .* "latency\.min" = 0\.9',
             "outcome.require",
             "latency",
+        ),
+        (
+            b"version = 1\n[outcome.require]\nrouge.l = 0.5\n",
+            r'\[outcome.require\] rouge is a table\. Quote a score name that has a dot, such as "rouge\.l" = 0\.9\.',
+            "outcome.require",
+            "rouge",
         ),
         (b"version = 1\n[outcome]\nrequire = 0.5\n", r"\[outcome.require\] must be a table", "outcome", "require"),
         (b'version = 1\n[outcome.require]\n"" = 0.5\n', "empty score name", "outcome.require", None),

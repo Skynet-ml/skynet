@@ -871,6 +871,14 @@ def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]
                 " the score.",
                 section="outcome.require",
             )
+        # TOML reads an unquoted ``rouge.l = 0.5`` as the table ``rouge = {l = 0.5}``.
+        if isinstance(value, dict):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [outcome.require] {name} is a table. Quote a score name that has a dot,"
+                f' such as "{name}.{next(iter(value), "l")}" = 0.9.',
+                section="outcome.require",
+                key=name,
+            )
         minimums[name] = _score_value(value, f"[outcome.require] {name}", "outcome.require", name)
     return target, minimums
 
