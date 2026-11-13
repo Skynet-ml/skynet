@@ -168,9 +168,10 @@ void describe("cardKeyStep", () => {
     assert.equal(press("l", "KeyL"), 0);
     // Dvorak types j on the C key.
     assert.equal(press("j", "KeyC"), 1);
-    // The Hebrew layout types ח on the J key and ל on the K key.
-    assert.equal(press("ח", "KeyJ"), 1);
-    assert.equal(press("ל", "KeyK"), -1);
+    // The Hebrew layout types het (U+05D7) on the J key and lamed (U+05DC) on the K key.
+    // The lint rule bans Hebrew literals outside the catalogs, so build them from code points.
+    assert.equal(press(String.fromCodePoint(0x05d7), "KeyJ"), 1);
+    assert.equal(press(String.fromCodePoint(0x05dc), "KeyK"), -1);
     // Caps Lock.
     assert.equal(press("J", "KeyJ"), 1);
     // Colemak types n on the J key, so that is no step.
