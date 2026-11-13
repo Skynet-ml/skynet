@@ -11,16 +11,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { setClientLocale } from "@/shared/lib/runtime-locale";
 
+import type { ChartNode } from "../../lib/edge-case-schema";
+
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { EdgeCaseView } = await import("./EdgeCaseView");
+const { EdgeCaseView, chartData, numberFormat } = await import("./EdgeCaseView");
 
 function render(
   tree: unknown,
   patchDiff: string | null = null,
   whyMd: string | null = null,
+  locale: "en" | "de" = "en",
 ): string {
-  setClientLocale("en");
+  setClientLocale(locale);
   return renderToStaticMarkup(<EdgeCaseView tree={tree} patchDiff={patchDiff} whyMd={whyMd} />);
 }
 
@@ -37,6 +40,8 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /submit\.v2\.edge_case\.score\.base/);
     assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.98<\/bdi><\/dd>/);
     assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.41<\/bdi><\/dd>/);
+    // A 15-digit score must wrap inside a half-width card on a phone.
+    for (const dd of html.match(/<dd [^>]*>/g) ?? []) assert.match(dd, /break-all/);
   });
 
   void it("draws the translated default labels when ScoreCompare has none", () => {
@@ -143,6 +148,26 @@ void describe("EdgeCaseView", () => {
     const table = html.match(/<table class="sr-only">.*<\/table>/)?.[0] ?? "";
     assert.match(table, /<bdi dir="auto">base<\/bdi><\/td><td><bdi dir="ltr">0\.4<\/bdi>/);
     assert.match(table, /<bdi dir="auto">exploit<\/bdi><\/td><td><bdi dir="ltr">1,234\.5<\/bdi>/);
+  });
+
+  void it("formats a numeric category x for the locale, as the y values are", () => {
+    const node: ChartNode = {
+      type: "Chart",
+      kind: "bar",
+      points: [
+        { x: 0.5, y: 1.5 },
+        { x: "label", y: 2 },
+      ],
+    };
+    setClientLocale("de");
+    const { numericX, data } = chartData(node, numberFormat());
+    assert.equal(numericX, false);
+    assert.deepEqual(data, [
+      { x: "0,5", y: 1.5 },
+      { x: "label", y: 2 },
+    ]);
+    const html = render([node], null, null, "de");
+    assert.match(html, /<td><bdi dir="ltr">0,5<\/bdi><\/td><td><bdi dir="ltr">1,5<\/bdi>/);
   });
 
   void it("orders a line chart with numeric x values by x", () => {

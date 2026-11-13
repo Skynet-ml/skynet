@@ -42,7 +42,7 @@ const CAPTION_CLASS =
   "border-b border-border/50 px-3 py-1.5 text-start font-mono text-xs text-muted-foreground break-words";
 
 /** Format model numbers for the active locale; 15 digits never round 0.9999999 to 1. */
-function numberFormat(): Intl.NumberFormat {
+export function numberFormat(): Intl.NumberFormat {
   return new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 15 });
 }
 
@@ -100,7 +100,7 @@ function ScoreCompare({ node }: { node: ScoreCompareNode }) {
           <dt className="text-xs break-words text-muted-foreground" dir="auto">
             {s.label}
           </dt>
-          <dd className={cn("text-start font-mono text-xl font-semibold", s.tone)}>
+          <dd className={cn("text-start font-mono text-xl font-semibold break-all", s.tone)}>
             <bdi dir="ltr">{format.format(s.value)}</bdi>
           </dd>
         </div>
@@ -220,14 +220,34 @@ function Callout({ node }: { node: CalloutNode }) {
   );
 }
 
-function Chart({ node }: { node: ChartNode }) {
-  const format = numberFormat();
-  // A line over numeric x values needs a numeric axis, so the gaps between points stay true.
+/**
+ * Build the recharts rows for a chart.
+ *
+ * A line over numeric x values gets a numeric axis, so the gaps between points
+ * stay true. Every other chart uses category labels; a numeric x is formatted
+ * for the locale there, as the y axis and the value table are.
+ *
+ * Args:
+ *   node: The checked Chart node.
+ *   format: The locale number format.
+ *
+ * Returns:
+ *   Whether x is numeric, the points in draw order, and the recharts rows.
+ */
+export function chartData(node: ChartNode, format: Intl.NumberFormat) {
   const numericX = node.kind === "line" && node.points.every((p) => typeof p.x === "number");
   const points = numericX
     ? [...node.points].sort((a, b) => (a.x as number) - (b.x as number))
     : node.points;
-  const data = numericX ? points : points.map((p) => ({ x: String(p.x), y: p.y }));
+  const data = numericX
+    ? points
+    : points.map((p) => ({ x: typeof p.x === "number" ? format.format(p.x) : p.x, y: p.y }));
+  return { numericX, points, data };
+}
+
+function Chart({ node }: { node: ChartNode }) {
+  const format = numberFormat();
+  const { numericX, points, data } = chartData(node, format);
   const axis = {
     tickLine: false,
     axisLine: false,
