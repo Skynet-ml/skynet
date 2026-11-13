@@ -132,6 +132,7 @@ function ExploitCard({
  *   busy: A user action is out.
  *   toReview: The cards in the round that still wait for a verdict.
  *   focusCard: The card to focus when the drawer opens, or null.
+ *   onFocusCard: Make a card the focused card (J, K, or a verdict on it).
  *   onVerdict: Record the user's verdict on a claim.
  *   onNextCard: Jump to the next card that waits for a verdict.
  *   onClose: Close the drawer.
