@@ -14,7 +14,7 @@ SANDBOX_PROTOCOL = 14
 # deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
 # ``conversation_id``, which the submit route clears before it stores the run.
 # Protocol 14 added ``target.repo.draft_files`` and ``draft_base``: the parent
-# writes the drafts into the staged tree and removes both fields, and an older
-# image ignores a ``draft_base`` that serving keeps. The worker sends such an
-# image the image's own protocol number.
+# writes the drafts into the staged tree and removes both fields before the
+# guest request, for a run and for serving, so an older image never sees them.
+# The worker sends such an image the image's own protocol number.
 READABLE_PROTOCOLS = frozenset({12, 13, SANDBOX_PROTOCOL})

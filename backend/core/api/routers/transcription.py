@@ -137,6 +137,28 @@ def _own_openrouter_key(engine: Any, username: str) -> str | None:
     return connection.secret
 
 
+# One client for the process keeps the TCP and TLS connection to OpenRouter
+# open between clips. A new client per clip paid a new SSL context and a new
+# handshake on every take. The app lifespan closes it at shutdown.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    """Return the shared OpenRouter client, created on first use."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT_S))
+    return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the shared OpenRouter client and forget it, so the next clip opens a new one."""
+    global _http_client
+    client, _http_client = _http_client, None
+    if client is not None:
+        await client.aclose()
+
+
 def create_transcription_router(job_store: Any) -> APIRouter:
     """Build the dictation transcription router.
 
@@ -148,17 +170,6 @@ def create_transcription_router(job_store: Any) -> APIRouter:
         A configured :class:`APIRouter` exposing ``POST /transcribe``.
     """
     router = APIRouter()
-    # One client for the router's life keeps the TCP and TLS connection to
-    # OpenRouter open between clips. A new client per clip paid a new SSL
-    # context and a new handshake on every take.
-    http: httpx.AsyncClient | None = None
-
-    def _http() -> httpx.AsyncClient:
-        """Return the router's shared OpenRouter client, created on first use."""
-        nonlocal http
-        if http is None or http.is_closed:
-            http = httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT_S))
-        return http
 
     @router.post(
         "/transcribe",

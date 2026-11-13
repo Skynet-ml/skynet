@@ -162,6 +162,19 @@ def test_router_reuses_one_http_client_across_clips(monkeypatch: pytest.MonkeyPa
     assert seen[0] is seen[1]
 
 
+def test_shutdown_closes_the_shared_client_and_the_next_clip_opens_a_new_one() -> None:
+    """The lifespan close shuts the client and forgets it, so a restart does not reuse a dead client."""
+    first = transcription._http()
+    asyncio.run(transcription.close_http_client())
+    assert first.is_closed
+    assert transcription._http_client is None
+    second = transcription._http()
+    assert second is not first
+    assert not second.is_closed
+    asyncio.run(transcription.close_http_client())
+    asyncio.run(transcription.close_http_client())
+
+
 def test_clip_cost_uses_reported_cost_then_falls_back_to_seconds() -> None:
     """OpenRouter's ``usage.cost`` wins; without it the seconds estimate keeps a 10 s floor."""
     assert transcription._clip_cost({"cost": 0.000508, "seconds": 9.2}) == pytest.approx(0.000508)

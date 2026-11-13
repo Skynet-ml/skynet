@@ -2,9 +2,9 @@
 
 A submit binds the new run to the setup chat that the request names, but only
 when the submitter owns that chat. ``GET /optimizations/{id}/chat`` then serves
-the full chat up to the run to its owner and admins. An editor or a viewer of
-the run, or a user with no access, gets no chat. The stale-chat purge keeps a
-bound chat.
+the full chat up to the run to the chat's user and admins. Any other member of
+the run, also a new owner after a transfer, or a user with no access, gets no
+chat. The stale-chat purge keeps a bound chat.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from ..routers.agent_history import purge_stale_conversations
 from ..routers.agent_settings import MASK
 from ..routers.generalist_agent import _persist_user_turn
 from ..routers.optimizations import create_optimizations_router
+from ..routers.share import create_share_router
 from ..routers.submissions import _bind_setup_chat
 
 _SECRET = "sk-ant-api03-" + "a" * 40
@@ -139,7 +140,7 @@ def _bound(store: _MemStore) -> str | None:
 
 
 def _client(store: _MemStore, username: str, role: str = "user") -> TestClient:
-    """Mount the optimizations router over ``store`` as ``username``.
+    """Mount the optimizations and share routers over ``store`` as ``username``.
 
     Args:
         store: The store the router reads.
@@ -151,6 +152,7 @@ def _client(store: _MemStore, username: str, role: str = "user") -> TestClient:
     """
     app = FastAPI()
     app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    app.include_router(create_share_router(job_store=store))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(
         username=username, role=role, groups=()
     )
@@ -291,6 +293,23 @@ def test_viewer_and_editor_get_no_chat(username: str) -> None:
     assert resp.status_code == 404
     assert resp.json()["code"] == "agent.conversation.not_found"
     assert _SECRET not in resp.text
+
+
+def test_a_transfer_keeps_the_chat_with_its_user() -> None:
+    """After alice transfers the run to eve, eve gets no chat and alice, now an editor, keeps hers."""
+    store = _store()
+    _bind_setup_chat(store, "opt-1", "alice", "c-alice")
+    moved = _client(store, "alice").post("/optimizations/opt-1/sharing/transfer", json={"username": "eve"})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["owner"] == "eve"
+    new_owner = _client(store, "eve").get("/optimizations/opt-1/chat")
+    assert new_owner.status_code == 404
+    assert new_owner.json()["code"] == "agent.conversation.not_found"
+    assert _SECRET not in new_owner.text
+    old_owner = _client(store, "alice").get("/optimizations/opt-1/chat")
+    assert old_owner.status_code == 200, old_owner.text
+    assert old_owner.json()["id"] == "c-alice"
+    assert _SECRET in old_owner.text
 
 
 def test_public_visitor_gets_no_chat() -> None:

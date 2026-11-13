@@ -227,6 +227,20 @@ def _github(monkeypatch: pytest.MonkeyPatch, refuse_draft: bool = False) -> list
     sent: list[dict[str, Any]] = []
 
     def fake_request(method: str, url: str, *, json: dict[str, Any], **_: Any) -> httpx.Response:
+        """Record the pull request body and answer as GitHub does.
+
+        Args:
+            method: HTTP method.
+            url: Request URL.
+            json: Pull request body.
+            **_: Other request options, ignored.
+
+        Returns:
+            The created pull request response.
+
+        Raises:
+            DomainError: A draft request when ``refuse_draft`` is set.
+        """
         assert (method, url) == ("POST", "https://api.github.com/repos/acme/app/pulls")
         sent.append(json)
         if refuse_draft and json.get("draft"):

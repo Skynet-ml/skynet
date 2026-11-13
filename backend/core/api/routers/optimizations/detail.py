@@ -35,10 +35,9 @@ from ....models import (
 )
 from ....models.run_calls import RunCallPage, RunCandidateList
 from ....storage.models import AgentConversationModel, JobModel
-from ...auth import AuthenticatedUser, get_authenticated_user
+from ...auth import AuthenticatedUser, get_authenticated_user, is_admin
 from ...converters import (
     compute_elapsed,
-    job_owner,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
@@ -399,13 +398,15 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         summary="The setup chat that created one optimization",
     )
     def get_run_chat(optimization_id: str, current_user: AuthenticatedUserDep) -> ConversationDetail:
-        """Return the setup chat bound to a run, to its owner and admins only.
+        """Return the setup chat bound to a run, to the chat's user and admins only.
 
-        A run's tools read the owner's runs, datasets, wallet and settings, so
-        an editor or a viewer of the run does not get the chat. Only the owner
-        reads it unmasked: an admin gets every credential in it masked. The
-        mask hides only credential-shaped strings and secret-like keys, so a
-        secret typed as plain prose still reaches admins.
+        The chat's tools read its user's runs, datasets, wallet and settings,
+        so no other member of the run gets the chat. The check uses the chat
+        row's user, not the run owner: a transfer changes the run owner but
+        keeps the bound chat. Only the chat's user reads it unmasked: an admin
+        gets every credential in it masked. The mask hides only
+        credential-shaped strings and secret-like keys, so a secret typed as
+        plain prose still reaches admins.
 
         Args:
             optimization_id: The run whose setup chat is read.
@@ -414,17 +415,16 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         Returns:
             The full chat up to this run: every turn before it, including
             earlier setups, and the agent's reply to the turn that started it.
-            For an admin who is not the owner, credentials are masked.
+            For an admin who is not the chat's user, credentials are masked.
 
         Raises:
             DomainError: 404 when the run is unknown or inaccessible to the
-                caller, when the caller is an editor or a viewer of the run,
-                or when the run has no bound chat.
+                caller, when the caller is neither the chat's user nor an
+                admin, or when the run has no bound chat.
         """
-        job, role = load_job_with_role(job_store, optimization_id, current_user, include_payload=False)
+        load_job_with_role(job_store, optimization_id, current_user, include_payload=False)
         engine = getattr(job_store, "engine", None)
-        # load_job_with_role gives admins the owner role.
-        if engine is None or role != ShareRole.owner:
+        if engine is None:
             raise DomainError("agent.conversation.not_found", status=404)
         with Session(engine) as session:
             bound = session.execute(
@@ -433,12 +433,13 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
             row = (
                 session.get(AgentConversationModel, bound.conversation_id) if bound and bound.conversation_id else None
             )
-            if row is None:
+            own = row is not None and row.username.strip().lower() == current_user.username.strip().lower()
+            if bound is None or row is None or not (own or is_admin(current_user)):
                 raise DomainError("agent.conversation.not_found", status=404)
             detail = conversation_detail(session, row, run_started_at=bound.created_at)
-        if job_owner(job) == current_user.username.strip().lower():
+        if own:
             return detail
-        # The owner may paste a key into the chat; an admin must not read it.
+        # The chat's user may paste a key into the chat; an admin must not read it.
         return ConversationDetail.model_validate(mask_secrets(detail.model_dump()))
 
     @router.get(
