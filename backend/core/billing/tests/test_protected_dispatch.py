@@ -21,6 +21,7 @@ from core.billing.model_dispatch import (
     FUNDS_BUSY,
     MANAGED_FUNDS_EXHAUSTED,
     OpenRouterDispatcher,
+    mark_lm_prompt_cache,
     mark_prompt_cache,
     response_usage,
 )
@@ -666,6 +667,135 @@ def test_anthropic_chat_prefix_is_marked_cacheable() -> None:
 def test_prompt_cache_leaves_other_requests_alone(path: str, body: dict) -> None:
     """Skip providers that cache on their own, other protocols, and callers that placed breakpoints."""
     assert mark_prompt_cache(path, body) is body
+
+
+_TOOL_STEP = [
+    {"role": "system", "content": "instructions"},
+    {"role": "user", "content": "question"},
+    {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+    {"role": "tool", "content": "result", "tool_call_id": "c1"},
+]
+
+
+def _breakpoints(messages: list) -> list[int]:
+    """List the indexes of the messages that carry a cache breakpoint.
+
+    Args:
+        messages: Chat messages, possibly marked.
+
+    Returns:
+        The indexes, in order.
+    """
+    return [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        and any(isinstance(part, dict) and "cache_control" in part for part in message["content"])
+    ]
+
+
+def test_dispatcher_cache_marks_stay_as_they_were_on_a_tool_step() -> None:
+    """The dispatcher keeps its own rule: no walk-back, so a text-less call before the last turn stays unmarked."""
+    marked = mark_prompt_cache("/chat/completions", {"model": "anthropic/claude-sonnet-5", "messages": _TOOL_STEP})
+
+    assert _breakpoints(marked["messages"]) == [0]
+    assert marked["messages"][1:] == _TOOL_STEP[1:]
+
+
+def test_lm_prompt_cache_walks_back_past_a_text_less_tool_call() -> None:
+    """An agent's tool step puts the second breakpoint on the user message, never on the call or the tool result."""
+    marked = mark_lm_prompt_cache("litellm_proxy/anthropic/claude-sonnet-5", _TOOL_STEP)
+
+    assert _breakpoints(marked) == [0, 1]
+    assert marked[1]["content"] == [{"type": "text", "text": "question", "cache_control": {"type": "ephemeral"}}]
+    assert marked[2:] == _TOOL_STEP[2:]
+    assert _TOOL_STEP[1]["content"] == "question"
+
+
+def test_lm_prompt_cache_marks_the_last_text_part_of_list_content() -> None:
+    """List content keeps its parts and gets the breakpoint on its last text part."""
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "q"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "reply"}]},
+        {"role": "user", "content": "next"},
+    ]
+
+    marked = mark_lm_prompt_cache("openrouter/anthropic/claude-sonnet-5", messages)
+
+    assert _breakpoints(marked) == [0, 2]
+    assert marked[0]["content"][0] == {"type": "text", "text": "a"}
+    assert marked[0]["content"][1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_lm_prompt_cache_never_sets_more_than_four_breakpoints() -> None:
+    """A long agent history with many system and tool messages still gets at most four breakpoints (Anthropic's limit)."""
+    messages: list[dict] = []
+    for step in range(30):
+        messages += [
+            {"role": "system", "content": f"note {step}"},
+            {"role": "user", "content": f"q{step}"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": f"c{step}"}]},
+            {"role": "tool", "content": "r", "tool_call_id": f"c{step}"},
+        ]
+
+    marked = mark_lm_prompt_cache("litellm_proxy/anthropic/claude-sonnet-5", messages)
+
+    assert 1 <= len(_breakpoints(marked)) <= 4
+    assert all(marked[index]["role"] in ("system", "user", "assistant") for index in _breakpoints(marked))
+
+
+def test_lm_prompt_cache_puts_no_breakpoint_on_an_empty_system_message() -> None:
+    """Anthropic rejects a breakpoint on an empty text block, so an empty system message stays as it is."""
+    messages = [
+        {"role": "system", "content": ""},
+        {"role": "user", "content": "q"},
+        {"role": "user", "content": "next"},
+    ]
+
+    marked = mark_lm_prompt_cache("litellm_proxy/anthropic/claude-sonnet-5", messages)
+
+    assert marked[0] == {"role": "system", "content": ""}
+    assert _breakpoints(marked) == [1]
+
+
+def test_lm_prompt_cache_leaves_a_call_with_its_own_breakpoints_alone() -> None:
+    """A caller that placed its own breakpoints keeps them, so the four-breakpoint limit holds."""
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": "q"},
+        {"role": "user", "content": "next"},
+    ]
+
+    assert mark_lm_prompt_cache("litellm_proxy/anthropic/claude-sonnet-5", messages) is messages
+
+
+@pytest.mark.parametrize("model", ["litellm_proxy/anthropic/claude-sonnet-5", "openrouter/anthropic/claude-sonnet-5"])
+def test_lm_prompt_cache_marks_the_gateway_and_openrouter_routes(model: str) -> None:
+    """An LM on the managed gateway or on OpenRouter gets the dispatcher's breakpoints."""
+    messages = [{"role": "system", "content": "instructions"}, {"role": "user", "content": "hi"}]
+
+    marked = mark_lm_prompt_cache(model, messages)
+
+    assert marked[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert messages[0]["content"] == "instructions"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic/claude-sonnet-5",
+        "openai/anthropic/claude",
+        "litellm_proxy/openai/gpt-5",
+        "openrouter/openai/gpt-5",
+        "scripted",
+    ],
+)
+def test_lm_prompt_cache_leaves_other_routes_alone(model: str) -> None:
+    """A native key, a custom endpoint and a model that caches on its own stay unmarked, as in the dispatcher."""
+    messages = [{"role": "system", "content": "instructions"}, {"role": "user", "content": "hi"}]
+
+    assert mark_lm_prompt_cache(model, messages) is messages
 
 
 def test_dispatch_sends_and_reserves_the_marked_body(database: Engine) -> None:

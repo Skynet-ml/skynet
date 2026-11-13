@@ -253,6 +253,29 @@ def response_complete(body: bytes, content_type: str, finish_reason_ends: bool =
     return False
 
 
+def _has_text(message: Any) -> bool:
+    """Tell whether a chat message can hold a prompt-cache breakpoint.
+
+    Args:
+        message: One chat message.
+
+    Returns:
+        True for a system, user or assistant message whose content is a
+        non-empty string or ends with a text part.
+    """
+    if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content)
+    return (
+        isinstance(content, list)
+        and bool(content)
+        and isinstance(content[-1], dict)
+        and content[-1].get("type") == "text"
+    )
+
+
 def mark_prompt_cache(path: str, body: dict[str, Any]) -> dict[str, Any]:
     """Mark the shared prefix of an Anthropic chat request as cacheable.
 
@@ -303,6 +326,59 @@ def mark_prompt_cache(path: str, body: dict[str, Any]) -> dict[str, Any]:
         ):
             message["content"] = [*content[:-1], {**content[-1], "cache_control": _EPHEMERAL}]
     return {**body, "messages": marked}
+
+
+def mark_lm_prompt_cache(lm_model: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark the shared prefix of a chat call that a LiteLLM LM sends to the managed gateway or OpenRouter.
+
+    The dispatcher marks only the requests it relays. An agent turn's
+    ``dspy.LM`` calls the managed gateway (``litellm_proxy/``) or OpenRouter
+    (``openrouter/``) itself, so it marks its messages here. Every other
+    route, such as a native Anthropic key or a custom endpoint, stays
+    unmarked, as in the dispatcher.
+
+    The breakpoints follow the dispatcher's rule, the last system message
+    and the message before the final turn, with one change: an agent's tool
+    step ends with a text-less tool call and its result, so the second
+    breakpoint goes back to the nearest earlier message with text. Tool
+    messages and text-less messages never get one, and a call never gets
+    more than two, well below Anthropic's limit of four. The dispatcher's
+    own rule stays as it is for its other callers.
+
+    Args:
+        lm_model: The model id as the LM sends it.
+        messages: The chat messages of the call.
+
+    Returns:
+        ``messages``, or a copy with ``cache_control`` breakpoints for an Anthropic model.
+    """
+    model = lm_model.removeprefix("litellm_proxy/").removeprefix("openrouter/")
+    if (
+        model == lm_model
+        or not model.startswith("anthropic/")
+        or any(
+            isinstance(part, dict) and "cache_control" in part
+            for message in messages
+            if isinstance(message, dict) and isinstance(message.get("content"), list)
+            for part in message["content"]
+        )
+    ):
+        return messages
+    systems = [i for i, message in enumerate(messages) if isinstance(message, dict) and message.get("role") == "system"]
+    targets = {systems[-1]} if systems else set()
+    if len(messages) >= 3:
+        turn = next((i for i in range(len(messages) - 2, -1, -1) if _has_text(messages[i])), None)
+        if turn is not None:
+            targets.add(turn)
+    marked = list(messages)
+    for index in targets:
+        if not _has_text(marked[index]):
+            continue
+        content = marked[index]["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        marked[index] = {**marked[index], "content": [*content[:-1], {**content[-1], "cache_control": _EPHEMERAL}]}
+    return marked
 
 
 def data_policy_refusal(model: str, policy: DataPolicy) -> bytes:

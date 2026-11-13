@@ -285,6 +285,29 @@ async def test_prompt_is_the_programs_own_with_pis_tail_and_tools() -> None:
     assert "tool_choice" not in first
 
 
+async def test_turn_on_the_managed_gateway_marks_its_prompt_cache() -> None:
+    """Each model call of a gateway Anthropic turn caches the program prompt and the steps before the last one."""
+    lm = _ScriptedLM([("_lookup", {"name": "a"}), ("submit", {_REPLY: "done"})])
+    lm.model = "litellm_proxy/anthropic/claude-test"
+    handlers, _ = await _run(lm)
+
+    assert handlers.reply == "done"
+    first, second = lm.requests
+    for request in (first, second):
+        assert request["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # The tool step ends with a text-less call and its result: the user message holds the breakpoint.
+    assert second["messages"][1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert second["messages"][3]["content"] == "value of a"
+
+
+async def test_turn_on_other_routes_sends_plain_messages() -> None:
+    """A model the dispatcher would not mark gets the prompt as plain text."""
+    lm = _ScriptedLM([("submit", {_REPLY: "done"})])
+    await _run(lm)
+
+    assert all(isinstance(message["content"], str) for message in lm.requests[0]["messages"])
+
+
 async def test_tool_results_errors_and_unknown_tools() -> None:
     """A dict result travels as JSON; a failing or unknown tool is an error result the model reads."""
     handlers, _ = _handlers(_ScriptedLM([]))
