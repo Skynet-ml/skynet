@@ -101,7 +101,9 @@ its train cases when there are none. A
 run with no cases has no split, so the verdict uses the one `score()` of
 the version. "Target reached" is true when that score is equal to or above
 `target`. "Minimums passed" is true when each named score is equal to or
-above its minimum. A named score is its mean over the same cases. A minimum
+above its minimum. A named score is its mean over the same cases. The
+metric must return the name on every held-out case, or the minimum fails,
+and the reason gives the count. A minimum
 fails when the metric does not return that name, and the reason names the
 score. The run stores the verdict as `details.outcome` in its result, with
 the list of the failed minimums. The verdict does not change what the run

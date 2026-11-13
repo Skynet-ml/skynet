@@ -17,6 +17,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import tempfile
 import time
 from collections import Counter
@@ -515,6 +516,9 @@ class FinalRun:
     # run, the traceback of the version's own crashed run, which scores 0 (SKY-221).
     # The traceback is stored without its "Run failed: " prefix.
     failures: list[str] = field(default_factory=list)
+    # How many cases returned each named score. ``named`` holds a name's mean
+    # but cannot show that some cases left the name out (SKY-692).
+    named_cases: dict[str, int] = field(default_factory=dict)
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
@@ -680,6 +684,7 @@ def _final_run(
         score=mean,
         feedback=None if cases else feedbacks[0],
         named={} if errors else _mean_named_scores(side_infos),
+        named_cases={} if errors else Counter(name for side_info in side_infos for name in named_scores(side_info)),
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
@@ -724,6 +729,20 @@ def _case_results(baseline: FinalRun | None, best: FinalRun | None) -> list[Blac
     return rows
 
 
+def _reaches(value: float, bound: float) -> bool:
+    """Tell whether ``value`` is equal to or above ``bound``.
+
+    Args:
+        value: The measured score; finite.
+        bound: The target or minimum from ``optimize.toml``.
+
+    Returns:
+        True when ``value`` is above ``bound`` or equal to it within float rounding.
+    """
+    # A mean of equal case scores can land one rounding step below the number in the file.
+    return value >= bound or math.isclose(value, bound, rel_tol=1e-9, abs_tol=1e-12)
+
+
 def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
     """Judge the ``[outcome]`` target and minimums of ``optimize.toml`` on the reported final run.
 
@@ -739,12 +758,15 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
         ``target`` and ``target_reached`` when the file sets a target, and
         ``minimums_passed`` and ``failed_minimums`` when it sets minimums.
         A version with no final score reaches no target and passes no minimum.
+        A score that is not a finite number reaches nothing and is stored as
+        ``None``, because this dict is stored without ``finite_json``.
     """
     score = best.score if best else None
     verdict: dict[str, Any] = {}
     if outcome.get("target") is not None:
         target = float(outcome["target"])
-        verdict.update(target=target, target_reached=score is not None and score >= target)
+        reached = score is not None and math.isfinite(score) and _reaches(score, target)
+        verdict.update(target=target, target_reached=reached)
     minimums = outcome.get("require") or {}
     if minimums:
         failed = []
@@ -752,15 +774,18 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
             entry = best.named.get(name) if best and score is not None else None
             if score is None:
                 reason = f"The final run has no score, so {name!r} has no value."
-            elif entry is None:
+            elif best is None or entry is None:
                 reason = f"The metric returned no score named {name!r}."
-            elif entry.score < float(minimum):
+            elif (returned := best.named_cases.get(name, 0)) < best.runs:
+                reason = f"The metric returned {name!r} on only {returned} of {best.runs} cases."
+            elif not math.isfinite(entry.score):
+                reason = f"The metric returned a value for {name!r} that is not a finite number."
+            elif not _reaches(entry.score, float(minimum)):
                 reason = f"{name!r} scored {entry.score:.3f}, below its minimum {float(minimum):g}."
             else:
                 continue
-            failed.append(
-                {"name": name, "minimum": float(minimum), "value": entry.score if entry else None, "reason": reason}
-            )
+            value = entry.score if entry and math.isfinite(entry.score) else None
+            failed.append({"name": name, "minimum": float(minimum), "value": value, "reason": reason})
         verdict.update(minimums_passed=not failed, failed_minimums=failed)
     return verdict
 
