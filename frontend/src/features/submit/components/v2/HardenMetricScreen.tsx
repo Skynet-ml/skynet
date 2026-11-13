@@ -283,7 +283,7 @@ function SettingsForm({
             ))}
           </div>
         </div>
-        </div>
+      </div>
       {!hasScorer && <p className="text-sm text-destructive">{t("submit.v2.harden.no_scorer")}</p>}
       <div className="flex flex-wrap gap-2">
         <Button

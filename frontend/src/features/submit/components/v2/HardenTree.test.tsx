@@ -407,6 +407,23 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
       assert.equal(active(), "e2");
       await press(card, { key: "Escape" });
       assert.equal(closed, 1);
+      // A menu inside the drawer still owns its keys: only the panel itself is exempt.
+      const inner = document.createElement("div");
+      inner.setAttribute("role", "menu");
+      inner.innerHTML = "<button id='inner' role='menuitem'>B</button>";
+      document.querySelector('[role="dialog"]')!.appendChild(inner);
+      const innerItem = document.getElementById("inner")!;
+      const ringed = () => document.querySelector("[data-exploit].ring-2")?.getAttribute("data-exploit");
+      await press(card, { key: "k", code: "KeyK" });
+      assert.equal(ringed(), "e1");
+      innerItem.focus();
+      const innerJ = await press(innerItem, { key: "j", code: "KeyJ" });
+      assert.equal(innerJ.defaultPrevented, false);
+      assert.equal(document.activeElement, innerItem);
+      assert.equal(ringed(), "e1");
+      await press(innerItem, { key: "Escape" });
+      assert.equal(closed, 1);
+      inner.remove();
     } finally {
       await React.act(async () => root.unmount());
     }
