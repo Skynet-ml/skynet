@@ -35,8 +35,8 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /Cheat/);
     // The UI catalog does not load under jiti, so default labels render as their keys.
     assert.match(html, /submit\.v2\.edge_case\.score\.base/);
-    assert.match(html, /<dd dir="ltr"[^>]*>0\.98<\/dd>/);
-    assert.match(html, /<dd dir="ltr"[^>]*>0\.41<\/dd>/);
+    assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.98<\/bdi><\/dd>/);
+    assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.41<\/bdi><\/dd>/);
   });
 
   void it("draws the translated default labels when ScoreCompare has none", () => {
@@ -47,14 +47,16 @@ void describe("EdgeCaseView", () => {
 
   void it("keeps a near-perfect score apart from a perfect one", () => {
     const html = render([{ type: "ScoreCompare", exploit_score: 1, base_score: 0.99999 }]);
-    assert.match(html, /<dd dir="ltr"[^>]*>1<\/dd>/);
-    assert.match(html, /<dd dir="ltr"[^>]*>0\.99999<\/dd>/);
+    assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">1<\/bdi><\/dd>/);
+    assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.99999<\/bdi><\/dd>/);
   });
 
-  void it("draws a Diff in an LTR block with tinted lines", () => {
+  void it("draws a Diff in an LTR block with tinted lines and no file name", () => {
     const html = render([{ type: "Diff", diff: PATCH }]);
     assert.match(html, /<pre dir="ltr"/);
-    assert.match(html, /patch\.diff/);
+    // Only the fallback names patch.diff, so a model diff is not taken for the real patch.
+    assert.doesNotMatch(html, /<figcaption/);
+    assert.doesNotMatch(html, /patch\.diff/);
     assert.match(html, /bg-chart-2\/15[^>]*>\+return 1\.0</);
     assert.match(html, /bg-chart-5\/15[^>]*>-return score</);
   });

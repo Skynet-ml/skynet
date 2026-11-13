@@ -142,7 +142,10 @@ function cell(value: unknown): Cell {
 function list(value: unknown, max: number, min = 0): unknown[] {
   if (!Array.isArray(value)) fail();
   const length: unknown = value.length;
-  if (typeof length !== "number" || length > max || length < min) fail();
+  // A proxy can report any length; NaN would pass the range check and parse as empty.
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length > max || length < min) {
+    fail();
+  }
   return Array.from({ length }, (_, i) => (value as unknown[])[i]);
 }
 

@@ -46,12 +46,14 @@ const CAPTION_CLASS =
  * A unified diff, read-only, with added and removed lines tinted. It mirrors
  * DiffView in HardenMetricScreen.tsx; SKY-684 (the harden page) will share one copy.
  */
-function DiffBlock({ diff, label }: { diff: string; label: string }) {
+function DiffBlock({ diff, label }: { diff: string; label?: string }) {
   return (
     <figure className={FIGURE_CLASS}>
-      <figcaption className={CAPTION_CLASS}>
-        <bdi dir="ltr">{label}</bdi>
-      </figcaption>
+      {label && (
+        <figcaption className={CAPTION_CLASS}>
+          <bdi dir="ltr">{label}</bdi>
+        </figcaption>
+      )}
       <pre dir="ltr" className="max-h-72 overflow-auto py-2 text-start font-mono text-xs leading-5">
         {diff.split("\n").map((line, i) => (
           <div
@@ -94,8 +96,8 @@ function ScoreCompare({ node }: { node: ScoreCompareNode }) {
           <dt className="text-xs text-muted-foreground" dir="auto">
             {s.label}
           </dt>
-          <dd dir="ltr" className={cn("text-start font-mono text-xl font-semibold", s.tone)}>
-            {format.format(s.value)}
+          <dd className={cn("text-start font-mono text-xl font-semibold", s.tone)}>
+            <bdi dir="ltr">{format.format(s.value)}</bdi>
           </dd>
         </div>
       ))}
@@ -231,7 +233,8 @@ function NodeView({ node }: { node: EdgeCaseNode }) {
     case "ScoreCompare":
       return <ScoreCompare node={node} />;
     case "Diff":
-      return <DiffBlock diff={node.diff} label={PATCH_FILE} />;
+      // No file name: a model-written diff is not the exploit's real patch.diff.
+      return <DiffBlock diff={node.diff} />;
     case "IOPair":
       return <IOPair input={node.input} expected={node.expected} got={node.got} />;
     case "Table":
