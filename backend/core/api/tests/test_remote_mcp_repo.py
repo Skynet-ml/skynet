@@ -325,6 +325,29 @@ def test_review_needs_a_contract_when_the_repository_has_none(harness: Any, monk
     assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
 
 
+def test_a_draft_from_before_the_field_reads_the_tree_at_review(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored draft with no ``has_optimize_toml`` is unknown, so the review reads the tree (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        repository = {key: value for key, value in row.spec["repository"].items() if key != "has_optimize_toml"}
+        row.spec = {**row.spec, "repository": repository}
+        session.commit()
+    _tree(monkeypatch, ["src", "src/app.py", "optimize.toml"])
+    body = _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
+    assert "contract" not in body["remaining_steps"]
+    assert body["next_tool"] == "repo_draft_review"
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["ready"] is True
+    _tree(monkeypatch, ["src", "src/app.py"])
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["ready"] is False
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+
+
 def test_repository_file_makes_the_contract_step_optional(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Drop the contract step when the repository has optimize.toml or is too large to list (SKY-693)."""
     client, _engine, _calls = harness

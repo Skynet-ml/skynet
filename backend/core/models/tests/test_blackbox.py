@@ -271,15 +271,22 @@ def test_an_empty_optimize_toml_draft_is_refused(text: str) -> None:
         ({"optimize.toml": "version = 1\n"}, "mcp", "mcp"),
         ({}, None, "repository"),
         ({"README.md": "x"}, None, "repository"),
-        ({}, "setup_screen", "setup_screen"),
+        ({}, "setup_screen", "repository"),
+        ({}, "mcp", "repository"),
     ],
 )
 def test_the_run_records_where_its_contract_comes_from(drafts: dict[str, str], sent: str | None, stored: str) -> None:
-    """A draft contract counts as the setup screen's unless MCP sent it, and a set value survives staging."""
+    """The server decides the source: no draft contract is the repository's, and only MCP keeps ``mcp``."""
     source = BlackboxRepoSource(
         repository="octo/hello", editable_paths=["src"], draft_files=drafts, contract_source=sent
     )
     assert source.contract_source == stored
+
+
+def test_a_stored_record_with_no_contract_source_loads_as_repository() -> None:
+    """A run stored before the field existed has no draft contract, so it reads as the repository's."""
+    source = BlackboxRepoSource.model_validate({"repository": "octo/hello", "editable_paths": ["src"]})
+    assert source.contract_source == "repository"
 
 
 @pytest.mark.parametrize("base", ["main", "abc1234", "A" * 40])

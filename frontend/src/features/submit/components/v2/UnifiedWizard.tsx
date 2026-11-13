@@ -188,8 +188,9 @@ function UnifiedWizardFrame() {
     visibleScreen === "metric" && w.state.task.repo
       ? (w.state.workspace.files[OPTIMIZE_TOML] ?? "")
       : "";
-  // Every new run needs a contract (SKY-693). Only a read that found no file
-  // holds here; with no Changes pane or a read still loading, staging decides.
+  // Every new run needs a contract (SKY-693). Only a repository read that found
+  // no file holds here. With no Changes pane, a read still loading, or a read
+  // that failed or could not give text, the server decides.
   const repoBase = useWizardStateOptional()?.repoBase;
   const noContract =
     visibleScreen === "metric" &&

@@ -174,10 +174,18 @@ def _remaining(spec: dict[str, Any]) -> list[str]:
     """List the required steps the draft does not have yet.
 
     The contract step is required until the repository step finds an
-    ``optimize.toml`` in the repository. When the tree is too large to list
-    whole (``None``), the step is not required: the run's start checks the file.
+    ``optimize.toml`` in the repository, so a draft with no repository step
+    needs it. ``None`` means unknown: the tree was too large to list whole, or
+    the draft is older than the field. Then the step is not required here, and
+    the review reads the tree for the file.
+
+    Args:
+        spec: The whole draft.
+
+    Returns:
+        The missing required steps, in step order.
     """
-    repo_file = (spec.get("repository") or {}).get("has_optimize_toml", False)
+    repo_file = spec["repository"].get("has_optimize_toml") if spec.get("repository") else False
     return [
         step for step in _REQUIRED_STEPS if step not in spec and not (step == "contract" and repo_file is not False)
     ]

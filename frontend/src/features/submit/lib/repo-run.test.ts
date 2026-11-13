@@ -19,7 +19,7 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { contractMissing, finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
+const { contractMissing, finishedHardeningJobId, repoBaseText, repoRunRequest } = await import("./repo-run.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
@@ -497,4 +497,16 @@ test("the Metric screen holds only when neither the draft nor the repository has
   assert.equal(contractMissing("", "version = 1\n"), false);
   // A read still loading, or no pane to read it: the server decides.
   assert.equal(contractMissing("", undefined), false);
+});
+
+test("only a repository read that found no optimize.toml holds the Metric screen", () => {
+  const holds = (result: { text: string } | { issue: string } | null) =>
+    contractMissing("", repoBaseText("optimize.toml", result));
+  assert.equal(holds({ issue: "missing" }), true);
+  assert.equal(holds({ issue: "binary" }), false);
+  assert.equal(holds({ issue: "too_large" }), false);
+  assert.equal(holds(null), false);
+  assert.equal(holds({ text: "version = 1\n" }), false);
+  // Other files keep an empty base, so the Changes pane does not change.
+  assert.equal(repoBaseText("src/a.py", null), "");
 });

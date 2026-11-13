@@ -253,6 +253,12 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
             Scoped checks, reusable evidence identity, and authoritative setup spend,
             worded in the caller's locale.
         """
+        target = request.payload.get("target")
+        repo = target.get("repo") if isinstance(target, dict) else None
+        # Same rule as ``/blackbox/run`` (SKY-693): only the MCP draft flow builds
+        # an ``mcp`` contract, and that flow calls ``checked_preflight`` directly.
+        if isinstance(repo, dict) and repo.get("contract_source") == "mcp":
+            repo["contract_source"] = "setup_screen"
         try:
             response = checked_preflight(request, user, job_store)
         except DomainError as error:
