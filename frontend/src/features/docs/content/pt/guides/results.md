@@ -11,7 +11,6 @@ A página da execução mostra apenas as abas que se aplicam à execução. Algu
 | **Artefacto**          | Uma execução com resultado                                 | As versões do seu repositório, incluindo a melhor versão                  |
 | **Dados**              | Uma execução concluída com casos                           | Os dados divididos em conjuntos de treino, validação e teste              |
 | **Código**             | Quando a execução tem código para mostrar                  | O avaliador                                                               |
-| **Recompensa**         | Uma execução cujo avaliador declara partes de recompensa   | As partes da recompensa e os pesos delas                                  |
 | **Registos**           | A maioria das execuções                                    | O log da execução                                                         |
 | **Utilização e custo** | Quando você tem sessão iniciada                            | O que a execução gastou                                                   |
 | **Execução agendada**  | Uma execução bem-sucedida                                  | Um agendamento para executar a otimização de novo a partir da melhor versão |

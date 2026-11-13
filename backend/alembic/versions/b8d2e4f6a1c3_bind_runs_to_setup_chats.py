@@ -1,10 +1,10 @@
 """Remove chat share links and bind each run to its setup chat.
 
 Revision ID: b8d2e4f6a1c3
-Revises: f3a9c2d81b56
+Revises: 33a823c490ff
 
 The "Share chat" feature (SKY-294) goes away. A run now names the setup chat
-that created it, and the owner, admins and editors of the run can read that
+that created it, and the run owner and admins can read that
 chat. The upgrade drops ``agent_chat_shares`` and the continued-copy column
 ``agent_conversations.source_share_token`` with its index, then adds
 ``jobs.conversation_id``. The new column is nullable and its FK sets it to
@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from alembic import op
 
 revision: str = "b8d2e4f6a1c3"
-down_revision: str | Sequence[str] | None = "f3a9c2d81b56"
+down_revision: str | Sequence[str] | None = "33a823c490ff"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

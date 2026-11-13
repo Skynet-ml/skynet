@@ -15,7 +15,6 @@ import type { MessageKey } from "@/shared/lib/messages";
 
 /** Grid row order: what needs the user first, product news last. */
 export const EVENT_TYPES: readonly NotificationEventType[] = [
-  "needs_input",
   "budget_near",
   "failed",
   "finished",
@@ -139,10 +138,6 @@ export function cellEditable(
 }
 
 export const EVENT_KEYS: Record<NotificationEventType, { label: MessageKey; tip: MessageKey }> = {
-  needs_input: {
-    label: "notifications.event.needs_input",
-    tip: "notifications.event.needs_input_tip",
-  },
   budget_near: {
     label: "notifications.event.budget_near",
     tip: "notifications.event.budget_near_tip",
@@ -195,13 +190,6 @@ export function itemLine(item: NotificationItem, fmt: FactFormatters): ItemLine 
   const spent = num(facts.spent);
   const limit = num(facts.limit);
   const duration = num(facts.duration);
-  // A hardening job reuses the run events (SKY-360): it pauses for the user's
-  // review as needs_input and ends as finished, with `kind: "hardening"`.
-  // The facts type does not list that kind yet, so compare it as a string.
-  if ((facts.kind as string | null | undefined) === "hardening") {
-    if (item.event_type === "needs_input") return { key: "notifications.item.hardening_review", params: {} };
-    if (item.event_type === "finished") return { key: "notifications.item.hardening_done", params: {} };
-  }
   switch (item.event_type) {
     case "finished":
     case "new_best": {
@@ -226,16 +214,12 @@ export function itemLine(item: NotificationItem, fmt: FactFormatters): ItemLine 
         ? { key: "notifications.item.stuck_plain", params: {} }
         : { key: "notifications.item.stuck", params: { score: fmt.score(score) } };
     case "budget_near":
-    case "needs_input": {
-      const base = item.event_type;
-      if (spent === null || limit === null) {
-        return { key: `notifications.item.${base}_plain` as MessageKey, params: {} };
-      }
-      return {
-        key: `notifications.item.${base}` as MessageKey,
-        params: { spent: fmt.usd(spent), limit: fmt.usd(limit) },
-      };
-    }
+      return spent === null || limit === null
+        ? { key: "notifications.item.budget_near_plain", params: {} }
+        : {
+            key: "notifications.item.budget_near",
+            params: { spent: fmt.usd(spent), limit: fmt.usd(limit) },
+          };
     case "shared": {
       const actor = typeof facts.actor === "string" && facts.actor ? facts.actor : null;
       if (!actor) return { key: "notifications.item.shared_plain", params: {} };

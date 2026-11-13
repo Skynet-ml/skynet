@@ -1019,15 +1019,16 @@ def test_steer_applied_names_the_saved_steer_row(
 ) -> None:
     """The client gets the steer row id, so a later compaction can store its entry on that message."""
 
-    async def steered(**_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-        """Apply one steer, then finish the turn.
+    async def steered(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Store one steer as the agent does, apply it, then finish the turn.
 
         Args:
-            **_kwargs: Unused.
+            **kwargs: The router's arguments; ``on_steer`` stores the steer.
 
         Yields:
             A ``steer_applied`` and a ``done`` event.
         """
+        await asyncio.to_thread(kwargs["on_steer"], "use less")
         yield {"event": agent_mod.STEER_APPLIED_EVENT, "data": {"ids": ["s1"], "text": "use less"}}
         yield {"event": "done", "data": {"assistant_message": "ok", "model": "m"}}
 

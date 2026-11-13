@@ -1070,7 +1070,6 @@ export function checkPackageRegistry(indexUrl: string) {
 }
 
 export type NotificationEventType =
-  | "needs_input"
   | "budget_near"
   | "failed"
   | "finished"

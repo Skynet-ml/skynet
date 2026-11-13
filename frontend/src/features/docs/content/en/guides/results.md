@@ -11,7 +11,6 @@ The run page shows only the tabs that apply to the run. Some tabs depend on the 
 | **Artifact**       | A run with a result                                        | The versions of your repository, with the best version                           |
 | **Data**           | A finished run with cases                                  | The data split into train, validation and test sets                              |
 | **Code**           | When the run has code to show                              | The scorer                                                                       |
-| **Reward**         | A run whose scorer declares reward parts                   | The reward parts and their weights                                               |
 | **Logs**           | Most runs                                                  | The run log                                                                      |
 | **Usage and cost** | When you are signed in                                     | What the run spent                                                               |
 | **Scheduled run**  | A successful run                                           | A schedule to run the optimization again from the best version                   |

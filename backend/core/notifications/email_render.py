@@ -50,8 +50,8 @@ NOTIFICATION_SETTINGS_PATH = "/?settings=notifications"
 # and must hold every key, and English reads from its overlay.
 EMAIL_LOCALE = "en"
 
-EventType = Literal["needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared"]
-EVENT_TYPES: tuple[EventType, ...] = ("needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared")
+EventType = Literal["budget_near", "failed", "finished", "new_best", "stuck", "shared"]
+EVENT_TYPES: tuple[EventType, ...] = ("budget_near", "failed", "finished", "new_best", "stuck", "shared")
 AccountEmailKind = Literal["verification", "password_reset", "sign_in"]
 ACCOUNT_EMAIL_KINDS: tuple[AccountEmailKind, ...] = ("verification", "password_reset", "sign_in")
 _ACCOUNT_CODE_MINUTES: dict[str, int] = {"verification": 30, "password_reset": 30, "sign_in": 10}
@@ -64,7 +64,6 @@ FactValue = float | int | str | None
 FACT_KEYS: tuple[str, ...] = ("score", "delta", "spent", "duration")
 _FACT_INPUT_KEYS = frozenset((*FACT_KEYS, "limit"))
 _EVENT_FACTS: dict[str, frozenset[str]] = {
-    "needs_input": frozenset({"score", "spent", "duration"}),
     "budget_near": frozenset({"score", "spent", "duration"}),
     "failed": frozenset({"spent", "duration"}),
     "finished": frozenset({"score", "delta", "spent", "duration"}),
@@ -73,7 +72,6 @@ _EVENT_FACTS: dict[str, frozenset[str]] = {
     "shared": frozenset({"score", "delta"}),
 }
 _EVENT_TONES: dict[str, Tone] = {
-    "needs_input": "warn",
     "budget_near": "warn",
     "failed": "bad",
     "finished": "good",
@@ -707,9 +705,8 @@ def render_notification_email(
     """Render a run or sharing notification in English.
 
     Args:
-        event_type: One of :data:`EVENT_TYPES` (``needs_input``,
-            ``budget_near``, ``failed``, ``finished``, ``new_best``,
-            ``stuck``, ``shared``).
+        event_type: One of :data:`EVENT_TYPES` (``budget_near``,
+            ``failed``, ``finished``, ``new_best``, ``stuck``, ``shared``).
         title: The run's display name, inserted into the headline.
         facts: Optional ``score`` / ``delta`` / ``spent`` (+ ``limit``) /
             ``duration`` values; see :func:`build_facts`. Only the facts the

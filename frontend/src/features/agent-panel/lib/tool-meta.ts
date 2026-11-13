@@ -36,6 +36,7 @@ import {
   ListChecks,
   MagicWand,
   MagnifyingGlass,
+  Megaphone,
   Package,
   Pause,
   PencilSimple,
@@ -459,6 +460,7 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   get_release_by_tag: () => msg("agent.tool.github.get_release_by_tag.title"),
   get_tagging_guide_for_agent: () => msg("agent.tool.tagging_guide.get.title"),
   save_tagging_guide_for_agent: () => msg("agent.tool.tagging_guide.save.title"),
+  send_feedback: () => msg("agent.tool.send_feedback.title"),
 };
 
 // Icons for the tools that have only a title above, so every tool row and the
@@ -511,6 +513,7 @@ export const TOOL_ICONS: Record<string, Icon> = {
   get_release_by_tag: RocketLaunch,
   get_tagging_guide_for_agent: ListChecks,
   save_tagging_guide_for_agent: FloppyDisk,
+  send_feedback: Megaphone,
 };
 
 function prettifyToolName(tool: string): string {

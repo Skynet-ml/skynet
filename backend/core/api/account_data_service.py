@@ -42,6 +42,7 @@ from ..notifications.preferences import settings_from_row
 from ..storage.models import (
     AgentConversationModel,
     AgentEnginePreferenceModel,
+    AgentFeedbackReportModel,
     AgentMessageModel,
     AgentStagedDatasetModel,
     ApiTokenModel,
@@ -267,6 +268,11 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
             .where(AgentMessageModel.conversation_id == conversation.id)
             .order_by(AgentMessageModel.created_at)
         ).all()
+        reports = session.scalars(
+            select(AgentFeedbackReportModel)
+            .where(AgentFeedbackReportModel.conversation_id == conversation.id)
+            .order_by(AgentFeedbackReportModel.created_at)
+        ).all()
         conversations_out.append(
             {
                 "id": conversation.id,
@@ -281,6 +287,15 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
                         "created_at": _iso(message.created_at),
                     }
                     for message in messages
+                ],
+                "feedback_reports": [
+                    {
+                        "tool_name": report.tool_name,
+                        "user_quote": report.user_quote,
+                        "summary": report.summary,
+                        "created_at": _iso(report.created_at),
+                    }
+                    for report in reports
                 ],
             }
         )
@@ -555,6 +570,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         session.scalars(select(AgentConversationModel.id).where(AgentConversationModel.username == username))
     )
     if conversation_ids:
+        _run_delete(
+            delete(AgentFeedbackReportModel).where(AgentFeedbackReportModel.conversation_id.in_(conversation_ids))
+        )
         _run_delete(delete(AgentMessageModel).where(AgentMessageModel.conversation_id.in_(conversation_ids)))
     _run_delete(delete(ConversationEmbeddingModel).where(ConversationEmbeddingModel.username == username))
     _run_delete(delete(AgentConversationModel).where(AgentConversationModel.username == username))

@@ -43,6 +43,7 @@ from ...models import ModelConfig
 from ...service_gateway.agents import compaction
 from ...service_gateway.agents.chat_title import with_title_event, write_chat_title
 from ...service_gateway.agents.code import _reply_language
+from ...service_gateway.agents.feedback import FeedbackTarget
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
     TrustMode,
@@ -854,6 +855,7 @@ async def _wrap_with_persistence(
     title: str | None,
     wizard_state_before: dict[str, Any] | None = None,
     user_message_id: int | None = None,
+    steer_ids: dict[str, int] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Mirror upstream SSE events, accumulate state, persist on ``done``.
 
@@ -879,6 +881,8 @@ async def _wrap_with_persistence(
             this turn — persisted verbatim alongside the row.
         user_message_id: The saved row of the turn's user message. The client
             sends it back with that message, so a compaction finds its row.
+        steer_ids: The saved row of each steered text, by text; each
+            ``steer_applied`` event takes its id from here.
 
     Yields:
         The same ``{event, data}`` mappings the SSE serializer expects, with
@@ -974,18 +978,12 @@ async def _wrap_with_persistence(
                 # Internal envelope — never forward to the frontend.
                 continue
             elif name == STEER_APPLIED_EVENT:
-                # The steered message is a user turn of this conversation; it
-                # goes in now so it sits before the reply written on ``done``.
-                if conversation_id and job_store is not None and isinstance(data.get("text"), str):
-                    try:
-                        steer_id = await asyncio.to_thread(
-                            _persist_user_turn, job_store, conversation_id, data["text"], steer=True
-                        )
-                        # The client sends the id back with the turn, so a later
-                        # compaction that keeps from this message can store on it.
-                        event = {**event, "data": {**data, "message_id": steer_id}}
-                    except Exception:
-                        logger.exception("Failed to persist a steered user message")
+                # The router stored the steer before the agent read it. The
+                # client sends the id back with the turn, so a later compaction
+                # that keeps from this message can store on it.
+                steer_id = steer_ids.pop(data.get("text"), None) if steer_ids is not None else None
+                if steer_id is not None:
+                    event = {**event, "data": {**data, "message_id": steer_id}}
             elif name == "tool_start":
                 tid = str(data.get("id", ""))
                 if tid:
@@ -1546,6 +1544,35 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         )
         usage_sink: list = []
         compaction_cents: float | None = None
+        steer_ids: dict[str, int] = {}
+        feedback_target = (
+            FeedbackTarget(
+                engine=engine,
+                username=current_user.username,
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+            )
+            if engine is not None and conversation_id and user_message_id is not None
+            else None
+        )
+
+        def _store_steer(text: str) -> None:
+            """Store a steered user message before the agent reads it.
+
+            The row must exist before the steer reaches the prompt, so a
+            ``send_feedback`` call about the steer keys its report on it.
+
+            Args:
+                text: The steered text the agent receives.
+            """
+            # Clear the target first: if the store fails, a complaint in the
+            # steer must give "not sent", not land on the previous message.
+            if feedback_target is not None:
+                feedback_target.user_message_id = None
+            message_id = _persist_user_turn(job_store, conversation_id, text, steer=True)
+            steer_ids[text] = message_id
+            if feedback_target is not None:
+                feedback_target.user_message_id = message_id
 
         def _github_token() -> str | None:
             """Load the caller's token for the run's repository host, for the coding agent's reads.
@@ -1634,6 +1661,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 usage_sink=usage_sink,
                 steer_key=req.steer_key,
                 github_token=_github_token,
+                feedback_target=feedback_target,
+                on_steer=_store_steer if conversation_id and job_store is not None else None,
             ):
                 yield event
 
@@ -1677,6 +1706,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             title=title,
             wizard_state_before=dict(wizard_state),
             user_message_id=user_message_id,
+            steer_ids=steer_ids,
         )
         if title_task is not None and conversation_id:
             wrapped = with_title_event(wrapped, title_task, conversation_id, title or "")

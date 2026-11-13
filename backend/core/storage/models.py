@@ -1660,6 +1660,42 @@ class AgentConversationModel(Base):
     )
 
 
+class AgentFeedbackReportModel(Base):
+    """One report an agent sent when the user was not satisfied with a tool result (SKY-580).
+
+    The agent writes the report with its ``send_feedback`` tool. The unique
+    key on ``(conversation_id, user_message_id)`` keeps it to at most one
+    report for each stored user message. A regenerate stores the message again
+    with a new id, so it can get one more report. ``user_message_id`` is the stored user message the report
+    is about. It has no foreign key on purpose: an edit or a regenerate deletes
+    that message, and the report must stay. Postgres takes message ids from a
+    sequence and never reuses them, so a later message never meets an old
+    report. The row holds only a short quote of the user and the agent's
+    summary, never secrets or file contents. Deleting the chat deletes its
+    reports.
+    """
+
+    __tablename__ = "agent_feedback_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_quote: Mapped[str] = mapped_column(String(300), nullable=False)
+    summary: Mapped[str] = mapped_column(String(1000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), index=True
+    )
+
+    __table_args__ = (UniqueConstraint("conversation_id", "user_message_id", name="uq_agent_feedback_reports_message"),)
+
+
 class AgentMessageModel(Base):
     """Single turn inside an :class:`AgentConversationModel`.
 

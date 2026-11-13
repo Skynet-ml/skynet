@@ -121,8 +121,9 @@ def _states(row: NotificationModel) -> dict[str, str]:
 
 
 def test_urgent_event_goes_out_at_once_on_every_enabled_channel(engine, channels) -> None:
-    """``needs_input`` skips the hold on email, Chrome and Slack."""
-    notification_id = notify(_USER, "needs_input", "run1", {"spent": 12.0}, title="Bot", now=_T0)
+    """``budget_near`` skips the hold on email, Chrome and Slack."""
+    _prefs(engine, channel_grid={"budget_near": {"slack": True}})
+    notification_id = notify(_USER, "budget_near", "run1", {"spent": 12.0}, title="Bot", now=_T0)
 
     row = _row(engine, notification_id)
     assert row.in_inbox is True
@@ -220,9 +221,9 @@ def test_zero_hold_sends_at_once(engine, channels) -> None:
 
 def test_inbox_off_still_routes_other_channels(engine, channels) -> None:
     """Switching the inbox cell off hides the item but keeps the email."""
-    _prefs(engine, channel_grid={"needs_input": {"inbox": False}})
+    _prefs(engine, channel_grid={"budget_near": {"inbox": False}})
 
-    notification_id = notify(_USER, "needs_input", "run1", {}, title="Bot", now=_T0)
+    notification_id = notify(_USER, "budget_near", "run1", {}, title="Bot", now=_T0)
 
     assert _row(engine, notification_id).in_inbox is False
     assert len(channels["email"].sent) == 1
@@ -239,8 +240,8 @@ def test_event_off_everywhere_stores_nothing(engine, channels) -> None:
 
 def test_dedupe_key_makes_a_repeat_a_no_op(engine, channels) -> None:
     """A resumed run re-emitting the same event records and sends it once."""
-    first = notify(_USER, "needs_input", "run1", {}, title="Bot", dedupe_key="needs_input:run1", now=_T0)
-    second = notify(_USER, "needs_input", "run1", {}, title="Bot", dedupe_key="needs_input:run1", now=_T0)
+    first = notify(_USER, "budget_near", "run1", {}, title="Bot", dedupe_key="budget_near:run1", now=_T0)
+    second = notify(_USER, "budget_near", "run1", {}, title="Bot", dedupe_key="budget_near:run1", now=_T0)
 
     assert first is not None
     assert second is None
@@ -290,7 +291,7 @@ def test_email_channel_reports_unavailable_without_an_address(monkeypatch: pytes
 
 def test_slack_is_an_inert_slot() -> None:
     """Until a later step connects it, Slack records ``unavailable``."""
-    delivery = Delivery("n1", _USER, "needs_input", "run1", "Bot", None)
+    delivery = Delivery("n1", _USER, "budget_near", "run1", "Bot", None)
 
     assert SlackChannel().send(delivery) == "unavailable"
 

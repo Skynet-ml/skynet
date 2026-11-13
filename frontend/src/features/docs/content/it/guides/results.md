@@ -11,7 +11,6 @@ La pagina dell'esecuzione mostra solo le schede pertinenti all'esecuzione. Alcun
 | **Artefatto**              | Un'esecuzione con un risultato                                   | Le versioni del tuo repository, con la versione migliore                           |
 | **Dati**                   | Un'esecuzione terminata con casi                                 | I dati suddivisi in set di addestramento, convalida e test                         |
 | **Codice**                 | Quando l'esecuzione ha codice da mostrare                        | Lo scorer                                                                          |
-| **Ricompensa**             | Un'esecuzione il cui scorer dichiara parti di ricompensa         | Le componenti della ricompensa e i loro pesi                                       |
 | **Log**                    | La maggior parte delle esecuzioni                                | Il log dell'esecuzione                                                             |
 | **Utilizzo e costi**       | Quando hai effettuato l'accesso                                  | Quanto ha speso l'esecuzione                                                       |
 | **Esecuzione pianificata** | Un'esecuzione riuscita                                           | Una pianificazione per eseguire di nuovo l'ottimizzazione dalla versione migliore |
