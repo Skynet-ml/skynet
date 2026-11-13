@@ -4,6 +4,8 @@ import path from "node:path";
 import { it } from "node:test";
 
 const frontend = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../../../..");
+// The harden screen's imports pull in a stylesheet that node cannot load.
+const stub = path.join(frontend, "src/features/optimizations/components/__fixtures__/style-stub.ts");
 
 // node --test only loads .ts, so the .tsx render test runs in a jiti child.
 void it("HardenTree render tests pass", () => {
@@ -16,7 +18,10 @@ void it("HardenTree render tests pass", () => {
       env: {
         ...process.env,
         JITI_JSX: "1",
-        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
+        JITI_ALIAS: JSON.stringify({
+          "@/": `${path.join(frontend, "src")}/`,
+          "react-loading-skeleton/dist/skeleton.css": stub,
+        }),
       },
     },
   );

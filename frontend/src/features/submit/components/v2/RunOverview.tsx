@@ -137,9 +137,9 @@ export function RunOverview({
               </>
             ) : (
               t("submit.v2.harden.noise.scores", {
-                  scores: hardening.noise.scores.map(fmt).join(", "),
-                  spread: hardening.noise.spread === null ? "–" : fmt(hardening.noise.spread),
-                })
+                scores: hardening.noise.scores.map(fmt).join(", "),
+                spread: hardening.noise.spread === null ? "–" : fmt(hardening.noise.spread),
+              })
             )}
           </p>
         )}

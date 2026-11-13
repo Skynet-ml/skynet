@@ -1,7 +1,7 @@
 /*
  * node --test cannot load .tsx, so this runs through jiti (HardenTree.render.test.ts
  * spawns it inside `npm run test:unit`). To run it by hand from frontend/:
- * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
+ * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\",\"react-loading-skeleton/dist/skeleton.css\":\"$PWD/src/features/optimizations/components/__fixtures__/style-stub.ts\"}" npx jiti <this file>
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -18,7 +18,9 @@ const {
   HardenTree,
   LEAD_NODE,
   bestScore,
+  cardKeyStep,
   cardStep,
+  focusLost,
   liveRoundIndex,
   needsReview,
   nodeStatus,
@@ -27,6 +29,7 @@ const {
 } = await import(
   "./HardenTree"
 );
+const { HardenMetricScreen } = await import("./HardenMetricScreen");
 
 // The tree takes its translator as a prop, so the test sees each key and its params.
 const t = (key: string, params?: Record<string, string | number>) =>
@@ -152,6 +155,62 @@ void describe("cardStep", () => {
 
   void it("returns null with no card to review", () => {
     assert.equal(cardStep([], null, 1), null);
+  });
+});
+
+void describe("cardKeyStep", () => {
+  const press = (code: string, over: Partial<KeyboardEvent> = {}, target: unknown = null) =>
+    cardKeyStep({ code, metaKey: false, ctrlKey: false, altKey: false, ...over, target: target as EventTarget });
+
+  void it("reads the physical J and K keys, so the Hebrew layout and Caps Lock work", () => {
+    // On the Hebrew layout the J key types ח and the K key types ל; code stays KeyJ and KeyK.
+    assert.equal(press("KeyJ"), 1);
+    assert.equal(press("KeyK"), -1);
+    assert.equal(press("KeyL"), 0);
+  });
+
+  void it("does nothing with a modifier or in a text field", () => {
+    assert.equal(press("KeyJ", { ctrlKey: true }), 0);
+    assert.equal(press("KeyJ", { metaKey: true }), 0);
+    assert.equal(press("KeyK", { altKey: true }), 0);
+    assert.equal(press("KeyJ", {}, { closest: () => ({}) }), 0);
+    assert.equal(press("KeyJ", {}, { closest: () => null }), 1);
+  });
+});
+
+void describe("focusLost", () => {
+  const body = { isConnected: true } as Element;
+
+  void it("gives focus back only when the drawer took it away", () => {
+    assert.equal(focusLost(null, body), true);
+    assert.equal(focusLost(body, body), true);
+    assert.equal(focusLost({ isConnected: false } as Element, body), true);
+    // A round tab or the agent panel that holds focus keeps it.
+    assert.equal(focusLost({ isConnected: true } as Element, body), false);
+  });
+});
+
+void describe("HardenMetricScreen", () => {
+  const state = (j: HardeningJob) => ({
+    job: j,
+    loading: false,
+    busy: false,
+    hasScorer: true,
+    start: async () => {},
+    verdict: async () => {},
+    decideFix: async () => {},
+    stop: async () => {},
+    retry: async () => {},
+  });
+  const render = (j: HardeningJob) =>
+    renderToStaticMarkup(
+      <HardenMetricScreen active guided={false} onBack={() => {}} hardening={state(j)} reflectionModel={null} />,
+    );
+
+  void it("draws no tree before the first round, and draws it while the job runs", () => {
+    assert.doesNotMatch(render(job({ status: "preflight" })), /role="tree"/);
+    assert.doesNotMatch(render(job({ status: "preflight_failed", preflight_failures: ["no scorer"] })), /role="tree"/);
+    assert.match(render(job({ status: "running" })), /role="tree"/);
   });
 });
 

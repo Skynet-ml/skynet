@@ -34,7 +34,9 @@ import { v2Msg } from "./ArtifactConfirmCard";
 import { DiffBlock } from "./EdgeCaseView";
 import { HardenSessionDrawer } from "./HardenSessionDrawer";
 import {
+  cardKeyStep,
   cardStep,
+  focusLost,
   HardenTree,
   LEAD_NODE,
   liveRoundIndex,
@@ -354,10 +356,7 @@ function pendingCards(round: TreeRound): HardeningExploit[] {
 function CardKeys({ onStep }: { onStep: (step: 1 | -1) => void }) {
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const step = event.key === "j" ? 1 : event.key === "k" ? -1 : 0;
+      const step = cardKeyStep(event);
       if (!step) return;
       event.preventDefault();
       onStep(step);
@@ -409,10 +408,16 @@ export function HardenMetricScreen({
   const drawerNode = active ? node : null;
   const openedNode = React.useRef<number | null>(null);
 
-  // Esc or the close button would drop focus to the body; give it back to the
-  // tree node that opened the drawer.
+  // Esc or the close button drops focus to the body with the drawer; give it
+  // back to the tree node that opened it. A round tab click or a key typed in
+  // the agent panel also closes the drawer, and that focus stays where it is.
   React.useEffect(() => {
-    if (drawerNode === null && openedNode.current !== null && active) {
+    if (
+      drawerNode === null &&
+      openedNode.current !== null &&
+      active &&
+      focusLost(document.activeElement, document.body)
+    ) {
       document.querySelector<HTMLElement>(`[data-node="${openedNode.current}"]`)?.focus();
     }
     openedNode.current = drawerNode;

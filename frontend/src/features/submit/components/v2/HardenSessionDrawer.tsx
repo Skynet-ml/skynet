@@ -11,7 +11,7 @@ import { UserBubble } from "@/shared/ui/agent/user-bubble";
 import { ArrowLeft, Info, X } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { EdgeCaseView } from "./EdgeCaseView";
-import { LEAD_NODE, reviewOrder, sessionExploits, type TreeRound } from "./HardenTree";
+import { LEAD_NODE, cardKeyStep, reviewOrder, sessionExploits, type TreeRound } from "./HardenTree";
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 
@@ -166,10 +166,7 @@ export function HardenSessionDrawer({
   }, [onClose]);
 
   const onKeyDown = (event: React.KeyboardEvent) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable=true]")) return;
-    if (event.metaKey || event.ctrlKey || event.altKey) return;
-    const step = event.key === "j" ? 1 : event.key === "k" ? -1 : 0;
+    const step = cardKeyStep(event);
     if (!step || !cards.length) return;
     event.preventDefault();
     setFocus((i) => Math.min(cards.length - 1, Math.max(0, i + step)));

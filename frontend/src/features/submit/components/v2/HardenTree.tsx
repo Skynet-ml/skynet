@@ -115,6 +115,41 @@ export function cardStep(
   return pending[(from + step + pending.length) % pending.length] ?? null;
 }
 
+/**
+ * The card step a key press asks for: J is the next card, K the previous.
+ * It reads the physical key, so it works on the Hebrew and other non-Latin
+ * layouts and with Caps Lock. A press in a text field or with a modifier is no step.
+ *
+ * Args:
+ *   event: The key press.
+ *
+ * Returns:
+ *   1, -1, or 0 for no step.
+ */
+export function cardKeyStep(
+  event: Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKey"> & { target: EventTarget | null },
+): 1 | -1 | 0 {
+  const target = event.target as HTMLElement | null;
+  if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return 0;
+  if (event.metaKey || event.ctrlKey || event.altKey) return 0;
+  return event.code === "KeyJ" ? 1 : event.code === "KeyK" ? -1 : 0;
+}
+
+/**
+ * Focus went away with a closed drawer: nothing holds it, or the element that
+ * held it left the page. Focus the user moved on purpose is not lost.
+ *
+ * Args:
+ *   active: The document's active element.
+ *   body: The document body.
+ *
+ * Returns:
+ *   True when the page should give focus back.
+ */
+export function focusLost(active: Element | null, body: Element | null): boolean {
+  return active === null || active === body || !active.isConnected;
+}
+
 /** The claims of one session; claims from jobs before SKY-682 have no session. */
 export function sessionExploits(exploits: HardeningExploit[], session: number): HardeningExploit[] {
   return exploits.filter((e) => (e.session ?? LEAD_NODE) === session);
