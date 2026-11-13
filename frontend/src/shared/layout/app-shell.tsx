@@ -54,11 +54,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // Shared-optimization pages render bare — no sidebar, agent panel, or other
   // app chrome — to keep the focus on the shared item. The recipient is still
-  // authenticated (the route is login-gated like the rest of the app). A chat
-  // link opens in Skynet for a signed-in user, so it keeps the chrome; a
-  // signed-out reader has no session for the chrome's data (SKY-294).
-  const signedInChatLink = pathname.startsWith("/share/chat/") && status === "authenticated";
-  if (pathname.startsWith("/share/") && !signedInChatLink) {
+  // authenticated (the route is login-gated like the rest of the app).
+  if (pathname.startsWith("/share/")) {
     return (
       <main className="min-h-dvh" dir={dir}>
         {children}
@@ -234,7 +231,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
           aria-hidden={!sidebarOpen}
         />
 
-        <main className="app-main flex-1 overflow-auto min-w-0 page-gradient grid-pattern">
+        <main className="app-main flex-1 overflow-auto min-w-0 page-gradient">
           {/* The tagger picks its own container per phase (full-width working
               surface vs the capped session chooser), so its routes render bare
               and wrap themselves in PageContainer — nesting it inside the

@@ -6,6 +6,7 @@ Public dev surface (in ``_SCALAR_PUBLIC_PATHS``):
 
 Internal (frontend-only, hidden from public docs):
 - ``GET /optimizations/{id}/agent-runs/{run_id}`` — one sandboxed agent run's answer and transcript.
+- ``GET /optimizations/{id}/chat`` — the setup chat that created the run, for its owner, admins and editors.
 - ``GET /optimizations/{id}/candidates`` — the run's candidates with state, call count and cost (owner only).
 - ``GET /optimizations/{id}/candidates/{candidate_id}/calls`` — one candidate's relay calls after a cursor (owner only).
 """
@@ -19,6 +20,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....constants import OPTIMIZATION_TYPE_BLACKBOX, PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE
@@ -31,16 +34,18 @@ from ....models import (
     OptimizationSummaryResponse,
 )
 from ....models.run_calls import RunCallPage, RunCandidateList
+from ....storage.models import AgentConversationModel, JobModel
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import (
     compute_elapsed,
+    job_owner,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
     status_to_job_status,
 )
 from ...errors import DomainError
-from ...sharing_access import ShareRole
+from ...sharing_access import ShareRole, role_rank
 from .._helpers import (
     build_summary,
     is_pausable,
@@ -48,6 +53,8 @@ from .._helpers import (
     load_job_for_user,
     load_job_with_role,
 )
+from ..agent_history import ConversationDetail, conversation_detail
+from ..agent_settings import mask_secrets
 from ..constants import TERMINAL_STATUSES
 from ._local import execution_budget_view
 
@@ -385,6 +392,53 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
                 "transcript_length": len(transcript),
             }
         )
+
+    @router.get(
+        "/optimizations/{optimization_id}/chat",
+        response_model=ConversationDetail,
+        summary="The setup chat that created one optimization",
+    )
+    def get_run_chat(optimization_id: str, current_user: AuthenticatedUserDep) -> ConversationDetail:
+        """Return the setup chat bound to a run, to its owner, admins and editors.
+
+        A run's tools read the owner's runs, datasets, wallet and settings, so
+        a viewer of the run does not get the chat. Only the owner reads it
+        unmasked: an admin or an editor gets every credential in it masked.
+        The mask hides only credential-shaped strings and secret-like keys, so
+        a secret typed as plain prose still reaches admins and editors.
+
+        Args:
+            optimization_id: The run whose setup chat is read.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            The full chat up to this run: every turn before it, including
+            earlier setups, and the agent's reply to the turn that started it.
+            For a caller who is not the owner, credentials are masked.
+
+        Raises:
+            DomainError: 404 when the run is unknown or inaccessible to the
+                caller, when the caller only views the run, or when the run has
+                no bound chat.
+        """
+        job, role = load_job_with_role(job_store, optimization_id, current_user, include_payload=False)
+        engine = getattr(job_store, "engine", None)
+        if engine is None or role_rank(role) < role_rank(ShareRole.editor):
+            raise DomainError("agent.conversation.not_found", status=404)
+        with Session(engine) as session:
+            bound = session.execute(
+                select(JobModel.conversation_id, JobModel.created_at).where(JobModel.optimization_id == optimization_id)
+            ).first()
+            row = (
+                session.get(AgentConversationModel, bound.conversation_id) if bound and bound.conversation_id else None
+            )
+            if row is None:
+                raise DomainError("agent.conversation.not_found", status=404)
+            detail = conversation_detail(session, row, run_started_at=bound.created_at)
+        if job_owner(job) == current_user.username.strip().lower():
+            return detail
+        # The owner may paste a key into the chat; an admin or an editor must not read it.
+        return ConversationDetail.model_validate(mask_secrets(detail.model_dump()))
 
     @router.get(
         "/optimizations/{optimization_id}/candidates",

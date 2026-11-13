@@ -3,8 +3,6 @@ export { AgentPanelDock } from "./components/AgentPanelDock";
 export { AgentPillDock } from "./components/AgentPillDock";
 export { MinimizedPill } from "./components/MinimizedPill";
 export { ToolCallRow } from "./components/ToolCallRow";
-export { SharedChatView } from "./components/SharedChatView";
-export { shareLinkTypeLabel } from "./components/ShareChatDialog";
 export { Carousel, CarouselNav } from "./components/Carousel";
 export {
   GeneralistPanelProvider,
@@ -23,17 +21,10 @@ export type { DraftFiles } from "./hooks/use-wizard-state";
 export {
   SETUP_CHAT_KEY,
   flushSetupChat,
-  hideKickoffs,
   legacySetupChatId,
+  runSetupChatId,
 } from "./lib/screen-agent";
-export {
-  deleteConversation,
-  getSharedConversation,
-  listSharedConversations,
-  openSharedConversation,
-  revokeConversationShare,
-} from "./lib/conversation-api";
-export type { SharedConversation, SharedConversationSummary } from "./lib/conversation-api";
+export { deleteConversation } from "./lib/conversation-api";
 export { queueAgentPrompt } from "./lib/prompt-queue";
 export { dispatchGeneralistEvent } from "./lib/stream-events";
 export type { GeneralistAgentHandlers } from "./lib/stream";

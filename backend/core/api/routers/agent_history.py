@@ -6,36 +6,24 @@ authenticated principal to the row's ``username``. The companion writer
 that *populates* these tables lives in :mod:`generalist_agent` — this
 router only reads, renames, pins, and archives.
 
-It also lets an owner share a thread by a typed link (SKY-294). A ``view``
-link shows the chat read-only to anyone. A ``continue`` link lets a
-signed-in user continue the chat as their own copy. A ``continue_data``
-link does the same and also grants live, read-only access to the runs,
-datasets and files that the owner ticked. Every shared-item read checks
-the live link, so a revoke stops it at once. Users other than the owner
-never see the owner's private tool results: those become
-``shared_chat_item`` rows. Sharing needs the hosted app, so the Mac app
-(local mode) cannot create a link.
+A run keeps the setup chat that created it (``jobs.conversation_id``), and
+:func:`conversation_detail` also serves that chat to the run's editors.
 
 Hidden from the public Scalar reference — wizard-internal flow.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-import secrets
-import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, cast
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, load_only
-from sqlalchemy.orm.exc import StaleDataError
 
 from ...config import settings
 from ...models import (
@@ -44,51 +32,19 @@ from ...models import (
     BulkDeleteByIdsSkipped,
 )
 from ...service_gateway.embedding_pipeline.embeddings import get_embedder
-from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ...storage.models import (
-    AgentChatShareModel,
     AgentConversationModel,
     AgentMessageModel,
-    AgentStagedDatasetModel,
-    DatasetModel,
     JobModel,
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from .agent_settings import MASK, mask_secrets
 
 logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 MAX_LIST = 100
 DEFAULT_LIST = 50
-# A shared chat copies at most this many turns into a continued chat.
-MAX_SHARED_MESSAGES = 1000
-# Each live link is a public page, so one account cannot publish without bound.
-MAX_SHARED_CHATS = 200
-MAX_SHARE_ITEMS = 50
-# A shared-item read goes to the model, so it stays small.
-MAX_ITEM_ROWS = 50
-MAX_ITEM_CHARS = 20_000
-ITEM_KINDS = ("run", "dataset", "file")
-# Tool-call keys whose value names one private item. A program is the result
-# of a run, so a run grant also covers its program.
-_ITEM_ID_KEYS = {
-    "optimization_id": "run",
-    "job_id": "run",
-    "dataset_id": "dataset",
-    "source_dataset_id": "dataset",
-    "staged_dataset_id": "file",
-}
-# Catalog tools whose results hold no user data, so other users may see them.
-_PUBLIC_TOOLS = frozenset({"list_models_for_agent", "get_registry_snapshot_registry_get"})
-_SHARED_HINT = (
-    "The owner shares these items read-only. Call read_shared_chat_item with an item's kind and id to read it."
-)
-_NOT_SHARED_HINT = "Not shared. The owner did not share this result, so its content is not available."
-# A tool result (for example the account settings) can carry an email address,
-# and another user must not see who owns the chat.
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
 class ConversationSummary(BaseModel):
@@ -130,6 +86,12 @@ class ConversationMessage(BaseModel):
     plan: str | None = None
     # The turn's thinking rows (reasoning, timing, summary), from router_metadata.
     thinking: list[dict[str, Any]] | None = None
+    # The chat compaction that starts at this user turn, from router_metadata.
+    compaction: dict[str, Any] | None = None
+    # The cost of summary calls that stored no compaction, from router_metadata.
+    side_cents: float | None = None
+    # The row id; a compaction names the user message it starts at by this id.
+    id: int | None = None
     created_at: datetime
 
 
@@ -140,73 +102,9 @@ class ConversationPatchRequest(BaseModel):
     pinned: bool | None = None
 
 
-class SharedConversation(BaseModel):
-    """Public read-only view of a shared conversation, without owner or cost data."""
-
-    title: str
-    created_at: datetime
-    updated_at: datetime
-    messages: list[ConversationMessage]
-    link_type: str = "view"
-
-
-class SharedItemOption(BaseModel):
-    """One private item that a share link may grant, or grants."""
-
-    kind: Literal["run", "dataset", "file"]
-    id: str
-    label: str
-    available: bool = True
-
-
-class SharedConversationSummary(BaseModel):
-    """One of the owner's shared conversations, for the settings list."""
-
-    id: str
-    title: str
-    shared_at: datetime | None = None
-    token: str
-    link_type: str = "view"
-    items: list[SharedItemOption] = Field(default_factory=list)
-
-
-class SharedItemRef(BaseModel):
-    """One ticked item in a share request."""
-
-    kind: Literal["run", "dataset", "file"]
-    id: str = Field(min_length=1, max_length=64)
-
-
-class ChatShareRequest(BaseModel):
-    """The link type and the ticked items of a share link."""
-
-    link_type: Literal["view", "continue", "continue_data"]
-    items: list[SharedItemRef] = Field(default_factory=list, max_length=MAX_SHARE_ITEMS)
-
-
-class ChatShareState(BaseModel):
-    """The owner's view of a conversation's share link and the items it may share."""
-
-    token: str | None = None
-    link_type: str | None = None
-    items: list[SharedItemOption] = Field(default_factory=list)
-    candidates: list[SharedItemOption] = Field(default_factory=list)
-
-
-class SharedChatOpenResponse(BaseModel):
-    """What the signed-in caller opens for a share link."""
-
-    mode: Literal["owner", "fork", "view"]
-    conversation_id: str | None = None
-
-
-class SharedItemContent(BaseModel):
-    """A capped, masked, read-only view of one shared item."""
-
-    kind: Literal["run", "dataset", "file"]
-    id: str
-    label: str
-    detail: dict[str, Any]
+# Fork keeps every turn before the user turn with this 0-based number.
+class ConversationForkRequest(BaseModel):
+    user_turns: int = Field(ge=0)
 
 
 def _row_to_summary(row: AgentConversationModel, preview: str | None) -> ConversationSummary:
@@ -240,7 +138,6 @@ def create_agent_history_router(*, job_store) -> APIRouter:
         A FastAPI ``APIRouter`` exposing list / get / patch / archive routes.
     """
     router = APIRouter()
-    dataset_store = DatasetLibraryStore(job_store.engine, PostgresDatasetBlobStore(job_store.engine))
 
     @router.get(
         "/agent/conversations",
@@ -356,56 +253,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 raise DomainError("agent.conversation.not_found", status=404)
             if row.username != user.username:
                 raise DomainError("agent.conversation.forbidden", status=403)
-            if row.source_share_token is not None:
-                # History reopens a continued copy without the share link, and the
-                # model reads these rows, so they must follow the live share too.
-                share = session.get(AgentChatShareModel, row.source_share_token)
-                if share is not None:
-                    _refresh_fork(session, share, conversation_id)
-                    # A delete of the copy can race the refresh commit.
-                    row = session.get(AgentConversationModel, conversation_id)
-                    if row is None:
-                        raise DomainError("agent.conversation.not_found", status=404)
-            msgs = (
-                session.query(AgentMessageModel)
-                .options(
-                    load_only(
-                        AgentMessageModel.role,
-                        AgentMessageModel.content,
-                        AgentMessageModel.tool_calls,
-                        AgentMessageModel.created_at,
-                    )
-                )
-                .filter(AgentMessageModel.conversation_id == conversation_id)
-                .order_by(AgentMessageModel.created_at.asc(), AgentMessageModel.id.asc())
-                .all()
-            )
-            return ConversationDetail(
-                id=cast(str, row.id),
-                title=cast(str, row.title),
-                pinned=cast(bool, row.pinned),
-                archived_at=cast("datetime | None", row.archived_at),
-                created_at=cast(datetime, row.created_at),
-                updated_at=cast(datetime, row.updated_at),
-                messages=[
-                    ConversationMessage(
-                        role=cast(str, m.role),
-                        content=cast(str, m.content),
-                        tool_calls=cast("list[dict[str, Any]] | None", m.tool_calls),
-                        model=cast("str | None", m.model),
-                        served_model=(m.router_metadata or {}).get("served_model")
-                        if isinstance(m.router_metadata, dict)
-                        else None,
-                        stats=(m.router_metadata or {}).get("stats") if isinstance(m.router_metadata, dict) else None,
-                        plan=(m.router_metadata or {}).get("plan") if isinstance(m.router_metadata, dict) else None,
-                        thinking=(m.router_metadata or {}).get("thinking")
-                        if isinstance(m.router_metadata, dict)
-                        else None,
-                        created_at=cast(datetime, m.created_at),
-                    )
-                    for m in msgs
-                ],
-            )
+            return conversation_detail(session, row)
 
     @router.patch(
         "/agent/conversations/{conversation_id}",
@@ -469,352 +317,74 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 raise DomainError("agent.conversation.not_found", status=404)
             if row.username != user.username:
                 raise DomainError("agent.conversation.forbidden", status=403)
-            _drop_shares(session, [conversation_id])
             session.delete(row)
             session.commit()
 
-    @router.get(
-        "/agent/conversations/{conversation_id}/share",
-        response_model=ChatShareState,
-        summary="Read the share link of a conversation and the data it can share",
+    @router.post(
+        "/agent/conversations/{conversation_id}/fork",
+        response_model=ConversationSummary,
+        summary="Copy the start of a conversation into a new conversation",
     )
-    def get_conversation_share(conversation_id: str, user: AuthenticatedUserDep) -> ChatShareState:
-        """Return the conversation's live share link, if any, and the private items it may share.
+    def fork_conversation(
+        conversation_id: str,
+        req: ConversationForkRequest,
+        user: AuthenticatedUserDep,
+    ) -> ConversationSummary:
+        """Save a new conversation with copies of the turns before one user turn.
 
         Args:
-            conversation_id: UUID of the conversation.
-            user: Authenticated caller; must own the row.
+            conversation_id: UUID of the source conversation.
+            req: How many user turns, from the start, the fork keeps.
+            user: Authenticated caller; must own the source conversation.
 
         Returns:
-            The link token, type and ticked items, plus every private item
-            (run, dataset, file) that the chat refers to.
+            The new conversation projected as ``ConversationSummary``.
 
         Raises:
             DomainError: 404 when unknown, 403 when the caller does not own it.
         """
         with Session(job_store.engine) as session:
-            row = _owned_conversation(session, conversation_id, user.username)
-            candidates = _item_candidates(session, row)
-            return _share_state(session, _share_of(session, conversation_id), candidates)
-
-    @router.post(
-        "/agent/conversations/{conversation_id}/share",
-        response_model=ChatShareState,
-        summary="Create or change the share link of a conversation",
-    )
-    def share_conversation(
-        conversation_id: str, body: ChatShareRequest, user: AuthenticatedUserDep
-    ) -> ChatShareState:
-        """Create the conversation's share link, or change its type and items in place.
-
-        The token stays the same while the link lives. Only ``continue_data``
-        links keep items, and only items that the chat refers to (or that the
-        link already shares) and the caller owns are kept; other items are
-        dropped.
-
-        Args:
-            conversation_id: UUID of the conversation to share.
-            body: The link type and the ticked items.
-            user: Authenticated caller; must own the row.
-
-        Returns:
-            The new link state.
-
-        Raises:
-            DomainError: 404 when unknown (and always in the Mac app, where a
-                link cannot work for anyone else), 403 when the caller does not
-                own it, 409 ``agent.share.limit_reached`` when a new link would
-                pass ``MAX_SHARED_CHATS``, 422 when a ``continue_data`` link
-                ticks no item that the chat offers.
-        """
-        if settings.local_mode:
-            raise DomainError("agent.conversation.not_found", status=404)
-        with Session(job_store.engine) as session:
-            row = _owned_conversation(session, conversation_id, user.username)
-            candidates = _item_candidates(session, row)
-            share = _share_of(session, conversation_id)
-            allowed = {(c.kind, c.id) for c in candidates}
-            # A shared item stays shareable after older turns push it out of the candidate window.
-            if share is not None:
-                allowed |= set(_owned_item_labels(session, user.username, _share_refs(share)))
-            items: list[dict[str, str]] = []
-            if body.link_type == "continue_data":
-                for item in body.items:
-                    ref = {"kind": item.kind, "id": item.id}
-                    if (item.kind, item.id) in allowed and ref not in items:
-                        items.append(ref)
-                if not items:
-                    raise DomainError("agent_settings.invalid_value", status=422, field="items")
-            now = datetime.now(UTC)
-            if share is None:
-                live = session.query(AgentChatShareModel).filter(AgentChatShareModel.username == user.username).count()
-                if live >= MAX_SHARED_CHATS:
-                    raise DomainError("agent.share.limit_reached", status=409, limit=MAX_SHARED_CHATS)
-                share = AgentChatShareModel(
-                    token=secrets.token_urlsafe(24),
-                    conversation_id=conversation_id,
-                    username=user.username,
-                    created_at=now,
-                )
-                session.add(share)
-            share.link_type = body.link_type
-            share.items = items
-            share.updated_at = now
-            try:
-                session.commit()
-            except IntegrityError:
-                # A second request made the link first; change that link instead.
-                session.rollback()
-                share = _share_of(session, conversation_id)
-                if share is None:
-                    raise
-                share.link_type = body.link_type
-                share.items = items
-                share.updated_at = now
-                session.commit()
-            return _share_state(session, share, candidates)
-
-    @router.delete(
-        "/agent/conversations/{conversation_id}/share",
-        status_code=204,
-        summary="Revoke the share link of a conversation",
-    )
-    def unshare_conversation(conversation_id: str, user: AuthenticatedUserDep) -> None:
-        """Delete the conversation's share link, so the link and its data grants stop at once.
-
-        The continued copies that other users made stay theirs, but they
-        lose the link, so they can no longer read the shared items.
-
-        Args:
-            conversation_id: UUID of the conversation to unshare.
-            user: Authenticated caller; must own the row.
-
-        Raises:
-            DomainError: 404 when unknown, 403 when the caller does not own it.
-        """
-        with Session(job_store.engine) as session:
-            _owned_conversation(session, conversation_id, user.username)
-            share = _share_of(session, conversation_id)
-            if share is None:
-                return
-            session.query(AgentConversationModel).filter(
-                AgentConversationModel.source_share_token == share.token
-            ).update({AgentConversationModel.source_share_token: None}, synchronize_session=False)
-            session.delete(share)
-            session.commit()
-
-    @router.get(
-        "/agent/shared-conversations",
-        response_model=list[SharedConversationSummary],
-        summary="List the caller's shared conversations",
-    )
-    def list_shared_conversations(user: AuthenticatedUserDep) -> list[SharedConversationSummary]:
-        """Return the caller's live share links, newest change first.
-
-        Args:
-            user: Authenticated caller; only their links are listed.
-
-        Returns:
-            The conversation id and title, link token, type and ticked items of
-            each link. An item that no longer exists has ``available`` false.
-        """
-        with Session(job_store.engine) as session:
-            rows = (
-                session.query(AgentChatShareModel, AgentConversationModel)
-                .join(AgentConversationModel, AgentConversationModel.id == AgentChatShareModel.conversation_id)
-                .filter(AgentChatShareModel.username == user.username)
-                .order_by(AgentChatShareModel.updated_at.desc())
-                .limit(MAX_SHARED_CHATS)
-                .all()
-            )
-            summaries = []
-            for share, row in rows:
-                labels = _owned_item_labels(session, user.username, _share_refs(share))
-                summaries.append(
-                    SharedConversationSummary(
-                        id=cast(str, row.id),
-                        title=cast(str, row.title),
-                        shared_at=cast("datetime | None", share.created_at),
-                        token=cast(str, share.token),
-                        link_type=cast(str, share.link_type),
-                        items=_item_options(_share_refs(share), labels),
-                    )
-                )
-            return summaries
-
-    # Deliberately unauthenticated: the token is the capability. Every unknown,
-    # malformed or revoked token is the same 404 so a probe learns nothing.
-    @router.get(
-        "/agent/shared-conversations/{token}",
-        response_model=SharedConversation,
-        summary="Read a shared conversation by its link token",
-    )
-    def get_shared_conversation(token: str) -> SharedConversation:
-        """Return the link type and, for a view-only link, the read-only chat.
-
-        Args:
-            token: The share token from the link.
-
-        Returns:
-            The link type. A ``view`` link also returns the title and the
-            ordered messages, with owner identity, costs, token usage and
-            thinking left out, credentials and email addresses masked, and
-            every private tool result replaced by a "not shared" row. A
-            continue link returns no chat content, because it needs a sign-in.
-
-        Raises:
-            DomainError: 404 when no live link carries the token.
-        """
-        with Session(job_store.engine) as session:
-            share = _share_by_token(session, token)
-            row = session.get(AgentConversationModel, share.conversation_id)
-            if row is None:
-                raise DomainError("agent.conversation.not_found", status=404)
-            if share.link_type != "view":
-                return SharedConversation(
-                    title="",
-                    created_at=cast(datetime, share.created_at),
-                    updated_at=cast(datetime, share.updated_at),
-                    messages=[],
-                    link_type=cast(str, share.link_type),
-                )
-            return SharedConversation(
-                title=_mask_public(cast(str, row.title)),
-                created_at=cast(datetime, row.created_at),
-                updated_at=cast(datetime, row.updated_at),
-                messages=_recipient_messages(session, share),
-                link_type="view",
-            )
-
-    @router.post(
-        "/agent/shared-conversations/{token}/open",
-        response_model=SharedChatOpenResponse,
-        summary="Open a shared conversation for the signed-in caller",
-    )
-    def open_shared_conversation(token: str, user: AuthenticatedUserDep) -> SharedChatOpenResponse:
-        """Decide what the caller sees when they open a share link.
-
-        The owner opens the chat itself. Another user gets the read-only view
-        for a ``view`` link. For a continue link, the first open makes the
-        caller's own copy of the chat and later opens return the same copy,
-        with its copied tool calls rebuilt when the owner changed the link.
-
-        Args:
-            token: The share token from the link.
-            user: Authenticated caller.
-
-        Returns:
-            The mode (``owner``, ``fork`` or ``view``) and the conversation to open.
-
-        Raises:
-            DomainError: 404 when no live link carries the token.
-        """
-        with Session(job_store.engine) as session:
-            share = _share_by_token(session, token)
-            if share.username == user.username:
-                return SharedChatOpenResponse(mode="owner", conversation_id=cast(str, share.conversation_id))
-            if share.link_type == "view":
-                return SharedChatOpenResponse(mode="view", conversation_id=None)
-            existing = _fork_of(session, share.token, user.username)
-            if existing is not None:
-                _refresh_fork(session, share, existing)
-                return SharedChatOpenResponse(mode="fork", conversation_id=existing)
-            source = session.get(AgentConversationModel, share.conversation_id)
+            source = session.get(AgentConversationModel, conversation_id)
             if source is None:
                 raise DomainError("agent.conversation.not_found", status=404)
-            messages = _recipient_messages(session, share)
-            fork_id = str(uuid.uuid4())
-            now = datetime.now(UTC)
-            try:
-                session.add(
-                    AgentConversationModel(
-                        id=fork_id,
-                        username=user.username,
-                        title=_mask_public(cast(str, source.title))[:200],
-                        source_share_token=share.token,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-                # The copy row must exist before its messages reference it.
-                session.flush()
-                session.add_all(
-                    AgentMessageModel(
-                        conversation_id=fork_id,
-                        role=m.role,
-                        content=m.content,
-                        tool_calls=m.tool_calls,
-                        model=m.model,
-                        router_metadata={"served_model": m.served_model, "plan": m.plan}
-                        if m.role == "assistant"
-                        else None,
-                        created_at=m.created_at,
-                    )
-                    for m in messages
-                )
-                session.commit()
-            except IntegrityError:
-                # A second open of the same link made the copy first.
-                session.rollback()
-                existing = _fork_of(session, share.token, user.username)
-                if existing is None:
-                    raise
-                return SharedChatOpenResponse(mode="fork", conversation_id=existing)
-            return SharedChatOpenResponse(mode="fork", conversation_id=fork_id)
-
-    @router.get(
-        "/agent/shared-items/{kind}/{item_id}",
-        response_model=SharedItemContent,
-        operation_id="read_shared_chat_item",
-        summary="Read a run, dataset or file that a shared chat grants to the caller",
-        tags=["agent"],
-    )
-    def read_shared_chat_item(
-        kind: Literal["run", "dataset", "file"], item_id: str, user: AuthenticatedUserDep
-    ) -> SharedItemContent:
-        """Read one item that the owner of a shared chat ticked for you, read-only.
-
-        Use it in a chat continued from a share link, for a ``shared_chat_item``
-        row whose status is ``shared``: pass that row's item ``kind`` and ``id``.
-        The read fails when the item is not shared or the owner revoked the link.
-
-        Args:
-            kind: ``run``, ``dataset`` or ``file``.
-            item_id: The item id from the shared row.
-            user: Authenticated caller; must own a chat continued from a live
-                ``continue_data`` link that ticks this item.
-
-        Returns:
-            The item label and a capped, masked view of its content.
-
-        Raises:
-            DomainError: 403 when no live link grants the item to the caller,
-                404 when the item no longer exists.
-        """
-        with Session(job_store.engine) as session:
-            shares = (
-                session.query(AgentChatShareModel)
-                .join(AgentConversationModel, AgentConversationModel.source_share_token == AgentChatShareModel.token)
-                .filter(
-                    AgentConversationModel.username == user.username,
-                    AgentChatShareModel.link_type == "continue_data",
-                )
+            if source.username != user.username:
+                raise DomainError("agent.conversation.forbidden", status=403)
+            msgs = (
+                session.query(AgentMessageModel)
+                .filter(AgentMessageModel.conversation_id == source.id)
+                .order_by(AgentMessageModel.created_at.asc(), AgentMessageModel.id.asc())
                 .all()
             )
-            owner = next(
-                (
-                    cast(str, share.username)
-                    for share in shares
-                    if share.username != user.username and (kind, item_id) in _share_refs(share)
-                ),
-                None,
+            kept = _turns_before_user_turn(msgs, req.user_turns)
+            now = datetime.now(UTC)
+            row = AgentConversationModel(
+                id=str(uuid4()),
+                username=user.username,
+                title=source.title,
+                pinned=False,
+                archived_at=None,
+                created_at=now,
+                updated_at=now,
             )
-            if owner is None:
-                raise DomainError("agent.conversation.forbidden", status=403)
-            content = _item_content(session, dataset_store, owner, kind, item_id)
-        if content is None:
-            raise DomainError("agent.conversation.not_found", status=404)
-        return content
+            session.add(row)
+            # The wizard state stays on the source rows, so one turn never
+            # counts twice in the training-ground export. The source chat paid
+            # for its turns, so the copies carry no cost.
+            session.add_all(
+                AgentMessageModel(
+                    conversation_id=row.id,
+                    role=m.role,
+                    content=m.content,
+                    tool_calls=m.tool_calls,
+                    model=m.model,
+                    router_metadata=_fork_metadata(m.router_metadata),
+                    created_at=m.created_at,
+                )
+                for m in kept
+            )
+            session.commit()
+            session.refresh(row)
+            return _row_to_summary(row, _fetch_previews(session, [row.id]).get(row.id))
 
     @router.post(
         "/agent/conversations/bulk-delete",
@@ -858,7 +428,6 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                     AgentConversationModel.username == user.username,
                 )
             }
-            _drop_shares(session, list(owned))
             for conversation_id in ordered_unique:
                 row = owned.get(conversation_id)
                 if row is None:
@@ -872,520 +441,152 @@ def create_agent_history_router(*, job_store) -> APIRouter:
     return router
 
 
-def _owned_conversation(session: Session, conversation_id: str, username: str) -> AgentConversationModel:
-    """Load a conversation and check that ``username`` owns it.
+def conversation_detail(
+    session: Session,
+    row: AgentConversationModel,
+    *,
+    run_started_at: datetime | None = None,
+) -> ConversationDetail:
+    """Serialize one conversation and every persisted turn in order.
 
     Args:
         session: Active SQLAlchemy session.
-        conversation_id: UUID of the conversation.
-        username: The caller.
+        row: The conversation, already access-checked by the caller.
+        run_started_at: When a run's setup chat is read, the run's creation
+            time. The chat then ends with the turn that started the run,
+            including the agent's reply saved after it; later turns are left
+            out.
 
     Returns:
-        The conversation row.
-
-    Raises:
-        DomainError: 404 when unknown, 403 when another user owns it.
+        The ``ConversationDetail`` with messages ordered ``created_at`` ascending.
     """
-    row = session.get(AgentConversationModel, conversation_id)
-    if row is None:
-        raise DomainError("agent.conversation.not_found", status=404)
-    if row.username != username:
-        raise DomainError("agent.conversation.forbidden", status=403)
-    return row
-
-
-def _share_of(session: Session, conversation_id: str) -> AgentChatShareModel | None:
-    """Return the live share link of a conversation, if any.
-
-    Args:
-        session: Active SQLAlchemy session.
-        conversation_id: UUID of the conversation.
-
-    Returns:
-        The share row, or ``None``.
-    """
-    return (
-        session.query(AgentChatShareModel)
-        .filter(AgentChatShareModel.conversation_id == conversation_id)
-        .one_or_none()
-    )
-
-
-def _share_by_token(session: Session, token: str) -> AgentChatShareModel:
-    """Return the live share link that carries ``token``.
-
-    Args:
-        session: Active SQLAlchemy session.
-        token: The token from the link.
-
-    Returns:
-        The share row.
-
-    Raises:
-        DomainError: 404 for an unknown, malformed or revoked token.
-    """
-    share = session.get(AgentChatShareModel, token) if 0 < len(token) <= 48 else None
-    if share is None:
-        raise DomainError("agent.conversation.not_found", status=404)
-    return share
-
-
-def _drop_shares(session: Session, conversation_ids: list[str]) -> None:
-    """Revoke the share links of conversations that are about to be deleted.
-
-    The database cascade also removes the rows, but the continued copies
-    must lose their link token too, and SQLite does not enforce the cascade.
-
-    Args:
-        session: Active SQLAlchemy session.
-        conversation_ids: The conversations that are deleted.
-    """
-    shares = (
-        session.query(AgentChatShareModel).filter(AgentChatShareModel.conversation_id.in_(conversation_ids)).all()
-    )
-    for share in shares:
-        session.query(AgentConversationModel).filter(
-            AgentConversationModel.source_share_token == share.token
-        ).update({AgentConversationModel.source_share_token: None}, synchronize_session=False)
-        session.delete(share)
-
-
-def _fork_of(session: Session, token: str, username: str) -> str | None:
-    """Return the id of the caller's chat continued from the link ``token``.
-
-    Args:
-        session: Active SQLAlchemy session.
-        token: The share token.
-        username: The caller.
-
-    Returns:
-        The conversation id, or ``None`` when the caller has no copy yet.
-    """
-    row = (
-        session.query(AgentConversationModel.id)
-        .filter(
-            AgentConversationModel.source_share_token == token,
-            AgentConversationModel.username == username,
-        )
-        .first()
-    )
-    return cast(str, row[0]) if row is not None else None
-
-
-def _refresh_fork(session: Session, share: AgentChatShareModel, fork_id: str) -> None:
-    """Rebuild the copied tool calls of a continued chat after the owner changed the link.
-
-    The copy names the ticked items in its tool-call rows, and the recipient
-    and the model learn item ids only from there. A stale copy would hide a
-    newly ticked item and still name an unticked one. Copied rows keep the
-    source turn's role and time, so they match the source by that key; the
-    recipient's own later turns never match and stay as they are.
-
-    Args:
-        session: Active SQLAlchemy session.
-        share: The live share link.
-        fork_id: The recipient's continued chat.
-    """
-    fork = session.get(AgentConversationModel, fork_id)
-    if fork is None or share.updated_at is None or share.updated_at <= fork.created_at:
-        return
-    ticked = _share_refs(share)
-    labels = _owned_item_labels(session, cast(str, share.username), ticked)
-    rebuilt: dict[tuple[str, Any], list[Any]] = {}
-    for m in _recipient_messages(session, share):
-        rebuilt.setdefault((m.role, m.created_at), []).append(m.tool_calls)
-    changed = False
-    for row in (
+    msgs = (
         session.query(AgentMessageModel)
-        .filter(AgentMessageModel.conversation_id == fork_id, AgentMessageModel.created_at <= fork.created_at)
-        .order_by(AgentMessageModel.created_at, AgentMessageModel.id)
-    ):
-        calls = rebuilt.get((cast(str, row.role), row.created_at))
-        if calls:
-            fresh = calls.pop(0)
-        else:
-            # The source turn fell out of the shared window, so only narrow the items it already names.
-            fresh = [_narrowed_call(call, ticked, labels) for call in (row.tool_calls or [])] or None
-        # Write only real changes, so later opens of an unchanged link do not commit.
-        if row.tool_calls != fresh:
-            row.tool_calls = fresh
-            changed = True
-    if changed:
-        try:
-            session.commit()
-        except StaleDataError:
-            # The recipient deleted or changed the copy at the same moment; their change wins.
-            session.rollback()
-
-
-def _narrowed_call(call: Any, ticked: list[tuple[str, str]], labels: dict[tuple[str, str], str]) -> Any:
-    """Drop the items that the link no longer shares from one copied ``shared_chat_item`` call.
-
-    Args:
-        call: One copied tool call.
-        ticked: The items the link shares.
-        labels: The labels of the ticked items that still exist.
-
-    Returns:
-        The call with only shared items, marked ``not_shared`` when none are
-        left; any other call unchanged.
-    """
-    if not isinstance(call, dict) or call.get("tool") != "shared_chat_item":
-        return call
-    result = (call.get("payload") or {}).get("result") or {}
-    refs = [(str(i.get("kind")), str(i.get("id"))) for i in result.get("items") or [] if isinstance(i, dict)]
-    shared = [ref for ref in refs if ref in ticked and ref in labels]
-    items = [{"kind": kind, "id": item_id, "label": labels[(kind, item_id)]} for kind, item_id in shared]
-    return {
-        **call,
-        "payload": {
-            "arguments": {},
-            "result": {
-                "status": "shared" if items else "not_shared",
-                "items": items,
-                "hint": _SHARED_HINT if items else _NOT_SHARED_HINT,
-            },
-        },
-    }
-
-
-def _share_refs(share: AgentChatShareModel) -> list[tuple[str, str]]:
-    """Return the ticked items of a share link as ``(kind, id)`` pairs.
-
-    Args:
-        share: The share row.
-
-    Returns:
-        The ticked items; always empty for a link that is not ``continue_data``.
-    """
-    if share.link_type != "continue_data":
-        return []
-    return [
-        (str(item.get("kind")), str(item.get("id")))
-        for item in (share.items or [])
-        if isinstance(item, dict) and item.get("kind") in ITEM_KINDS
-    ]
-
-
-def _refs_in(value: Any, found: list[tuple[str, str]]) -> None:
-    """Collect the private item ids that a tool call's arguments or result name.
-
-    Args:
-        value: Any JSON-like value from a tool call.
-        found: The list that receives new ``(kind, id)`` pairs, in order.
-    """
-    if isinstance(value, dict):
-        for key, item in value.items():
-            kind = _ITEM_ID_KEYS.get(str(key))
-            if kind is not None and isinstance(item, str) and 0 < len(item) <= 64:
-                ref = (kind, item)
-                if ref not in found:
-                    found.append(ref)
-            else:
-                _refs_in(item, found)
-    elif isinstance(value, list):
-        for item in value:
-            _refs_in(item, found)
-
-
-def _call_refs(call: Any) -> list[tuple[str, str]]:
-    """Return the private items that one stored tool call refers to.
-
-    Args:
-        call: One entry of a message's ``tool_calls``.
-
-    Returns:
-        The ``(kind, id)`` pairs in the order they appear.
-    """
-    found: list[tuple[str, str]] = []
-    if isinstance(call, dict):
-        _refs_in(call.get("payload"), found)
-    return found
-
-
-def _owned_item_labels(
-    session: Session, owner: str, refs: list[tuple[str, str]]
-) -> dict[tuple[str, str], str]:
-    """Return the label of each item in ``refs`` that still exists and ``owner`` owns.
-
-    Args:
-        session: Active SQLAlchemy session.
-        owner: The share owner.
-        refs: Candidate ``(kind, id)`` pairs.
-
-    Returns:
-        A map from each owned pair to its display name.
-    """
-    ids: dict[str, list[str]] = {kind: [] for kind in ITEM_KINDS}
-    for kind, item_id in refs:
-        ids[kind].append(item_id)
-    labels: dict[tuple[str, str], str] = {}
-    if ids["run"]:
-        for job in session.query(JobModel).filter(
-            JobModel.optimization_id.in_(ids["run"]), JobModel.username == owner
-        ):
-            name = (job.payload_overview or {}).get("name") if isinstance(job.payload_overview, dict) else None
-            labels[("run", cast(str, job.optimization_id))] = str(name or job.optimization_id)
-    if ids["dataset"]:
-        for dataset in session.query(DatasetModel).filter(
-            DatasetModel.id.in_(ids["dataset"]), DatasetModel.owner_username == owner
-        ):
-            labels[("dataset", cast(str, dataset.id))] = cast(str, dataset.name)
-    if ids["file"]:
-        for staged in session.query(AgentStagedDatasetModel).filter(
-            AgentStagedDatasetModel.id.in_(ids["file"]), AgentStagedDatasetModel.username == owner
-        ):
-            labels[("file", cast(str, staged.id))] = cast(str, staged.dataset_filename)
-    return {ref: _mask_public(label) for ref, label in labels.items()}
-
-
-def _item_options(
-    refs: list[tuple[str, str]], labels: dict[tuple[str, str], str]
-) -> list[SharedItemOption]:
-    """Build the list rows of a set of items.
-
-    Args:
-        refs: The ``(kind, id)`` pairs, in order.
-        labels: The labels of the items that still exist.
-
-    Returns:
-        One row for each pair; a missing item has ``available`` false.
-    """
-    return [
-        SharedItemOption(kind=kind, id=item_id, label=labels.get((kind, item_id), ""), available=(kind, item_id) in labels)
-        for kind, item_id in refs
-    ]
-
-
-def _conversation_messages(session: Session, conversation_id: str) -> list[AgentMessageModel]:
-    """Load a conversation's newest ``MAX_SHARED_MESSAGES`` turns in order.
-
-    Args:
-        session: Active SQLAlchemy session.
-        conversation_id: UUID of the conversation.
-
-    Returns:
-        The message rows, oldest first.
-    """
-    newest = (
-        session.query(AgentMessageModel)
-        .filter(AgentMessageModel.conversation_id == conversation_id)
-        .order_by(AgentMessageModel.created_at.desc(), AgentMessageModel.id.desc())
-        .limit(MAX_SHARED_MESSAGES)
+        .filter(AgentMessageModel.conversation_id == row.id)
+        .order_by(AgentMessageModel.created_at.asc(), AgentMessageModel.id.asc())
         .all()
     )
-    return newest[::-1]
-
-
-def _item_candidates(session: Session, row: AgentConversationModel) -> list[SharedItemOption]:
-    """Return the private items that a chat refers to and its owner owns.
-
-    Args:
-        session: Active SQLAlchemy session.
-        row: The conversation, already owner-checked.
-
-    Returns:
-        At most ``MAX_SHARE_ITEMS`` items, in the order the chat first names them.
-    """
-    refs: list[tuple[str, str]] = []
-    for m in _conversation_messages(session, cast(str, row.id)):
-        for call in m.tool_calls or []:
-            for ref in _call_refs(call):
-                if ref not in refs:
-                    refs.append(ref)
-    labels = _owned_item_labels(session, cast(str, row.username), refs)
-    owned = [ref for ref in refs if ref in labels][:MAX_SHARE_ITEMS]
-    return _item_options(owned, labels)
-
-
-def _share_state(
-    session: Session, share: AgentChatShareModel | None, candidates: list[SharedItemOption]
-) -> ChatShareState:
-    """Build the owner's view of a conversation's share link.
-
-    Args:
-        session: Active SQLAlchemy session.
-        share: The live share row, or ``None``.
-        candidates: The items that the link may share.
-
-    Returns:
-        The link state. A ticked item is ``available`` while it exists, even
-        when the chat no longer names it, because the grant still covers it.
-    """
-    if share is None:
-        return ChatShareState(token=None, link_type=None, items=[], candidates=candidates)
-    labels = _owned_item_labels(session, cast(str, share.username), _share_refs(share))
-    return ChatShareState(
-        token=cast(str, share.token),
-        link_type=cast(str, share.link_type),
-        items=_item_options(_share_refs(share), labels),
-        candidates=candidates,
-    )
-
-
-def _redacted_call(call: Any, ticked: list[tuple[str, str]], labels: dict[tuple[str, str], str]) -> Any:
-    """Return the form of one tool call that a user other than the owner may see.
-
-    A call on the public list (model and registry catalogs) stays, masked.
-    Every other call can carry the owner's private data, so it becomes a
-    ``shared_chat_item`` row with no arguments and no result content. The row
-    names only the ticked items that the call referred to.
-
-    Args:
-        call: One entry of a message's ``tool_calls``.
-        ticked: The items the link shares.
-        labels: The labels of the ticked items that still exist.
-
-    Returns:
-        The redacted call.
-    """
-    if not isinstance(call, dict):
-        return None
-    if call.get("tool") in _PUBLIC_TOOLS:
-        return _mask_public(call)
-    shared = [ref for ref in _call_refs(call) if ref in ticked and ref in labels]
-    items = [{"kind": kind, "id": item_id, "label": labels[(kind, item_id)]} for kind, item_id in shared]
-    return {
-        "id": _mask_public(str(call.get("id") or "")),
-        "tool": "shared_chat_item",
-        "reason": "",
-        "status": "done",
-        "payload": {
-            "arguments": {},
-            "result": {
-                "status": "shared" if items else "not_shared",
-                "items": items,
-                "hint": _SHARED_HINT if items else _NOT_SHARED_HINT,
-            },
-        },
-    }
-
-
-def _recipient_messages(session: Session, share: AgentChatShareModel) -> list[ConversationMessage]:
-    """Return the shared chat in the form that a user other than the owner may see.
-
-    Args:
-        session: Active SQLAlchemy session.
-        share: The live share link.
-
-    Returns:
-        The turns with costs, token usage and thinking left out, credentials
-        and email addresses masked, and every private tool call redacted.
-    """
-    ticked = _share_refs(share)
-    labels = _owned_item_labels(session, cast(str, share.username), ticked)
+    if run_started_at is not None:
+        msgs = msgs[: _setup_end(msgs, _aware(run_started_at))]
     messages = []
-    for m in _conversation_messages(session, cast(str, share.conversation_id)):
+    for m in msgs:
         meta = m.router_metadata if isinstance(m.router_metadata, dict) else {}
-        calls = [_redacted_call(call, ticked, labels) for call in (m.tool_calls or [])]
         messages.append(
             ConversationMessage(
                 role=cast(str, m.role),
-                content=_mask_public(cast(str, m.content)),
-                tool_calls=[call for call in calls if call is not None] or None,
+                content=cast(str, m.content),
+                tool_calls=cast("list[dict[str, Any]] | None", m.tool_calls),
                 model=cast("str | None", m.model),
                 served_model=meta.get("served_model"),
-                plan=_mask_public(meta.get("plan")),
+                stats=meta.get("stats"),
+                plan=meta.get("plan"),
+                thinking=meta.get("thinking"),
+                compaction=meta.get("compaction"),
+                side_cents=meta.get("side_cents"),
+                id=cast(int, m.id),
                 created_at=cast(datetime, m.created_at),
             )
         )
-    return messages
-
-
-def _capped(value: Any) -> Any:
-    """Cap a value for a shared item read, so one read stays small for the model.
-
-    Args:
-        value: Any JSON-like value.
-
-    Returns:
-        The masked value, or a truncated JSON text when it is too large.
-    """
-    masked = _mask_public(value)
-    text_value = json.dumps(masked, ensure_ascii=False, default=str)
-    if len(text_value) <= MAX_ITEM_CHARS:
-        return masked
-    return {"truncated": True, "preview": text_value[:MAX_ITEM_CHARS]}
-
-
-def _item_content(
-    session: Session, dataset_store: DatasetLibraryStore, owner: str, kind: str, item_id: str
-) -> SharedItemContent | None:
-    """Read one shared item of ``owner``, masked and capped.
-
-    Args:
-        session: Active SQLAlchemy session.
-        dataset_store: Store that reads dataset rows.
-        owner: The share owner; the item must still be theirs.
-        kind: ``run``, ``dataset`` or ``file``.
-        item_id: The item id.
-
-    Returns:
-        The item content, or ``None`` when it no longer exists or changed owner.
-    """
-    if kind == "run":
-        job = session.get(JobModel, item_id)
-        if job is None or job.username != owner:
-            return None
-        overview = job.payload_overview if isinstance(job.payload_overview, dict) else {}
-        detail = {
-            "status": job.status,
-            "optimization_type": job.optimization_type,
-            "created_at": job.created_at.isoformat() if job.created_at else None,
-            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            "latest_metrics": _capped(job.latest_metrics),
-            "result": _capped(job.result),
-        }
-        return SharedItemContent(
-            kind="run", id=item_id, label=_mask_public(str(overview.get("name") or item_id)), detail=detail
+    if run_started_at is not None:
+        # The owner's later pins, archives and turns are not part of this run's setup.
+        return ConversationDetail(
+            id=cast(str, row.id),
+            title=cast(str, row.title),
+            pinned=False,
+            archived_at=None,
+            created_at=cast(datetime, row.created_at),
+            updated_at=messages[-1].created_at if messages else cast(datetime, row.created_at),
+            messages=messages,
         )
-    if kind == "dataset":
-        dataset = session.get(DatasetModel, item_id)
-        if dataset is None or dataset.owner_username != owner:
-            return None
-        rows = dataset_store.get_rows(item_id) or []
-        detail = {
-            "row_count": dataset.row_count,
-            "column_count": dataset.column_count,
-            "column_schema": _capped(dataset.column_schema),
-            "rows": _capped(rows[:MAX_ITEM_ROWS]),
-        }
-        return SharedItemContent(kind="dataset", id=item_id, label=_mask_public(cast(str, dataset.name)), detail=detail)
-    staged = session.get(AgentStagedDatasetModel, item_id)
-    if staged is None or staged.username != owner:
-        return None
-    detail = {"row_count": staged.row_count, "rows": _capped((staged.rows or [])[:MAX_ITEM_ROWS])}
-    return SharedItemContent(
-        kind="file", id=item_id, label=_mask_public(cast(str, staged.dataset_filename)), detail=detail
+    return ConversationDetail(
+        id=cast(str, row.id),
+        title=cast(str, row.title),
+        pinned=cast(bool, row.pinned),
+        archived_at=cast("datetime | None", row.archived_at),
+        created_at=cast(datetime, row.created_at),
+        updated_at=cast(datetime, row.updated_at),
+        messages=messages,
     )
 
 
-def _mask_public(value: Any) -> Any:
-    """Mask credentials and email addresses in a value that another user sees.
+def _fork_metadata(meta: Any) -> dict[str, Any] | None:
+    """Copy one row's ``router_metadata`` for a fork, without the turn's cost.
+
+    The compaction summary stays, because the fork's next turn needs it; only
+    its cost goes.
 
     Args:
-        value: Any JSON-like value from a stored turn.
+        meta: The source row's ``router_metadata``.
 
     Returns:
-        The same structure with secrets and email addresses replaced by the mask.
+        The copy, or ``None`` when the source row has none.
     """
-    masked = mask_secrets(value)
-    if isinstance(masked, dict):
-        return {key: _mask_public(item) for key, item in masked.items()}
-    if isinstance(masked, list):
-        return [_mask_public(item) for item in masked]
-    if isinstance(masked, str):
-        return _EMAIL.sub(MASK, masked)
-    return masked
+    if not isinstance(meta, dict):
+        return None
+    copy = {key: value for key, value in meta.items() if key not in ("stats", "side_cents")}
+    if isinstance(copy.get("compaction"), dict):
+        copy["compaction"] = {**copy["compaction"], "cents": None}
+    return copy
+
+
+def _turns_before_user_turn(msgs: list[AgentMessageModel], user_turns: int) -> list[AgentMessageModel]:
+    """Return the ordered turns before the user turn with 0-based number ``user_turns``.
+
+    Args:
+        msgs: A conversation's turns, ordered oldest first.
+        user_turns: How many user turns the result keeps.
+
+    Returns:
+        Every turn before that user turn, or all turns when it does not exist.
+    """
+    seen = 0
+    for index, m in enumerate(msgs):
+        if m.role != "user":
+            continue
+        if seen == user_turns:
+            return msgs[:index]
+        seen += 1
+    return msgs
+
+
+def _setup_end(msgs: list[AgentMessageModel], started: datetime) -> int:
+    """Return how many of a chat's ordered turns belong to the run started at ``started``.
+
+    The agent may save its reply to the turn that started the run after the
+    run, so the chat ends at the first new user turn after the start. A steer
+    sent while that turn runs is part of it, not a new turn.
+
+    Args:
+        msgs: The chat's turns, ordered by ``created_at``.
+        started: The run's creation time, timezone-aware.
+
+    Returns:
+        The count of leading turns to keep.
+    """
+    return next(
+        (
+            i
+            for i, m in enumerate(msgs)
+            if m.role == "user"
+            and _aware(cast(datetime, m.created_at)) > started
+            and not (isinstance(m.router_metadata, dict) and m.router_metadata.get("steer"))
+        ),
+        len(msgs),
+    )
+
+
+def _aware(moment: datetime) -> datetime:
+    """Read a naive timestamp as UTC, so SQLite and Postgres rows compare alike."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
     """Delete unpinned conversations whose last activity is older than ``threshold_days``.
 
     Pinned conversations are preserved regardless of age — the user explicitly
-    marked them as worth keeping. Shared conversations are preserved too, so a
-    share link keeps working until the owner revokes it. Messages cascade via the ``ON DELETE CASCADE``
-    FK on :class:`AgentMessageModel.conversation_id`.
+    marked them as worth keeping. The setup chat of a run is preserved too,
+    because the run's owner, admins and editors read that chat. Messages cascade
+    via the ``ON DELETE CASCADE`` FK on :class:`AgentMessageModel.conversation_id`.
 
     Args:
         engine: SQLAlchemy engine the conversations table is bound to.
@@ -1401,7 +602,10 @@ def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
             session.query(AgentConversationModel)
             .filter(
                 AgentConversationModel.pinned.is_(False),
-                AgentConversationModel.id.not_in(session.query(AgentChatShareModel.conversation_id)),
+                # NOT IN over a NULL matches nothing, so unbound runs stay out of the subquery.
+                AgentConversationModel.id.not_in(
+                    session.query(JobModel.conversation_id).filter(JobModel.conversation_id.isnot(None))
+                ),
                 AgentConversationModel.updated_at < cutoff,
             )
             .delete(synchronize_session=False)

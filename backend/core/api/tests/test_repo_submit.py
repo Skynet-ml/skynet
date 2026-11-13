@@ -103,6 +103,42 @@ def test_repo_run_without_a_hardening_job_stores_none(client_and_store: tuple[An
     assert store._jobs[resp.json()["optimization_id"]]["payload"]["hardening_job_id"] is None
 
 
+def test_repo_run_binds_its_setup_chat_outside_the_payload(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup chat id goes to the ownership-checked bind, never into the stored payload."""
+    client, store = client_and_store
+    binds: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        _sub_mod,
+        "_bind_setup_chat",
+        lambda _store, optimization_id, username, conversation_id: binds.append(
+            (optimization_id, username, conversation_id)
+        ),
+    )
+
+    resp = client.post("/blackbox/run", json=repo_payload(conversation_id="chat-1"))
+
+    assert resp.status_code == 201, resp.json()
+    optimization_id = resp.json()["optimization_id"]
+    assert binds == [(optimization_id, store._jobs[optimization_id]["payload"]["username"], "chat-1")]
+    assert store._jobs[optimization_id]["payload"]["conversation_id"] is None
+
+
+def test_repo_run_without_a_setup_chat_binds_nothing(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run submitted with no setup chat makes no bind."""
+    client, _store = client_and_store
+    binds: list[str] = []
+    monkeypatch.setattr(_sub_mod, "_bind_setup_chat", lambda *args: binds.append(args[1]))
+
+    resp = client.post("/blackbox/run", json=repo_payload())
+
+    assert resp.status_code == 201, resp.json()
+    assert binds == []
+
+
 def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore]) -> None:
     """Text targets submit to ``/optimize``; this route turns them away."""
     client, store = client_and_store
