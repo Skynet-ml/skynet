@@ -9,9 +9,10 @@ from typing import Any
 import pytest
 
 from core.constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
-from core.models.hardening import HardeningExploit, HardeningJob
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningNoise, HardeningSession
 from core.service_gateway.optimization.blackbox.classification import ClassificationError
 from core.service_gateway.optimization.blackbox.hardening import (
+    AttackResult,
     Candidate,
     ExploitNotFoundError,
     FixChecksFailedError,
@@ -23,6 +24,7 @@ from core.service_gateway.optimization.blackbox.hardening import (
     record_verdict,
     retry,
     run_until_wait,
+    stop,
 )
 
 _CASE = Candidate(kind="case", patch_diff="--- a/out\n+++ b/out\n+A A A\n", why_md="Repeats the keyword.")
@@ -47,6 +49,8 @@ class FakeRunner:
         fix_moves_base: bool = False,
         fix_lowers_reference: bool = False,
         fail_on: str | None = None,
+        noise: HardeningNoise | None = None,
+        noise_cost: float = 0.0,
     ) -> None:
         """Script the runner.
 
@@ -60,6 +64,8 @@ class FakeRunner:
             fix_moves_base: Whether the fix changes the base score.
             fix_lowers_reference: Whether the fix lowers the reference score.
             fail_on: A method name that raises instead of answering.
+            noise: What the noise check returns; a skipped check when None.
+            noise_cost: Dollars the noise check spends.
         """
         self.rounds = rounds
         self.attack_cost = attack_cost
@@ -70,6 +76,8 @@ class FakeRunner:
         self.fix_moves_base = fix_moves_base
         self.fix_lowers_reference = fix_lowers_reference
         self.fail_on = fail_on
+        self.noise = noise if noise is not None else HardeningNoise(skipped=True, reason="Deterministic.")
+        self.noise_cost = noise_cost
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.judged: dict[str, Any] = {}
 
@@ -100,9 +108,16 @@ class FakeRunner:
         return self.preflight_failures
 
     def attack(
-        self, *, round_index: int, view: str, model: str, exploits_path: Path, budget_usd: float | None
-    ) -> tuple[list[Candidate], float]:
-        """Return the scripted round's candidates.
+        self,
+        *,
+        round_index: int,
+        view: str,
+        model: str,
+        exploits_path: Path,
+        budget_usd: float | None,
+        sessions: int,
+    ) -> AttackResult:
+        """Return the scripted round's candidates, with one brief and one session for each session.
 
         Args:
             round_index: The 1-based round.
@@ -110,9 +125,10 @@ class FakeRunner:
             model: The attacker model.
             exploits_path: The suite folder.
             budget_usd: The dollars left, or None when local.
+            sessions: K.
 
         Returns:
-            The candidates and the dollars spent.
+            The candidates, the dollars spent, the briefs and the sessions.
         """
         self._call(
             "attack",
@@ -121,11 +137,18 @@ class FakeRunner:
             model=model,
             exploits_path=exploits_path,
             budget_usd=budget_usd,
+            sessions=sessions,
         )
         scripted = self.rounds[round_index - 1] if round_index <= len(self.rounds) else []
         for candidate, raw in scripted:
             self.judged[candidate.why_md] = raw
-        return [candidate for candidate, _raw in scripted], self.attack_cost
+        briefs = [f"brief {i + 1}" for i in range(sessions)]
+        return AttackResult(
+            candidates=[candidate for candidate, _raw in scripted],
+            cost_usd=self.attack_cost,
+            briefs=briefs,
+            sessions=[HardeningSession(index=i + 1, brief=b, status="done") for i, b in enumerate(briefs)],
+        )
 
     def judge(self, *, candidate: Candidate, model: str, budget_usd: float | None) -> tuple[Any, float]:
         """Return the scripted judge output for ``candidate``.
@@ -142,7 +165,13 @@ class FakeRunner:
         return self.judged[candidate.why_md], self.judge_cost
 
     def draft_fix(
-        self, *, exploits: list[HardeningExploit], model: str, exploits_path: Path, budget_usd: float | None
+        self,
+        *,
+        exploits: list[HardeningExploit],
+        model: str,
+        exploits_path: Path,
+        budget_usd: float | None,
+        notes: list[str],
     ) -> tuple[str, float]:
         """Return a fix diff.
 
@@ -151,11 +180,12 @@ class FakeRunner:
             model: The model that drafts the fix.
             exploits_path: The suite folder.
             budget_usd: The dollars left, or None when local.
+            notes: The user's notes on rejected drafts.
 
         Returns:
             The diff and the dollars spent.
         """
-        self._call("draft_fix", exploits=exploits, model=model, budget_usd=budget_usd)
+        self._call("draft_fix", exploits=exploits, model=model, budget_usd=budget_usd, notes=notes)
         drafts = self.names().count("draft_fix")
         return f"--- a/metric.py\n+++ b/metric.py\n+cap repeats {drafts}\n", self.fix_cost
 
@@ -196,6 +226,19 @@ class FakeRunner:
             fix_diff: The approved fix.
         """
         self._call("apply_fix", fix_diff=fix_diff)
+
+    def noise_check(self, *, model: str, budget_usd: float | None) -> tuple[HardeningNoise, float]:
+        """Return the scripted noise result.
+
+        Args:
+            model: The model that decides.
+            budget_usd: The dollars left, or None when local.
+
+        Returns:
+            The noise result and the dollars spent.
+        """
+        self._call("noise_check", model=model, budget_usd=budget_usd)
+        return self.noise, self.noise_cost
 
     def names(self) -> list[str]:
         """Return the called method names in order.
@@ -338,7 +381,11 @@ def test_full_round_drafts_a_fix_that_passes_every_check_and_writes_the_suite(tm
         "reference_not_lower": "pass",
     }
     assert fix.user_decision is None
-    replayed = [kw["exploit"].kind for name, kw in runner.calls if name == "score" and kw["exploit"] is not None]
+    replayed = [
+        kw["exploit"].kind
+        for name, kw in runner.calls
+        if name == "score" and kw["exploit"] is not None and kw["fix_diff"]
+    ]
     assert sorted(replayed) == ["case", "method"]
 
     job = _run(decide_fix(job, approve=True), runner, tmp_path, reference)
@@ -707,3 +754,152 @@ def test_retry_after_a_preflight_error_runs_the_preflight_before_any_attack(tmp_
     assert names.count("preflight") == 2
     assert names.index("attack") > names.index("preflight", 1)
     assert job.status == "clean_stop"
+
+
+_EDGE = [{"type": "Text", "text": "The metric counts keywords."}]
+
+
+def test_each_exploit_stores_its_scores_edge_case_session_and_the_round_briefs(tmp_path: Path) -> None:
+    """Each claim gets its score and the base score on the current metric; the round keeps K briefs (SKY-682)."""
+    claim = Candidate(kind="case", patch_diff="p1", why_md="w1", edge_case=_EDGE, session=2)
+    runner = FakeRunner([[(claim, _EXPLOIT)]])
+    job = _run(_job(parallel_sessions=3), runner, tmp_path)
+
+    current = job.rounds_detail[0]
+    assert current.briefs == ["brief 1", "brief 2", "brief 3"]
+    assert [s.index for s in current.sessions] == [1, 2, 3]
+    exploit = current.exploits[0]
+    assert (exploit.exploit_score, exploit.base_score) == (1.0, 0.8)
+    assert (exploit.edge_case, exploit.session) == (_EDGE, 2)
+    assert dict(runner.calls)["attack"]["sessions"] == 3
+
+
+class BrokenScoreRunner(FakeRunner):
+    """A runner whose scorer fails on every unfixed score."""
+
+    def score(self, *, fix_diff: str | None, exploit: HardeningExploit | None) -> float:
+        """Fail on scores without a fix.
+
+        Args:
+            fix_diff: The fix to apply first, if any.
+            exploit: The exploit to replay, or None for the base solution.
+
+        Returns:
+            The metric score with a fix.
+
+        Raises:
+            RuntimeError: When there is no fix.
+        """
+        if fix_diff is None:
+            raise RuntimeError("box broke")
+        return super().score(fix_diff=fix_diff, exploit=exploit)
+
+
+def test_a_scorer_failure_leaves_the_card_scores_null(tmp_path: Path) -> None:
+    """The card scores only inform the user, so a scorer error does not fail the round."""
+    job = _run(_job(), BrokenScoreRunner([[(_CASE, _EXPLOIT)]]), tmp_path)
+
+    assert job.status == "waiting_review"
+    exploit = job.rounds_detail[0].exploits[0]
+    assert (exploit.exploit_score, exploit.base_score) == (None, None)
+
+
+def test_no_claims_means_no_base_score_run(tmp_path: Path) -> None:
+    """A round without claims spends no sandbox run on the base score."""
+    runner = FakeRunner([[]])
+    job = _run(_job(), runner, tmp_path)
+
+    assert job.status == "clean_stop"
+    assert "score" not in runner.names()
+
+
+def test_reject_with_a_note_drafts_the_fix_again_with_the_note(tmp_path: Path) -> None:
+    """A reject with a note sends the round back to drafting, and the next draft reads every note."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_confirm_all(_run(_job(), runner, tmp_path)), runner, tmp_path)
+    assert job.status == "waiting_fix"
+
+    job = decide_fix(job, approve=False, note="  Keep the old format.  ")
+    assert (job.status, job.rounds_detail[0].status, job.rounds_detail[0].fix) == ("running", "running", None)
+    assert job.rounds_detail[0].fix_notes == ["Keep the old format."]
+    job = _run(job, runner, tmp_path)
+    assert job.status == "waiting_fix"
+    drafts = [kw["notes"] for name, kw in runner.calls if name == "draft_fix"]
+    assert drafts == [[], ["Keep the old format."]]
+
+
+def test_reject_with_a_blank_note_rejects_the_job(tmp_path: Path) -> None:
+    """A blank note is no note: the reject ends the job as before."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_confirm_all(_run(_job(), runner, tmp_path)), runner, tmp_path)
+
+    assert decide_fix(job, approve=False, note="  ").status == "rejected"
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_stop_ends_a_waiting_job_clean_and_releases_the_rest(tmp_path: Path, confirm: bool) -> None:
+    """Stop works on a job that waits for a review or a fix decision."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_job(), runner, tmp_path)
+    if confirm:
+        job = _run(_confirm_all(job), runner, tmp_path)
+    assert job.status == ("waiting_fix" if confirm else "waiting_review")
+
+    stopped = stop(job)
+    assert (stopped.status, stopped.rounds_detail[-1].status) == ("clean_stop", "stopped")
+    assert stopped.reserved_usd == pytest.approx(stopped.spent_usd)
+    assert stopped.noise is None
+    assert job.status != "clean_stop"
+
+
+@pytest.mark.parametrize("status", ["preflight", "running", "done", "failed"])
+def test_stop_refuses_a_job_that_does_not_wait(status: str) -> None:
+    """A job a worker may hold, or one that ended, cannot stop."""
+    with pytest.raises(HardeningStateError):
+        stop(_job().model_copy(update={"status": status}))
+
+
+def _finish_one_round(runner: FakeRunner, tmp_path: Path) -> HardeningJob:
+    """Run a one-round job through its approved fix.
+
+    Args:
+        runner: The fake runner.
+        tmp_path: The test folder.
+
+    Returns:
+        The ended job.
+    """
+    job = _run(_confirm_all(_run(_job(rounds=1), runner, tmp_path)), runner, tmp_path)
+    return _run(decide_fix(job, approve=True), runner, tmp_path)
+
+
+def test_noise_check_runs_once_after_the_last_round(tmp_path: Path) -> None:
+    """The last round's approved fix starts the noise check, and the job stores its result and cost."""
+    noise = HardeningNoise(skipped=False, reason="The judge is a model.", scores=[0.8, 0.7, 0.8], spread=0.1)
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]], noise=noise, noise_cost=0.05)
+    job = _finish_one_round(runner, tmp_path)
+
+    assert job.status == "done"
+    assert job.noise == noise
+    assert runner.names().count("noise_check") == 1
+    assert dict(runner.calls)["noise_check"]["model"] == "openai/judge"
+    assert job.spent_usd == pytest.approx(0.5 + 0.1 + 0.2 + 0.05)
+    assert job.reserved_usd == pytest.approx(job.spent_usd)
+
+
+def test_a_failed_noise_check_is_skipped_with_its_reason(tmp_path: Path) -> None:
+    """A noise check that raises does not fail a job whose rounds all ended."""
+    job = _finish_one_round(FakeRunner([[(_CASE, _EXPLOIT)]], fail_on="noise_check"), tmp_path)
+
+    assert job.status == "done"
+    assert job.noise == HardeningNoise(skipped=True, reason="The noise check failed: RuntimeError.")
+
+
+def test_no_budget_skips_the_noise_check(tmp_path: Path) -> None:
+    """With no money left in the last round, the noise check is skipped and costs nothing."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]], attack_cost=1.6, judge_cost=0.2, fix_cost=0.2)
+    job = _finish_one_round(runner, tmp_path)
+
+    assert job.status == "done"
+    assert job.noise == HardeningNoise(skipped=True, reason="No budget was left for the noise check.")
+    assert "noise_check" not in runner.names()

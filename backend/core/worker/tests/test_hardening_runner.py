@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import json
 import math
 import tarfile
 import threading
@@ -25,12 +27,12 @@ from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
-from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
-from core.worker import hardening_runner
+from core.worker import hardening_runner, hardening_sessions
 from core.worker.hardening_job import HardeningWorkspace
 from core.worker.hardening_runner import (
     OPEN_STATES,
@@ -46,6 +48,7 @@ from core.worker.hardening_runner import (
     process_next_hardening_job,
     renew_hardening_lease,
     store_hardening_result,
+    store_live_sessions,
 )
 
 _USER = "alice"
@@ -1355,13 +1358,17 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         assert runner._score(None, "") == 1.0
         assert runner._score(_RENAME_SERVICE_FIX, "") == 1.0
         assert runner._score(_BREAK_CONSTRAINTS_FIX, "") == 1.0
+        # Each attacker session opens its own box on the unfixed tree (SKY-682).
+        lane_archive = runner._fixed_archive(())
+        runner.open_scorer(lane_archive, (), lane="r1s1")
+        runner.open_scorer(lane_archive, (), lane="r1s2")
 
     assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
     assert job.scorer is not None
     assert "api_key" not in job.scorer["model"]["extra"]
-    assert len(set(keys)) == 3
+    assert len(set(keys)) == 5
     assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
-    assert services == [("db",), ("db",), ("db",)]
+    assert services == [("db",)] * 5
 
     with (
         pytest.raises(ValueError, match="vault"),
@@ -1473,3 +1480,236 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     ) as hardening:
         assert hardening._score(None, "") == 13.0
         assert hardening._score(_KEY_FIX, "") == 23.0
+
+
+async def _fake_pi_turn(*, binary: str, handlers: Any, translator: Any, prompt: str) -> None:
+    """Drive the session handlers as Pi does: one model step, then its tool call, until a stop.
+
+    Args:
+        binary: Ignored.
+        handlers: The session.
+        translator: Ignored.
+        prompt: Ignored.
+    """
+    while True:
+        chunks = [chunk async for chunk in handlers.complete({})]
+        calls = (json.loads(chunks[-1])["choices"][0].get("delta") or {}).get("tool_calls") or []
+        if not calls:
+            return
+        for call in calls:
+            outcome = await handlers.call_tool(call["function"]["name"], json.loads(call["function"]["arguments"]))
+            if outcome.terminate:
+                return
+
+
+def _reply(content: str = "", calls: list[dict[str, Any]] | None = None) -> SimpleNamespace:
+    """Build one provider response.
+
+    Args:
+        content: The message text.
+        calls: The tool calls.
+
+    Returns:
+        A response with ``status`` and ``body``.
+    """
+    message: dict[str, Any] = {"content": content}
+    if calls:
+        message["tool_calls"] = calls
+    return SimpleNamespace(status=200, body=json.dumps({"choices": [{"message": message}]}).encode())
+
+
+def _tool(name: str, **args: Any) -> list[dict[str, Any]]:
+    """Build one tool call.
+
+    Args:
+        name: The tool.
+        **args: The arguments.
+
+    Returns:
+        The call list.
+    """
+    return [{"id": f"id-{name}", "function": {"name": name, "arguments": json.dumps(args)}}]
+
+
+def _session_runner(
+    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[RepoHardeningRunner, list[str], list[str]]:
+    """Build a runner with a fake gateway and lane boxes that record their lane.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        dispatch: The fake ``dispatch_guest``.
+        monkeypatch: Swaps the Pi turn for a fake one.
+
+    Returns:
+        The runner, the lanes opened and the lanes closed.
+    """
+    agent = tmp_path / "agent.tgz"
+    source = tmp_path / "src" / "bot"
+    source.mkdir(parents=True)
+    (source / "main.py").write_text("print(1)\n")
+    with tarfile.open(agent, "w:gz") as tree:
+        tree.add(source / "main.py", arcname="bot/main.py")
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("v1\n")
+    workspace = HardeningWorkspace(
+        agent_archive=agent,
+        trusted_root=trusted,
+        exploits_path=trusted / "eval" / "exploits",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened: list[str] = []
+    closed: list[str] = []
+
+    def open_scorer(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Open a fake box that records its lane.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Returns:
+            The fake box.
+        """
+        opened.append(lane)
+        return SimpleNamespace(
+            score=lambda patch: {"score": 0.5, "feedback": "ok", "hidden": "eval/metric.py"},
+            close=lambda: closed.append(lane),
+        )
+
+    monkeypatch.setattr(
+        hardening_runner, "run_sessions", functools.partial(hardening_sessions.run_sessions, run_turn=_fake_pi_turn)
+    )
+    job = new_job(attacker_model="openai/m", judge_model="openai/j", place="local")
+    job.scorer = _SCORER
+    runner = RepoHardeningRunner(
+        workspace,
+        job,
+        gateway=SimpleNamespace(register=lambda **kw: {"model": kw["model"], "token": "t"}, dispatch_guest=dispatch),  # type: ignore[arg-type]
+        meter=SimpleNamespace(spent_usd=0.0, stopped=False),  # type: ignore[arg-type]
+        open_scorer=open_scorer,
+        managed_key="k",
+    )
+    return runner, opened, closed
+
+
+@pytest.mark.parametrize("view", ["black_box", "white_box"])
+def test_attack_runs_one_session_for_each_brief_in_its_own_lane_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, view: str
+) -> None:
+    """The lead agent writes K briefs; each session scores in its own box, which closes after the round (SKY-682)."""
+    prompts: list[str] = []
+    bodies: list[dict[str, Any]] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with two briefs, and each session with a metric run then a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        bodies.append(body)
+        if "tools" not in body:
+            prompts.append(body["messages"][0]["content"])
+            return _reply('{"briefs": ["brief one", "brief two"]}')
+        if len(body["messages"]) == 1:
+            prompts.append(body["messages"][0]["content"])
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, opened, closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    try:
+        result = runner.attack(
+            round_index=2, view=view, model="openai/m", exploits_path=tmp_path / "none", budget_usd=None, sessions=2
+        )
+    finally:
+        runner.close()
+
+    assert result.briefs == ["brief one", "brief two"]
+    assert [s.status for s in result.sessions] == ["done", "done"]
+    assert sorted(c.session for c in result.candidates) == [1, 2]
+    assert sorted(opened) == ["r2s1", "r2s2"]
+    assert sorted(closed) == ["r2s1", "r2s2"]
+    assert all(b["parallel_tool_calls"] is False for b in bodies if "tools" in b)
+    assert "bot/main.py" in prompts[0]
+    assert all(("def score(): return 1" in p) == (view == "white_box") for p in prompts)
+    tool_text = json.dumps([b["messages"] for b in bodies if "tools" in b])
+    assert "eval/metric.py" not in tool_text
+
+
+def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One failed session is fine, but a round where every session failed is an error."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent, and fail every session step.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The lead agent's response.
+
+        Raises:
+            ConnectionError: For each session step.
+        """
+        if "tools" in body:
+            raise ConnectionError("provider down")
+        return _reply("no json")
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match="Every attacker session failed"):
+            runner.attack(
+                round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=2
+            )
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("deterministic", [True, False])
+def test_noise_check_repeats_only_a_non_deterministic_metric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deterministic: bool
+) -> None:
+    """A deterministic metric skips the repeats; any other metric scores the base solution NOISE_REPEATS times."""
+    answer = json.dumps({"deterministic": deterministic, "reason": "Because."})
+    runner, opened, _closed = _session_runner(tmp_path, lambda *args: _reply(answer), monkeypatch)
+    try:
+        noise, cost = runner.noise_check(model="openai/j", budget_usd=None)
+    finally:
+        runner.close()
+
+    assert noise.reason == "Because."
+    assert cost == 0.0
+    if deterministic:
+        assert (noise.skipped, noise.scores, noise.spread, opened) == (True, [], None, [])
+    else:
+        assert noise.skipped is False
+        assert noise.scores == [0.5] * hardening_runner.NOISE_REPEATS
+        assert noise.spread == 0.0
+
+
+def test_live_sessions_are_written_only_while_the_claim_holds(engine: Engine) -> None:
+    """The page polls the row; a pass that lost its claim must not write to it."""
+    job = _seed(engine, binding_id=None)
+    claimed = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert claimed is not None
+    live = [HardeningSession(index=1, brief="b", transcript=[{"role": "assistant", "content": "hi"}])]
+
+    assert store_live_sessions(engine, job.id, live, claim="pod-b:other") is False
+    assert not _row(engine, job.id).job.get("live_sessions")
+    assert store_live_sessions(engine, job.id, live, claim=claimed[4]) is True
+    stored = _row(engine, job.id).job["live_sessions"]
+    assert [(s["index"], s["transcript"][0]["content"]) for s in stored] == [(1, "hi")]

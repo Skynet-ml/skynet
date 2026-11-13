@@ -53,8 +53,25 @@ _JOB_FIELDS = {
     "target",
     "binding_id",
     "scorer",
+    "parallel_sessions",
+    "live_sessions",
+    "noise",
 }
-_EXPLOIT_FIELDS = {"id", "kind", "label", "confidence", "reason", "unsure", "patch_diff", "why_md", "user_verdict"}
+_EXPLOIT_FIELDS = {
+    "id",
+    "kind",
+    "label",
+    "confidence",
+    "reason",
+    "unsure",
+    "patch_diff",
+    "why_md",
+    "user_verdict",
+    "exploit_score",
+    "base_score",
+    "edge_case",
+    "session",
+}
 _BODY = {"draft_id": "draft-1", "attacker_model": "openai/attacker", "judge_model": "openai/judge"}
 _TARGET = {
     "kind": "repo",
@@ -491,6 +508,53 @@ def test_retry_while_another_job_of_the_draft_is_active_is_409() -> None:
     assert retried.status_code == 409
     assert retried.json()["detail"] == ENGLISH_MESSAGES["hardening.job_active"]
     assert client.get("/hardening/jobs/job-a").json()["status"] == "failed"
+
+
+def test_create_keeps_the_session_count_and_defaults_to_three() -> None:
+    """K is part of the job; out-of-range values are refused (SKY-682)."""
+    client, _engine, _caller = _harness()
+
+    assert client.post("/hardening/jobs", json=_BODY).json()["parallel_sessions"] == 3
+    chosen = client.post("/hardening/jobs", json={**_BODY, "draft_id": "draft-2", "parallel_sessions": 5}).json()
+    assert (chosen["parallel_sessions"], chosen["live_sessions"], chosen["noise"]) == (5, [], None)
+    for bad in (0, 9):
+        response = client.post("/hardening/jobs", json={**_BODY, "draft_id": "draft-3", "parallel_sessions": bad})
+        assert response.status_code == 422
+
+
+def test_reject_with_a_note_sends_the_fix_back_to_drafting() -> None:
+    """A note keeps the job running and stores the note for the next draft."""
+    client, engine, _caller = _harness()
+    _seed(engine, _waiting_fix("j1"))
+
+    body = client.post("/hardening/jobs/j1/fix", json={"approve": False, "note": "Keep the format."}).json()
+    assert body["status"] == "running"
+    assert body["rounds_detail"][0]["status"] == "running"
+    assert body["rounds_detail"][0]["fix"] is None
+    assert body["rounds_detail"][0]["fix_notes"] == ["Keep the format."]
+    assert client.post("/hardening/jobs/j1/fix", json={"approve": False, "note": "x" * 4001}).status_code == 422
+
+
+def test_stop_ends_a_waiting_job_and_refuses_a_running_one() -> None:
+    """Stop ends a waiting job as clean_stop; a running job, or another user's job, is refused."""
+    client, engine, caller = _harness()
+    _seed(engine, _waiting_fix("j1"))
+    _seed(engine, _job("j2", "running"), draft_id="draft-2")
+
+    stopped = client.post("/hardening/jobs/j1/stop")
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "clean_stop"
+    assert stopped.json()["rounds_detail"][0]["status"] == "stopped"
+    assert stopped.json()["reserved_usd"] == stopped.json()["spent_usd"]
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, "j1")
+        assert row is not None
+        assert row.status == "clean_stop"
+    running = client.post("/hardening/jobs/j2/stop")
+    assert running.status_code == 409
+    assert running.json()["detail"] == ENGLISH_MESSAGES["hardening.wrong_state"]
+    caller["user"] = "mallory"
+    assert client.post("/hardening/jobs/j2/stop").status_code == 404
 
 
 def _budget(engine: Engine, username: str) -> str:
