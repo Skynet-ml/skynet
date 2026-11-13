@@ -100,6 +100,17 @@ void describe("treeRounds", () => {
     const stopped = treeRounds(job({ status: "clean_stop", live_sessions: live }));
     assert.equal(stopped.length, 0);
   });
+
+  void it("keeps a round with a status the page does not know, and its lists", () => {
+    const detail = [
+      { index: 1, status: "failed", fix: null },
+      { index: 2, status: "budget_stopped", exploits: [exploit()], fix: null, sessions: [session(1, "stopped" as never)] },
+    ];
+    const rounds = treeRounds(job({ status: "budget_stop", round: 2, rounds_detail: detail as never }));
+    assert.deepEqual(rounds.map((r) => [r.index, r.exploits.length, r.sessions.length]), [[1, 0, 0], [2, 1, 1]]);
+    // A session status the page does not know ended the session: no live pulse.
+    assert.equal(nodeStatus(rounds[1]!.sessions[0]!, rounds[1]!.exploits), "found");
+  });
 });
 
 void describe("node helpers", () => {

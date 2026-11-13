@@ -42,10 +42,12 @@ export interface TreeRound {
  *   The rounds; empty before the first attack starts.
  */
 export function treeRounds(job: HardeningJob): TreeRound[] {
+  // A round status this page does not know (SKY-682 adds failed and stopped
+  // rounds) still draws: the tree reads only the round's index and lists.
   const rounds: TreeRound[] = job.rounds_detail.map((r) => ({
     index: r.index,
     sessions: r.sessions ?? [],
-    exploits: r.exploits,
+    exploits: r.exploits ?? [],
     briefs: r.briefs ?? [],
     live: false,
   }));
@@ -93,8 +95,9 @@ export function sessionExploits(exploits: HardeningExploit[], session: number): 
  */
 export function nodeStatus(session: HardeningSession, exploits: HardeningExploit[]): NodeStatus {
   if (session.status === "failed") return "failed";
-  if (session.status === "done") return exploits.length ? "found" : "clean";
-  const calls = session.transcript.flatMap((m) => m.toolCalls ?? []);
+  // Only a running session is live; a status this page does not know ended it.
+  if (session.status !== "running") return exploits.length ? "found" : "clean";
+  const calls = (session.transcript ?? []).flatMap((m) => m.toolCalls ?? []);
   return calls.some((c) => c.status === "running" && SCORE_TOOLS.has(c.tool)) ? "scoring" : "thinking";
 }
 
@@ -116,7 +119,7 @@ function scoreOf(payload: Record<string, unknown> | undefined): number | null {
 export function bestScore(session: HardeningSession, exploits: HardeningExploit[]): number | null {
   const scores = [
     ...exploits.map((e) => e.exploit_score ?? null),
-    ...session.transcript.flatMap((m) =>
+    ...(session.transcript ?? []).flatMap((m) =>
       (m.toolCalls ?? [])
         .filter((c) => c.tool === "run_metric" && c.status === "done")
         .map((c) => scoreOf(c.payload)),
@@ -132,7 +135,7 @@ export function baseScore(exploits: HardeningExploit[]): number | null {
 
 /** The model the session ran, as its transcript names it. */
 export function sessionModel(session: HardeningSession, fallback: string): string {
-  return session.transcript.find((m) => m.model)?.model ?? fallback;
+  return (session.transcript ?? []).find((m) => m.model)?.model ?? fallback;
 }
 
 function formatScore(n: number): string {

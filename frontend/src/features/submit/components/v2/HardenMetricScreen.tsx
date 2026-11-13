@@ -31,6 +31,7 @@ import { Textarea } from "@/shared/ui/primitives/textarea";
 import { hardeningDefaultModel, type HardeningState } from "../../hooks/use-hardening";
 import { hardeningErrorKey } from "../../lib/hardening-error";
 import { v2Msg } from "./ArtifactConfirmCard";
+import { DiffBlock } from "./EdgeCaseView";
 import { HardenSessionDrawer } from "./HardenSessionDrawer";
 import {
   HardenTree,
@@ -53,41 +54,6 @@ type T = (key: string, params?: Record<string, string | number>) => string;
 // The job waits for the user only in these; the server stops no other status.
 const STOPPABLE: ReadonlySet<HardeningStatus> = new Set(["waiting_review", "waiting_fix"]);
 const NOTE_MAX = 4000;
-
-/** Code and numbers keep their own direction inside Hebrew text. */
-function Ltr({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <bdi dir="ltr" className={className}>
-      {children}
-    </bdi>
-  );
-}
-
-/** A unified diff, read-only, with added and removed lines tinted as the IDE does. */
-function DiffView({ diff, label }: { diff: string; label: string }) {
-  return (
-    <figure className="overflow-hidden rounded-lg border border-border/60 bg-muted/30">
-      <figcaption className="border-b border-border/50 px-3 py-1.5 font-mono text-xs text-muted-foreground">
-        <Ltr>{label}</Ltr>
-      </figcaption>
-      <pre dir="ltr" className="max-h-72 overflow-auto py-2 font-mono text-xs leading-5">
-        {diff.split("\n").map((line, i) => (
-          <div
-            key={i}
-            className={cn(
-              "px-3 whitespace-pre",
-              line.startsWith("+") && !line.startsWith("+++") && "bg-chart-2/15 text-foreground",
-              line.startsWith("-") && !line.startsWith("---") && "bg-chart-5/15 text-foreground",
-              line.startsWith("@@") && "text-muted-foreground",
-            )}
-          >
-            {line || " "}
-          </div>
-        ))}
-      </pre>
-    </figure>
-  );
-}
 
 function CheckLine({ name, result, t }: { name: string; result: HardeningCheckResult; t: T }) {
   const Icon = result === "pass" ? CheckCircle : result === "fail" ? XCircle : CircleNotch;
@@ -118,7 +84,7 @@ function FixPanel({ fix, h, t }: { fix: HardeningFix; h: HardeningState; t: T })
         <h3 className="text-base font-semibold">{t("submit.v2.harden.fix.title")}</h3>
         <p className="text-sm text-muted-foreground">{t("submit.v2.harden.fix.desc")}</p>
       </div>
-      <DiffView diff={fix.diff} label="metric.py" />
+      <DiffBlock diff={fix.diff} label="metric.py" />
       <ul className="space-y-1.5 rounded-lg border border-border/60 p-3">
         <CheckLine name="suite_replay" result={checks.suite_replay} t={t} />
         <CheckLine name="base_score_unchanged" result={checks.base_score_unchanged} t={t} />

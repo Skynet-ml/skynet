@@ -43,10 +43,10 @@ const CAPTION_CLASS =
   "border-b border-border/50 px-3 py-1.5 text-start font-mono text-xs text-muted-foreground";
 
 /**
- * A unified diff, read-only, with added and removed lines tinted. It mirrors
- * DiffView in HardenMetricScreen.tsx; SKY-684 (the harden page) will share one copy.
+ * A unified diff, read-only, with added and removed lines tinted. The harden
+ * page's fix step uses it too.
  */
-function DiffBlock({ diff, label }: { diff: string; label: string }) {
+export function DiffBlock({ diff, label }: { diff: string; label: string }) {
   return (
     <figure className={FIGURE_CLASS}>
       <figcaption className={CAPTION_CLASS}>
