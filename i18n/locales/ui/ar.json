@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "يؤثر هذا على تسجيل الدخول: رموز التحقق عبر البريد الإلكتروني أو مفاتيح المرور أو حسابات تسجيل الدخول المرتبطة. راجع التفاصيل قبل الموافقة.",
   "agent.tool.change_protected_setting.confirm": "موافقة",
   "agent.tool.request_secret.title": "حفظ سر",
+  "agent.tool.send_feedback.title": "إرسال ملاحظات إلى الفريق",
   "agent.tool.request_secret.description": "يطلب منك الوكيل حفظ سر في حسابك، مثل مفتاح API. لا يرى الوكيل القيمة أبدًا.",
   "agent.tool.request_secret.confirm": "حفظ",
   "agent.secret_card.host": "يُرسل إلى {host}",

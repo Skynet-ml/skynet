@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "サインインに影響します（メール認証コード、パスキー、連携したサインインアカウント）。承認する前に内容を確認してください。",
   "agent.tool.change_protected_setting.confirm": "承認",
   "agent.tool.request_secret.title": "シークレットを保存",
+  "agent.tool.send_feedback.title": "チームにフィードバックを送信",
   "agent.tool.request_secret.description": "エージェントが、API キーなどのシークレットをアカウントに保存するよう求めています。エージェントが値を見ることはありません。",
   "agent.tool.request_secret.confirm": "保存",
   "agent.secret_card.host": "{host} に送信されます",

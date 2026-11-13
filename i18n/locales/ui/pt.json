@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "Isto afeta o início de sessão: códigos por e-mail, chaves de acesso ou contas de início de sessão vinculadas. Confira os detalhes antes de aprovar.",
   "agent.tool.change_protected_setting.confirm": "Aprovar",
   "agent.tool.request_secret.title": "Salvar um segredo",
+  "agent.tool.send_feedback.title": "Enviar feedback para a equipe",
   "agent.tool.request_secret.description": "O agente pede que você salve um segredo, como uma chave de API, na sua conta. Ele nunca vê o valor.",
   "agent.tool.request_secret.confirm": "Salvar",
   "agent.secret_card.host": "Enviado para {host}",

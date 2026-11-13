@@ -1414,6 +1414,7 @@
   "agent.tool.change_protected_setting.description": "呢個會影響登入：電郵驗證碼、密鑰或者已連結嘅登入帳戶。批准之前請檢查清楚。",
   "agent.tool.change_protected_setting.confirm": "批准",
   "agent.tool.request_secret.title": "儲存密鑰",
+  "agent.tool.send_feedback.title": "向團隊發送意見",
   "agent.tool.request_secret.description": "智能助手請你喺帳戶度儲存一個密鑰，例如 API 密鑰。佢永遠睇唔到個值。",
   "agent.tool.request_secret.confirm": "儲存",
   "agent.secret_card.host": "傳送去 {host}",

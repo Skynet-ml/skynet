@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "这会影响登录：邮件验证码、通行密钥或已关联的登录账户。批准前请检查详细信息。",
   "agent.tool.change_protected_setting.confirm": "批准",
   "agent.tool.request_secret.title": "保存密钥",
+  "agent.tool.send_feedback.title": "向团队发送反馈",
   "agent.tool.request_secret.description": "智能体请你在账户中保存一个密钥，例如 API 密钥。智能体永远看不到它的值。",
   "agent.tool.request_secret.confirm": "保存",
   "agent.secret_card.host": "发送到 {host}",

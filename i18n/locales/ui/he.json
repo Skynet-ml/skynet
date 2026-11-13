@@ -572,6 +572,7 @@
   "agent.tool.change_protected_setting.description": "הפעולה משפיעה על הכניסה: קודי אימות במייל, מפתחות גישה או חשבונות כניסה מקושרים. בדקו את הפרטים לפני האישור.",
   "agent.tool.change_protected_setting.confirm": "אשר/אשרי",
   "agent.tool.request_secret.title": "שמירת סוד",
+  "agent.tool.send_feedback.title": "שליחת משוב לצוות",
   "agent.tool.request_secret.description": "הסוכן מבקש שתשמרו סוד בחשבון, כמו מפתח API. הוא אף פעם לא רואה את הערך.",
   "agent.tool.request_secret.confirm": "שמירה",
   "agent.secret_card.host": "נשלח אל {host}",

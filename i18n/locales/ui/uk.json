@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "Це впливає на вхід: коди електронною поштою, ключі доступу або пов'язані облікові записи для входу. Перевірте деталі перед підтвердженням.",
   "agent.tool.change_protected_setting.confirm": "Підтвердити",
   "agent.tool.request_secret.title": "Зберегти секрет",
+  "agent.tool.send_feedback.title": "Надіслати відгук команді",
   "agent.tool.request_secret.description": "Агент просить зберегти у вашому акаунті секрет, наприклад ключ API. Агент ніколи не бачить значення.",
   "agent.tool.request_secret.confirm": "Зберегти",
   "agent.secret_card.host": "Надсилається на {host}",

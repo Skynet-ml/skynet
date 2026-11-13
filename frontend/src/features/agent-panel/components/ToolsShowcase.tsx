@@ -75,6 +75,7 @@ const GROUPS: ReadonlyArray<{ labelKey: MessageKey; tools: readonly string[] }> 
       "ask_user",
       "request_secret",
       "remember_for_later",
+      "send_feedback",
       "continue_to_next_screen",
       "go_back_to_screen",
     ],

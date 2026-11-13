@@ -1047,6 +1047,7 @@
   "agent.tool.change_protected_setting.description": "این کار بر ورود اثر می‌گذارد: کدهای تأیید ایمیلی، کلیدهای عبور یا حساب‌های ورود پیوندشده. پیش از تأیید، جزئیات را بررسی کنید.",
   "agent.tool.change_protected_setting.confirm": "تأیید",
   "agent.tool.request_secret.title": "ذخیرهٔ راز",
+  "agent.tool.send_feedback.title": "ارسال بازخورد به تیم",
   "agent.tool.request_secret.description": "عامل از شما می‌خواهد یک راز، مانند کلید API، را در حسابتان ذخیره کنید. عامل هرگز مقدار را نمی‌بیند.",
   "agent.tool.request_secret.confirm": "ذخیره",
   "agent.secret_card.host": "به {host} فرستاده می‌شود",

@@ -722,6 +722,7 @@
   "agent.tool.change_protected_setting.description": "This affects sign-in: two-factor email codes, passkeys or linked sign-in accounts. Check the details before you approve.",
   "agent.tool.change_protected_setting.confirm": "Approve",
   "agent.tool.request_secret.title": "Save a secret",
+  "agent.tool.send_feedback.title": "Send feedback to the team",
   "agent.tool.request_secret.description": "The agent asks you to save a secret, such as an API key, on your account. It never sees the value.",
   "agent.tool.request_secret.confirm": "Save",
   "agent.secret_card.host": "Goes to {host}",
