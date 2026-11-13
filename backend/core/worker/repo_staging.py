@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import logging
@@ -83,6 +84,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
     drop_paths,
+    inside,
     linked_hidden_paths,
     patch_paths,
     patch_violations,
@@ -98,6 +100,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
 
@@ -182,6 +185,9 @@ class StagedRepository:
     # Whether staging refused an optimize.toml with no version. Every later read
     # of this tree uses the same rule, so one pass never reads the file two ways.
     require_version: bool = True
+    # The run record's hashes and metric home, taken from the staged tree the
+    # run reads, so the run end never reads the repository again (SKY-694).
+    record_facts: Mapping[str, Any] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -451,6 +457,19 @@ def stage_repository(
         if leaks:
             raise RepoGateError(leaks)
         warnings = tuple(metric_import_warnings(snapshot.archive, metric.files))
+        record_facts = (
+            _record_facts(
+                snapshot.archive,
+                contract_sha256=environment.constraints.sha256,
+                metric_files=metric.files,
+                metric_code=str((result.get("scorer") or {}).get("metric_code") or ""),
+                drafts=drafts,
+                cases_file=cases_file,
+                cases=result.get("cases"),
+            )
+            if environment.constraints is not None
+            else {}
+        )
         scorer_archive = (
             relay_mcp_archive(
                 snapshot.archive,
@@ -526,6 +545,7 @@ def stage_repository(
         secret_allowed_hosts=secret_allowed_hosts,
         drafts=drafts,
         require_version=require_version,
+        record_facts=record_facts,
     )
 
 
@@ -1141,6 +1161,170 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     return best if optimized > baseline else None
 
 
+def _framed(path: str, data: bytes) -> bytes:
+    """Frame one file for the metric hash as ``<path>\\0<byte length>\\0<bytes>``.
+
+    Args:
+        path: Repository-relative path, encoded as UTF-8.
+        data: The file's bytes.
+
+    Returns:
+        The framed part.
+    """
+    return path.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data
+
+
+def _record_facts(
+    archive: Path,
+    *,
+    contract_sha256: str,
+    metric_files: tuple[str, ...],
+    metric_code: str,
+    drafts: Mapping[str, str],
+    cases_file: str | None,
+    cases: list[Any] | None,
+) -> dict[str, Any]:
+    """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
+
+    ``metric_sha256`` is one SHA-256 over the framed entry code (path
+    ``metric.py``, the UTF-8 bytes of ``metric_code``) and then each regular
+    file under the ``[metric] files`` paths, in sorted path order; see
+    :func:`_framed`. ``metric_home`` describes the ``[metric] files`` only: it
+    is ``repository`` when the file sets ``[metric] files`` and every one comes
+    from the pinned commit, and ``judge`` when there are none or a draft file
+    replaces or adds one. ``cases_sha256`` hashes the ``[data] cases`` file
+    bytes (``cases_source`` ``file``), or else the compact JSON of the
+    request's cases with sorted keys (``cases_source`` ``request``).
+
+    Args:
+        archive: The staged tree, after the draft files apply.
+        contract_sha256: SHA-256 of the ``optimize.toml`` bytes the run read.
+        metric_files: The ``[metric] files`` paths, files or folders.
+        metric_code: The scorer's entry code.
+        drafts: The run's draft files by path.
+        cases_file: The ``[data] cases`` path, or ``None``.
+        cases: The request's cases, used when there is no cases file.
+
+    Returns:
+        ``contract_sha256``, ``metric_sha256``, ``metric_home``,
+        ``cases_sha256`` and ``cases_source``; the last two are ``None`` with no cases.
+    """
+    roots = tuple(metric_files) + ((cases_file,) if cases_file is not None else ())
+    files: dict[str, bytes] = {}
+    with tarfile.open(archive, "r:gz") as packed:
+        for member in packed.getmembers():
+            path = posixpath.normpath(member.name).lstrip("/")
+            if member.isfile() and inside(path, roots):
+                handle = packed.extractfile(member)
+                files[path] = handle.read() if handle is not None else b""
+    metric = hashlib.sha256(_framed("metric.py", metric_code.encode("utf-8")))
+    for path in sorted(path for path in files if inside(path, metric_files)):
+        metric.update(_framed(path, files[path]))
+    from_commit = bool(metric_files) and not any(inside(path, metric_files) for path in drafts)
+    if cases_file is not None:
+        cases_sha256, cases_source = hashlib.sha256(files.get(cases_file, b"")).hexdigest(), "file"
+    elif cases:
+        canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cases_sha256, cases_source = hashlib.sha256(canonical.encode("utf-8")).hexdigest(), "request"
+    else:
+        cases_sha256, cases_source = None, None
+    return {
+        "contract_sha256": contract_sha256,
+        "metric_sha256": metric.hexdigest(),
+        "metric_home": "repository" if from_commit else "judge",
+        "cases_sha256": cases_sha256,
+        "cases_source": cases_source,
+    }
+
+
+def add_run_record(
+    result: dict[str, Any], payload: dict[str, Any], staged: StagedRepository, *, image: str | None
+) -> None:
+    """Write the run record into ``result["details"]["record"]`` at the run end (SKY-694).
+
+    The record lets another person reproduce the score: the hashes and the
+    metric home from staging (:func:`_record_facts`), the seed, the split the
+    guest made, the pinned sandbox image, and the ``[outcome]`` verdict keys
+    with the same absent-key rule as ``details["outcome"]``. ``contract_met``
+    is true when no rule failed, also when the file sets no target and no
+    minimum. A run with no ``optimize.toml``, a result with no ``details``, or
+    a run with cases whose guest wrote no split positions (an older image)
+    gets no record. The record holds no secret, no case content and no metric code.
+
+    Args:
+        result: The run's final result; changed in place.
+        payload: The staged run payload, with the cases the guest received.
+        staged: The staged tree, which keeps the record facts.
+        image: The sandbox image pinned for the run, or ``None``.
+    """
+    details = result.get("details")
+    if not staged.constrained or not staged.record_facts or not isinstance(details, dict):
+        return
+    split = details.get(CASE_SPLIT_KEY) if payload.get("cases") else None
+    if payload.get("cases") and not isinstance(split, dict):
+        return
+    outcome = details.get("outcome") or {}
+    verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
+    details["record"] = {
+        **staged.record_facts,
+        "seed": payload.get("seed"),
+        "split": split,
+        "image": image,
+        **verdict,
+        "contract_met": verdict.get("target_reached", True) is True and verdict.get("minimums_passed", True) is True,
+    }
+
+
+def _record_block(result: dict[str, Any]) -> str:
+    """Write the pull request's run record block, or nothing for a run with no record.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        Markdown that starts with one plain line on the contract, then the
+        record fields; an empty string when the result has no record.
+    """
+    record = (result.get("details") or {}).get("record")
+    if not isinstance(record, dict):
+        return ""
+    if "target_reached" not in record and "minimums_passed" not in record:
+        verdict = f"The {CONSTRAINTS_FILE} file sets no target and no minimum."
+    elif record.get("contract_met"):
+        verdict = "This run met the contract."
+    else:
+        failed = []
+        if record.get("target_reached") is False:
+            target = ((result.get("details") or {}).get("outcome") or {}).get("target")
+            score = result.get("best_score")
+            reached = f"{score:.12g}" if isinstance(score, int | float) else "no score"
+            failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
+        failed.extend(str(entry.get("reason")) for entry in record.get("failed_minimums") or [])
+        verdict = "This run did not meet the contract. " + " ".join(failed)
+    split = record.get("split")
+    if split is None:
+        split_line = "none, the run has no cases"
+    else:
+        parts = {name: split.get(name) or [] for name in ("search", "validation", "held_out")}
+        if sum(len(positions) for positions in parts.values()) > 30:
+            counts = ", ".join(f"{len(positions)} {name}" for name, positions in parts.items())
+            split_line = (
+                f"`{split.get('rule')}`, seed {split.get('seed')}: {counts} cases (`get_run` lists the positions)"
+            )
+        else:
+            listed = "; ".join(f"{name} {positions}" for name, positions in parts.items())
+            split_line = f"`{split.get('rule')}`, seed {split.get('seed')}: {listed}"
+    fields = [
+        f"- Contract SHA-256: `{record.get('contract_sha256')}`",
+        f"- Metric SHA-256: `{record.get('metric_sha256')}` (metric home: {record.get('metric_home')})",
+        f"- Cases SHA-256: `{record.get('cases_sha256')}` (source: {record.get('cases_source')})",
+        f"- Seed: {record.get('seed')}",
+        f"- Split: {split_line}",
+        f"- Sandbox image: `{record.get('image')}`",
+    ]
+    return f"{verdict}\n\nRun record:\n" + "\n".join(fields) + "\n\n"
+
+
 def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
     """Write the pull request description.
 
@@ -1163,6 +1347,7 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
         f"{result.get('engine_used', 'an agent')}.\n\n"
         f"Score went from {baseline:.4g} to {optimized:.4g}.\n\n"
         f"Changed files:\n{listed}{more}\n\n"
+        f"{_record_block(result)}"
         f"Review the run: {run_url}\n"
     )
 

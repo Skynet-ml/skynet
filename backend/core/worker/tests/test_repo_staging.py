@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import re
@@ -58,7 +59,7 @@ from core.service_gateway.optimization.blackbox.sandbox import (
     LocalSubprocessSession,
     SandboxSpec,
 )
-from core.service_gateway.optimization.blackbox.service import legacy_case_splits
+from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
 from core.worker import repo_staging, scoped_relay
@@ -3131,3 +3132,237 @@ def test_without_cases_the_entry_runs_once_with_no_input(monkeypatch: pytest.Mon
         staged.close_scorers()
         staged.cleanup()
     assert json.loads(result["feedback"]) == {"case": None, "output": {"value": None, "sees_cases": False}}
+
+
+_RECORD_METRIC = "def score(prediction, case):\n    return 1.0\n"
+_PINNED_IMAGE = "registry.example/skynet-sandbox@sha256:" + "a" * 64
+
+
+def _framed(path: str, data: bytes) -> bytes:
+    """Frame one part of the metric hash the way the docs say.
+
+    Args:
+        path: The part's path.
+        data: The part's bytes.
+
+    Returns:
+        ``<path>\\0<length>\\0<bytes>``.
+    """
+    return path.encode() + b"\0" + str(len(data)).encode() + b"\0" + data
+
+
+def _guest_details(cases: list[Any], seed: int | None, **extra: Any) -> dict[str, Any]:
+    """Build the ``details`` a current guest writes: the split positions plus ``extra``.
+
+    Args:
+        cases: The cases the guest received.
+        seed: The run's seed.
+        **extra: More ``details`` keys, such as ``outcome``.
+
+    Returns:
+        The details.
+    """
+    return {CASE_SPLIT_KEY: case_split_positions(cases, legacy_case_splits(cases, seed), seed), **extra}
+
+
+def _record_payload(**extra: Any) -> dict[str, Any]:
+    """Build the fixture payload with a python entry metric.
+
+    Args:
+        **extra: Payload keys to add.
+
+    Returns:
+        The payload.
+    """
+    return {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": _RECORD_METRIC}, "seed": 7, **extra}
+
+
+def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with a cases file gets the file's hashes, the guest's split and the verdict keys (SKY-694)."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        outcome = {"target": 0.9, "target_reached": True}
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    metric = hashlib.sha256(
+        _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): ...\n")
+    )
+    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+    assert record["metric_sha256"] == metric.hexdigest()
+    assert record["metric_home"] == "repository"
+    assert record["cases_sha256"] == hashlib.sha256(_CASES_JSONL.encode()).hexdigest()
+    assert record["cases_source"] == "file"
+    assert record["seed"] == 7
+    assert record["image"] == _PINNED_IMAGE
+    assert (record["target_reached"], record["contract_met"]) == (True, True)
+    assert "minimums_passed" not in record
+    assert "failed_minimums" not in record
+    split = record["split"]
+    assert split["rule"] == "pairs"
+    assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(20))
+    text = json.dumps(record)
+    for secret_or_content in ("secret-value", "place 0", '"expected"', "return 1.0", "def score"):
+        assert secret_or_content not in text
+
+
+def test_a_draft_metric_file_makes_the_judge_the_metric_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft that replaces a [metric] file is held by Skynet, not by the pinned commit."""
+    payload = _record_payload()
+    payload["target"]["repo"]["draft_files"] = {"eval/scorer.py": "def score(): return 2\n"}
+    _, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
+    staged.cleanup()
+
+    assert staged.record_facts["metric_home"] == "judge"
+    metric = _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): return 2\n")
+    assert staged.record_facts["metric_sha256"] == hashlib.sha256(metric).hexdigest()
+
+
+def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Request cases hash as sorted compact JSON; a file with no [metric] files has the judge as home."""
+    cases = [{"input": "é", "expected": 1}, {"input": "b", "expected": 2}]
+    staged_payload, staged = _stage_with(_FILES, monkeypatch, _record_payload(cases=cases))
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=None)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    assert record["cases_sha256"] == hashlib.sha256(canonical).hexdigest()
+    assert record["cases_source"] == "request"
+    assert record["metric_home"] == "judge"
+    assert record["metric_sha256"] == hashlib.sha256(_framed("metric.py", _RECORD_METRIC.encode())).hexdigest()
+    assert record["image"] is None
+    assert record["contract_met"] is True
+
+
+def test_a_run_with_no_cases_has_no_split_and_no_cases_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no cases the record says so: the split, the cases hash and its source are null."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert (record["split"], record["cases_sha256"], record["cases_source"]) == (None, None, None)
+
+
+def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guest image from before the record writes no positions, so the run gets no record and nothing fails."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details={"outcome": {"target": 0.9, "target_reached": True}})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+
+
+@pytest.mark.parametrize("result", [_result(0.5, 0.8), _result(0.5, 0.8, details=None), {"best_score": 0.8}])
+def test_a_run_from_before_the_record_gets_none_and_does_not_fail(tmp_path: Path, result: dict[str, Any]) -> None:
+    """A tree staged with no record facts, or a result with no details, makes no record and no record block."""
+    repo_staging.add_run_record(result, _payload("c" * 40), _staged(tmp_path), image=_PINNED_IMAGE)
+
+    assert "record" not in (result.get("details") or {})
+    assert "Run record" not in repo_staging._description(_result(0.5, 0.8), _EDIT, "https://x/run")
+
+
+def _recorded(**verdict: Any) -> dict[str, Any]:
+    """Build a result whose details hold a record with the given verdict keys.
+
+    Args:
+        **verdict: ``target_reached``, ``minimums_passed``, ``failed_minimums`` and ``contract_met``.
+
+    Returns:
+        The result.
+    """
+    record = {
+        "contract_sha256": "1" * 64,
+        "metric_sha256": "2" * 64,
+        "metric_home": "repository",
+        "cases_sha256": "3" * 64,
+        "cases_source": "file",
+        "seed": 7,
+        "split": {"rule": "pairs", "seed": 7, "search": [2, 0], "validation": [1], "held_out": [3]},
+        "image": _PINNED_IMAGE,
+        **verdict,
+    }
+    return _result(0.5, 0.85, details={"outcome": {"target": 0.9}, "record": record})
+
+
+def test_the_pull_request_shows_the_record_for_a_run_that_met_the_contract() -> None:
+    """The block starts with the plain line, then every field with the full SHA-256 values."""
+    body = repo_staging._description(
+        _recorded(target_reached=True, minimums_passed=True, failed_minimums=[], contract_met=True),
+        _EDIT,
+        "https://x/run",
+    )
+
+    assert "This run met the contract.\n\nRun record:\n" in body
+    for digest in ("1" * 64, "2" * 64, "3" * 64):
+        assert f"`{digest}`" in body
+    assert "(metric home: repository)" in body
+    assert "- Seed: 7" in body
+    assert "- Split: `pairs`, seed 7: search [2, 0]; validation [1]; held_out [3]" in body
+    assert f"- Sandbox image: `{_PINNED_IMAGE}`" in body
+    assert body.index("Run record:") < body.index("Review the run:")
+
+
+@pytest.mark.parametrize(
+    ("verdict", "line"),
+    [
+        (
+            {"target_reached": False, "contract_met": False},
+            "This run did not meet the contract. The final score 0.85 did not reach the target 0.9.",
+        ),
+        (
+            {
+                "minimums_passed": False,
+                "failed_minimums": [
+                    {
+                        "name": "recall",
+                        "minimum": 0.8,
+                        "value": 0.5,
+                        "reason": "'recall' scored 0.5, below its minimum 0.8.",
+                    }
+                ],
+                "contract_met": False,
+            },
+            "This run did not meet the contract. 'recall' scored 0.5, below its minimum 0.8.",
+        ),
+        ({"contract_met": True}, "The optimize.toml file sets no target and no minimum."),
+    ],
+)
+def test_the_pull_request_line_names_the_failed_rule_or_no_rule(verdict: dict[str, Any], line: str) -> None:
+    """A failed target or minimum shows its numbers; a file with no rule says so in one line."""
+    body = repo_staging._description(_recorded(**verdict), _EDIT, "https://x/run")
+
+    assert f"{line}\n\nRun record:" in body
+
+
+def test_the_pull_request_counts_a_long_split_and_points_to_get_run() -> None:
+    """A long position list would flood the text, so the block gives each part's count."""
+    result = _recorded(contract_met=True)
+    result["details"]["record"]["split"] = {
+        "rule": "pairs",
+        "seed": 7,
+        "search": list(range(70)),
+        "validation": list(range(70, 85)),
+        "held_out": list(range(85, 100)),
+    }
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "seed 7: 70 search, 15 validation, 15 held_out cases (`get_run` lists the positions)" in body
+    assert "[0, 1" not in body
