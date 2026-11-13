@@ -5,7 +5,13 @@ import * as React from "react";
 import { ApiError, transcribeAudio } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 
-import { UNIT_HEAD_BYTES, audioStarts, joinHeard, partialDue } from "./dictation-level";
+import {
+  UNIT_HEAD_BYTES,
+  audioStarts,
+  canShowLiveWords,
+  joinHeard,
+  partialDue,
+} from "./dictation-level";
 
 /** The composer's voice state: recording live, transcribing the take, or
  *  showing a short-lived failure before returning to idle. */
@@ -208,7 +214,8 @@ export function useDictation({
     const unitStarts: number[] = [];
     let scanned = 0;
     // A reason that retrying cannot fix (no key, budget spent) ends live updates.
-    let livePaused = false;
+    // A browser that cannot show live words sends none.
+    let livePaused = !canShowLiveWords();
     // A provider outage would fail every update, so a run of failures ends them too.
     let failures = 0;
     // Whisper cannot resume a clip, so each live update sends the file header and

@@ -261,6 +261,30 @@ void it("shows live words while recording", async () => {
   await unmount();
 });
 
+void it("with no Intl.Segmenter, a take sends no live update and the final text still arrives", async () => {
+  const segmenter = Intl.Segmenter;
+  Object.assign(Intl, { Segmenter: undefined });
+  try {
+    const { view, unmount } = await mount();
+    await startTake(view);
+    recorders[0]!.speak();
+    await tickTo(10_000);
+    const partials = calls.length;
+    await React.act(async () => view.current!.finish());
+    const final = calls.at(-1)!;
+    await React.act(async () => final.reply.resolve(ok("final words")));
+    const live = view.current!.live;
+    const texts = [...view.texts];
+    await unmount();
+    assert.equal(partials, 0);
+    assert.equal(final.partial, false);
+    assert.equal(live, "");
+    assert.deepEqual(texts, ["final words"]);
+  } finally {
+    Object.assign(Intl, { Segmenter: segmenter });
+  }
+});
+
 const sentText = async (call: Call) =>
   new TextDecoder("latin1").decode(new Uint8Array(await call.audio.arrayBuffer()));
 

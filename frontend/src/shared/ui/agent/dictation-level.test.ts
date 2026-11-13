@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   HEAR_FLOOR,
   audioStarts,
+  canShowLiveWords,
   frameLevel,
   liveWords,
   partialDue,
@@ -126,7 +127,7 @@ test("a quiet speaker below the bars' gate still counts as sound for live update
   assert.equal(frameLevel(frame(0.003), HEAR_FLOOR), 0);
 });
 
-test("with no Intl.Segmenter (Firefox before 125), the module loads and splits on spaces", async () => {
+test("with no Intl.Segmenter (Firefox before 125), the module loads and shows no live words", async () => {
   const segmenter = Intl.Segmenter;
   Object.assign(Intl, { Segmenter: undefined });
   try {
@@ -134,12 +135,9 @@ test("with no Intl.Segmenter (Firefox before 125), the module loads and splits o
     const fresh = (await import(
       "./dictation-level.ts?no-segmenter"
     )) as typeof import("./dictation-level.ts");
-    assert.deepEqual(fresh.liveWords("hello there."), [
-      { piece: "hello", tail: false },
-      { piece: " ", tail: false },
-      { piece: "there.", tail: true },
-    ]);
+    assert.equal(fresh.canShowLiveWords(), false);
   } finally {
     Object.assign(Intl, { Segmenter: segmenter });
   }
+  assert.equal(canShowLiveWords(), true);
 });

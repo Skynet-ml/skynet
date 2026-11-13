@@ -169,22 +169,28 @@ export function joinHeard(parts: readonly string[]): string {
   }, "");
 }
 
-// A space split finds no words in Chinese and Japanese; the word segmenter does.
-// Built on first use: Firefox before 125 has no Intl.Segmenter, and a throw at
-// module load would break the whole composer there.
-let words: Intl.Segmenter | null | undefined;
+/**
+ * Tell whether this browser can show live dictation words.
+ *
+ * Firefox before 125 has no Intl.Segmenter. A space split finds no words in
+ * Chinese and Japanese, so those browsers show no live words: the take sends
+ * no live updates, and only the final transcript lands in the message box.
+ *
+ * Returns:
+ *   True when Intl.Segmenter exists.
+ */
+export function canShowLiveWords(): boolean {
+  return typeof Intl.Segmenter === "function";
+}
 
-/** Split text into word pieces, with a whitespace split when Intl.Segmenter is missing. */
+// Built on first use: a throw at module load would break the whole composer
+// in a browser with no Intl.Segmenter.
+let words: Intl.Segmenter | undefined;
+
+/** Split text into word pieces with the word segmenter. */
 function segments(text: string): Array<{ segment: string; isWordLike?: boolean }> {
-  words ??=
-    typeof Intl.Segmenter === "function"
-      ? new Intl.Segmenter(undefined, { granularity: "word" })
-      : null;
-  if (words) return [...words.segment(text)];
-  return text
-    .split(/(\s+)/)
-    .filter(Boolean)
-    .map((segment) => ({ segment, isWordLike: /\S/.test(segment) }));
+  words ??= new Intl.Segmenter(undefined, { granularity: "word" });
+  return [...words.segment(text)];
 }
 
 /**
