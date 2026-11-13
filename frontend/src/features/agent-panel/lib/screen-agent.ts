@@ -456,8 +456,8 @@ export function legacySetupChatId(raw: string | null): string | null {
 
 /**
  * The server id of the setup chat that a submitted run keeps. The run's
- * owner, admins and editors can read this chat; viewers cannot. The owner
- * reads it raw, and the others read it with secrets masked.
+ * owner and admins can read this chat; editors and viewers cannot. The owner
+ * reads it raw, and admins read it with secrets masked.
  *
  * Args:
  *   raw: The tab's stored setup chat.

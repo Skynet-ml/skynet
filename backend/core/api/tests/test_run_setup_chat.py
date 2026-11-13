@@ -2,8 +2,8 @@
 
 A submit binds the new run to the setup chat that the request names, but only
 when the submitter owns that chat. ``GET /optimizations/{id}/chat`` then serves
-the full chat up to the run to its owner, admins and editors. A viewer of the
-run, or a user with no access, gets no chat. The stale-chat purge keeps a
+the full chat up to the run to its owner and admins. An editor or a viewer of
+the run, or a user with no access, gets no chat. The stale-chat purge keeps a
 bound chat.
 """
 
@@ -178,11 +178,9 @@ def test_bind_ignores_another_users_chat_and_unknown_ids() -> None:
     assert _bound(store) is None
 
 
-@pytest.mark.parametrize(
-    ("username", "role", "key"), [("alice", "user", _SECRET), ("eve", "user", MASK), ("root", "admin", MASK)]
-)
-def test_owner_editor_and_admin_read_the_full_chat_up_to_the_run(username: str, role: str, key: str) -> None:
-    """The owner, an editor and an admin get the chat up to the run's final reply; only the owner sees keys."""
+@pytest.mark.parametrize(("username", "role", "key"), [("alice", "user", _SECRET), ("root", "admin", MASK)])
+def test_owner_and_admin_read_the_full_chat_up_to_the_run(username: str, role: str, key: str) -> None:
+    """The owner and an admin get the chat up to the run's final reply; only the owner sees keys."""
     store = _store()
     _bind_setup_chat(store, "opt-1", "alice", "c-alice")
     resp = _client(store, username, role).get("/optimizations/opt-1/chat")
@@ -205,7 +203,7 @@ def test_owner_editor_and_admin_read_the_full_chat_up_to_the_run(username: str, 
 
 
 def _contents(store: _MemStore) -> list[str]:
-    """Return the turn texts that an editor of ``opt-1`` reads.
+    """Return the turn texts that an admin reads from ``opt-1``.
 
     Args:
         store: The store the router reads.
@@ -213,7 +211,7 @@ def _contents(store: _MemStore) -> list[str]:
     Returns:
         The ``content`` of each turn, in order.
     """
-    return [m["content"] for m in _client(store, "eve").get("/optimizations/opt-1/chat").json()["messages"]]
+    return [m["content"] for m in _client(store, "root", "admin").get("/optimizations/opt-1/chat").json()["messages"]]
 
 
 def test_a_steer_before_the_final_reply_keeps_the_reply() -> None:
@@ -279,16 +277,17 @@ def test_chat_shows_no_later_pin_or_archive() -> None:
         row.pinned = True
         row.archived_at = datetime.now(UTC) + timedelta(days=1)
         session.commit()
-    body = _client(store, "eve").get("/optimizations/opt-1/chat").json()
+    body = _client(store, "root", "admin").get("/optimizations/opt-1/chat").json()
     assert body["pinned"] is False
     assert body["archived_at"] is None
 
 
-def test_viewer_gets_no_chat() -> None:
-    """A viewer of the run gets the chat-not-found error."""
+@pytest.mark.parametrize("username", ["bob", "eve"])
+def test_viewer_and_editor_get_no_chat(username: str) -> None:
+    """A viewer (bob) or an editor (eve) of the run gets the chat-not-found error."""
     store = _store()
     _bind_setup_chat(store, "opt-1", "alice", "c-alice")
-    resp = _client(store, "bob").get("/optimizations/opt-1/chat")
+    resp = _client(store, username).get("/optimizations/opt-1/chat")
     assert resp.status_code == 404
     assert resp.json()["code"] == "agent.conversation.not_found"
     assert _SECRET not in resp.text

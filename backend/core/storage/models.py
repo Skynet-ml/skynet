@@ -1293,8 +1293,8 @@ class JobModel(Base):
     # folds the finished leg in before clearing the timestamps, so elapsed reports net
     # active compute across resumes without ever counting the paused gap between legs.
     accumulated_runtime_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
-    # The setup chat that created the run. The owner, admins and editors of the
-    # run can read this chat, so it is set only to a chat the submitter owns.
+    # The setup chat that created the run. The owner and admins of the run can
+    # read this chat, so it is set only to a chat the submitter owns.
     # SET NULL keeps a chat delete free of the run.
     conversation_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True

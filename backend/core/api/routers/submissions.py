@@ -741,7 +741,7 @@ def _optimizer_option(
 def _bind_setup_chat(job_store, optimization_id: str, username: str, conversation_id: str) -> None:
     """Bind a new run to its setup chat when ``username`` owns that chat.
 
-    The owner, admins and editors of the run can read the bound chat, so a
+    The owner and admins of the run can read the bound chat, so a
     chat of another user, or an unknown id, leaves the run unbound.
 
     Args:
