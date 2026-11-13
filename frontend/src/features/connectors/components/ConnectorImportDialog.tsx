@@ -703,7 +703,7 @@ export function ConnectorImportDialog({
               </div>
             </div>
 
-            <DialogFooter className="shrink-0 px-5 pb-5">
+            <DialogFooter className="mx-0 mt-0 mb-0 shrink-0 px-5">
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 {msg("connector_import.cancel")}
               </Button>
