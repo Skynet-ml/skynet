@@ -288,6 +288,36 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
         assert path not in served
 
 
+def test_serving_writes_the_drafts_into_the_tree_and_never_lists_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The served tree holds the run's drafts, and the guest payload names no draft, as one hides the scorer."""
+
+    def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
+        """Pack the serving side only, so the scoring side comes from the drafts."""
+        archive = _archive(workdir, _SERVING_SIDE)
+        return type("Snapshot", (), {"archive": archive, "commit": commit, "readonly_paths": ()})()
+
+    monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
+    job = _job()
+    job["payload"]["target"]["repo"]["draft_files"] = {**_SCORING_SIDE, "src/app.py": "DRAFTED = 1\n"}
+    payload = serve_payload(job, patch="", inputs={}, optimization_id="opt-1")
+
+    with staged_snapshot(payload, engine=None, owner=None) as staged:
+        archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
+        served = _members(archive)
+        with tarfile.open(archive, "r:gz") as packed:
+            member = next(item for item in packed.getmembers() if item.name.removeprefix("./") == "src/app.py")
+            app = packed.extractfile(member).read()  # type: ignore[union-attr]
+        guest = staged
+
+    assert app == b"DRAFTED = 1\n"
+    assert served == set(_SERVING_SIDE)
+    assert "draft_files" not in guest["repo"]
+    assert "eval/scorer.py" not in json.dumps(guest)
+
+
 def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], patch: str = "") -> Any:
     """Point the serving fetch at a real packed tree of ``files``.
 

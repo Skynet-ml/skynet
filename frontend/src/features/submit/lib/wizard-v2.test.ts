@@ -23,6 +23,7 @@ const {
   presetEngine,
   taskIssue,
   withRepository,
+  withTaskPatch,
   wizardSteps,
   withDefaultModels,
   withLevel,
@@ -288,7 +289,15 @@ test("only extra files can be deleted", () => {
   assert.equal(deleteWorkspaceFile(ws, "run.py"), null);
   assert.equal(deleteWorkspaceFile(ws, "metric.py"), null);
   assert.equal(deleteWorkspaceFile(ws, "nope.py"), null);
-  assert.deepEqual(deleteWorkspaceFile(ws, "helpers.py"), { files: {} });
+  assert.deepEqual(deleteWorkspaceFile(ws, "helpers.py"), { files: {}, filesBase: undefined });
+});
+
+test("deleting the last draft file forgets the commit the drafts were read at", () => {
+  const files = { "a.py": "a = 1\n", "b.py": "b = 1\n" };
+  const ws = { ...initialWizardV2State().workspace, files, filesBase: "c".repeat(40) };
+  assert.deepEqual(deleteWorkspaceFile(ws, "a.py"), { files: { "b.py": "b = 1\n" } });
+  const last = { ...ws, files: { "b.py": "b = 1\n" } };
+  assert.deepEqual(deleteWorkspaceFile(last, "b.py"), { files: {}, filesBase: undefined });
 });
 
 test("a new file's path must be relative, clean, a known suffix and free", () => {
@@ -336,6 +345,63 @@ test("withRepository picks a repository from its default branch", () => {
     commit: "",
   });
   assert.equal(withRepository(pinned, "acme/old"), pinned);
+});
+
+test("withTaskPatch drops the draft files when the repository, branch or commit moves", () => {
+  const start = initialWizardV2State();
+  const repo = { ...emptyRepoDraft(), repository: "acme/bot", branch: "main" };
+  const files = { "optimize.toml": "version = 1\n", "src/app.py": "x = 2\n" };
+  const filesBase = "c".repeat(40);
+  const state = {
+    ...start,
+    task: { ...start.task, repo },
+    workspace: { ...start.workspace, files, filesBase },
+  };
+
+  assert.deepEqual(withTaskPatch(state, { objective: "Faster" }).workspace.files, files);
+  assert.equal(withTaskPatch(state, { objective: "Faster" }).workspace.filesBase, filesBase);
+  assert.deepEqual(withTaskPatch(state, { repo: { ...repo, setupCommand: "npm ci" } }).workspace.files, files);
+  for (const moved of [
+    withRepository(repo, "acme/other"),
+    { ...repo, branch: "dev" },
+    { ...repo, commit: "a".repeat(40) },
+    { ...repo, provider: "gitlab" as const },
+  ]) {
+    const next = withTaskPatch(state, { repo: moved });
+    assert.deepEqual(next.workspace.files, {});
+    assert.equal(next.workspace.filesBase, undefined);
+    assert.equal(next.task.repo, moved);
+  }
+});
+
+test("withTaskPatch keeps the draft files for the branch and commit they were read at", () => {
+  const start = initialWizardV2State();
+  const repo = { ...emptyRepoDraft(), repository: "acme/bot", branch: "main" };
+  const files = { "src/app.py": "x = 2\n" };
+  const filesBase = "c0ffee".padEnd(40, "1");
+  const state = {
+    ...start,
+    task: { ...start.task, repo },
+    workspace: { ...start.workspace, files, filesBase },
+  };
+
+  for (const kept of [
+    { ...repo },
+    { ...repo, commit: filesBase },
+    { ...repo, commit: filesBase.slice(0, 7).toUpperCase() },
+    { ...repo, branch: "dev", commit: filesBase },
+  ]) {
+    const next = withTaskPatch(state, { repo: kept });
+    assert.deepEqual(next.workspace.files, files);
+    assert.equal(next.workspace.filesBase, filesBase);
+  }
+  for (const moved of [
+    { ...repo, commit: filesBase.slice(0, 6) },
+    { ...repo, commit: "d".repeat(40) },
+    { ...repo, repository: "acme/other", commit: filesBase },
+  ]) {
+    assert.deepEqual(withTaskPatch(state, { repo: moved }).workspace.files, {});
+  }
 });
 
 test("withRepository clears the created-by-Skynet flag for another repository", () => {

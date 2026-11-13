@@ -263,6 +263,28 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
     )
 
 
+def check_draft_base(has_drafts: bool, base: str | None, commit: str, *, place: Place) -> list[GateFailure]:
+    """Refuse draft files written on another commit than the one the run starts from.
+
+    A draft is a whole-file copy of the tree the setup agent read. When the
+    branch moves after that, the run would write the old copies over the new
+    commits and undo them.
+
+    Args:
+        has_drafts: Whether the run has draft files.
+        base: The commit the drafts were written on; ``None`` for drafts that
+            do not record it.
+        commit: The commit the run starts from.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        One failure when the two commits differ; else an empty list.
+    """
+    if not has_drafts or base is None or base == commit:
+        return []
+    return [_failure("draft_files", place, I18nKey.REPO_GATE_DRAFT_BASE_MOVED, base=base[:7], commit=commit[:7])]
+
+
 def check_hidden(
     original_archive: Path,
     agent_archive: Path,

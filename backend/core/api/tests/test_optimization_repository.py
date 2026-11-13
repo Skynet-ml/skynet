@@ -203,6 +203,68 @@ def test_tree_lists_every_path_at_the_commit_sorted(store: FakeJobStore, github:
     assert [call[0] for call in github.calls] == [TREE_PATH]
 
 
+def _seed_drafted_run(store: FakeJobStore) -> None:
+    """Seed a run on the same commit whose setup draft edits one file and adds another.
+
+    Args:
+        store: Fake job store.
+    """
+    store.seed_job(
+        "drafted-run",
+        payload={
+            "username": "alice",
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "repository": "acme/app",
+                    "commit": COMMIT,
+                    "editable_paths": ["."],
+                    "draft_files": {"src/main.py": "drafted\n", "cfg/optimize.toml": "[run]\n"},
+                },
+            },
+        },
+    )
+
+
+def test_tree_shows_the_run_draft_files_and_keeps_the_cache_clean(store: FakeJobStore, github: _FakeGithub) -> None:
+    """A run's drafts show in its tree only; another run on the commit still sees the plain tree."""
+    _seed_drafted_run(store)
+    client = _client(store)
+
+    drafted = client.get("/optimizations/drafted-run/repository/tree").json()
+    plain = client.get("/optimizations/repo-run/repository/tree").json()
+
+    assert drafted["entries"] == [
+        {"path": "README.md", "type": "file", "size": 5},
+        {"path": "cfg", "type": "dir", "size": None},
+        {"path": "cfg/optimize.toml", "type": "file", "size": 6},
+        {"path": "src", "type": "dir", "size": None},
+        {"path": "src/main.py", "type": "file", "size": 8},
+    ]
+    assert [entry["path"] for entry in plain["entries"]] == ["README.md", "src", "src/main.py"]
+    assert [call[0] for call in github.calls] == [TREE_PATH]
+
+
+def test_file_route_returns_the_run_draft_text(store: FakeJobStore, github: _FakeGithub) -> None:
+    """A draft file reads as the run's draft text, without a host read, and never fills the shared cache."""
+    _seed_drafted_run(store)
+    client = _client(store)
+
+    drafted = client.get("/optimizations/drafted-run/repository/file", params={"path": "src/main.py"}).json()
+    plain = client.get("/optimizations/repo-run/repository/file", params={"path": "src/main.py"}).json()
+
+    assert drafted == {
+        "path": "src/main.py",
+        "content": "drafted\n",
+        "binary": False,
+        "too_large": False,
+        "missing": False,
+        "size": 8,
+    }
+    assert plain["content"] == "print('hi')\n"
+    assert len(github.calls) == 1
+
+
 def test_file_found_returns_its_text(store: FakeJobStore, github: _FakeGithub) -> None:
     """A text file comes back decoded, and stepping back to it does not refetch."""
     client = _client(store)
@@ -390,13 +452,22 @@ def test_archive_zips_only_a_recorded_version(store: FakeJobStore) -> None:
         "done-run",
         payload={
             "username": "alice",
-            "target": {"kind": "repo", "repo": {"repository": "acme/app", "commit": COMMIT}},
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "repository": "acme/app",
+                    "commit": COMMIT,
+                    "draft_files": {"optimize.toml": "[run]\n"},
+                    "environment": {"readonly_paths": ["vendor/lib"]},
+                },
+            },
         },
         result={"best_candidate": "PATCH-B", "versions": [{"candidate": "PATCH-A"}]},
     )
     seen: list[str] = []
+    drafts: list[Any] = []
 
-    def fake_zip(repository, commit, patch_text, token, workdir, **_):
+    def fake_zip(repository, commit, patch_text, token, workdir, **kwargs):
         """Record the call and write a stand-in zip.
 
         Args:
@@ -405,12 +476,13 @@ def test_archive_zips_only_a_recorded_version(store: FakeJobStore) -> None:
             patch_text: The version's patch.
             token: GitHub token.
             workdir: Folder for the zip.
-            **_: Ignored keywords.
+            **kwargs: Host options, the run's ``drafts`` and its ``readonly_paths``.
 
         Returns:
             The zip path.
         """
         seen.append(patch_text)
+        drafts.append((kwargs.get("drafts"), kwargs.get("readonly_paths")))
         out = workdir / "app.zip"
         out.write_bytes(b"PK")
         return out
@@ -426,6 +498,7 @@ def test_archive_zips_only_a_recorded_version(store: FakeJobStore) -> None:
     assert refused.status_code == 404
     assert refused.json()["code"] == "optimization.repo_version_unknown"
     assert seen == ["PATCH-A"]
+    assert drafts == [({"optimize.toml": "[run]\n"}, ["vendor/lib"])]
 
 
 def test_archive_reports_a_failed_clone(store: FakeJobStore) -> None:

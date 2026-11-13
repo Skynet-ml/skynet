@@ -28,6 +28,9 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     10: {"blackbox": "bd713b1948891fa7"},
     11: {"blackbox": "033ae0d643c915f4"},
     12: {"blackbox": "a896ba28b7bdbc7a"},
+    13: {"blackbox": "b5878009b64947bc"},
+    # target.repo.draft_files and draft_base: the setup draft's repository files and their base commit.
+    14: {"blackbox": "6e0761a3f301b387"},
 }
 
 

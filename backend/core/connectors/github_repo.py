@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tarfile
 import zipfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from urllib.parse import quote
 from ..api.errors import DomainError
 from .github import API_URL, PROVIDER, _headers, _repo_url, _split_repo, oauth_app
 from .oauth import current_oauth_token
+from .repo_drafts import MAX_ARCHIVE_BYTES, DraftFileError, write_to_checkout
 from .transport import get_json
 from .vault import ConnectorVault
 
@@ -33,8 +35,6 @@ GIT_HOSTS = {
     "gitlab": ("https://gitlab.com", "oauth2"),
     "bitbucket": ("https://bitbucket.org", "x-token-auth"),
 }
-# Compressed tree ceiling: the tree crosses into each sandbox as base64 text.
-MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
 # The commit picker shows only recent work; an older commit is rarely the start of a run.
 COMMIT_LIMIT = 20
 COMMIT_TITLE_MAX = 120
@@ -356,8 +356,10 @@ def patched_repo_zip(
     *,
     remote: str | None = None,
     provider: str = "github",
+    drafts: Mapping[str, str] | None = None,
+    readonly_paths: Iterable[str] = (),
 ) -> Path:
-    """Clone ``repository`` at ``commit``, apply ``patch`` and zip the resulting tree.
+    """Clone ``repository`` at ``commit``, write the draft files, apply ``patch`` and zip the resulting tree.
 
     Submodules and Git LFS content are left out: the zip is the files a run's
     versions can change, not a working checkout.
@@ -370,13 +372,15 @@ def patched_repo_zip(
         workdir: Empty folder the clone and zip go in.
         remote: Clone URL override, used by tests with a local repository.
         provider: Repository host, see :data:`GIT_HOSTS`.
+        drafts: The run's ``draft_files``, which the patch was made against; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
 
     Returns:
         The zip, its entries under one ``<name>/`` folder.
 
     Raises:
-        RepoFetchError: When the clone fails, the patch does not apply, or the
-            zip is larger than the limit.
+        RepoFetchError: When the clone fails, a draft file cannot be written,
+            the patch does not apply, or the zip is larger than the limit.
     """
     origin, user = git_host(provider)
     environment = git_auth_env(token, origin, user)
@@ -386,6 +390,10 @@ def patched_repo_zip(
     _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], checkout, environment)
     _git(["fetch", "--quiet", "--depth", "1", "origin", commit], checkout, environment)
     _git(["-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], checkout, environment)
+    try:
+        write_to_checkout(checkout, drafts, readonly_paths)
+    except DraftFileError as error:
+        raise RepoFetchError(f"A draft file of the run cannot be written: {error}") from None
     if patch.strip():
         patch_file = workdir / "version.patch"
         patch_file.write_text(patch if patch.endswith("\n") else patch + "\n", encoding="utf-8")

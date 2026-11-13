@@ -243,6 +243,36 @@ def test_editable_paths_must_stay_inside_the_repository(path: str) -> None:
         BlackboxRepoSource(repository="octo/hello", editable_paths=[path])
 
 
+@pytest.mark.parametrize("drafts", [{"src": "x", "src/app.py": "y"}, {"a/b": "x", "a/b/c/d.py": "y"}])
+def test_a_draft_file_under_another_draft_file_is_refused(drafts: dict[str, str]) -> None:
+    """A path cannot be both a draft file and a folder of another, as the trusted parent cannot write both."""
+    with pytest.raises(ValidationError, match="lies under another draft file"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files=drafts)
+    assert BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files={"src/a.py": "x", "src/ab.py": "y"}
+    ).draft_files
+
+
+@pytest.mark.parametrize("text", ["", "  \n\t"])
+def test_an_empty_optimize_toml_draft_is_refused(text: str) -> None:
+    """An empty optimize.toml draft would replace the repository's file with one that names no run."""
+    with pytest.raises(ValidationError, match=r"optimize\.toml is empty"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files={"optimize.toml": text})
+    assert BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files={"README.md": ""}
+    ).draft_files == {"README.md": ""}
+
+
+@pytest.mark.parametrize("base", ["main", "abc1234", "A" * 40])
+def test_the_draft_base_must_be_a_full_commit_id(base: str) -> None:
+    """The draft base pins a commit, so a branch name or a short or uppercase id is refused."""
+    with pytest.raises(ValidationError):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_base=base)
+    pinned = BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_base="a" * 40)
+    assert pinned.draft_base == "a" * 40
+    assert BlackboxRepoSource(repository="octo/hello", editable_paths=["src"]).draft_base is None
+
+
 def test_editable_paths_are_normalized_and_deduplicated() -> None:
     """Backslashes and trailing slashes normalize; duplicates collapse; ``.`` means everything."""
     source = BlackboxRepoSource(repository="octo/hello", editable_paths=["src\\lib/", "src/lib", "./"])
