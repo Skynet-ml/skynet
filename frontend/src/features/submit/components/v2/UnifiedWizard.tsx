@@ -1,12 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
+import { checkOptimizeToml } from "@/shared/lib/api";
+import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { slideVariants } from "../../constants";
@@ -15,6 +25,7 @@ import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unif
 import {
   budgetContinueBlock,
   budgetShortfall,
+  limitMissing,
   runBalance,
   type BudgetShortfall,
 } from "../../lib/budget-limit";
@@ -51,6 +62,16 @@ const LIMIT_SCREENS = ["budget", "plan"] as const;
 
 // One toast per shortfall, however often Continue is pressed.
 const SHORTFALL_TOAST_ID = "submit-budget-shortfall";
+// A stalled check must not hold Continue silently; the timeout shows a toast.
+const SETUP_CHECK_TIMEOUT_MS = 15_000;
+const SETUP_CHECK_TOAST_ID = "submit-setup-check";
+const OPTIMIZE_TOML = "optimize.toml";
+
+// A second failed press shows its own error, not the first one's.
+function setupToast(text: string) {
+  if (toast.isActive(SETUP_CHECK_TOAST_ID)) toast.update(SETUP_CHECK_TOAST_ID, { render: text });
+  else toast.error(text, { toastId: SETUP_CHECK_TOAST_ID });
+}
 
 function shortfallMessage(shortfall: BudgetShortfall): string {
   return shortfall.kind === "balance"
@@ -100,10 +121,7 @@ function UnifiedWizardFrame() {
     w.restored
       ? {
           ...FIRST_PAGES,
-          [current]: reopenedPage(
-            stepPages(current, w.state),
-            readSessionValue(WIZARD_SCREEN_KEY),
-          ),
+          [current]: reopenedPage(stepPages(current, w.state), readSessionValue(WIZARD_SCREEN_KEY)),
         }
       : FIRST_PAGES,
   );
@@ -163,40 +181,117 @@ function UnifiedWizardFrame() {
     (beforeMetric || (LIMIT_SCREENS as readonly string[]).includes(visibleScreen));
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   if (waitingOn !== null && waitingOn !== visibleScreen) setWaitingOn(null);
+  // A repository run's optimize.toml must parse before the user leaves the
+  // code screen. The server holds the agent's own moves on the same check.
+  const setupText =
+    visibleScreen === "metric" && w.state.task.repo
+      ? (w.state.workspace.files[OPTIMIZE_TOML] ?? "")
+      : "";
+  const screenRef = useRef(visibleScreen);
+  const setupTextRef = useRef(setupText);
+  useLayoutEffect(() => {
+    screenRef.current = visibleScreen;
+    setupTextRef.current = setupText;
+  });
+  const checkingSetup = useRef(false);
+  // Runs ``then`` only once the file on the code screen parses.
+  const gateSetup = useCallback(
+    (then: () => void) => {
+      if (!setupText.trim()) {
+        then();
+        return;
+      }
+      if (checkingSetup.current) return;
+      checkingSetup.current = true;
+      const screen = visibleScreen;
+      const run = (text: string): Promise<void> => {
+        if (!text.trim()) {
+          then();
+          return Promise.resolve();
+        }
+        return checkOptimizeToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
+          (result) => {
+            if (screenRef.current !== screen) return;
+            // The file changed while the check ran, so its answer is stale.
+            if (setupTextRef.current !== text) return run(setupTextRef.current);
+            if (result.ok) {
+              toast.dismiss(SETUP_CHECK_TOAST_ID);
+              then();
+              return;
+            }
+            setupToast(
+              formatMsg("submit.setup_check.invalid", { p1: result.errors[0]?.message ?? "" }),
+            );
+          },
+        );
+      };
+      run(setupText)
+        .catch(() => setupToast(msg("submit.setup_check.unavailable")))
+        .finally(() => {
+          checkingSetup.current = false;
+        });
+    },
+    [setupText, visibleScreen],
+  );
   // Continue stays clickable under a shortfall so the press can say why it holds.
-  const forward = useCallback(() => {
-    if (!inputsOpen) return;
-    if (pricing) {
-      setWaitingOn(visibleScreen);
-      return;
-    }
-    if (shortfall !== null) {
-      toast.error(
-        shortfallToast(shortfallMessage(shortfall), shortfall.kind === "balance" ? addFundsRef.current : null),
-        { toastId: SHORTFALL_TOAST_ID },
-      );
-      return;
-    }
-    if (page < pageCount - 1) {
-      setPages((p) => ({ ...p, [current]: page + 1 }));
-      return;
-    }
-    const next = steps[position + 1];
-    if (next) setPages((p) => ({ ...p, [next]: 0 }));
-    goNext();
-  }, [
-    inputsOpen,
-    pricing,
-    visibleScreen,
-    shortfall,
-    openTo,
-    page,
-    pageCount,
-    current,
-    steps,
-    position,
-    goNext,
-  ]);
+  // The agent's moves skip the file check: the server checked the same file
+  // before it let the agent continue, and a second check that fails here
+  // would leave the agent told it moved when it did not. A user edit made
+  // while the agent's turn runs leaves unchecked; the worker's repository
+  // gate parses the file again before the run starts.
+  const moveForward = useCallback(
+    (checkSetup: boolean) => {
+      if (!inputsOpen) return;
+      if (pricing) {
+        setWaitingOn(visibleScreen);
+        return;
+      }
+      if (limitMissing(visibleScreen, { uncapped: budgetUncapped, limit: maxCostCents, balance })) {
+        toast.error(msg("submit.budget.error.empty"), { toastId: SHORTFALL_TOAST_ID });
+        return;
+      }
+      if (shortfall !== null) {
+        toast.error(
+          shortfallToast(
+            shortfallMessage(shortfall),
+            shortfall.kind === "balance" ? addFundsRef.current : null,
+          ),
+          { toastId: SHORTFALL_TOAST_ID },
+        );
+        return;
+      }
+      const advance = () => {
+        if (page < pageCount - 1) {
+          setPages((p) => ({ ...p, [current]: page + 1 }));
+          return;
+        }
+        const next = steps[position + 1];
+        if (next) setPages((p) => ({ ...p, [next]: 0 }));
+        goNext();
+      };
+      if (checkSetup) gateSetup(advance);
+      else advance();
+    },
+    [
+      gateSetup,
+      inputsOpen,
+      pricing,
+      visibleScreen,
+      budgetUncapped,
+      maxCostCents,
+      balance,
+      shortfall,
+      openTo,
+      page,
+      pageCount,
+      current,
+      steps,
+      position,
+      goNext,
+    ],
+  );
+  const forward = useCallback(() => moveForward(true), [moveForward]);
+  const agentForward = useCallback(() => moveForward(false), [moveForward]);
   useEffect(() => {
     if (waitingOn === null || pricing) return;
     setWaitingOn(null);
@@ -238,10 +333,15 @@ function UnifiedWizardFrame() {
     (screen: string) => {
       const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
       const target = step ? (stepPages(step, w.state) as readonly string[]).indexOf(screen) : -1;
-      const later = step !== undefined && (steps.indexOf(step) > position || (step === current && target > page));
+      const later =
+        step !== undefined &&
+        (steps.indexOf(step) > position || (step === current && target > page));
       const open = inputsOpen && !pricing && shortfall === null;
       // The stepper's own hold: no jump into the metric step while costs are unsettled.
-      const held = step !== undefined && (runShort || !w.costSettled) && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
+      const held =
+        step !== undefined &&
+        (runShort || !w.costSettled) &&
+        WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
       // A step on the way with a problem (an optimizer that no longer fits
       // the data, a stale check) holds the jump, so Continue shows it.
       const blocked =
@@ -249,18 +349,34 @@ function UnifiedWizardFrame() {
         (steps.slice(position, steps.indexOf(step)).some((s) => stepIssue(s) !== null) ||
           (target > 0 && stepIssue(step) !== null));
       if (!step || !later || !open || held || blocked || (step !== current && !canEnter(step))) {
-        forward();
+        agentForward();
         return;
       }
       setPages((p) => ({ ...p, [step]: target }));
       if (step !== current) goTo(step);
     },
-    [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, stepIssue, w.state],
+    [
+      steps,
+      position,
+      current,
+      page,
+      inputsOpen,
+      pricing,
+      shortfall,
+      runShort,
+      w.costSettled,
+      agentForward,
+      goTo,
+      canEnter,
+      stepIssue,
+      w.state,
+    ],
   );
 
   // The agent edits only the screen on view, so it is told which one that
   // is; unmounting the wizard clears it and leaves the agent unscoped. Its
-  // Continue runs this frame's own ``forward``, the button's handler.
+  // Continue runs the button's handler, without the file check (see
+  // ``moveForward``).
   const wizardCtx = useWizardStateOptional();
   const setWizardScreen = wizardCtx?.setWizardScreen;
   const setScreenIssue = wizardCtx?.setScreenIssue;
@@ -282,7 +398,9 @@ function UnifiedWizardFrame() {
   }, [shareRestoredSetup, w.restored]);
   // The agent's create-repository write lands as a plain repository pick,
   // which clears the mark; set it again once the wizard holds that repository.
-  const agentCreatedRepo = wizardCtx?.state.repo_created_by_skynet ? wizardCtx.state.repository : undefined;
+  const agentCreatedRepo = wizardCtx?.state.repo_created_by_skynet
+    ? wizardCtx.state.repository
+    : undefined;
   const taskRepo = w.state.task.repo;
   const patchTask = w.patchTask;
   useEffect(() => {
@@ -299,8 +417,13 @@ function UnifiedWizardFrame() {
     setScreenIssue?.(blockedText);
   }, [blockedText, setScreenIssue]);
   useLayoutEffect(() => {
-    setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen, goForwardTo });
-  }, [visibleScreen, forward, goToScreen, goForwardTo, setScreenNavigator]);
+    setScreenNavigator?.({
+      screen: visibleScreen,
+      forward: agentForward,
+      goToScreen,
+      goForwardTo,
+    });
+  }, [visibleScreen, agentForward, goToScreen, goForwardTo, setScreenNavigator]);
   // A layout cleanup: a new frame (an account switch remounts it) registers in
   // layout effects, and this old frame's nulls must land before them.
   useLayoutEffect(
@@ -356,8 +479,9 @@ function UnifiedWizardFrame() {
         <SubmitStepper w={stepper} />
       </div>
 
+      {/* The summary screen sizes to its card, so Back and Run sit right under it. */}
       <div
-        className="relative min-h-0 flex-1 overflow-hidden pt-[10px]"
+        className={`relative min-h-0 overflow-hidden pt-[10px] ${lastScreen ? "flex-initial" : "flex-1"}`}
         data-tutorial="submit-wizard"
       >
         {WIZARD_V2_STEPS.filter(mounted).map((step) => {
