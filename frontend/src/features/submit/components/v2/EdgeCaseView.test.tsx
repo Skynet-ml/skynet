@@ -1,5 +1,5 @@
 /*
- * node --test cannot load .tsx, so this runs through jiti (edge-case-schema.test.ts
+ * node --test cannot load .tsx, so this runs through jiti (EdgeCaseView.render.test.ts
  * spawns it inside `npm run test:unit`). To run it by hand from frontend/:
  * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
  */
@@ -39,6 +39,18 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /<dd dir="ltr"[^>]*>0\.41<\/dd>/);
   });
 
+  void it("draws the translated default labels when ScoreCompare has none", () => {
+    const html = render([{ type: "ScoreCompare", exploit_score: 1, base_score: 0 }]);
+    assert.match(html, /<dt [^>]*>submit\.v2\.edge_case\.score\.exploit<\/dt>/);
+    assert.match(html, /<dt [^>]*>submit\.v2\.edge_case\.score\.base<\/dt>/);
+  });
+
+  void it("keeps a near-perfect score apart from a perfect one", () => {
+    const html = render([{ type: "ScoreCompare", exploit_score: 1, base_score: 0.99999 }]);
+    assert.match(html, /<dd dir="ltr"[^>]*>1<\/dd>/);
+    assert.match(html, /<dd dir="ltr"[^>]*>0\.99999<\/dd>/);
+  });
+
   void it("draws a Diff in an LTR block with tinted lines", () => {
     const html = render([{ type: "Diff", diff: PATCH }]);
     assert.match(html, /<pre dir="ltr"/);
@@ -64,12 +76,20 @@ void describe("EdgeCaseView", () => {
         rows: [
           ["a", 1],
           ["b", 0.5],
+          [null, true],
         ],
       },
     ]);
     assert.equal(html.match(/<th /g)?.length, 2);
-    assert.equal(html.match(/<tr /g)?.length, 3);
+    assert.equal(html.match(/<tr /g)?.length, 4);
+    // Each cell isolates its own text, so the th and td keep the table's direction.
+    assert.doesNotMatch(html, /<t[hd] [^>]*dir=/);
+    assert.match(html, /<th [^>]*><bdi dir="auto">case<\/bdi><\/th>/);
+    assert.match(html, /<td [^>]*><bdi dir="auto">a<\/bdi><\/td>/);
     assert.match(html, /<bdi dir="ltr">0\.5<\/bdi>/);
+    // React drops booleans and null, so the view writes them as text.
+    assert.match(html, /<bdi dir="ltr">true<\/bdi>/);
+    assert.match(html, /<bdi dir="ltr"><\/bdi>/);
   });
 
   void it("draws each Callout tone with its own role", () => {
@@ -80,7 +100,7 @@ void describe("EdgeCaseView", () => {
 
   void it("draws a Chart frame with its label and point count", () => {
     for (const kind of ["bar", "line"]) {
-      const html = render([{ type: "Chart", kind, label: "Scores", points: [{ x: 1, y: 2 }] }]);
+      const html = render([{ type: "Chart", kind, title: "Scores", points: [{ x: 1, y: 2 }] }]);
       assert.match(html, /role="img"/);
       assert.match(html, /aria-label="submit\.v2\.edge_case\.chart"/);
       assert.match(html, />Scores</);
@@ -94,8 +114,18 @@ void describe("EdgeCaseView", () => {
     ]);
     assert.match(html, /<p [^>]*dir="auto"[^>]*>Plain words\.<\/p>/);
     assert.match(html, /<ol class="list-decimal[^"]*ps-5/);
-    assert.equal(html.match(/<li /g)?.length, 2);
-    assert.match(html, /<li dir="auto"><figure/);
+    assert.equal(html.match(/<li>/g)?.length, 2);
+    assert.match(html, /<li><bdi dir="auto">Read the label\.<\/bdi><\/li>/);
+    assert.match(html, /<li><figure/);
+  });
+
+  void it("draws a nested Steps of strings inside a step", () => {
+    const html = render([
+      { type: "Steps", items: ["Outer.", { type: "Steps", items: ["Inner a.", "Inner b."] }] },
+    ]);
+    assert.equal(html.match(/<ol /g)?.length, 2);
+    assert.equal(html.match(/<li>/g)?.length, 4);
+    assert.match(html, /<li><bdi dir="auto">Inner b\.<\/bdi><\/li>/);
   });
 
   void it("falls back to patch.diff and why.md when the tree is invalid", () => {

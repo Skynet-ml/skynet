@@ -4,12 +4,12 @@
  * here and draws only the node types below. The backend (SKY-682) writes the
  * same node names and fields.
  *
- * A tree is a list of nodes. A Steps item may hold one child node, so the
- * deepest tree has two levels.
+ * A tree is a list of nodes. Only Steps holds other nodes: a Steps item is a
+ * string, a leaf node, or a Steps of strings. So the deepest tree has two
+ * levels.
  */
 
 export const MAX_NODES = 30;
-export const MAX_DEPTH = 2;
 export const MAX_TABLE_ROWS = 50;
 export const MAX_TABLE_COLUMNS = 20;
 export const MAX_CHART_POINTS = 200;
@@ -19,8 +19,9 @@ export const MAX_STRING = 100_000;
 
 export type CalloutTone = "info" | "warn" | "danger";
 export type ChartKind = "bar" | "line";
-export type Cell = string | number;
+export type Cell = string | number | boolean | null;
 
+// The backend drops a missing label (exclude_none), so the view shows a translated default.
 export interface ScoreCompareNode {
   type: "ScoreCompare";
   exploit_score: number;
@@ -32,7 +33,6 @@ export interface ScoreCompareNode {
 export interface DiffNode {
   type: "Diff";
   diff: string;
-  label?: string;
 }
 
 export interface IOPairNode {
@@ -55,7 +55,7 @@ export interface CalloutNode {
 }
 
 export interface ChartPoint {
-  x: Cell;
+  x: string | number;
   y: number;
 }
 
@@ -63,7 +63,7 @@ export interface ChartNode {
   type: "Chart";
   kind: ChartKind;
   points: ChartPoint[];
-  label?: string;
+  title?: string;
 }
 
 export interface TextNode {
@@ -71,20 +71,28 @@ export interface TextNode {
   text: string;
 }
 
-export interface StepsNode {
+export interface InnerStepsNode {
   type: "Steps";
-  items: Array<string | EdgeCaseNode>;
+  items: string[];
 }
 
-export type EdgeCaseNode =
+export type EdgeCaseLeafNode =
   | ScoreCompareNode
   | DiffNode
   | IOPairNode
   | TableNode
   | CalloutNode
   | ChartNode
-  | TextNode
-  | StepsNode;
+  | TextNode;
+
+export type StepItem = string | EdgeCaseLeafNode | InnerStepsNode;
+
+export interface StepsNode {
+  type: "Steps";
+  items: StepItem[];
+}
+
+export type EdgeCaseNode = EdgeCaseLeafNode | StepsNode;
 
 export type EdgeCaseTree = EdgeCaseNode[];
 
@@ -118,8 +126,12 @@ function num(value: unknown): number {
   return value;
 }
 
-function cell(value: unknown): Cell {
+function key(value: unknown): string | number {
   return typeof value === "number" ? num(value) : str(value);
+}
+
+function cell(value: unknown): Cell {
+  return value === null || typeof value === "boolean" ? value : key(value);
 }
 
 /** Checks the length before any element is read, so a huge array costs nothing. */
@@ -129,17 +141,20 @@ function list(value: unknown, max: number, min = 0): unknown[] {
 }
 
 function withOptional<T extends object>(node: T, extras: Record<string, string | undefined>): T {
-  for (const [key, value] of Object.entries(extras)) {
-    if (value !== undefined) (node as Record<string, unknown>)[key] = value;
+  for (const [name, value] of Object.entries(extras)) {
+    if (value !== undefined) (node as Record<string, unknown>)[name] = value;
   }
   return node;
 }
 
-function node(value: unknown, depth: number, budget: Budget): EdgeCaseNode {
-  if (depth > MAX_DEPTH) fail();
+/** Read the node's fields once the node is counted against the budget. */
+function counted(value: unknown, budget: Budget): Record<string, unknown> {
   budget.nodes += 1;
   if (budget.nodes > MAX_NODES) fail();
-  const raw = record(value);
+  return record(value);
+}
+
+function leaf(raw: Record<string, unknown>): EdgeCaseLeafNode {
   // Only known fields are copied, so extra keys from the model never reach the view.
   switch (raw.type) {
     case "ScoreCompare":
@@ -152,10 +167,7 @@ function node(value: unknown, depth: number, budget: Budget): EdgeCaseNode {
         { exploit_label: optStr(raw.exploit_label), base_label: optStr(raw.base_label) },
       );
     case "Diff":
-      return withOptional<DiffNode>(
-        { type: "Diff", diff: str(raw.diff) },
-        { label: optStr(raw.label) },
-      );
+      return { type: "Diff", diff: str(raw.diff) };
     case "IOPair":
       return {
         type: "IOPair",
@@ -177,25 +189,39 @@ function node(value: unknown, depth: number, budget: Budget): EdgeCaseNode {
       if (raw.kind !== "bar" && raw.kind !== "line") fail();
       const points = list(raw.points, MAX_CHART_POINTS, 1).map((p) => {
         const point = record(p);
-        return { x: cell(point.x), y: num(point.y) };
+        return { x: key(point.x), y: num(point.y) };
       });
       return withOptional<ChartNode>(
         { type: "Chart", kind: raw.kind, points },
-        { label: optStr(raw.label) },
+        { title: optStr(raw.title) },
       );
     }
     case "Text":
       return { type: "Text", text: str(raw.text) };
-    case "Steps":
-      return {
-        type: "Steps",
-        items: list(raw.items, MAX_STEPS, 1).map((item) =>
-          typeof item === "string" ? str(item) : node(item, depth + 1, budget),
-        ),
-      };
     default:
       return fail();
   }
+}
+
+function stepItem(value: unknown, budget: Budget): StepItem {
+  if (typeof value === "string") return str(value);
+  const raw = counted(value, budget);
+  if (raw.type === "Steps") {
+    // The second level is the last one, so a nested Steps holds only strings.
+    return { type: "Steps", items: list(raw.items, MAX_STEPS, 1).map(str) };
+  }
+  return leaf(raw);
+}
+
+function node(value: unknown, budget: Budget): EdgeCaseNode {
+  const raw = counted(value, budget);
+  if (raw.type === "Steps") {
+    return {
+      type: "Steps",
+      items: list(raw.items, MAX_STEPS, 1).map((item) => stepItem(item, budget)),
+    };
+  }
+  return leaf(raw);
 }
 
 /**
@@ -211,7 +237,7 @@ function node(value: unknown, depth: number, budget: Budget): EdgeCaseNode {
 export function parseEdgeCase(value: unknown): EdgeCaseTree | null {
   try {
     const budget: Budget = { nodes: 0 };
-    return list(value, MAX_NODES, 1).map((item) => node(item, 1, budget));
+    return list(value, MAX_NODES, 1).map((item) => node(item, budget));
   } catch {
     // A hostile value can also throw from a getter or a proxy trap; all of it falls back.
     return null;

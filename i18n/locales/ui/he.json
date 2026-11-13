@@ -3799,7 +3799,7 @@
   "submit.v2.edge_case.io.input": "קלט",
   "submit.v2.edge_case.io.expected": "צפוי",
   "submit.v2.edge_case.io.got": "התקבל",
-  "submit.v2.edge_case.chart": "תרשים עם {n} נקודות",
+  "submit.v2.edge_case.chart": "{n, plural, one {תרשים עם נקודה אחת} two {תרשים עם שתי נקודות} other {תרשים עם # נקודות}}",
   "submit.v2.edge_case.empty": "אין פרטים לממצא הזה.",
   "submit.v2.overview.tabs_label": "סיכום ההרצה",
   "submit.v2.overview.tab.general": "כללי",

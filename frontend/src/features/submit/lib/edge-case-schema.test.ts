@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
   MAX_CHART_POINTS,
   MAX_NODES,
+  MAX_STEPS,
   MAX_STRING,
+  MAX_TABLE_COLUMNS,
   MAX_TABLE_ROWS,
   parseEdgeCase,
 } from "./edge-case-schema.ts";
@@ -22,7 +22,6 @@ const ONE_OF_EACH = [
   {
     type: "Diff",
     diff: "--- a/metric.py\n+++ b/metric.py\n@@ -1 +1 @@\n-x\n+y",
-    label: "metric.py",
   },
   { type: "IOPair", input: "2+2", expected: "4", got: "4 (copied from the label)" },
   {
@@ -31,6 +30,8 @@ const ONE_OF_EACH = [
     rows: [
       ["a", 1],
       ["b", 0.5],
+      ["c", true],
+      [null, false],
     ],
   },
   { type: "Callout", tone: "warn", text: "The metric reads the label." },
@@ -41,10 +42,11 @@ const ONE_OF_EACH = [
       { x: "base", y: 0.4 },
       { x: "exploit", y: 1 },
     ],
-    label: "Scores",
+    title: "Scores",
   },
   { type: "Text", text: "Plain words." },
   { type: "Steps", items: ["Read the label.", { type: "Text", text: "Echo it." }] },
+  { type: "Steps", items: ["Outer step.", { type: "Steps", items: ["Inner a.", "Inner b."] }] },
 ];
 
 function text(value: string) {
@@ -73,6 +75,10 @@ void describe("parseEdgeCase", () => {
       { type: "Text", text: "a", html: "<b>a</b>", onClick: "alert(1)" },
     ]);
     assert.deepEqual(tree, text("a"));
+    // SKY-682 has no Diff label, so a label from the model is dropped too.
+    assert.deepEqual(parseEdgeCase([{ type: "Diff", diff: "d", label: "x.py" }]), [
+      { type: "Diff", diff: "d" },
+    ]);
   });
 
   void it("returns null for values that are not a non-empty node list", () => {
@@ -130,6 +136,23 @@ void describe("parseEdgeCase", () => {
       null,
     );
 
+    const table = (n: number) => ({
+      type: "Table",
+      columns: Array.from({ length: n }, (_, i) => `c${i}`),
+      rows: [Array.from({ length: n }, (_, i) => i)],
+    });
+    assert.ok(parseEdgeCase([table(MAX_TABLE_COLUMNS)]));
+    assert.equal(parseEdgeCase([table(MAX_TABLE_COLUMNS + 1)]), null);
+
+    const steps = (n: number) => ({
+      type: "Steps",
+      items: Array.from({ length: n }, (_, i) => `step ${i}`),
+    });
+    assert.ok(parseEdgeCase([steps(MAX_STEPS)]));
+    assert.equal(parseEdgeCase([steps(MAX_STEPS + 1)]), null);
+    assert.ok(parseEdgeCase([{ type: "Steps", items: [steps(MAX_STEPS)] }]));
+    assert.equal(parseEdgeCase([{ type: "Steps", items: [steps(MAX_STEPS + 1)] }]), null);
+
     assert.ok(parseEdgeCase(text("x".repeat(MAX_STRING))));
     assert.equal(parseEdgeCase(text("x".repeat(MAX_STRING + 1))), null);
   });
@@ -149,6 +172,20 @@ void describe("parseEdgeCase", () => {
       parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: [inner] }] }]),
       null,
     );
+  });
+
+  void it("returns null when a nested Steps holds a node, not a string", () => {
+    for (const child of [
+      { type: "Text", text: "a" },
+      { type: "Diff", diff: "d" },
+    ]) {
+      assert.equal(
+        parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: ["a", child] }] }]),
+        null,
+        child.type,
+      );
+    }
+    assert.equal(parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: [] }] }]), null);
   });
 
   void it("keeps hostile strings as plain data", () => {
@@ -187,24 +224,4 @@ void describe("parseEdgeCase", () => {
       assert.equal(parseEdgeCase(value), null);
     }
   });
-});
-
-const frontend = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../../..");
-
-// node --test only loads .ts, so the EdgeCaseView .tsx render tests run in a jiti child.
-void it("EdgeCaseView render tests pass", () => {
-  const result = spawnSync(
-    path.join(frontend, "node_modules/.bin/jiti"),
-    ["src/features/submit/components/v2/EdgeCaseView.test.tsx"],
-    {
-      cwd: frontend,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        JITI_JSX: "1",
-        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
-      },
-    },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
