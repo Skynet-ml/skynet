@@ -146,7 +146,11 @@ def test_logs_never_hold_the_quote_or_the_summary(caplog: pytest.LogCaptureFixtu
 
 
 def test_edit_of_an_earlier_message_keeps_the_later_report() -> None:
-    """An edit of message 1 deletes messages 1 to 3 but keeps message 3's report; the edited text can report."""
+    """An edit of message 1 deletes messages 1 to 3 but keeps message 3's report; the edited text can report.
+
+    SQLite can reuse a deleted row id, but Postgres never does, so the test
+    checks only that the reports stay, not which ids the new rows get.
+    """
     engine = _engine()
     store = SimpleNamespace(engine=engine)
     _persist_user_turn(store, _CHAT, "u2")
@@ -163,7 +167,11 @@ def test_edit_of_an_earlier_message_keeps_the_later_report() -> None:
 
 
 def test_regenerate_keeps_the_report() -> None:
-    """Regenerate deletes the latest user message, but its report and earlier reports stay."""
+    """Regenerate deletes the latest user message, but its report and earlier reports stay.
+
+    SQLite can reuse a deleted row id, but Postgres never does, so the test
+    checks only that the reports stay, not which id the new message gets.
+    """
     engine = _engine()
     store = SimpleNamespace(engine=engine)
     assert _send(engine, 1, user_quote="message one") == FEEDBACK_SENT

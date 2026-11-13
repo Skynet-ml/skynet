@@ -3,8 +3,9 @@
 The agent decides when the user is not satisfied with a tool result and
 writes the report itself; the user fills no form and is not asked first. The
 report goes to the ``agent_feedback_reports`` table, which the admin feedback
-endpoint lists. A chat gets at most one report for each stored user message,
-so one complaint gives one report. An edit or a regenerate keeps the reports.
+endpoint lists. A chat gets at most one report for each stored user message.
+An edit or a regenerate keeps the reports. A regenerate stores the message
+again with a new id, so the agent can send one more report about it.
 
 The report holds a short quote of the user and the agent's summary, both cut
 to a fixed length. Logs name the chat and the user message only, never the
@@ -51,13 +52,15 @@ class FeedbackTarget:
 
     ``user_message_id`` is mutable: when the user steers a running turn, the
     router stores the steer message and points the target at it, so a
-    complaint in the steer gets its own report.
+    complaint in the steer gets its own report. It is ``None`` while a steer
+    is being stored, and stays ``None`` when that store fails, so no report
+    goes to the wrong message.
     """
 
     engine: Engine
     username: str
     conversation_id: str
-    user_message_id: int
+    user_message_id: int | None
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -110,10 +113,13 @@ def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_
         ``True`` when the report is new, ``False`` when this message already has one.
 
     Raises:
-        LookupError: The chat no longer exists, for example after a delete in another tab.
+        LookupError: The user message is not stored, for example after a failed steer
+            store, or the chat no longer exists, for example after a delete in another tab.
         IntegrityError: The insert failed for a reason other than this message's existing report.
     """
     message_id = target.user_message_id
+    if message_id is None:
+        raise LookupError("user message not stored")
     with Session(target.engine) as session:
         if session.get(AgentConversationModel, target.conversation_id) is None:
             raise LookupError("chat not found")

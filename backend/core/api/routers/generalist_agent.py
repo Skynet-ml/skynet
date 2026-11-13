@@ -1016,6 +1016,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             Args:
                 text: The steered text the agent receives.
             """
+            # Clear the target first: if the store fails, a complaint in the
+            # steer must give "not sent", not land on the previous message.
+            if feedback_target is not None:
+                feedback_target.user_message_id = None
             message_id = _persist_user_turn(job_store, conversation_id, text)
             if feedback_target is not None:
                 feedback_target.user_message_id = message_id

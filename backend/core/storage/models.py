@@ -1694,8 +1694,9 @@ class AgentFeedbackReportModel(Base):
     """One report an agent sent when the user was not satisfied with a tool result (SKY-580).
 
     The agent writes the report with its ``send_feedback`` tool. The unique
-    key on ``(conversation_id, user_message_id)`` keeps it to one report for
-    each complaint. ``user_message_id`` is the stored user message the report
+    key on ``(conversation_id, user_message_id)`` keeps it to at most one
+    report for each stored user message. A regenerate stores the message again
+    with a new id, so it can get one more report. ``user_message_id`` is the stored user message the report
     is about. It has no foreign key on purpose: an edit or a regenerate deletes
     that message, and the report must stay. Postgres takes message ids from a
     sequence and never reuses them, so a later message never meets an old
