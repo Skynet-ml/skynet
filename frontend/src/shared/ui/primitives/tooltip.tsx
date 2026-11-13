@@ -24,10 +24,30 @@ function Tooltip({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Root
   return <TooltipPrimitive.Root data-slot="tooltip" {...props} />;
 }
 
-function TooltipTrigger({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {
+/** True when the focused element shows a keyboard focus ring. */
+function isKeyboardFocus(el: Element): boolean {
+  try {
+    return el.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
+function TooltipTrigger({ onFocus, ...props }: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {
   return (
     <TooltipTriggerContext.Provider value>
-      <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
+      <TooltipPrimitive.Trigger
+        data-slot="tooltip-trigger"
+        onFocus={(event) => {
+          onFocus?.(event);
+          // Radix opens on every focus. A closing menu or dialog gives focus
+          // back to its trigger, so the tooltip showed with no hover. Only a
+          // keyboard focus opens it now; a prevented event skips Radix's handler.
+          // A menu closed with the keyboard returns a keyboard focus, so that one still opens it.
+          if (!isKeyboardFocus(event.currentTarget)) event.preventDefault();
+        }}
+        {...props}
+      />
     </TooltipTriggerContext.Provider>
   );
 }
@@ -43,9 +63,13 @@ function TooltipContent({
   className,
   sideOffset = 10,
   collisionPadding = 8,
+  arrow = true,
   children,
   ...props
-}: React.ComponentProps<typeof TooltipPrimitive.Content>) {
+}: React.ComponentProps<typeof TooltipPrimitive.Content> & {
+  /** Draw the caret that points at the trigger. */
+  arrow?: boolean;
+}) {
   return (
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Content
@@ -61,15 +85,17 @@ function TooltipContent({
         {...props}
       >
         {children}
-        <TooltipPrimitive.Arrow asChild width={12} height={7}>
-          <svg
-            viewBox="0 0 12 7"
-            className="overflow-visible fill-card stroke-border drop-shadow-[0_1px_1px_rgb(0_0_0/0.05)]"
-            style={{ zIndex: 50, transform: "translateY(-1px)" }}
-          >
-            <path d="M0 0 L6 6 L12 0" />
-          </svg>
-        </TooltipPrimitive.Arrow>
+        {arrow && (
+          <TooltipPrimitive.Arrow asChild width={12} height={7}>
+            <svg
+              viewBox="0 0 12 7"
+              className="overflow-visible fill-card stroke-border drop-shadow-[0_1px_1px_rgb(0_0_0/0.05)]"
+              style={{ zIndex: 50, transform: "translateY(-1px)" }}
+            >
+              <path d="M0 0 L6 6 L12 0" />
+            </svg>
+          </TooltipPrimitive.Arrow>
+        )}
       </TooltipPrimitive.Content>
     </TooltipPrimitive.Portal>
   );

@@ -8,6 +8,7 @@ import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
+import { ForkButton } from "./fork-button";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { automaticTurnBody } from "./automatic-turn";
@@ -79,11 +80,19 @@ interface UserBubbleProps {
   editable?: boolean;
   /** When the message was sent, in epoch ms. */
   createdAt?: number;
+  /** Start a new chat from before this message; no button without it. */
+  onFork?: () => void;
 }
 
 // The user's turns sit at the end side as bubbles; the agent's answers sit
 // at the start side with no bubble. Logical classes mirror both in RTL.
-export function UserBubble({ content, onEdit, editable = true, createdAt }: UserBubbleProps) {
+export function UserBubble({
+  content,
+  onEdit,
+  editable = true,
+  createdAt,
+  onFork,
+}: UserBubbleProps) {
   const automatic = automaticTurnBody(content);
   if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
   const { rest, comments } = splitLineComments(content);
@@ -122,7 +131,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
         <div
           className={cn(
             "flex items-center gap-0.5 -me-1",
-            "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
+            "opacity-0 group-hover/user:opacity-100 has-[:focus-visible]:opacity-100 transition-opacity",
             // The global coarse-pointer reveal only matches the unnamed
             // `group-hover:` spelling, so touch screens (iPad) need their own.
             "any-pointer-coarse:opacity-100",
@@ -133,6 +142,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
               text={content}
               ariaLabel={msg("shared.agent.copy")}
               copiedAriaLabel={msg("shared.agent.copied")}
+              autoTooltip
             />
             {editable && onEdit && (
               <Button
@@ -140,11 +150,11 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
                 size="icon-xs"
                 onClick={onEdit}
                 aria-label={msg("shared.agent.edit_and_resend")}
-                autoTooltip={false}
               >
                 <PencilSimple className="size-3.5" />
               </Button>
             )}
+            {onFork && <ForkButton onFork={onFork} />}
           </div>
           <MessageTime createdAt={createdAt} />
         </div>
@@ -178,7 +188,7 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
         </div>
         <span
           className={cn(
-            "opacity-0 group-hover/user:opacity-100 transition-opacity",
+            "opacity-0 group-hover/user:opacity-100 has-[:focus-visible]:opacity-100 transition-opacity",
             "any-pointer-coarse:opacity-100",
           )}
         >
