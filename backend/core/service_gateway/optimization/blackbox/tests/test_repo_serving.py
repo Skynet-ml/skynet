@@ -379,6 +379,21 @@ def test_a_commit_from_before_optimize_toml_still_serves(tmp_path: Path, monkeyp
     assert served == {"serve.py", "src/app.py"}
 
 
+def test_a_commit_whose_optimize_toml_has_no_version_still_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finished run may predate the required ``version`` key, so serving reads it as 1 and still hides the metric."""
+    files = {
+        "serve.py": _SERVE,
+        "optimize.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        "eval/scorer.py": "def score(repo_path, case):\n    return 0.0\n",
+    }
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert "serve.py" in served
+    assert "eval/scorer.py" not in served
+
+
 def test_a_commit_whose_optimize_toml_no_longer_validates_fails_clearly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

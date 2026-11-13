@@ -196,7 +196,7 @@ export function initialWizardV2State(
       followsDefaults: { taskModel: true, reflectionModel: true },
       extraReflectionModels: [],
       // Mirrors the backend BlackboxBudget defaults.
-      budget: { max_scorer_runs: maxScorerRuns ?? 200, max_iterations: null, stop_at_score: null },
+      budget: { max_scorer_runs: maxScorerRuns ?? 200, max_iterations: null },
       maxCostCents: null,
       budgetUncapped: false,
       // Same defaults as the legacy wizard's DEFAULT_PROPOSER.

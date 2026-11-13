@@ -207,6 +207,36 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
     assert "The candidate gets only input" in json.dumps(schema)
 
 
+def test_budget_tool_has_no_stop_score_argument(harness: Any) -> None:
+    """The stop score comes from ``[outcome] target`` in optimize.toml, so the budget step does not take one."""
+    client, _engine, _calls = harness
+    resp = _rpc(client, "tools/list", {}, WRITE_TOKEN, None)
+    assert resp.status_code == 200, resp.text
+    tool = next(tool for tool in resp.json()["result"]["tools"] if tool["name"] == "repo_draft_set_budget")
+    assert "stop_at_score" not in tool["inputSchema"]["properties"]
+    assert "[outcome] target" in tool["description"]
+
+
+def test_a_draft_with_the_retired_stop_score_gets_a_clear_issue(harness: Any) -> None:
+    """A draft saved with ``budget.stop_at_score`` gets an issue that names the file key, not a crash (SKY-691)."""
+    client, engine, calls = harness
+    draft_id = _complete_draft(client)
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        row.spec = {**row.spec, "budget": {"max_scorer_runs": 50, "stop_at_score": 0.9}}
+        session.commit()
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True})
+    )
+
+    assert review["ready"] is False
+    assert [issue for issue in review["issues"] if "[outcome] target" in issue]
+    assert json.loads(text)["code"] == "draft.not_ready"
+    assert calls["submits"] == []
+
+
 def test_step_issues_point_back_at_the_step(harness: Any) -> None:
     """Report a missing path, a syntax error, an unpriced model and an unknown engine."""
     client, _engine, _calls = harness

@@ -21,7 +21,7 @@ registerHooks({
 });
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { BlackboxConfigCard } = await import("./BlackboxConfig");
+const { BlackboxConfigCard, runStopScore } = await import("./BlackboxConfig");
 
 const job = { optimization_id: "run-1", status: "running" } as OptimizationStatusResponse;
 
@@ -46,5 +46,24 @@ void describe("BlackboxConfigCard sandbox row", () => {
     for (const payload of [{}, { sandbox_provider: null }, { sandbox_provider: "" }]) {
       assert.doesNotMatch(render(payload), /submit\.v2\.optimizer\.sandbox\.label/);
     }
+  });
+});
+
+void describe("runStopScore", () => {
+  const repo = (outcome: unknown) =>
+    ({ kind: "repo", repo: { repository: "o/r", editable_paths: ["."], environment: { outcome } } }) as never;
+
+  void it("gives the outcome target the server recorded from optimize.toml", () => {
+    assert.equal(runStopScore({ max_scorer_runs: 8 }, repo({ target: 0.9, require: {} })), 0.9);
+  });
+
+  void it("falls back to the retired budget stop score of a stored run", () => {
+    assert.equal(runStopScore({ max_scorer_runs: 8, stop_at_score: 0.75 } as never, {}), 0.75);
+  });
+
+  void it("gives no stop score when the run has none", () => {
+    assert.equal(runStopScore({}, {}), null);
+    assert.equal(runStopScore({}, repo({ target: null, require: {} })), null);
+    assert.equal(runStopScore({ stop_at_score: null } as never, {}), null);
   });
 });

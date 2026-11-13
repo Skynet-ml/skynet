@@ -81,7 +81,6 @@ Sihirbaz yalnızca görevinize ve girdilerinize uyan optimize edicileri listeler
 Çalıştırmanın ne kadar süre denemeye devam edebileceğini ve ne kadar harcayabileceğini belirleyin:
 
 - **Maks. puanlayıcı çalıştırması** (Rehberli: **Maks. deneme**): Skynet'in puanladığı en fazla aday sayısı. Bazı optimize ediciler en az belirli bir sayı gerektirir.
-- **Durma puanı** (Rehberli: **Puan şuna ulaşınca erken dur**): bir sürüm bu puana ulaştığında çalıştırma durur.
 - **Maks. yineleme** (Rehberli: **Maks. tur**): bunu destekleyen optimize ediciler için gösterilir.
 - **Harcama limiti**: çalıştırmanın harcayabileceği en yüksek tutar. Varsayılan 5 $'dır; **Başlamak için gereken** tutar daha yüksekse o tutardır. **Limit yok** seçeneğini de seçebilirsiniz.
 

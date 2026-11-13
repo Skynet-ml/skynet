@@ -174,6 +174,25 @@ def test_iteration_limit_requires_single_meta_harness(strategy: dict[str, str], 
     assert BlackboxRunRequest.model_validate(payload).budget.max_iterations is None
 
 
+@pytest.mark.parametrize("value", [0.9, None])
+def test_a_new_request_with_the_retired_stop_score_names_the_outcome_target(value: float | None) -> None:
+    """A new request that still sends ``budget.stop_at_score``, even as null, gets an error naming the file key."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
+
+    with pytest.raises(ValidationError, match=r"\[outcome\] target in optimize\.toml"):
+        BlackboxRunRequest.model_validate(payload)
+
+
+def test_a_stored_payload_with_the_retired_stop_score_still_loads() -> None:
+    """A stored run's payload keeps loading; the retired key drops, as the stop score now comes from the file."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": 0.9})
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.budget.max_scorer_runs == 20
+    assert "stop_at_score" not in request.model_dump()["budget"]
+
+
 def _repo_request(**overrides: object) -> dict:
     """Build a valid repository run payload, with ``overrides`` applied.
 

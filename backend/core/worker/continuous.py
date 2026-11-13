@@ -46,6 +46,7 @@ from ..billing.protected_credentials import scrub_execution_credentials
 from ..billing.service import StripeBillingService
 from ..constants import PAYLOAD_OVERVIEW_NAME
 from ..models import BlackboxRunRequest
+from ..models.blackbox import STORED_PAYLOAD_CONTEXT
 from ..models.common import OptimizationStatus
 from ..service_gateway.optimization.blackbox.service import legacy_case_splits
 from ..storage.models import ContinuousCycleModel, ContinuousPlanModel, ExecutionBudgetModel
@@ -568,7 +569,7 @@ def _repo_cycle_payload(
         # publish a draft pull request instead, as on any other repository.
         repo["created_by_skynet"] = False
     _name_and_fund(copy, plan, incumbent, sequence)
-    return BlackboxRunRequest.model_validate(copy)
+    return BlackboxRunRequest.model_validate(copy, context=STORED_PAYLOAD_CONTEXT)
 
 
 def _swapped(block: dict[str, Any], better: dict[str, Any]) -> dict[str, Any]:

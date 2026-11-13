@@ -111,9 +111,9 @@ MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
 UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove the uploaded cases."
 # Rules the run is held to; a resumed run must arrive at exactly these again.
-_ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules")
+_ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
-_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": []}
+_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}}}
 _SETUP_ANSWER_TOKENS = 1_024
 _JUDGE_ROLE = "judge"
 # The per-run watch hook setting: ``{"enabled", "model", "threshold"}``, each
@@ -179,6 +179,9 @@ class StagedRepository:
     # The setup draft's files, kept in the parent only: the guest gets them
     # inside the packed tree, never as a list, as a draft can be a hidden path.
     drafts: Mapping[str, str] = field(default_factory=dict)
+    # Whether staging refused an optimize.toml with no version. Every later read
+    # of this tree uses the same rule, so one pass never reads the file two ways.
+    require_version: bool = True
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -316,14 +319,21 @@ def stage_repository(
     username: str,
     binding_id: str,
     engine: Any,
+    started: bool = False,
 ) -> tuple[dict[str, Any], StagedRepository]:
     """Fetch the pinned tree and decrypt the run's secrets in the parent.
+
+    A run with a recorded environment, or a ``started`` job, already passed
+    its first staging, maybe before ``version`` was required (SKY-690). Its
+    commit's ``optimize.toml`` then reads a missing ``version`` as 1.
 
     Args:
         payload: Parent payload whose secrets are still vault references.
         username: Owner of the run and of the GitHub connection.
         binding_id: Execution budget the vaulted secrets are bound to.
         engine: SQLAlchemy engine for the vaults.
+        started: Whether the caller's job already started; a hardening job
+            records no environment.
 
     Returns:
         A payload copy that pins the commit, lists no secret entries and no
@@ -345,6 +355,7 @@ def stage_repository(
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
+    require_version = not started and not isinstance(repo.get(ENVIRONMENT_KEY), dict)
     # The guest receives this payload, and a draft (often optimize.toml) can be
     # a hidden scoring path, so only the parent keeps the drafts.
     drafts = dict(repo.pop("draft_files", None) or {})
@@ -390,7 +401,7 @@ def stage_repository(
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
         environment = effective_environment(
-            read_constraints(snapshot.archive),
+            read_constraints(snapshot.archive, require_version=require_version),
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
         )
@@ -472,6 +483,7 @@ def stage_repository(
         "proposer_hosts": list(hosts),
         # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
         "hidden_hashes": hidden_hashes(hidden),
+        "outcome": record["outcome"],
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -513,6 +525,7 @@ def stage_repository(
         secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
         secret_allowed_hosts=secret_allowed_hosts,
         drafts=drafts,
+        require_version=require_version,
     )
 
 

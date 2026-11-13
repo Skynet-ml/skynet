@@ -331,6 +331,19 @@ def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization
     ]
 
 
+def test_run_service_in_subprocess_runs_a_stored_payload_with_the_retired_stop_score() -> None:
+    """A run stored with ``budget.stop_at_score`` still starts; the stop score comes from the snapshot (SKY-691)."""
+    q: queue.Queue[dict] = queue.Queue()
+    payload = {**_BLACKBOX_PAYLOAD, "budget": {"max_scorer_runs": 10, "stop_at_score": 0.9}}
+
+    with _patch_run(return_value=_blackbox_result()) as run_bb:
+        run_service_in_subprocess(payload, "art-stop", q)
+
+    run_bb.assert_called_once()
+    assert run_bb.call_args.args[0].budget.max_scorer_runs == 10
+    assert [e for e in _drain_queue(q) if e.get("type") == EVENT_ERROR] == []
+
+
 def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
     """Lane events emitted by the black-box run reach the parent as ``EVENT_PROGRESS``."""
     q: queue.Queue[dict] = queue.Queue()

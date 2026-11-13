@@ -252,6 +252,27 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
     assert environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])["rules"] == []
 
 
+@pytest.mark.parametrize(
+    ("raw", "outcome"),
+    [
+        (None, {"target": None, "require": {}}),
+        (b"version = 1\n", {"target": None, "require": {}}),
+        (
+            b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n",
+            {"target": 0.9, "require": {"latency": 0.5}},
+        ),
+    ],
+)
+def test_the_record_holds_the_outcome(raw: bytes | None, outcome: dict[str, object]) -> None:
+    """Every new run records the file's target and minimums, with null and empty when the file sets none (SKY-691)."""
+    constraints = None if raw is None else parse_constraints(raw)
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    record = environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])
+
+    assert record["outcome"] == outcome
+
+
 def test_parsing_alone_keeps_the_paths_and_leaves_the_text_empty() -> None:
     """parse_constraints reads only the toml; read_constraints fills the text from the same snapshot (E48)."""
     constraints = parse_constraints(_CFCA + _RULES.removeprefix(b"version = 1\n"))
@@ -1744,6 +1765,7 @@ def test_the_outcome_block_gives_the_target_and_the_minimums() -> None:
         (b"version = 1\n[outcome.require]\nlatency = 0.5\n", None, {"latency": 0.5}),
         (b"version = 1\n[outcome]\ntarget = 2\n", 2.0, {}),
         (b"version = 1\n[outcome]\ntarget = -3.5\n", -3.5, {}),
+        (b'version = 1\n[outcome.require]\n"rouge.l" = 0.5\n', None, {"rouge.l": 0.5}),
     ],
 )
 def test_the_outcome_block_and_each_of_its_keys_are_optional(
@@ -1799,12 +1821,43 @@ def test_the_outcome_block_and_each_of_its_keys_are_optional(
         ),
         (
             b"version = 1\n[outcome.require.latency]\nmin = 0.5\n",
+            r'\[outcome.require\] latency is a table\. .* "latency\.min" = 0\.9',
+            "outcome.require",
+            "latency",
+        ),
+        (
+            b"version = 1\n[outcome.require]\nrouge.l = 0.5\n",
+            r'\[outcome.require\] rouge is a table\. Quote a score name that has a dot, such as "rouge\.l" = 0\.9\.',
+            "outcome.require",
+            "rouge",
+        ),
+        (b"version = 1\n[outcome]\nrequire = 0.5\n", r"\[outcome.require\] must be a table", "outcome", "require"),
+        (b'version = 1\n[outcome.require]\n"" = 0.5\n', "empty score name", "outcome.require", None),
+        # A TOML integer this long is more than a float holds.
+        (
+            b"version = 1\n[outcome]\ntarget = " + b"9" * 400 + b"\n",
+            r"\[outcome\] target must be a finite number",
+            "outcome",
+            "target",
+        ),
+        (
+            b"version = 1\n[outcome]\ntarget = -" + b"9" * 400 + b"\n",
+            r"\[outcome\] target must be a finite number",
+            "outcome",
+            "target",
+        ),
+        (
+            b"version = 1\n[outcome.require]\nlatency = " + b"9" * 400 + b"\n",
             r"\[outcome.require\] latency must be a finite number",
             "outcome.require",
             "latency",
         ),
-        (b"version = 1\n[outcome]\nrequire = 0.5\n", r"\[outcome.require\] must be a table", "outcome", "require"),
-        (b'version = 1\n[outcome.require]\n"" = 0.5\n', "empty score name", "outcome.require", None),
+        (
+            b"version = 1\n[outcome.require]\nlatency = -" + b"9" * 400 + b"\n",
+            r"\[outcome.require\] latency must be a finite number",
+            "outcome.require",
+            "latency",
+        ),
     ],
 )
 def test_a_bad_outcome_setting_fails_with_its_section_and_key(
@@ -1830,6 +1883,30 @@ def test_a_file_without_a_version_fails_and_shows_the_fix(raw: bytes) -> None:
     with pytest.raises(ConstraintsError, match=r"version is missing\. Put version = 1 at the top") as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == (None, "version")
+
+
+def test_a_started_run_reads_a_missing_version_as_version_1() -> None:
+    """A run that started before ``version`` was required still parses its pinned commit's file (SKY-690)."""
+    raw = b'[paths]\neditable = ["src"]\n'
+
+    lenient = parse_constraints(raw, require_version=False)
+
+    assert replace(lenient, sha256="") == replace(parse_constraints(b"version = 1\n" + raw), sha256="")
+    with pytest.raises(ConstraintsError, match="version is missing"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("require_version", [True, False])
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [(b"2", "2"), (b"true", "True"), (b"false", "False"), (b"1.0", "1.0"), (b'"1"', "'1'")],
+)
+def test_a_version_that_is_not_the_integer_1_fails(require_version: bool, value: bytes, shown: str) -> None:
+    """``true`` and ``1.0`` equal 1 in Python, but only the integer 1 is a version, on every path."""
+    message = re.escape(f"version {shown} is not supported; use version = 1.")
+    with pytest.raises(ConstraintsError, match=message) as caught:
+        parse_constraints(b"version = " + value + b"\n", require_version=require_version)
+    assert caught.value.key == "version"
 
 
 def test_tool_tables_are_accepted_and_skipped() -> None:

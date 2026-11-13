@@ -68,7 +68,6 @@ A coding agent reads the feedback from your scorer and patches the version. Skyn
 | Setting         | Default | Range                                                       |
 | --------------- | ------- | ----------------------------------------------------------- |
 | Max scorer runs | 200     | 1 to 100000                              |
-| Stop at score   | Off     | 0 or more                                                   |
 | Max iterations  | Off     | 1 to 1000. Only Meta-Harness, AutoSaddler and ShinkaEvolve. |
 
 One scorer run is one call of your scorer on one case. The final re-score of the starting version and the winner does not count against **Max scorer runs**.

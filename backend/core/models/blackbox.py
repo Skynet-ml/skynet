@@ -17,7 +17,7 @@ import re
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
@@ -154,16 +154,47 @@ class BlackboxScorer(BaseModel):
         return self
 
 
+STOP_AT_SCORE_RETIRED = (
+    "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in optimize.toml."
+)
+# A stored run's payload passes this context to ``model_validate``: it may
+# still hold the retired ``budget.stop_at_score``, which then drops (SKY-691).
+STORED_PAYLOAD_KEY = "stored_payload"
+STORED_PAYLOAD_CONTEXT = {STORED_PAYLOAD_KEY: True}
+
+
 # Hard stops for a run. ``max_scorer_runs`` caps optimizer-driven scorer
 # calls (the final run that re-scores the starting point and the winner is
 # outside the cap);
 # ``max_iterations`` caps proposer rounds for the engines that iterate
-# (Meta-Harness, AutoSaddler, ShinkaEvolve generations); ``stop_at_score`` ends the run early once a version
-# reaches it.
+# (Meta-Harness, AutoSaddler, ShinkaEvolve generations). The stop score is
+# ``[outcome] target`` in the repository's optimize.toml (SKY-691).
 class BlackboxBudget(BaseModel):
     max_scorer_runs: int = Field(default=200, ge=1, le=100_000)
     max_iterations: int | None = Field(default=None, ge=1, le=1_000)
-    stop_at_score: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_stop_at_score(cls, data: Any, info: ValidationInfo) -> Any:
+        """Refuse the retired stop score in a new request, also when its value is null.
+
+        The model ignores unknown keys, so without this check a client that
+        still sends the key would lose its stop score with no error.
+
+        Args:
+            data: The raw budget before field validation.
+            info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            ``data`` unchanged.
+
+        Raises:
+            ValueError: When a new request holds ``stop_at_score``.
+        """
+        stored = bool((info.context or {}).get(STORED_PAYLOAD_KEY))
+        if isinstance(data, dict) and "stop_at_score" in data and not stored:
+            raise ValueError(STOP_AT_SCORE_RETIRED)
+        return data
 
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
