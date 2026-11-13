@@ -21,6 +21,9 @@ export function RepoCandidateBrowser({
   if (!version) return null;
   return (
     <RepoVersionBrowser
+      // The drawer can move to another node while open (a live run reselects);
+      // a new version starts its view fresh, scrolled to its first change.
+      key={version.number}
       optimizationId={optimizationId}
       version={version}
       path={path}

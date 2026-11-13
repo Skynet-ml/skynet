@@ -10,7 +10,7 @@ import {
   mergeLineSpans,
   numberRows,
   splitRows,
-} from "./blackbox-diff.ts";
+} from "./diff-rows.ts";
 
 test("diffLines keeps identical texts as same lines", () => {
   assert.deepEqual(diffLines("a\nb", "a\nb"), [
@@ -125,7 +125,25 @@ test("foldRows opens an expanded gap", () => {
   const rows = numberRows(fullDiffRows(before, after));
   const [gap] = foldRows(rows, 1);
   assert.ok(gap && "gap" in gap);
-  assert.equal(foldRows(rows, 1, new Set([gap.start])).length, rows.length);
+  const opened = new Set(rows.slice(gap.start, gap.start + gap.hidden).map((r) => r.oldLine!));
+  assert.equal(foldRows(rows, 1, opened).length, rows.length);
+});
+
+test("foldRows keeps an opened gap open when a kept line splits it or a write moves its lines", () => {
+  const before = numbered(40);
+  const lines = before.split("\n");
+  const after = ["first", ...lines.slice(1, 39), "last"].join("\n");
+  const rows = numberRows(fullDiffRows(before, after));
+  const gap = foldRows(rows, 3).find((r) => "gap" in r);
+  assert.ok(gap && "gap" in gap);
+  const opened = new Set(rows.slice(gap.start, gap.start + gap.hidden).map((r) => r.oldLine!));
+  const gaps = (folded: ReturnType<typeof foldRows>) => folded.filter((r) => "gap" in r);
+  assert.deepEqual(gaps(foldRows(rows, 3, opened, 4, new Set([20]))), []);
+  // An agent write adds two lines at the top: every new line number moves down.
+  const moved = numberRows(
+    fullDiffRows(before, ["first", "x", "y", ...lines.slice(1, 39), "last"].join("\n")),
+  );
+  assert.deepEqual(gaps(foldRows(moved, 3, opened)), []);
 });
 
 test("foldRows returns a single gap for an unchanged file", () => {
@@ -138,7 +156,11 @@ test("foldRows leaves runs shorter than minFold unfolded", () => {
   const after = before.replace("l5\n", "L5\n");
   const folded = foldRows(numberRows(fullDiffRows(before, after)), 1);
   assert.equal(folded.filter((r) => "gap" in r).length, 0);
-  assert.equal(foldRows(numberRows(fullDiffRows(before, after)), 1, new Set(), 3).filter((r) => "gap" in r).length, 2);
+  assert.equal(
+    foldRows(numberRows(fullDiffRows(before, after)), 1, new Set(), 3).filter((r) => "gap" in r)
+      .length,
+    2,
+  );
 });
 
 test("mergeLineSpans cuts tokens at change boundaries", () => {
@@ -193,4 +215,15 @@ test("splitRows keeps folded gaps between the pairs", () => {
     rows.map((r) => ("gap" in r ? `gap ${r.hidden}` : `${r.left?.oldLine}|${r.right?.newLine}`)),
     ["gap 9", "10|10", "11|11", "12|12", "gap 8"],
   );
+});
+
+test("foldRows never folds a kept line, and folds the rest of its run around it", () => {
+  const text = Array.from({ length: 20 }, (_, i) => `l${i + 1}`).join("\n");
+  const rows = numberRows(fullDiffRows(text, text));
+  const folded = foldRows(rows, 3, new Set(), 4, new Set([10]));
+  assert.deepEqual(
+    folded.map((r) => ("gap" in r ? `gap@${r.start}+${r.hidden}` : r.newLine)),
+    ["gap@0+9", 10, "gap@10+10"],
+  );
+  assert.equal(foldRows(rows).length, 1);
 });

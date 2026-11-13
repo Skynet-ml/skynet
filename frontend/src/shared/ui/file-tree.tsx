@@ -15,83 +15,37 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import {
-  CaretRight,
-  File,
-  FileC,
-  FileCode,
-  FileCpp,
-  FileCss,
-  FileCsv,
-  FileHtml,
-  FileImage,
-  FileJs,
-  FileLock,
-  FileMd,
-  FilePy,
-  FileRs,
-  FileSql,
-  FileSvg,
-  FileTs,
-  FileTsx,
-  FileTxt,
-  FileZip,
-  Folder,
-  FolderOpen,
-} from "@/shared/ui/icons";
+import { CaretRight } from "@/shared/ui/icons";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
+import { fileIcon, FOLDER_ICON, FOLDER_OPEN_ICON, type FileIcon } from "./file-icons";
 import { ancestors, treeRows, type FileTreeNode, type FileTreeRow } from "./file-tree-model";
 
-const ICON_BY_EXTENSION: Record<string, typeof File> = {
-  c: FileC,
-  h: FileC,
-  cc: FileCpp,
-  cpp: FileCpp,
-  hpp: FileCpp,
-  css: FileCss,
-  scss: FileCss,
-  csv: FileCsv,
-  tsv: FileCsv,
-  html: FileHtml,
-  htm: FileHtml,
-  png: FileImage,
-  jpg: FileImage,
-  jpeg: FileImage,
-  gif: FileImage,
-  webp: FileImage,
-  js: FileJs,
-  mjs: FileJs,
-  cjs: FileJs,
-  jsx: FileJs,
-  lock: FileLock,
-  md: FileMd,
-  mdx: FileMd,
-  py: FilePy,
-  pyi: FilePy,
-  rs: FileRs,
-  sql: FileSql,
-  svg: FileSvg,
-  ts: FileTs,
-  mts: FileTs,
-  tsx: FileTsx,
-  txt: FileTxt,
-  zip: FileZip,
-  gz: FileZip,
-  tar: FileZip,
-  json: FileCode,
-  yaml: FileCode,
-  yml: FileCode,
-  toml: FileCode,
-  go: FileCode,
-  java: FileCode,
-  rb: FileCode,
-  sh: FileCode,
-};
+function PackIcon({ icon, className }: { icon: FileIcon; className?: string }) {
+  if (!icon.lightSrc) {
+    return <img src={icon.src} alt="" aria-hidden="true" className={cn("shrink-0", className)} />;
+  }
+  return (
+    <>
+      <img
+        src={icon.lightSrc}
+        alt=""
+        aria-hidden="true"
+        className={cn("shrink-0 dark:hidden", className)}
+      />
+      <img
+        src={icon.src}
+        alt=""
+        aria-hidden="true"
+        className={cn("hidden shrink-0 dark:block", className)}
+      />
+    </>
+  );
+}
 
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+/** A file's Material Icon Theme icon. `name` is a file name or path. */
+export function FileTypeIcon({ name, className }: { name: string; className?: string }) {
+  return <PackIcon icon={fileIcon(name)} className={className} />;
 }
 
 /** How one row's name and end slot look; every field is optional. */
@@ -118,11 +72,6 @@ function FileTreeItem<N extends FileTreeNode>({
 }) {
   const { node, depth, expanded } = row;
   const isDir = node.type === "dir";
-  const Icon = isDir
-    ? expanded
-      ? FolderOpen
-      : Folder
-    : (ICON_BY_EXTENSION[extensionOf(node.name)] ?? File);
   return (
     <div
       ref={rowRef}
@@ -150,10 +99,11 @@ function FileTreeItem<N extends FileTreeNode>({
           />
         )}
       </span>
-      <Icon
-        className={cn("size-3.5 shrink-0", isDir ? "text-primary/80" : "text-muted-foreground")}
-        aria-hidden="true"
-      />
+      {isDir ? (
+        <PackIcon icon={expanded ? FOLDER_OPEN_ICON : FOLDER_ICON} className="size-3.5" />
+      ) : (
+        <FileTypeIcon name={node.name} className="size-3.5" />
+      )}
       <span
         className={cn(
           // The name stays LTR for paths, but in an RTL row it must still sit
@@ -242,7 +192,11 @@ export function FileTreeList<N extends FileTreeNode>({
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // Keys typed into a control inside a row (a rename box) are not tree moves.
-    if (event.target !== event.currentTarget && !(event.target as HTMLElement).matches('[role="treeitem"]')) return;
+    if (
+      event.target !== event.currentTarget &&
+      !(event.target as HTMLElement).matches('[role="treeitem"]')
+    )
+      return;
     const row = rows[focusIndex];
     if (!row) return;
     const rtl = getActiveDir() === "rtl";

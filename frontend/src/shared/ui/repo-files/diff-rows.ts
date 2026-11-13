@@ -214,21 +214,31 @@ export interface FoldedGap {
 
 /**
  * Keep only the changed rows and `context` unchanged rows around each change,
- * folding every unchanged run of at least `minFold` rows into a gap. Gaps
- * whose `start` is in `expanded` stay open.
+ * folding every unchanged run of at least `minFold` rows into a gap. A fold
+ * never takes a row whose old line number is in `opened` or whose new line
+ * number is in `keep`.
  */
 export function foldRows(
   rows: NumberedRow[],
   context = 3,
-  expanded: ReadonlySet<number> = new Set(),
+  // Old line numbers, not row indexes: they stay the same when a kept line
+  // splits the run or a write moves the new text's lines.
+  opened: ReadonlySet<number> = new Set(),
   // A fold row is as tall as a line, so folding a short run hides nothing.
   minFold = 4,
+  keep: ReadonlySet<number> = new Set(),
 ): Array<NumberedRow | FoldedGap> {
-  const keep = rows.map((row) => row.kind !== "same");
-  const near = keep.slice();
-  keep.forEach((changed, i) => {
+  const changes = rows.map((row) => row.kind !== "same");
+  const near = rows.map(
+    (row, i) =>
+      changes[i] ||
+      (row.oldLine != null && opened.has(row.oldLine)) ||
+      (row.newLine != null && keep.has(row.newLine)),
+  );
+  changes.forEach((changed, i) => {
     if (!changed) return;
-    for (let j = Math.max(0, i - context); j <= Math.min(rows.length - 1, i + context); j++) near[j] = true;
+    for (let j = Math.max(0, i - context); j <= Math.min(rows.length - 1, i + context); j++)
+      near[j] = true;
   });
   const out: Array<NumberedRow | FoldedGap> = [];
   let i = 0;
@@ -240,7 +250,7 @@ export function foldRows(
     }
     const start = i;
     while (i < rows.length && !near[i]) i++;
-    if (expanded.has(start) || i - start < minFold) out.push(...rows.slice(start, i));
+    if (i - start < minFold) out.push(...rows.slice(start, i));
     else out.push({ gap: true, start, hidden: i - start });
   }
   return out;

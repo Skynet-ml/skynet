@@ -1,7 +1,7 @@
 /**
- * Syntax colours for a read-only file view, without an editor: the grammar
+ * Syntax colours for a file view, without a code editor: the grammar
  * is picked by file name from the editor's own catalogue and loaded on
- * demand. Imported lazily so the run page only pays for it on a repo run.
+ * demand. Imported lazily, so a page pays for it only when it shows a file.
  */
 
 import { LanguageDescription } from "@codemirror/language";
@@ -20,7 +20,10 @@ const highlighter = tagHighlighter(
 );
 
 /** Tokens per line of `text`, or null when no grammar matches the file name. */
-export async function highlightLines(path: string, text: string): Promise<HighlightToken[][] | null> {
+export async function highlightLines(
+  path: string,
+  text: string,
+): Promise<HighlightToken[][] | null> {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const description = LanguageDescription.matchFilename(languages, name);
   if (!description) return null;

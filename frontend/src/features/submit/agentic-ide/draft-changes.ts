@@ -1,36 +1,43 @@
 /**
- * The Changes pane's diff model: numbered diff rows folded into hunks, a
- * side-by-side layout of them, reverting one hunk, and the order of the
- * file tree. Pure, so the pane and its tests share it.
+ * The Changes pane's draft model: each file's numbered diff rows, its line
+ * counts, editing one line, and moving a line number across an edit. Pure,
+ * so the pane and its tests share it.
  */
 
-import { diffStats, lineDiff, type DiffLine } from "@/shared/lib/line-diff";
+import { lineDiff } from "@/shared/lib/line-diff";
+import {
+  countChanges,
+  fullDiffRows,
+  numberRows,
+  type NumberedRow,
+} from "@/shared/ui/repo-files/diff-rows";
 
-/** One file of the draft: what it held at the scope's start, and what it holds now. */
+/** One file of the draft: what it held before the agent's changes, and what it holds now. */
 export interface DraftFile {
   path: string;
   before: string;
   after: string;
 }
 
-/** A diff row with its line numbers; ``hunk`` counts the change runs from 0. */
-export type DiffRow =
-  | { type: "same"; text: string; oldNo: number; newNo: number }
-  | { type: "add"; text: string; newNo: number; hunk: number }
-  | { type: "del"; text: string; oldNo: number; hunk: number }
-  | { type: "gap"; count: number };
+/**
+ * `next`, with each file whose texts did not change kept as its object in
+ * `prev`, and `prev` itself when nothing changed. An agent write to one file
+ * then does not redraw the rows of another.
+ */
+export function keepFiles(
+  prev: readonly DraftFile[],
+  next: readonly DraftFile[],
+): readonly DraftFile[] {
+  const byPath = new Map(prev.map((f) => [f.path, f]));
+  const kept = next.map((f) => {
+    const old = byPath.get(f.path);
+    return old && old.before === f.before && old.after === f.after ? old : f;
+  });
+  return kept.length === prev.length && kept.every((f, i) => f === prev[i]) ? prev : kept;
+}
 
-/** A row of the side-by-side layout: the old line, the new line, or a fold. */
-export type SplitRow =
-  | {
-      type: "pair";
-      left: Extract<DiffRow, { type: "same" | "del" }> | null;
-      right: Extract<DiffRow, { type: "same" | "add" }> | null;
-    }
-  | { type: "gap"; count: number };
-
-// A final newline ends the last line; it is not an empty line of its own.
-function body(text: string): string {
+/** Drop a text's final newline: it ends the last line, it is not an empty line of its own. */
+export function body(text: string): string {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
@@ -48,26 +55,37 @@ export function isChanged(file: Pick<DraftFile, "before" | "after">): boolean {
   return body(file.before) !== body(file.after);
 }
 
-// The tree, the totals and each diff all read a file's line diff on every
-// render, so keep the recent ones. Keyed by the new text first: many new
-// files share the empty old text. SKY-628.
-// Every render reads each shown file's diff, so the current versions stay
-// recent. Room for a large draft, but few old versions of a file that the
-// user types in.
+// The tree, the totals and the open file read every changed file's diff on
+// each render, so the current versions stay recent. Keyed by the new text
+// first: many new files share the empty old text. Room for a large draft, but
+// few old versions of a file that the user types in. SKY-628.
 const DIFF_CACHE_SIZE = 100;
-const diffCache = new Map<string, Map<string, DiffLine[]>>();
+let diffCacheSize = DIFF_CACHE_SIZE;
+const diffCache = new Map<string, Map<string, NumberedRow[]>>();
 
 /**
- * Diff a file's old and new text line by line, reusing a recent result.
+ * Make room in the diff cache for every changed file. A cache smaller than
+ * the files read in one render drops each entry just before its next read.
+ *
+ * Args:
+ *   files: How many changed files the pane shows.
+ */
+export function fitDiffCache(files: number): void {
+  diffCacheSize = Math.max(DIFF_CACHE_SIZE, files * 2);
+}
+
+/**
+ * Diff a file's old and new text into numbered rows, reusing a recent result.
  *
  * Args:
  *   before: The old text.
  *   after: The new text.
  *
  * Returns:
- *   The line diff; the same array for the same two texts while it is cached.
+ *   Every line of both texts, changes in place; the same array for the same
+ *   two texts while it is cached.
  */
-export function draftDiff(before: string, after: string): DiffLine[] {
+export function draftRows(before: string, after: string): NumberedRow[] {
   const byBefore = diffCache.get(after);
   const hit = byBefore?.get(before);
   if (byBefore) {
@@ -76,157 +94,96 @@ export function draftDiff(before: string, after: string): DiffLine[] {
     diffCache.set(after, byBefore);
   }
   if (hit) return hit;
-  const lines = lineDiff(body(before), body(after));
-  const entry = byBefore ?? new Map<string, DiffLine[]>();
+  const lines = numberRows(fullDiffRows(body(before), body(after)));
+  const entry = byBefore ?? new Map<string, NumberedRow[]>();
   if (entry.size >= 4) entry.delete(entry.keys().next().value!);
   entry.set(before, lines);
   diffCache.set(after, entry);
-  if (diffCache.size > DIFF_CACHE_SIZE) diffCache.delete(diffCache.keys().next().value!);
+  while (diffCache.size > diffCacheSize) diffCache.delete(diffCache.keys().next().value!);
   return lines;
 }
 
-function numbered(lines: readonly DiffLine[]): DiffRow[] {
-  const rows: DiffRow[] = [];
-  let oldNo = 0;
-  let newNo = 0;
-  let hunk = -1;
-  let inChange = false;
-  for (const line of lines) {
-    if (line.type === "gap") continue;
-    if (line.type === "same") {
-      inChange = false;
-      rows.push({ type: "same", text: line.text, oldNo: ++oldNo, newNo: ++newNo });
-      continue;
-    }
-    if (!inChange) hunk++;
-    inChange = true;
-    rows.push(
-      line.type === "add"
-        ? { type: "add", text: line.text, newNo: ++newNo, hunk }
-        : { type: "del", text: line.text, oldNo: ++oldNo, hunk },
-    );
+/**
+ * Replace one line of a text, or delete it.
+ *
+ * Args:
+ *   text: The file's text.
+ *   line: The line's number, from 1.
+ *   next: The new text of the line (it may hold more lines), or null to delete the line.
+ *
+ * Returns:
+ *   The new text; it keeps the final newline when the old text had one.
+ */
+export function replaceLine(text: string, line: number, next: string | null): string {
+  const lines = body(text).split("\n");
+  // The final line of a file with no final newline has no line end of its own,
+  // so it takes the file's.
+  const last = !text.endsWith("\n") && line === lines.length;
+  // Keep a CRLF file's line ends: the editor shows the line without its CR.
+  const cr = (last ? text.includes("\r\n") : lines[line - 1]?.endsWith("\r")) ? "\r" : "";
+  const added =
+    next === null
+      ? []
+      : next
+          .split("\n")
+          .map((l, i, all) =>
+            cr && !l.endsWith(cr) && !(last && i === all.length - 1) ? l + cr : l,
+          );
+  lines.splice(line - 1, 1, ...added);
+  // The line before a deleted final line becomes the final line: it loses its line end.
+  if (last && next === null && lines.length > 0) {
+    lines[lines.length - 1] = lines[lines.length - 1]!.replace(/\r$/, "");
   }
-  return rows;
+  const joined = lines.join("\n");
+  // Clearing the only line keeps it as an empty line; deleting it leaves no text.
+  return text.endsWith("\n") && (joined !== "" || next !== null) ? `${joined}\n` : joined;
 }
 
 /**
- * Diff two texts into numbered rows, folding unchanged stretches.
+ * Map each line number of a file's old text to the same line in its new
+ * text, so a comment stays on its line when lines above it move. A removed
+ * line maps to the line now in its place.
  *
  * Args:
- *   before: The old text.
- *   after: The new text.
- *   context: How many unchanged lines to keep around each change.
+ *   from: The file's old text.
+ *   to: The file's new text.
  *
  * Returns:
- *   The rows; each change row names its hunk, and a gap row counts the
- *   unchanged lines it folds.
+ *   The new number of an old line.
  */
-export function diffRows(before: string, after: string, context = 3): DiffRow[] {
-  const rows = numbered(draftDiff(before, after));
-  const keep = rows.map(() => false);
-  rows.forEach((row, idx) => {
-    if (row.type === "same") return;
-    for (let k = Math.max(0, idx - context); k <= Math.min(rows.length - 1, idx + context); k++) {
-      keep[k] = true;
-    }
-  });
-  const out: DiffRow[] = [];
-  let skipped = 0;
-  rows.forEach((row, idx) => {
-    if (keep[idx]) {
-      if (skipped) out.push({ type: "gap", count: skipped });
-      skipped = 0;
-      out.push(row);
-    } else {
-      skipped++;
-    }
-  });
-  if (skipped && out.length) out.push({ type: "gap", count: skipped });
-  return out;
-}
-
-/**
- * Lay diff rows out side by side: each removed line beside the added line
- * that replaced it, as a split diff view does.
- *
- * Args:
- *   rows: Rows from ``diffRows``.
- *
- * Returns:
- *   One row per screen line.
- */
-export function splitRows(rows: readonly DiffRow[]): SplitRow[] {
-  const out: SplitRow[] = [];
-  let dels: Array<Extract<DiffRow, { type: "del" }>> = [];
-  let adds: Array<Extract<DiffRow, { type: "add" }>> = [];
-  const flush = () => {
-    for (let i = 0; i < Math.max(dels.length, adds.length); i++) {
-      out.push({ type: "pair", left: dels[i] ?? null, right: adds[i] ?? null });
-    }
-    dels = [];
-    adds = [];
-  };
-  for (const row of rows) {
-    if (row.type === "del") dels.push(row);
-    else if (row.type === "add") adds.push(row);
-    else {
-      flush();
-      out.push(row.type === "gap" ? row : { type: "pair", left: row, right: row });
-    }
+export function lineMap(from: string, to: string): (line: number) => number {
+  const split = (text: string) => (body(text) ? body(text).split("\n") : []);
+  const a = split(from);
+  const b = split(to);
+  // Only the changed middle is diffed: past the diff's size limit a diff of
+  // the whole file keeps no line, so every comment would go to line 1.
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (
+    tail < a.length - head &&
+    tail < b.length - head &&
+    a[a.length - 1 - tail] === b[b.length - 1 - tail]
+  ) {
+    tail++;
   }
-  flush();
-  return out;
-}
-
-/**
- * Undo one hunk of a change: its removed lines come back and its added
- * lines go, while every other hunk stays as it is.
- *
- * Args:
- *   before: The old text.
- *   after: The new text.
- *   hunk: The hunk's number in ``diffRows``.
- *
- * Returns:
- *   The new text with that hunk reverted; it ends in a newline when the
- *   new text does.
- */
-export function revertHunk(before: string, after: string, hunk: number): string {
-  const kept: string[] = [];
-  for (const row of numbered(draftDiff(before, after))) {
-    if (row.type === "same") kept.push(row.text);
-    else if (row.type === "add" && row.hunk !== hunk) kept.push(row.text);
-    else if (row.type === "del" && row.hunk === hunk) kept.push(row.text);
+  // Each line takes a mark, so a middle of one empty line does not read as no lines.
+  const mark = (part: readonly string[]) => part.map((l) => `.${l}`).join("\n");
+  const at: number[] = [];
+  for (let i = 1; i <= head; i++) at[i] = i;
+  let oldNo = head;
+  let newNo = head;
+  for (const line of lineDiff(
+    mark(a.slice(head, a.length - tail)),
+    mark(b.slice(head, b.length - tail)),
+  )) {
+    if (line.type === "add") newNo++;
+    else if (line.type === "same") at[++oldNo] = ++newNo;
+    else if (line.type === "del") at[++oldNo] = newNo + 1;
   }
-  if (kept.length === 0) return "";
-  return kept.join("\n") + (after.endsWith("\n") ? "\n" : "");
-}
-
-/**
- * Find the screen row that starts each hunk, where its revert button sits.
- *
- * Args:
- *   rows: Rows from ``diffRows`` (unified) or ``splitRows`` (side by side).
- *
- * Returns:
- *   The hunk number at the index of each hunk's first row.
- */
-export function hunkStarts(rows: ReadonlyArray<DiffRow | SplitRow>): Map<number, number> {
-  const starts = new Map<number, number>();
-  const seen = new Set<number>();
-  rows.forEach((row, idx) => {
-    const hunk =
-      row.type === "add" || row.type === "del"
-        ? row.hunk
-        : row.type === "pair"
-          ? ((row.left?.type === "del" ? row.left.hunk : undefined) ??
-            (row.right?.type === "add" ? row.right.hunk : undefined))
-          : undefined;
-    if (hunk === undefined || seen.has(hunk)) return;
-    seen.add(hunk);
-    starts.set(idx, hunk);
-  });
-  return starts;
+  for (let i = 1; i <= tail; i++) at[oldNo + i] = newNo + i;
+  const last = Math.max(1, b.length);
+  return (line) => Math.min(at[line] ?? line, last);
 }
 
 /**
@@ -241,43 +198,5 @@ export function hunkStarts(rows: ReadonlyArray<DiffRow | SplitRow>): Map<number,
 export function fileStats(file: DraftFile): { added: number; removed: number } {
   return !isChanged(file)
     ? { added: 0, removed: 0 }
-    : diffStats(draftDiff(file.before, file.after));
-}
-
-/** Past this many changed lines a file's diff starts collapsed. */
-export const LARGE_DIFF_LINES = 400;
-
-/**
- * Tell whether a file's change is too large to draw before the user asks.
- *
- * Args:
- *   file: A draft file.
- *
- * Returns:
- *   True when the change adds and removes more than ``LARGE_DIFF_LINES`` lines.
- */
-export function isLarge(file: DraftFile): boolean {
-  const { added, removed } = fileStats(file);
-  return added + removed > LARGE_DIFF_LINES;
-}
-
-/**
- * Order the file tree: changed files first, then by path, keeping only the
- * paths that contain the filter text.
- *
- * Args:
- *   files: The draft's files.
- *   filter: The "Filter files…" text; empty keeps every file.
- *
- * Returns:
- *   The files to list, in order.
- */
-export function orderFiles(files: readonly DraftFile[], filter: string): DraftFile[] {
-  const needle = filter.trim().toLowerCase();
-  return files
-    .filter((file) => !needle || file.path.toLowerCase().includes(needle))
-    .sort((a, b) => {
-      const changed = Number(isChanged(b)) - Number(isChanged(a));
-      return changed || a.path.localeCompare(b.path);
-    });
+    : countChanges(draftRows(file.before, file.after));
 }
