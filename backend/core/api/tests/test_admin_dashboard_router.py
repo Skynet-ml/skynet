@@ -2,7 +2,7 @@
 
 Mounts ``create_admin_dashboard_router`` on an in-memory SQLite store and
 covers authorization, the empty window, every aggregate, and the exclusion of
-internal accounts.
+internal accounts. Also covers the admin agent feedback list (SKY-580).
 """
 
 from __future__ import annotations
@@ -16,7 +16,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...storage.models import Base, JobModel, TelemetryEventModel, UserModel, WalletLedgerModel
+from ...storage.models import (
+    AgentConversationModel,
+    AgentFeedbackReportModel,
+    Base,
+    JobModel,
+    TelemetryEventModel,
+    UserModel,
+    WalletLedgerModel,
+)
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..routers.admin_dashboard import create_admin_dashboard_router
@@ -189,3 +197,66 @@ def test_dashboard_rejects_out_of_range_window() -> None:
     client, _ = _client(_ADMIN)
     assert client.get("/admin/dashboard", params={"days": 0}).status_code == 422
     assert client.get("/admin/dashboard", params={"days": 366}).status_code == 422
+
+
+def _feedback(report_id: str, user_message_id: int, created: datetime) -> AgentFeedbackReportModel:
+    """Build a feedback report row for the chat ``c1``.
+
+    Args:
+        report_id: Row id.
+        user_message_id: The stored user message it reports on.
+        created: When the agent sent it.
+
+    Returns:
+        The unsaved row.
+    """
+    return AgentFeedbackReportModel(
+        id=report_id,
+        conversation_id="c1",
+        user_message_id=user_message_id,
+        username="bob",
+        agent="generalist",
+        tool_name="validate_code",
+        user_quote=f"wrong score {user_message_id}",
+        summary="Expected 1 for an exact match; the tool gave 0.",
+        created_at=created,
+    )
+
+
+def test_agent_feedback_lists_reports_newest_first_for_an_admin() -> None:
+    """An admin sees every report field, newest first, and ``limit`` caps the list."""
+    client, store = _client(_ADMIN)
+    now = datetime.now(UTC)
+    with Session(store.engine) as session:
+        session.add(AgentConversationModel(id="c1", username="bob", title="t"))
+        session.add_all([_feedback("r1", 1, now - timedelta(hours=2)), _feedback("r2", 2, now)])
+        session.commit()
+
+    body = client.get("/admin/agent-feedback").json()
+
+    assert [r["id"] for r in body["reports"]] == ["r2", "r1"]
+    newest = body["reports"][0]
+    assert {k: v for k, v in newest.items() if k != "created_at"} == {
+        "id": "r2",
+        "username": "bob",
+        "conversation_id": "c1",
+        "user_message_id": 2,
+        "agent": "generalist",
+        "tool_name": "validate_code",
+        "user_quote": "wrong score 2",
+        "summary": "Expected 1 for an exact match; the tool gave 0.",
+    }
+    assert [r["id"] for r in client.get("/admin/agent-feedback", params={"limit": 1}).json()["reports"]] == ["r2"]
+
+
+def test_agent_feedback_forbidden_for_non_admin() -> None:
+    """A non-admin caller gets 403."""
+    client, _ = _client(_NONADMIN)
+    assert client.get("/admin/agent-feedback").status_code == 403
+
+
+def test_agent_feedback_needs_a_signed_in_caller() -> None:
+    """A request with no token gets 401."""
+    app = FastAPI()
+    app.include_router(create_admin_dashboard_router(job_store=_MemStore()))
+    assert TestClient(app).get("/admin/agent-feedback").status_code == 401

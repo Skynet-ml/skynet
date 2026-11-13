@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "ذخیرهٔ راز",
   "agent.tool.request_secret.description": "عامل از شما می‌خواهد یک راز، مانند کلید API، را در حسابتان ذخیره کنید. عامل هرگز مقدار را نمی‌بیند.",
   "agent.tool.request_secret.confirm": "ذخیره",
+  "agent.tool.send_feedback.title": "ارسال بازخورد به تیم",
   "agent.secret_card.host": "به {host} فرستاده می‌شود",
   "agent.secret_card.value_label": "مقدار {name}",
   "agent.secret_card.hint": "عامل هرگز آنچه را تایپ می‌کنید نمی‌بیند. فقط می‌فهمد که راز ذخیره شد.",

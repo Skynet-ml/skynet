@@ -724,6 +724,7 @@
   "agent.tool.request_secret.title": "Save a secret",
   "agent.tool.request_secret.description": "The agent asks you to save a secret, such as an API key, on your account. It never sees the value.",
   "agent.tool.request_secret.confirm": "Save",
+  "agent.tool.send_feedback.title": "Send feedback to the team",
   "agent.secret_card.host": "Goes to {host}",
   "agent.secret_card.value_label": "Value of {name}",
   "agent.secret_card.hint": "The agent never sees what you type. It learns only that the secret is saved.",

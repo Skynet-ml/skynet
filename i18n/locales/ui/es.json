@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "Guardar un secreto",
   "agent.tool.request_secret.description": "El agente te pide que guardes un secreto, como una clave de API, en tu cuenta. Nunca ve el valor.",
   "agent.tool.request_secret.confirm": "Guardar",
+  "agent.tool.send_feedback.title": "Enviar comentarios al equipo",
   "agent.secret_card.host": "Se envía a {host}",
   "agent.secret_card.value_label": "Valor de {name}",
   "agent.secret_card.hint": "El agente nunca ve lo que escribes. Solo sabe que el secreto está guardado.",

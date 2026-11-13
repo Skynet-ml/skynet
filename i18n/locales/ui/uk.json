@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "Зберегти секрет",
   "agent.tool.request_secret.description": "Агент просить зберегти у вашому акаунті секрет, наприклад ключ API. Агент ніколи не бачить значення.",
   "agent.tool.request_secret.confirm": "Зберегти",
+  "agent.tool.send_feedback.title": "Надіслати відгук команді",
   "agent.secret_card.host": "Надсилається на {host}",
   "agent.secret_card.value_label": "Значення {name}",
   "agent.secret_card.hint": "Агент ніколи не бачить те, що ви вводите. Він дізнається лише, що секрет збережено.",

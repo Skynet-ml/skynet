@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "Salva un segreto",
   "agent.tool.request_secret.description": "L'agente ti chiede di salvare un segreto, come una chiave API, nel tuo account. Non vede mai il valore.",
   "agent.tool.request_secret.confirm": "Salva",
+  "agent.tool.send_feedback.title": "Invia un feedback al team",
   "agent.secret_card.host": "Inviato a {host}",
   "agent.secret_card.value_label": "Valore di {name}",
   "agent.secret_card.hint": "L'agente non vede mai ciò che digiti. Sa solo che il segreto è salvato.",

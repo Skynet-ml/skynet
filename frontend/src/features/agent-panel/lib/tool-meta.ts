@@ -33,6 +33,7 @@ import {
   ListBullets,
   MagicWand,
   MagnifyingGlass,
+  Megaphone,
   Package,
   Pause,
   PencilSimple,
@@ -423,6 +424,7 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   continue_to_next_screen: () => msg("agent.screen_nav.continued"),
   go_back_to_screen: () => msg("agent.screen_nav.back_running"),
   turn_check: () => msg("agent.turn_check.title"),
+  send_feedback: () => msg("agent.tool.send_feedback.title"),
 };
 
 // Icons for the tools that have only a title above, so every tool row and the
@@ -458,6 +460,7 @@ export const TOOL_ICONS: Record<string, Icon> = {
   ask_user: ChatCenteredDots,
   read_shared_chat_item: ShareNetwork,
   turn_check: Check,
+  send_feedback: Megaphone,
 };
 
 function prettifyToolName(tool: string): string {

@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "Gizli anahtar kaydet",
   "agent.tool.request_secret.description": "Ajan, API anahtarı gibi bir gizli anahtarı hesabınıza kaydetmenizi istiyor. Ajan değeri asla görmez.",
   "agent.tool.request_secret.confirm": "Kaydet",
+  "agent.tool.send_feedback.title": "Ekibe geri bildirim gönder",
   "agent.secret_card.host": "{host} adresine gider",
   "agent.secret_card.value_label": "{name} değeri",
   "agent.secret_card.hint": "Ajan yazdığınızı asla görmez. Yalnızca gizli anahtarın kaydedildiğini öğrenir.",

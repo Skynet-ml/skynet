@@ -1049,6 +1049,7 @@
   "agent.tool.request_secret.title": "حفظ سر",
   "agent.tool.request_secret.description": "يطلب منك الوكيل حفظ سر في حسابك، مثل مفتاح API. لا يرى الوكيل القيمة أبدًا.",
   "agent.tool.request_secret.confirm": "حفظ",
+  "agent.tool.send_feedback.title": "إرسال ملاحظات إلى الفريق",
   "agent.secret_card.host": "يُرسل إلى {host}",
   "agent.secret_card.value_label": "قيمة {name}",
   "agent.secret_card.hint": "لا يرى الوكيل ما تكتبه أبدًا. يعرف فقط أن السر محفوظ.",

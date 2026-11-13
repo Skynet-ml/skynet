@@ -344,6 +344,11 @@ class ReactOnPi:
         if not taken or not await asyncio.to_thread(claim_delivery, inbox, taken):
             return
         text = "\n\n".join(message for _, message in taken)
+        if inbox.on_taken is not None:
+            try:
+                await asyncio.to_thread(inbox.on_taken, text)
+            except Exception:
+                logger.exception("Failed to store a steered user message")
         content = self._adapter.format_user_message_content(self._signature, {inbox.input_field: text})
         self._steers.append((anchor, {"role": "user", "content": content}))
         inbox.emit(
