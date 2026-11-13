@@ -781,7 +781,8 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
             elif not math.isfinite(entry.score):
                 reason = f"The metric returned a value for {name!r} that is not a finite number."
             elif not _reaches(entry.score, float(minimum)):
-                reason = f"{name!r} scored {entry.score:.3f}, below its minimum {float(minimum):g}."
+                # Twelve digits always show the gap: ``_reaches`` passes anything closer than that.
+                reason = f"{name!r} scored {entry.score:.12g}, below its minimum {float(minimum):.12g}."
             else:
                 continue
             value = entry.score if entry and math.isfinite(entry.score) else None

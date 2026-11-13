@@ -2375,6 +2375,20 @@ def test_a_mean_below_the_target_by_a_real_margin_still_fails() -> None:
     assert verdict["minimums_passed"] is False
 
 
+def test_the_reason_of_a_near_miss_shows_the_gap_to_the_minimum() -> None:
+    """A mean just below the minimum must not print as the minimum itself."""
+    verdict = service_mod._outcome_verdict({"target": None, "require": {"accuracy": 0.9}}, _constant_run(0.8996, 1))
+
+    assert verdict["failed_minimums"] == [
+        {
+            "name": "accuracy",
+            "minimum": 0.9,
+            "value": 0.8996,
+            "reason": "'accuracy' scored 0.8996, below its minimum 0.9.",
+        }
+    ]
+
+
 def _named_run(per_case: list[dict[str, Any]]) -> service_mod.FinalRun:
     """Run the real final pass with a scorer that returns the given side info on each case.
 
