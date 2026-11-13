@@ -74,7 +74,7 @@ function DiffBlock({ diff, label }: { diff: string; label?: string }) {
 }
 
 function ScoreCompare({ node }: { node: ScoreCompareNode }) {
-  const format = new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 6 });
+  const format = new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 15 });
   const scores = [
     {
       key: "exploit",
@@ -145,7 +145,8 @@ function DataTable({ node }: { node: TableNode }) {
           {node.rows.map((row, r) => (
             <TableRow key={r}>
               {row.map((value, c) => (
-                <TableCell key={c}>
+                // The shared cell cuts text to one line; a model cell can be long, so it wraps.
+                <TableCell key={c} className="whitespace-normal break-words text-clip">
                   {typeof value === "string" ? (
                     <bdi dir="auto">{value}</bdi>
                   ) : (

@@ -49,6 +49,9 @@ void describe("EdgeCaseView", () => {
     const html = render([{ type: "ScoreCompare", exploit_score: 1, base_score: 0.99999 }]);
     assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">1<\/bdi><\/dd>/);
     assert.match(html, /<dd class="[^"]*"><bdi dir="ltr">0\.99999<\/bdi><\/dd>/);
+    const close = render([{ type: "ScoreCompare", exploit_score: 1, base_score: 0.9999999 }]);
+    assert.match(close, /<bdi dir="ltr">0\.9999999<\/bdi>/);
+    assert.equal(close.match(/<bdi dir="ltr">1<\/bdi>/g)?.length, 1);
   });
 
   void it("draws a Diff in an LTR block with tinted lines and no file name", () => {
@@ -88,6 +91,12 @@ void describe("EdgeCaseView", () => {
     assert.doesNotMatch(html, /<t[hd] [^>]*dir=/);
     assert.match(html, /<th [^>]*><bdi dir="auto">case<\/bdi><\/th>/);
     assert.match(html, /<td [^>]*><bdi dir="auto">a<\/bdi><\/td>/);
+    // A long cell wraps instead of being cut to one line with an ellipsis.
+    for (const td of html.match(/<td [^>]*>/g) ?? []) {
+      assert.match(td, /whitespace-normal/);
+      assert.match(td, /break-words/);
+      assert.doesNotMatch(td, /whitespace-nowrap|text-ellipsis/);
+    }
     assert.match(html, /<bdi dir="ltr">0\.5<\/bdi>/);
     // React drops booleans and null, so the view writes them as text.
     assert.match(html, /<bdi dir="ltr">true<\/bdi>/);
