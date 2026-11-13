@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "要レビュー",
   "submit.v2.harden.node.vs_base": "ベース {base} と比較",
   "submit.v2.harden.noise.title": "ノイズチェック",
-  "submit.v2.harden.noise.skipped": "ノイズチェックをスキップ: {reason}",
+  "submit.v2.harden.noise.skipped": "ノイズチェックをスキップ:",
   "submit.v2.harden.noise.scores": "ノイズチェック: 繰り返しスコア {scores}、ばらつき {spread}",
   "submit.v2.harden.drawer.back": "戻る",
   "submit.v2.harden.drawer.close": "閉じる",

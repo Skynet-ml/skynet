@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "Prüfung nötig",
   "submit.v2.harden.node.vs_base": "gegenüber Basis {base}",
   "submit.v2.harden.noise.title": "Rauschprüfung",
-  "submit.v2.harden.noise.skipped": "Rauschprüfung übersprungen: {reason}",
+  "submit.v2.harden.noise.skipped": "Rauschprüfung übersprungen:",
   "submit.v2.harden.noise.scores": "Rauschprüfung: wiederholte Scores {scores}, Streuung {spread}",
   "submit.v2.harden.drawer.back": "Zurück",
   "submit.v2.harden.drawer.close": "Schließen",

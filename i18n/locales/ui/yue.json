@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "等緊審核",
   "submit.v2.harden.node.vs_base": "基線 {base}",
   "submit.v2.harden.noise.title": "雜訊檢查",
-  "submit.v2.harden.noise.skipped": "已略過雜訊檢查：{reason}",
+  "submit.v2.harden.noise.skipped": "已略過雜訊檢查：",
   "submit.v2.harden.noise.scores": "雜訊檢查：重複分數 {scores}，波幅 {spread}",
   "submit.v2.harden.drawer.back": "返回",
   "submit.v2.harden.drawer.close": "關閉",

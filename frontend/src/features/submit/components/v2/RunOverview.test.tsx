@@ -212,7 +212,10 @@ void describe("RunOverview hardening line", () => {
     const state = initialWizardV2State("expert");
     assert.doesNotMatch(render(state, hardeningJob("done")), /harden\.noise/);
     const skipped = { skipped: true, reason: "deterministic", scores: [], spread: null };
-    assert.match(render(state, { ...hardeningJob("done"), noise: skipped }), /submit\.v2\.harden\.noise\.skipped/);
+    assert.match(
+      render(state, { ...hardeningJob("done"), noise: skipped }),
+      /submit\.v2\.harden\.noise\.skipped <bdi dir="auto">deterministic<\/bdi>/,
+    );
     const ran = { skipped: false, reason: "", scores: [0.5, 0.6], spread: 0.1 };
     assert.match(render(state, { ...hardeningJob("clean_stop"), noise: ran }), /submit\.v2\.harden\.noise\.scores/);
     assert.doesNotMatch(render(state, { ...hardeningJob("running"), noise: ran }), /harden\.noise/);

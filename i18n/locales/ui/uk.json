@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "Потрібна перевірка",
   "submit.v2.harden.node.vs_base": "проти бази {base}",
   "submit.v2.harden.noise.title": "Перевірка шуму",
-  "submit.v2.harden.noise.skipped": "Перевірку шуму пропущено: {reason}",
+  "submit.v2.harden.noise.skipped": "Перевірку шуму пропущено:",
   "submit.v2.harden.noise.scores": "Перевірка шуму: повторні оцінки {scores}, розкид {spread}",
   "submit.v2.harden.drawer.back": "Назад",
   "submit.v2.harden.drawer.close": "Закрити",

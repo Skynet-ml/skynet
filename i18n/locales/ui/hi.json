@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "समीक्षा बाकी",
   "submit.v2.harden.node.vs_base": "आधार {base} के मुकाबले",
   "submit.v2.harden.noise.title": "नॉइज़ जाँच",
-  "submit.v2.harden.noise.skipped": "नॉइज़ जाँच छोड़ी गई: {reason}",
+  "submit.v2.harden.noise.skipped": "नॉइज़ जाँच छोड़ी गई:",
   "submit.v2.harden.noise.scores": "नॉइज़ जाँच: दोहराए गए स्कोर {scores}, फैलाव {spread}",
   "submit.v2.harden.drawer.back": "वापस",
   "submit.v2.harden.drawer.close": "बंद करें",

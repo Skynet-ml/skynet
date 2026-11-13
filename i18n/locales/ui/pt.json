@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "Por rever",
   "submit.v2.harden.node.vs_base": "contra a base {base}",
   "submit.v2.harden.noise.title": "Verificação de ruído",
-  "submit.v2.harden.noise.skipped": "Verificação de ruído ignorada: {reason}",
+  "submit.v2.harden.noise.skipped": "Verificação de ruído ignorada:",
   "submit.v2.harden.noise.scores": "Verificação de ruído: pontuações repetidas {scores}, variação {spread}",
   "submit.v2.harden.drawer.back": "Voltar",
   "submit.v2.harden.drawer.close": "Fechar",

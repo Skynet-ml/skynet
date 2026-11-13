@@ -3784,7 +3784,7 @@
   "submit.v2.harden.node.needs_review": "Needs review",
   "submit.v2.harden.node.vs_base": "vs base {base}",
   "submit.v2.harden.noise.title": "Noise check",
-  "submit.v2.harden.noise.skipped": "Noise check skipped: {reason}",
+  "submit.v2.harden.noise.skipped": "Noise check skipped:",
   "submit.v2.harden.noise.scores": "Noise check: repeat scores {scores}, spread {spread}",
   "submit.v2.harden.drawer.back": "Back",
   "submit.v2.harden.drawer.close": "Close",

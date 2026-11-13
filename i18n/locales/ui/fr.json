@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "À examiner",
   "submit.v2.harden.node.vs_base": "contre {base} pour la base",
   "submit.v2.harden.noise.title": "Contrôle du bruit",
-  "submit.v2.harden.noise.skipped": "Contrôle du bruit ignoré : {reason}",
+  "submit.v2.harden.noise.skipped": "Contrôle du bruit ignoré :",
   "submit.v2.harden.noise.scores": "Contrôle du bruit : scores répétés {scores}, écart {spread}",
   "submit.v2.harden.drawer.back": "Retour",
   "submit.v2.harden.drawer.close": "Fermer",

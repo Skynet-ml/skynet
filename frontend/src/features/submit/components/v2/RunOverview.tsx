@@ -131,12 +131,16 @@ export function RunOverview({
         )}
         {hardening?.noise && HARDENING_SURVIVED.has(hardening.status) && (
           <p className="text-sm text-muted-foreground">
-            {hardening.noise.skipped
-              ? t("submit.v2.harden.noise.skipped", { reason: hardening.noise.reason })
-              : t("submit.v2.harden.noise.scores", {
+            {hardening.noise.skipped ? (
+              <>
+                {t("submit.v2.harden.noise.skipped")} <bdi dir="auto">{hardening.noise.reason}</bdi>
+              </>
+            ) : (
+              t("submit.v2.harden.noise.scores", {
                   scores: hardening.noise.scores.map(fmt).join(", "),
                   spread: hardening.noise.spread === null ? "–" : fmt(hardening.noise.spread),
-                })}
+                })
+            )}
           </p>
         )}
         <RunOnChoice />

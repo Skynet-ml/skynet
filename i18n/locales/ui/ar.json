@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "بانتظار المراجعة",
   "submit.v2.harden.node.vs_base": "مقابل الأساس {base}",
   "submit.v2.harden.noise.title": "فحص الضوضاء",
-  "submit.v2.harden.noise.skipped": "تم تخطي فحص الضوضاء: {reason}",
+  "submit.v2.harden.noise.skipped": "تم تخطي فحص الضوضاء:",
   "submit.v2.harden.noise.scores": "فحص الضوضاء: الدرجات المكررة {scores}، والتفاوت {spread}",
   "submit.v2.harden.drawer.back": "رجوع",
   "submit.v2.harden.drawer.close": "إغلاق",

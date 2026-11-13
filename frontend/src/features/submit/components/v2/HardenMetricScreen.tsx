@@ -34,8 +34,10 @@ import { v2Msg } from "./ArtifactConfirmCard";
 import { DiffBlock } from "./EdgeCaseView";
 import { HardenSessionDrawer } from "./HardenSessionDrawer";
 import {
+  cardStep,
   HardenTree,
   LEAD_NODE,
+  liveRoundIndex,
   needsReview,
   reviewOrder,
   treeRounds,
@@ -138,7 +140,7 @@ function LiveBar({ job, h, t, usd }: { job: HardeningJob; h: HardeningState; t: 
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-border/60 bg-card/60 px-4 py-3 text-sm">
       <span className="font-medium">
-        {t("submit.v2.harden.round", { k: Math.max(1, job.round), n: job.rounds })}
+        {t("submit.v2.harden.round", { k: liveRoundIndex(job), n: job.rounds })}
       </span>
       {job.place === "local" ? (
         <span className="text-muted-foreground">{t("submit.v2.harden.estimate_local_short")}</span>
@@ -343,6 +345,30 @@ function pendingCards(round: TreeRound): HardeningExploit[] {
 }
 
 /**
+ * J and K on the page move between the cards that wait for a verdict, so the
+ * review hint holds while no drawer is open. The open drawer has its own keys.
+ *
+ * Args:
+ *   onStep: Open the next (1) or previous (-1) card.
+ */
+function CardKeys({ onStep }: { onStep: (step: 1 | -1) => void }) {
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const step = event.key === "j" ? 1 : event.key === "k" ? -1 : 0;
+      if (!step) return;
+      event.preventDefault();
+      onStep(step);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onStep]);
+  return null;
+}
+
+/**
  * The page after the code: a lead agent briefs K attacker sessions that try
  * to game the metric, drawn as a live tree. The user reviews each claim in
  * its session's drawer, and an approved fix hardens metric.py. The job runs
@@ -379,6 +405,18 @@ export function HardenMetricScreen({
   const [node, setNode] = React.useState<number | null>(null);
   const [focusCard, setFocusCard] = React.useState<string | null>(null);
   const close = React.useCallback(() => setNode(null), []);
+  // Hidden wizard screens stay mounted, so the drawer and its keys live only on view.
+  const drawerNode = active ? node : null;
+  const openedNode = React.useRef<number | null>(null);
+
+  // Esc or the close button would drop focus to the body; give it back to the
+  // tree node that opened the drawer.
+  React.useEffect(() => {
+    if (drawerNode === null && openedNode.current !== null && active) {
+      document.querySelector<HTMLElement>(`[data-node="${openedNode.current}"]`)?.focus();
+    }
+    openedNode.current = drawerNode;
+  }, [drawerNode, active]);
 
   const header = (
     <header className="space-y-1">
@@ -419,7 +457,7 @@ export function HardenMetricScreen({
 
   const rounds = treeRounds(job);
   const latest: TreeRound = rounds.at(-1) ?? {
-    index: job.round + 1,
+    index: liveRoundIndex(job),
     sessions: [],
     exploits: [],
     briefs: [],
@@ -432,13 +470,13 @@ export function HardenMetricScreen({
   const redrafting =
     job.status === "running" && lastRound !== null && lastRound.fix === null && (lastRound.fix_notes?.length ?? 0) > 0;
 
-  const nextCard = () => {
-    const at = pending.findIndex((e) => e.id === focusCard);
-    const card = pending[(at + 1) % pending.length];
+  const moveCard = (step: 1 | -1) => {
+    const card = cardStep(pending, focusCard, step);
     if (!card) return;
     setFocusCard(card.id);
     setNode(card.session ?? LEAD_NODE);
   };
+  const nextCard = () => moveCard(1);
   const openNode = (id: number) => {
     setFocusCard(null);
     setNode(id);
@@ -454,8 +492,6 @@ export function HardenMetricScreen({
       : t("submit.v2.harden.clean", { k }),
     rejected: t("submit.v2.harden.rejected"),
   };
-  // Hidden wizard screens stay mounted, so the drawer and its keys live only on view.
-  const drawerNode = active ? node : null;
 
   return (
     <div
@@ -525,14 +561,17 @@ export function HardenMetricScreen({
           ))}
         </div>
       )}
-      <HardenTree
-        round={round}
-        job={job}
-        selected={drawerNode}
-        noise={round.index === latest.index ? (job.noise ?? null) : null}
-        onOpen={openNode}
-        t={t}
-      />
+      {active && drawerNode === null && pending.length > 0 && <CardKeys onStep={moveCard} />}
+      {(rounds.length > 0 || job.status === "running") && (
+        <HardenTree
+          round={round}
+          job={job}
+          selected={drawerNode}
+          noise={round.index === latest.index ? (job.noise ?? null) : null}
+          onOpen={openNode}
+          t={t}
+        />
+      )}
       {job.status === "waiting_fix" && lastRound?.fix && <FixPanel fix={lastRound.fix} h={h} t={t} />}
       {(job.status === "failed" || job.status === "stale") && (
         <section className="space-y-2">

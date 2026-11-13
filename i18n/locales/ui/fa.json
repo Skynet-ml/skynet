@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "در انتظار بررسی",
   "submit.v2.harden.node.vs_base": "در برابر پایه {base}",
   "submit.v2.harden.noise.title": "بررسی نویز",
-  "submit.v2.harden.noise.skipped": "بررسی نویز رد شد: {reason}",
+  "submit.v2.harden.noise.skipped": "بررسی نویز رد شد:",
   "submit.v2.harden.noise.scores": "بررسی نویز: امتیازهای تکراری {scores}، پراکندگی {spread}",
   "submit.v2.harden.drawer.back": "بازگشت",
   "submit.v2.harden.drawer.close": "بستن",

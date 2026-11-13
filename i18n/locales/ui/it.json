@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "Da esaminare",
   "submit.v2.harden.node.vs_base": "contro base {base}",
   "submit.v2.harden.noise.title": "Controllo del rumore",
-  "submit.v2.harden.noise.skipped": "Controllo del rumore saltato: {reason}",
+  "submit.v2.harden.noise.skipped": "Controllo del rumore saltato:",
   "submit.v2.harden.noise.scores": "Controllo del rumore: punteggi ripetuti {scores}, scarto {spread}",
   "submit.v2.harden.drawer.back": "Indietro",
   "submit.v2.harden.drawer.close": "Chiudi",

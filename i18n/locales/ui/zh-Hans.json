@@ -267,7 +267,7 @@
   "submit.v2.harden.node.needs_review": "待审核",
   "submit.v2.harden.node.vs_base": "基线 {base}",
   "submit.v2.harden.noise.title": "噪声检查",
-  "submit.v2.harden.noise.skipped": "已跳过噪声检查：{reason}",
+  "submit.v2.harden.noise.skipped": "已跳过噪声检查：",
   "submit.v2.harden.noise.scores": "噪声检查：重复得分 {scores}，波动 {spread}",
   "submit.v2.harden.drawer.back": "返回",
   "submit.v2.harden.drawer.close": "关闭",

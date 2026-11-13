@@ -14,7 +14,17 @@ import type { AgentToolCall } from "@/shared/ui/agent/types";
 
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { HardenTree, LEAD_NODE, bestScore, needsReview, nodeStatus, reviewOrder, treeRounds } = await import(
+const {
+  HardenTree,
+  LEAD_NODE,
+  bestScore,
+  cardStep,
+  liveRoundIndex,
+  needsReview,
+  nodeStatus,
+  reviewOrder,
+  treeRounds,
+} = await import(
   "./HardenTree"
 );
 
@@ -113,6 +123,38 @@ void describe("treeRounds", () => {
   });
 });
 
+void describe("liveRoundIndex", () => {
+  void it("matches the tree's live round while a new round attacks", () => {
+    const detail = [{ index: 1, status: "waiting_review", exploits: [], fix: null, sessions: [] }];
+    const live = job({ round: 1, rounds_detail: detail as never, live_sessions: [session(1, "running")] });
+    assert.equal(liveRoundIndex(live), 2);
+    assert.equal(treeRounds(live).at(-1)!.index, 2);
+  });
+
+  void it("shows round 1 before the first attack, and the last round after", () => {
+    assert.equal(liveRoundIndex(job({ status: "preflight" })), 1);
+    const detail = [1, 2].map((index) => ({ index, status: "done", exploits: [], fix: null, sessions: [] }));
+    assert.equal(liveRoundIndex(job({ status: "done", round: 2, rounds_detail: detail as never })), 2);
+  });
+});
+
+void describe("cardStep", () => {
+  const cards = ["a", "b", "c"].map((id) => exploit({ id }));
+
+  void it("moves forward and back and wraps at both ends", () => {
+    assert.equal(cardStep(cards, null, 1)!.id, "a");
+    assert.equal(cardStep(cards, null, -1)!.id, "c");
+    assert.equal(cardStep(cards, "a", 1)!.id, "b");
+    assert.equal(cardStep(cards, "c", 1)!.id, "a");
+    assert.equal(cardStep(cards, "a", -1)!.id, "c");
+    assert.equal(cardStep(cards, "gone", 1)!.id, "a");
+  });
+
+  void it("returns null with no card to review", () => {
+    assert.equal(cardStep([], null, 1), null);
+  });
+});
+
 void describe("node helpers", () => {
   void it("reads the session status from its tool calls and claims", () => {
     assert.equal(nodeStatus(session(1, "running"), []), "thinking");
@@ -180,7 +222,8 @@ void describe("HardenTree", () => {
 
   void it("adds the noise node with the skip reason or the repeat scores", () => {
     const skipped = render({ skipped: true, reason: "deterministic", scores: [], spread: null });
-    assert.match(skipped, /submit\.v2\.harden\.noise\.skipped\(deterministic\)/);
+    // The reason is user-language text, so it sits apart from the label in its own bidi island.
+    assert.match(skipped, /submit\.v2\.harden\.noise\.skipped <bdi dir="auto">deterministic<\/bdi>/);
     const scored = render({ skipped: false, reason: "", scores: [0.5, 0.75], spread: 0.25 });
     assert.match(scored, /submit\.v2\.harden\.noise\.scores\(0\.5, 0\.75\|0\.25\)/);
   });

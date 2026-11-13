@@ -67,6 +67,20 @@ export function treeRounds(job: HardeningJob): TreeRound[] {
   return rounds;
 }
 
+/**
+ * The round number the live bar shows. It is the same index as the tree's
+ * last round, so the two never disagree while a new round attacks.
+ *
+ * Args:
+ *   job: The hardening job.
+ *
+ * Returns:
+ *   The index of the newest round, or at least 1 before the first attack.
+ */
+export function liveRoundIndex(job: HardeningJob): number {
+  return treeRounds(job).at(-1)?.index ?? Math.max(1, job.round);
+}
+
 /** The claim waits for the user: the judge called it an exploit or was unsure. */
 export function needsReview(exploit: HardeningExploit): boolean {
   return (exploit.label === "exploit" || exploit.unsure) && exploit.user_verdict === null;
@@ -76,6 +90,29 @@ export function needsReview(exploit: HardeningExploit): boolean {
 export function reviewOrder(exploits: HardeningExploit[]): HardeningExploit[] {
   const rank = (e: HardeningExploit) => (e.unsure ? 0 : e.label === "exploit" ? 1 : 2);
   return [...exploits].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * The card one step from the focused card in the review list, wrapping at
+ * both ends. With no focused card, the first step goes to the first or last.
+ *
+ * Args:
+ *   pending: The cards that wait for a verdict, in review order.
+ *   focusCard: The id of the focused card, or null.
+ *   step: 1 for the next card, -1 for the previous card.
+ *
+ * Returns:
+ *   The card to focus, or null when no card waits.
+ */
+export function cardStep(
+  pending: HardeningExploit[],
+  focusCard: string | null,
+  step: 1 | -1,
+): HardeningExploit | null {
+  if (!pending.length) return null;
+  const at = pending.findIndex((e) => e.id === focusCard);
+  const from = at < 0 ? (step === 1 ? -1 : 0) : at;
+  return pending[(from + step + pending.length) % pending.length] ?? null;
 }
 
 /** The claims of one session; claims from jobs before SKY-682 have no session. */
@@ -211,7 +248,7 @@ function NoiseLine({ noise, t }: { noise: HardeningNoise; t: T }) {
   if (noise.skipped) {
     return (
       <p className="text-sm text-muted-foreground">
-        {t("submit.v2.harden.noise.skipped", { reason: noise.reason })}
+        {t("submit.v2.harden.noise.skipped")} <bdi dir="auto">{noise.reason}</bdi>
       </p>
     );
   }
