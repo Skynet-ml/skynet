@@ -256,7 +256,7 @@
   "submit.v2.edge_case.io.input": "輸入",
   "submit.v2.edge_case.io.expected": "預期",
   "submit.v2.edge_case.io.got": "實際",
-  "submit.v2.edge_case.chart": "有 {n} 個點嘅圖表",
+  "submit.v2.edge_case.chart": "{n, plural, other {有 # 個點嘅圖表}}",
   "submit.v2.edge_case.empty": "呢個發現冇詳細資料。",
   "submit.v2.overview.tabs_label": "運行摘要",
   "submit.v2.overview.tab.general": "一般",

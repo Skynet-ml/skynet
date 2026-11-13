@@ -72,7 +72,7 @@ function DiffBlock({ diff, label }: { diff: string; label: string }) {
 }
 
 function ScoreCompare({ node }: { node: ScoreCompareNode }) {
-  const format = new Intl.NumberFormat(getActiveIntlLocale(), { maximumFractionDigits: 4 });
+  const format = new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 6 });
   const scores = [
     {
       key: "exploit",
@@ -133,8 +133,8 @@ function DataTable({ node }: { node: TableNode }) {
         <TableHeader>
           <TableRow>
             {node.columns.map((column, i) => (
-              <TableHead key={i} dir="auto">
-                {column}
+              <TableHead key={i}>
+                <bdi dir="auto">{column}</bdi>
               </TableHead>
             ))}
           </TableRow>
@@ -143,8 +143,12 @@ function DataTable({ node }: { node: TableNode }) {
           {node.rows.map((row, r) => (
             <TableRow key={r}>
               {row.map((value, c) => (
-                <TableCell key={c} dir="auto">
-                  {typeof value === "string" ? value : <bdi dir="ltr">{String(value ?? "")}</bdi>}
+                <TableCell key={c}>
+                  {typeof value === "string" ? (
+                    <bdi dir="auto">{value}</bdi>
+                  ) : (
+                    <bdi dir="ltr">{String(value ?? "")}</bdi>
+                  )}
                 </TableCell>
               ))}
             </TableRow>
@@ -227,7 +231,7 @@ function NodeView({ node }: { node: EdgeCaseNode }) {
     case "ScoreCompare":
       return <ScoreCompare node={node} />;
     case "Diff":
-      return <DiffBlock diff={node.diff} label={node.label ?? PATCH_FILE} />;
+      return <DiffBlock diff={node.diff} label={PATCH_FILE} />;
     case "IOPair":
       return <IOPair input={node.input} expected={node.expected} got={node.got} />;
     case "Table":
@@ -246,8 +250,8 @@ function NodeView({ node }: { node: EdgeCaseNode }) {
       return (
         <ol className="list-decimal space-y-2 ps-5 text-sm">
           {node.items.map((item, i) => (
-            <li key={i} dir="auto">
-              {typeof item === "string" ? item : <NodeView node={item} />}
+            <li key={i}>
+              {typeof item === "string" ? <bdi dir="auto">{item}</bdi> : <NodeView node={item} />}
             </li>
           ))}
         </ol>

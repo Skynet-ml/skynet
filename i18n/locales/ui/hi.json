@@ -256,7 +256,7 @@
   "submit.v2.edge_case.io.input": "इनपुट",
   "submit.v2.edge_case.io.expected": "अपेक्षित",
   "submit.v2.edge_case.io.got": "प्राप्त",
-  "submit.v2.edge_case.chart": "{n} बिंदुओं वाला चार्ट",
+  "submit.v2.edge_case.chart": "{n, plural, one {# बिंदु वाला चार्ट} other {# बिंदुओं वाला चार्ट}}",
   "submit.v2.edge_case.empty": "इस खोज का कोई विवरण नहीं है।",
   "submit.v2.overview.tabs_label": "रन सारांश",
   "submit.v2.overview.tab.general": "सामान्य",

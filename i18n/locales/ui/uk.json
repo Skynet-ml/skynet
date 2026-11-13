@@ -256,7 +256,7 @@
   "submit.v2.edge_case.io.input": "Вхід",
   "submit.v2.edge_case.io.expected": "Очікувано",
   "submit.v2.edge_case.io.got": "Отримано",
-  "submit.v2.edge_case.chart": "Графік, точок: {n}",
+  "submit.v2.edge_case.chart": "{n, plural, one {Графік із # точкою} few {Графік із # точками} many {Графік із # точками} other {Графік із # точки}}",
   "submit.v2.edge_case.empty": "Ця знахідка не має подробиць.",
   "submit.v2.overview.tabs_label": "Підсумок запуску",
   "submit.v2.overview.tab.general": "Загальне",

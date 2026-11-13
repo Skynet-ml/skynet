@@ -256,7 +256,7 @@
   "submit.v2.edge_case.io.input": "المدخل",
   "submit.v2.edge_case.io.expected": "المتوقع",
   "submit.v2.edge_case.io.got": "الناتج",
-  "submit.v2.edge_case.chart": "مخطط فيه {n} نقطة",
+  "submit.v2.edge_case.chart": "{n, plural, zero {مخطط بلا نقاط} one {مخطط فيه نقطة واحدة} two {مخطط فيه نقطتان} few {مخطط فيه # نقاط} many {مخطط فيه # نقطة} other {مخطط فيه # نقطة}}",
   "submit.v2.edge_case.empty": "لا توجد تفاصيل لهذه النتيجة.",
   "submit.v2.overview.tabs_label": "ملخص التشغيل",
   "submit.v2.overview.tab.general": "عام",

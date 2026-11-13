@@ -4,7 +4,9 @@ import { describe, it } from "node:test";
 import {
   MAX_CHART_POINTS,
   MAX_NODES,
+  MAX_STEPS,
   MAX_STRING,
+  MAX_TABLE_COLUMNS,
   MAX_TABLE_ROWS,
   parseEdgeCase,
 } from "./edge-case-schema.ts";
@@ -20,7 +22,6 @@ const ONE_OF_EACH = [
   {
     type: "Diff",
     diff: "--- a/metric.py\n+++ b/metric.py\n@@ -1 +1 @@\n-x\n+y",
-    label: "metric.py",
   },
   { type: "IOPair", input: "2+2", expected: "4", got: "4 (copied from the label)" },
   {
@@ -74,6 +75,10 @@ void describe("parseEdgeCase", () => {
       { type: "Text", text: "a", html: "<b>a</b>", onClick: "alert(1)" },
     ]);
     assert.deepEqual(tree, text("a"));
+    // SKY-682 has no Diff label, so a label from the model is dropped too.
+    assert.deepEqual(parseEdgeCase([{ type: "Diff", diff: "d", label: "x.py" }]), [
+      { type: "Diff", diff: "d" },
+    ]);
   });
 
   void it("returns null for values that are not a non-empty node list", () => {
@@ -131,6 +136,23 @@ void describe("parseEdgeCase", () => {
       null,
     );
 
+    const table = (n: number) => ({
+      type: "Table",
+      columns: Array.from({ length: n }, (_, i) => `c${i}`),
+      rows: [Array.from({ length: n }, (_, i) => i)],
+    });
+    assert.ok(parseEdgeCase([table(MAX_TABLE_COLUMNS)]));
+    assert.equal(parseEdgeCase([table(MAX_TABLE_COLUMNS + 1)]), null);
+
+    const steps = (n: number) => ({
+      type: "Steps",
+      items: Array.from({ length: n }, (_, i) => `step ${i}`),
+    });
+    assert.ok(parseEdgeCase([steps(MAX_STEPS)]));
+    assert.equal(parseEdgeCase([steps(MAX_STEPS + 1)]), null);
+    assert.ok(parseEdgeCase([{ type: "Steps", items: [steps(MAX_STEPS)] }]));
+    assert.equal(parseEdgeCase([{ type: "Steps", items: [steps(MAX_STEPS + 1)] }]), null);
+
     assert.ok(parseEdgeCase(text("x".repeat(MAX_STRING))));
     assert.equal(parseEdgeCase(text("x".repeat(MAX_STRING + 1))), null);
   });
@@ -150,6 +172,20 @@ void describe("parseEdgeCase", () => {
       parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: [inner] }] }]),
       null,
     );
+  });
+
+  void it("returns null when a nested Steps holds a node, not a string", () => {
+    for (const child of [
+      { type: "Text", text: "a" },
+      { type: "Diff", diff: "d" },
+    ]) {
+      assert.equal(
+        parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: ["a", child] }] }]),
+        null,
+        child.type,
+      );
+    }
+    assert.equal(parseEdgeCase([{ type: "Steps", items: [{ type: "Steps", items: [] }] }]), null);
   });
 
   void it("keeps hostile strings as plain data", () => {

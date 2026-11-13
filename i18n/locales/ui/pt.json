@@ -256,7 +256,7 @@
   "submit.v2.edge_case.io.input": "Entrada",
   "submit.v2.edge_case.io.expected": "Esperado",
   "submit.v2.edge_case.io.got": "Obtido",
-  "submit.v2.edge_case.chart": "Gráfico com {n} pontos",
+  "submit.v2.edge_case.chart": "{n, plural, one {Gráfico com # ponto} other {Gráfico com # pontos}}",
   "submit.v2.edge_case.empty": "Esta descoberta não tem detalhes.",
   "submit.v2.overview.tabs_label": "Resumo da execução",
   "submit.v2.overview.tab.general": "Geral",
