@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "يطرح عليك سؤالًا مع بعض الخيارات للاختيار منها.",
   "agent.tools.tour.repositories": "يعرض مستودعاتك على GitHub وGitLab وBitbucket، أو ينشئ مستودعًا جديدًا للتشغيل.",
   "submit.setup_check.invalid": "أصلح optimize.toml قبل المتابعة. {p1}",
+  "submit.setup_check.missing": "تحتاج عملية التشغيل إلى عقد optimize.toml. اطلب من الوكيل كتابته، أو أضفه إلى المستودع.",
   "submit.setup_check.unavailable": "تعذّر فحص optimize.toml. حاول مرة أخرى.",
   "agent.tool.check_setup.title": "فحص الإعداد",
   "agent.tool.check_setup.running": "جارٍ فحص optimize.toml",

@@ -40,6 +40,7 @@ from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_REQUIRED,
     ConstraintsError,
     McpServer,
     RoleEnvironment,
@@ -146,6 +147,7 @@ def _stage_with(
     monkeypatch: pytest.MonkeyPatch,
     payload: dict[str, Any] | None = None,
     links: dict[str, tuple[bytes, str]] | None = None,
+    require_constraints: bool = False,
 ) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
     """Stage the fixture payload over a tree holding ``files``.
 
@@ -154,6 +156,7 @@ def _stage_with(
         monkeypatch: Pytest monkeypatch.
         payload: Payload to stage; the fixture payload pinned to ``c * 40`` when omitted.
         links: Links in the fetched tree, as ``_tree`` takes them.
+        require_constraints: Stage as a new run that needs an ``optimize.toml``.
 
     Returns:
         The staged payload and repository.
@@ -168,7 +171,13 @@ def _stage_with(
             commit=pinned, archive=_tree(workdir, files, links), readonly_paths=(), size_bytes=1
         ),
     )
-    return repo_staging.stage_repository(payload or _payload("c" * 40), username="alice", binding_id="b", engine=None)
+    return repo_staging.stage_repository(
+        payload or _payload("c" * 40),
+        username="alice",
+        binding_id="b",
+        engine=None,
+        require_constraints=require_constraints,
+    )
 
 
 _CONSTRAINTS = """
@@ -426,6 +435,36 @@ def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytes
 
     assert staged.constrained is False
     assert staged.rules == ()
+
+
+def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new run needs optimize.toml in the tree or the drafts (SKY-693)."""
+    with pytest.raises(ConstraintsError) as error:
+        _stage_with({}, monkeypatch, require_constraints=True)
+    assert str(error.value) == CONSTRAINTS_REQUIRED
+
+
+def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The contract can come from the repository tree or from the draft files."""
+    _, staged = _stage_with({"optimize.toml": "version = 1\n"}, monkeypatch, require_constraints=True)
+    staged.cleanup()
+    drafted = _payload("c" * 40)
+    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    _, staged = _stage_with({}, monkeypatch, drafted, require_constraints=True)
+    staged.cleanup()
+    assert staged.constrained is True
+
+
+def test_a_started_run_without_a_constraints_file_still_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that recorded its environment before the rule existed resumes and recovers as before."""
+    first, staged = _stage_with({}, monkeypatch)
+    staged.cleanup()
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+
+    _, staged = _stage_with({}, monkeypatch, resumed, require_constraints=True)
+    staged.cleanup()
+    assert staged.constrained is False
 
 
 @pytest.mark.parametrize("commit", [None, "b" * 40])

@@ -25,6 +25,8 @@ from sqlalchemy.pool import StaticPool
 from ...billing.budgets import BudgetConflictError
 from ...config import settings
 from ...models.hardening import HardeningJobModel
+from ...service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE
+from ...service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_REQUIRED
 from ...storage.models import Base, McpRunDraftModel, UserModel
 from .. import remote_mcp_repo, submission_idempotency
 from ..errors import DomainError
@@ -44,6 +46,7 @@ from .test_remote_mcp import (
 
 WRITE_TOKEN = "skym_at_read-write-token"
 SCORER = 'def score(repo_path):\n    return 1.0, "ok"\n'
+CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n'
 
 
 @pytest.fixture
@@ -95,7 +98,12 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
     def submit(request: Any, *, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Record the submission instead of starting a run."""
         calls["submits"].append(
-            {"username": current_user.username, "key": idempotency_key, "hardening_job_id": request.hardening_job_id}
+            {
+                "username": current_user.username,
+                "key": idempotency_key,
+                "hardening_job_id": request.hardening_job_id,
+                "repo": request.target.repo,
+            }
         )
         return SimpleNamespace(model_dump=lambda mode: {"optimization_id": f"opt-{len(calls['submits'])}"})
 
@@ -121,6 +129,7 @@ def _complete_draft(client: TestClient) -> str:
     draft_id = _step(client, "repo_draft_start", objective="Make the tests faster.")["draft_id"]
     _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
     _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml=CONTRACT)
     _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
     _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
     return draft_id
@@ -131,7 +140,7 @@ def test_start_lists_engines_and_the_first_step(harness: Any) -> None:
     client, _engine, _calls = harness
     body = _step(client, "repo_draft_start", objective="Make the tests faster.")
     assert body["next_tool"] == "repo_draft_set_repository"
-    assert body["remaining_steps"] == ["repository", "scorer", "models", "engine"]
+    assert body["remaining_steps"] == ["repository", "scorer", "contract", "models", "engine"]
     assert "gepa" in {engine["id"] for engine in body["engines"]}
 
 
@@ -165,7 +174,7 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     )
     assert body["issues"] == []
     assert body["notes"] == []
-    assert body["next_tool"] == "repo_draft_set_models"
+    assert body["next_tool"] == "repo_draft_set_contract"
 
 
 @pytest.mark.parametrize(
@@ -252,8 +261,108 @@ def test_review_of_an_incomplete_draft_names_the_missing_steps(harness: Any) -> 
     draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
     body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
     assert body["ready"] is False
-    assert len(body["issues"]) == 4
+    assert len(body["issues"]) == 5
     assert "min_max_cost_cents" not in body
+
+
+def _spec(engine: Any, draft_id: str) -> dict[str, Any]:
+    """Return the saved draft spec."""
+    with Session(engine) as session:
+        return dict(session.get(McpRunDraftModel, draft_id).spec)
+
+
+def _tree(monkeypatch: pytest.MonkeyPatch, paths: list[str], *, truncated: bool = False) -> None:
+    """Make the repository host list these file paths."""
+    tree = {"entries": [{"path": path, "type": "file"} for path in paths], "truncated": truncated}
+    monkeypatch.setattr(remote_mcp_repo.github, "tree_entries", lambda token, name, ref: tree)
+
+
+def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) -> None:
+    """Save the optimize.toml text, and give the parser's message as the issue (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml="[run]\nentry = 'a.py:f'\n")
+    assert body["saved"] == {"optimize_toml": "[run]\nentry = 'a.py:f'\n"}
+    assert body["issues"] == [remote_mcp_repo.optimize_toml_error("[run]\nentry = 'a.py:f'\n")["message"]]
+    assert "version" in body["issues"][0]
+    assert body["next_tool"] == "repo_draft_set_contract"
+    assert "contract" not in body["remaining_steps"]
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml=CONTRACT)
+    assert body["issues"] == []
+    assert set(body) >= {"saved", "issues", "notes", "remaining_steps", "next_tool"}
+    assert body["next_tool"] == "repo_draft_set_repository"
+    assert _spec(engine, draft_id)["contract"] == {"optimize_toml": CONTRACT}
+    text = _error_text(_call(client, "repo_draft_set_contract", {"draft_id": draft_id, "optimize_toml": "  "}))
+    assert CONSTRAINTS_REQUIRED in text
+
+
+def test_contract_guide_comes_from_the_setup_agent_guide(harness: Any) -> None:
+    """Serve the in-app guide and example themselves, not a copy (SKY-693)."""
+    client, _engine, _calls = harness
+    body = _payload(_call(client, "repo_draft_contract_guide", {}, token=READ_TOKEN))
+    assert body["guide"] == METRIC_GUIDE
+    assert body["example"] == OPTIMIZE_TOML_EXAMPLE
+    assert body["next_tool"] == "repo_draft_set_contract"
+
+
+def test_review_needs_a_contract_when_the_repository_has_none(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the missing file at review, also when the repository lost it after the step (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _complete_draft(client)
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        row.spec = {key: value for key, value in row.spec.items() if key != "contract"}
+        session.commit()
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["ready"] is False
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+    assert "no optimize.toml" in body["issues"][0]
+    _tree(monkeypatch, ["src", "src/app.py", "optimize.toml"])
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["ready"] is True
+    _tree(monkeypatch, ["src", "src/app.py"])
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+
+
+def test_repository_file_makes_the_contract_step_optional(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the contract step when the repository has optimize.toml or is too large to list (SKY-693)."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _tree(monkeypatch, ["src", "optimize.toml"])
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_optimize_toml"] is True
+    assert body["remaining_steps"] == ["scorer", "models", "engine"]
+    _tree(monkeypatch, ["src"], truncated=True)
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_optimize_toml"] is None
+    assert "contract" not in body["remaining_steps"]
+    _tree(monkeypatch, ["src"])
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_optimize_toml"] is False
+    assert body["remaining_steps"] == ["scorer", "contract", "models", "engine"]
+
+
+def test_request_sends_the_contract_as_a_draft_file(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the contract as draft_files with the source mcp, and a repository file as the source repository."""
+    client, engine, calls = harness
+    draft_id = _complete_draft(client)
+    _payload(_call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}))
+    repo = calls["submits"][0]["repo"]
+    assert (repo.draft_files, repo.draft_base, repo.contract_source) == ({"optimize.toml": CONTRACT}, None, "mcp")
+    commit = "a" * 40
+    _step(
+        client,
+        "repo_draft_set_repository",
+        draft_id=draft_id,
+        repository="acme/app",
+        editable_paths=["src"],
+        commit=commit,
+    )
+    assert remote_mcp_repo.build_request(_spec(engine, draft_id)).target.repo.draft_base == commit
+    spec = {key: value for key, value in _spec(engine, draft_id).items() if key != "contract"}
+    repo = remote_mcp_repo.build_request(spec).target.repo
+    assert (repo.draft_files, repo.contract_source) == ({}, "repository")
 
 
 def test_submit_needs_confirmation(harness: Any) -> None:
@@ -515,6 +624,8 @@ def test_preflight_checks_under_the_budget_the_submit_reuses(preflight: Any) -> 
     assert (request.execution_budget_id, request.execution_budget_revision) == ("budget-1", 3)
     assert request.payload["max_cost_cents"] == 500
     assert request.payload["hardening_job_id"] == job_id
+    assert request.payload["target"]["repo"]["draft_files"] == {"optimize.toml": CONTRACT}
+    assert request.payload["target"]["repo"]["contract_source"] == "mcp"
     key = record["keys"][0]
     assert key.startswith(f"mcp-draft-{draft_id}-")
     assert record["creates"] == [(USER, 500, f"api:{key}", False)]

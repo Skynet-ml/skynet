@@ -65,6 +65,7 @@ from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
+    CONSTRAINTS_REQUIRED,
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
@@ -316,6 +317,7 @@ def stage_repository(
     username: str,
     binding_id: str,
     engine: Any,
+    require_constraints: bool = False,
 ) -> tuple[dict[str, Any], StagedRepository]:
     """Fetch the pinned tree and decrypt the run's secrets in the parent.
 
@@ -324,6 +326,8 @@ def stage_repository(
         username: Owner of the run and of the GitHub connection.
         binding_id: Execution budget the vaulted secrets are bound to.
         engine: SQLAlchemy engine for the vaults.
+        require_constraints: Refuse a new run whose tree and drafts have no
+            ``optimize.toml``. A run that recorded its environment before keeps going.
 
     Returns:
         A payload copy that pins the commit, lists no secret entries and no
@@ -332,8 +336,8 @@ def stage_repository(
         ``target.repo.environment``, plus the staged tree and secrets for the parent.
 
     Raises:
-        ConstraintsError: When the repository's ``optimize.toml`` is invalid,
-            asks for more than the run approved, or a resumed run's rules
+        ConstraintsError: When the repository's ``optimize.toml`` is invalid or
+            missing for a new run that requires it, asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
             uploads cases and the repository defines its own in ``[data] cases``,
             or when a hidden path is, holds or lies inside a link, or when a
@@ -389,8 +393,12 @@ def stage_repository(
             apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
+        constraints = read_constraints(snapshot.archive)
+        # A started run (resume, recovery) already recorded the rules it runs under, so only a new run stops here.
+        if require_constraints and constraints is None and not isinstance(repo.get(ENVIRONMENT_KEY), dict):
+            raise ConstraintsError(CONSTRAINTS_REQUIRED)
         environment = effective_environment(
-            read_constraints(snapshot.archive),
+            constraints,
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
         )

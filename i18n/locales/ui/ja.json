@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "いくつかの選択肢を付けて質問します。",
   "agent.tools.tour.repositories": "GitHub、GitLab、Bitbucket のリポジトリを一覧表示するか、実行用に新しく作成します。",
   "submit.setup_check.invalid": "続行する前に optimize.toml を修正してください。{p1}",
+  "submit.setup_check.missing": "実行には optimize.toml の契約が必要です。エージェントに書いてもらうか、リポジトリに追加してください。",
   "submit.setup_check.unavailable": "optimize.toml を確認できませんでした。もう一度お試しください。",
   "agent.tool.check_setup.title": "セットアップを確認",
   "agent.tool.check_setup.running": "optimize.toml を確認中",

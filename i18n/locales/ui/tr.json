@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "Size seçebileceğiniz birkaç seçenekle bir soru sorar.",
   "agent.tools.tour.repositories": "GitHub, GitLab ve Bitbucket depolarınızı listeler veya çalıştırma için yeni bir depo oluşturur.",
   "submit.setup_check.invalid": "Devam etmeden önce optimize.toml dosyasını düzeltin. {p1}",
+  "submit.setup_check.missing": "Çalıştırma bir optimize.toml sözleşmesi gerektirir. Ajandan yazmasını isteyin veya depoya ekleyin.",
   "submit.setup_check.unavailable": "optimize.toml denetlenemedi. Yeniden deneyin.",
   "agent.tool.check_setup.title": "Kurulumu denetle",
   "agent.tool.check_setup.running": "optimize.toml denetleniyor",

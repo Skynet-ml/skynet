@@ -1,7 +1,7 @@
 """Step-by-step repository run setup for the remote MCP server (SKY-320).
 
 An MCP client builds a repository run the way the run wizard does, one step
-at a time: repository, data, scorer, models, engine and budget. Each step
+at a time: repository, data, scorer, contract, models, engine and budget. Each step
 saves its part of a server-side draft and answers with feedback: what it
 saved, the problems it found, and the next tool to call. ``repo_draft_review``
 checks the whole draft and prices its smallest spending limit.
@@ -47,10 +47,13 @@ from ..models.blackbox import (
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_ITERATION_LIMIT_ENGINES,
     BLACKBOX_MAX_EXTRA_REFLECTION_MODELS,
+    DRAFT_FILE_BYTES,
     BlackboxBudget,
     BlackboxRepoSource,
     BlackboxRunRequest,
 )
+from ..service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE, optimize_toml_error
+from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, CONSTRAINTS_REQUIRED
 from ..service_gateway.optimization.blackbox.service import engine_catalog, validate_job
 from ..storage.models import McpRunDraftModel
 from .auth import AuthenticatedUser
@@ -71,8 +74,8 @@ from .routers.submissions import (
 from .routers.wizard_preflight import checked_preflight, localize_preflight
 from .submission_idempotency import resolve_submission_replay_keys
 
-STEPS = ("repository", "data", "scorer", "models", "engine", "budget")
-_REQUIRED_STEPS = ("repository", "scorer", "models", "engine")
+STEPS = ("repository", "data", "scorer", "contract", "models", "engine", "budget")
+_REQUIRED_STEPS = ("repository", "scorer", "contract", "models", "engine")
 _STEP_TOOLS = {step: f"repo_draft_set_{step}" for step in STEPS}
 _CASE_KEYS = frozenset({"input", "expected"})
 # A draft is a scratch setup, not a saved object; old ones go so a client
@@ -168,8 +171,16 @@ def _load_draft(session: Session, draft_id: str, username: str, *, lock: bool = 
 
 
 def _remaining(spec: dict[str, Any]) -> list[str]:
-    """List the required steps the draft does not have yet."""
-    return [step for step in _REQUIRED_STEPS if step not in spec]
+    """List the required steps the draft does not have yet.
+
+    The contract step is required until the repository step finds an
+    ``optimize.toml`` in the repository. When the tree is too large to list
+    whole (``None``), the step is not required: the run's start checks the file.
+    """
+    repo_file = (spec.get("repository") or {}).get("has_optimize_toml", False)
+    return [
+        step for step in _REQUIRED_STEPS if step not in spec and not (step == "contract" and repo_file is not False)
+    ]
 
 
 def _feedback(
@@ -224,7 +235,9 @@ def _github_token(job_store: Any, username: str, provider: str = github.PROVIDER
         return None
 
 
-def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+def repository_issues(
+    job_store: Any, username: str, repo: dict[str, Any]
+) -> tuple[list[str], list[str], list[str], bool | None]:
     """Check that the repository, its ref and its editable paths exist on the repository host.
 
     Args:
@@ -233,7 +246,8 @@ def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tu
         repo: The draft's repository part.
 
     Returns:
-        The issues, the notes, and a sample of the repository's top-level paths.
+        The issues, the notes, a sample of the repository's top-level paths, and
+        whether the repository has an ``optimize.toml`` (``None`` when unknown).
     """
     provider = repo_hosts.provider_of(repo)
     host = label(provider)
@@ -255,15 +269,16 @@ def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tu
         issue = f"Cannot read {repo['repository']}{where} on {host} ({error.code})."
         if token is None:
             issue += f" For a private repository, connect {host} in Skynet first."
-        return [issue], notes, []
+        return [issue], notes, [], None
     paths = {entry["path"] for entry in tree["entries"]}
+    has_contract = True if CONSTRAINTS_FILE in paths else (None if tree["truncated"] else False)
     top_level = sorted({path.split("/", 1)[0] for path in paths})[:_TREE_SAMPLE]
     missing = [path for path in repo["editable_paths"] if path != "." and path not in paths]
     if missing and tree["truncated"]:
         notes.append("The repository is too large to list whole, so the editable paths were not all checked.")
         missing = []
     issues = [f"Editable path '{path}' does not exist in the repository." for path in missing]
-    return issues, notes, top_level
+    return issues, notes, top_level, has_contract
 
 
 def case_shape_issues(cases: list[dict[str, Any]]) -> list[str]:
@@ -539,6 +554,7 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
     data = spec.get("data") or {}
     models = spec["models"]
     scorer = spec["scorer"]
+    contract = spec.get("contract")
     entries = _model_entries(models)
     extra_count = len(models.get("extra_models", []))
     body: dict[str, Any] = {
@@ -564,6 +580,17 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
             "repo": {
                 **{key: spec["repository"].get(key) for key in ("repository", "branch", "commit", "editable_paths")},
                 **repo_hosts.git_kwargs(repo_hosts.provider_of(spec["repository"])),
+                # The contract travels like the setup screen's draft; a pinned
+                # commit is the tree the agent wrote it for, a branch has none.
+                **(
+                    {
+                        "draft_files": {CONSTRAINTS_FILE: contract["optimize_toml"]},
+                        "draft_base": spec["repository"].get("commit"),
+                        "contract_source": "mcp",
+                    }
+                    if contract
+                    else {}
+                ),
             },
         },
         "task_model_config": None,
@@ -608,6 +635,38 @@ def repo_floor_cents(spec: dict[str, Any], http_client: Callable[[], httpx.Clien
     return boxes + max(_MIN_CALL_HOLD_CENTS, math.ceil(max(holds, default=Decimal(0)))), unpriced
 
 
+def _missing_step_issue(step: str) -> str:
+    """Say which step is missing and which tool sets it.
+
+    Args:
+        step: The missing step.
+
+    Returns:
+        The issue line; the contract issue says that a run needs the file.
+    """
+    if step == "contract":
+        return (
+            f"The draft and the repository have no {CONSTRAINTS_FILE}, and every run needs one. "
+            f"Call repo_draft_contract_guide, then {_STEP_TOOLS[step]}."
+        )
+    return f"Step '{step}' is not done. Call {_STEP_TOOLS[step]}."
+
+
+def contract_issues(text: str) -> tuple[list[str], list[str]]:
+    """Parse the contract step's ``optimize.toml`` the way a run reads it.
+
+    Args:
+        text: The file text.
+
+    Returns:
+        The parser's first error as an issue, and the notes.
+    """
+    error = optimize_toml_error(text)
+    if error is not None:
+        return [error["message"]], []
+    return [], [f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged."]
+
+
 def review_draft(
     spec: dict[str, Any], user: AuthenticatedUser, *, job_store: Any, http_client: Callable[[], httpx.Client]
 ) -> tuple[list[str], list[str], dict[str, Any]]:
@@ -624,9 +683,13 @@ def review_draft(
     """
     missing = _remaining(spec)
     if missing:
-        return [f"Step '{step}' is not done. Call {_STEP_TOOLS[step]}." for step in missing], [], {}
-    repo_problems, notes, _top = repository_issues(job_store, user.username, spec["repository"])
+        return [_missing_step_issue(step) for step in missing], [], {}
+    repo_problems, notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
     issues = list(repo_problems)
+    if spec.get("contract"):
+        issues += contract_issues(spec["contract"]["optimize_toml"])[0]
+    elif has_contract is False:
+        issues.append(_missing_step_issue("contract"))
     data = spec.get("data") or {}
     issues += case_shape_issues(data.get("cases") or [])
     if data.get("staged_dataset_id"):
@@ -939,7 +1002,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Start a repository run draft. This is the first step of a repository optimization.
 
         The steps follow the run wizard: repository, data (optional), scorer,
-        models, engine, budget (optional), then review and submit. Every step
+        contract (unless the repository has an optimize.toml), models, engine,
+        budget (optional), then review and submit. Every step
         answers with the issues it found and the next tool to call.
         """
         user = _user(SCOPE_WRITE)
@@ -1004,9 +1068,17 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             "setup_command": setup_command,
         }
 
-        def check(spec: dict[str, Any], username: str) -> tuple[list[str], list[str], dict[str, Any]]:
-            """Check the repository on its host."""
-            issues, notes, top_level = repository_issues(job_store, username, spec["repository"])
+        # The contract step is required only without a repository file, so the
+        # draft keeps what the host showed; a review reads the tree again.
+        try:
+            issues, notes, top_level, part["has_optimize_toml"] = repository_issues(
+                job_store, _user(SCOPE_WRITE).username, part
+            )
+        except DomainError as error:
+            raise _domain_tool_error(error) from error
+
+        def check(_spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
+            """Answer with the repository check made before the save."""
             return issues, notes, {"top_level_paths": top_level}
 
         return save_step(draft_id, "repository", part, check)
@@ -1095,6 +1167,49 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             return issues, notes, {}
 
         return save_step(draft_id, "scorer", part, check)
+
+    @mcp.tool(name="repo_draft_contract_guide", annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    def repo_draft_contract_guide() -> dict[str, Any]:
+        """Return the guide to the optimize.toml contract and a valid example file. It changes nothing.
+
+        Read it before repo_draft_set_contract.
+        """
+        _user(SCOPE_READ)
+        return {
+            "note": "This is the guide of the app's setup agent. Read the repository with your own tools, and send "
+            "the whole optimize.toml text to repo_draft_set_contract instead of the guide's write tools.",
+            "guide": METRIC_GUIDE,
+            "example": OPTIMIZE_TOML_EXAMPLE,
+            "next_tool": "repo_draft_set_contract",
+        }
+
+    @mcp.tool(name="repo_draft_set_contract", annotations=writes)
+    def repo_draft_set_contract(
+        draft_id: Annotated[str, Field(max_length=64)],
+        optimize_toml: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=DRAFT_FILE_BYTES,
+                description="The whole optimize.toml text, starting with version = 1. "
+                "repo_draft_contract_guide gives the format.",
+            ),
+        ],
+    ) -> dict[str, Any]:
+        """Set the run's optimize.toml contract. Every run needs one, in the draft or in the repository.
+
+        Skynet parses the file the way a run reads it. The run writes it over
+        the repository's own file; the repository stays unchanged.
+        """
+        if not optimize_toml.strip():
+            raise ToolError(CONSTRAINTS_REQUIRED)
+
+        def check(_spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
+            """Parse the file the way a run reads it."""
+            issues, notes = contract_issues(optimize_toml)
+            return issues, notes, {}
+
+        return save_step(draft_id, "contract", {"optimize_toml": optimize_toml}, check)
 
     @mcp.tool(name="repo_draft_set_models", annotations=writes)
     def repo_draft_set_models(

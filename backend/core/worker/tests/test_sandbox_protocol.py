@@ -31,6 +31,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     13: {"blackbox": "b5878009b64947bc"},
     # target.repo.draft_files and draft_base: the setup draft's repository files and their base commit.
     14: {"blackbox": "6e0761a3f301b387"},
+    # target.repo.contract_source: where the run's optimize.toml comes from (SKY-693).
+    15: {"blackbox": "1a374a077a095e7c"},
 }
 
 

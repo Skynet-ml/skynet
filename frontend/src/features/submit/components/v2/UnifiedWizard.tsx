@@ -29,6 +29,7 @@ import {
   runBalance,
   type BudgetShortfall,
 } from "../../lib/budget-limit";
+import { contractMissing } from "../../lib/repo-run";
 import {
   WIZARD_SCREEN_KEY,
   keepSessionValue,
@@ -187,6 +188,13 @@ function UnifiedWizardFrame() {
     visibleScreen === "metric" && w.state.task.repo
       ? (w.state.workspace.files[OPTIMIZE_TOML] ?? "")
       : "";
+  // Every new run needs a contract (SKY-693). Only a read that found no file
+  // holds here; with no Changes pane or a read still loading, staging decides.
+  const repoBase = useWizardStateOptional()?.repoBase;
+  const noContract =
+    visibleScreen === "metric" &&
+    !!w.state.task.repo &&
+    contractMissing(setupText, repoBase?.get(OPTIMIZE_TOML));
   const screenRef = useRef(visibleScreen);
   const setupTextRef = useRef(setupText);
   useLayoutEffect(() => {
@@ -197,8 +205,12 @@ function UnifiedWizardFrame() {
   // Runs ``then`` only once the file on the code screen parses.
   const gateSetup = useCallback(
     (then: () => void) => {
+      const withoutFile = () => {
+        if (noContract) setupToast(msg("submit.setup_check.missing"));
+        else then();
+      };
       if (!setupText.trim()) {
-        then();
+        withoutFile();
         return;
       }
       if (checkingSetup.current) return;
@@ -206,7 +218,7 @@ function UnifiedWizardFrame() {
       const screen = visibleScreen;
       const run = (text: string): Promise<void> => {
         if (!text.trim()) {
-          then();
+          withoutFile();
           return Promise.resolve();
         }
         return checkOptimizeToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
@@ -231,7 +243,7 @@ function UnifiedWizardFrame() {
           checkingSetup.current = false;
         });
     },
-    [setupText, visibleScreen],
+    [setupText, visibleScreen, noContract],
   );
   // Continue stays clickable under a shortfall so the press can say why it holds.
   // The agent's moves skip the file check: the server checked the same file

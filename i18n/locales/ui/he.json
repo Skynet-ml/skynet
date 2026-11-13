@@ -4333,6 +4333,7 @@
   "usage.day.truncated": "מוצגות {shown} הקריאות האחרונות מתוך {total}.",
   "usage.day.loading": "טוען את הקריאות של היום הזה…",
   "submit.setup_check.invalid": "צריך לתקן את optimize.toml לפני שממשיכים. {p1}",
+  "submit.setup_check.missing": "להרצה צריך חוזה optimize.toml. בקשו מהסוכן לכתוב אותו, או הוסיפו אותו למאגר.",
   "submit.setup_check.unavailable": "לא הצלחנו לבדוק את optimize.toml. נסו שוב.",
   "agent.tool.check_setup.title": "בדיקת ההגדרה",
   "agent.tool.check_setup.running": "בודק את optimize.toml",

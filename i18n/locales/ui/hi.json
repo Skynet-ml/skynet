@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "आपसे कुछ विकल्पों के साथ एक सवाल पूछता है।",
   "agent.tools.tour.repositories": "आपकी GitHub, GitLab और Bitbucket रिपॉज़िटरी दिखाता है, या रन के लिए नई बनाता है।",
   "submit.setup_check.invalid": "आगे बढ़ने से पहले optimize.toml ठीक करें। {p1}",
+  "submit.setup_check.missing": "रन को optimize.toml अनुबंध चाहिए। एजेंट से इसे लिखने को कहें, या इसे रिपॉज़िटरी में जोड़ें।",
   "submit.setup_check.unavailable": "हम optimize.toml की जाँच नहीं कर सके। फिर से कोशिश करें।",
   "agent.tool.check_setup.title": "सेटअप जाँचें",
   "agent.tool.check_setup.running": "optimize.toml की जाँच हो रही है",

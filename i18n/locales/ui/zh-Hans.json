@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "向你提一个问题，并给出几个选项供你选择。",
   "agent.tools.tour.repositories": "列出你在 GitHub、GitLab 和 Bitbucket 上的代码仓库，或为运行新建一个。",
   "submit.setup_check.invalid": "继续之前请先修正 optimize.toml。{p1}",
+  "submit.setup_check.missing": "运行需要一个 optimize.toml 合约。请让代理编写，或将其添加到仓库。",
   "submit.setup_check.unavailable": "无法检查 optimize.toml，请重试。",
   "agent.tool.check_setup.title": "检查设置",
   "agent.tool.check_setup.running": "正在检查 optimize.toml",

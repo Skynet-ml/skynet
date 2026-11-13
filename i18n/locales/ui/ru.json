@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "Задаёт вам вопрос с несколькими вариантами ответа.",
   "agent.tools.tour.repositories": "Показывает ваши репозитории GitHub, GitLab и Bitbucket или создаёт новый для запуска.",
   "submit.setup_check.invalid": "Исправьте optimize.toml, прежде чем продолжить. {p1}",
+  "submit.setup_check.missing": "Для запуска нужен контракт optimize.toml. Попросите агента написать его или добавьте его в репозиторий.",
   "submit.setup_check.unavailable": "Не удалось проверить optimize.toml. Попробуйте ещё раз.",
   "agent.tool.check_setup.title": "Проверить настройку",
   "agent.tool.check_setup.running": "Проверка optimize.toml",

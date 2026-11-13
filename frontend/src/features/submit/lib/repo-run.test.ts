@@ -19,7 +19,7 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
+const { contractMissing, finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
@@ -488,4 +488,13 @@ test("a repository run never sends an empty optimize.toml draft", () => {
 
   state.workspace.files = { "optimize.toml": "" };
   assert.equal("draft_files" in repoRunRequest(state, options)!.target.repo, false);
+});
+
+test("the Metric screen holds only when neither the draft nor the repository has optimize.toml", () => {
+  assert.equal(contractMissing("", ""), true);
+  assert.equal(contractMissing(undefined, "  \n"), true);
+  assert.equal(contractMissing("version = 1\n", ""), false);
+  assert.equal(contractMissing("", "version = 1\n"), false);
+  // A read still loading, or no pane to read it: the server decides.
+  assert.equal(contractMissing("", undefined), false);
 });

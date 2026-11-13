@@ -323,6 +323,11 @@ class BlackboxRepoSource(BaseModel):
     # drafts are whole-file copies of that tree, so a run that would start from
     # another commit is refused. ``None`` (older drafts) skips the check.
     draft_base: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
+    # Where the run's optimize.toml comes from (SKY-693): the setup screen's
+    # draft, the MCP contract step's draft, or the repository. Only ``mcp``
+    # needs a client; the validator fills the rest from the drafts and keeps a
+    # set value, because staging drops the drafts before the payload is read again.
+    contract_source: Literal["setup_screen", "mcp", "repository"] | None = None
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -386,6 +391,10 @@ class BlackboxRepoSource(BaseModel):
         if not drafts.get("optimize.toml", "x").strip():
             raise ValueError("The draft optimize.toml is empty. Remove it or write its settings.")
         self.draft_files = drafts
+        if "optimize.toml" in drafts and self.contract_source in (None, "repository"):
+            self.contract_source = "setup_screen"
+        elif self.contract_source is None:
+            self.contract_source = "repository"
         return self
 
 

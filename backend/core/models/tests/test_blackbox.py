@@ -263,6 +263,25 @@ def test_an_empty_optimize_toml_draft_is_refused(text: str) -> None:
     ).draft_files == {"README.md": ""}
 
 
+@pytest.mark.parametrize(
+    ("drafts", "sent", "stored"),
+    [
+        ({"optimize.toml": "version = 1\n"}, None, "setup_screen"),
+        ({"optimize.toml": "version = 1\n"}, "repository", "setup_screen"),
+        ({"optimize.toml": "version = 1\n"}, "mcp", "mcp"),
+        ({}, None, "repository"),
+        ({"README.md": "x"}, None, "repository"),
+        ({}, "setup_screen", "setup_screen"),
+    ],
+)
+def test_the_run_records_where_its_contract_comes_from(drafts: dict[str, str], sent: str | None, stored: str) -> None:
+    """A draft contract counts as the setup screen's unless MCP sent it, and a set value survives staging."""
+    source = BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files=drafts, contract_source=sent
+    )
+    assert source.contract_source == stored
+
+
 @pytest.mark.parametrize("base", ["main", "abc1234", "A" * 40])
 def test_the_draft_base_must_be_a_full_commit_id(base: str) -> None:
     """The draft base pins a commit, so a branch name or a short or uppercase id is refused."""

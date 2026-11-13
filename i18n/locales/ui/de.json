@@ -4357,6 +4357,7 @@
   "agent.tools.tour.ask_user": "Stellt dir eine Frage mit einigen Optionen zur Auswahl.",
   "agent.tools.tour.repositories": "Listet deine GitHub-, GitLab- und Bitbucket-Repositorys auf oder erstellt ein neues für den Lauf.",
   "submit.setup_check.invalid": "Korrigiere optimize.toml, bevor du fortfährst. {p1}",
+  "submit.setup_check.missing": "Der Lauf braucht einen optimize.toml-Vertrag. Bitte den Agenten, ihn zu schreiben, oder füge ihn dem Repository hinzu.",
   "submit.setup_check.unavailable": "optimize.toml konnte nicht geprüft werden. Versuche es erneut.",
   "agent.tool.check_setup.title": "Einrichtung prüfen",
   "agent.tool.check_setup.running": "optimize.toml wird geprüft",
