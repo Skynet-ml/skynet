@@ -3,11 +3,11 @@
 The agent decides when the user is not satisfied with a tool result and
 writes the report itself; the user fills no form and is not asked first. The
 report goes to the ``agent_feedback_reports`` table, which the admin feedback
-endpoint lists. A chat gets at most one report for each user turn, so one
-complaint gives one report.
+endpoint lists. A chat gets at most one report for each stored user message,
+so one complaint gives one report. An edit or a regenerate keeps the reports.
 
 The report holds a short quote of the user and the agent's summary, both cut
-to a fixed length. Logs name the chat, the turn and the tool only, never the
+to a fixed length. Logs name the chat and the user message only, never the
 quote or the summary.
 """
 
@@ -19,12 +19,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import dspy
-from sqlalchemy import delete, func, select
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ...storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel
+from ...storage.models import AgentConversationModel, AgentFeedbackReportModel
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +45,19 @@ FEEDBACK_ALREADY_SENT = (
 FEEDBACK_NOT_SENT = "Feedback could not be sent. Do not try again this turn."
 
 
-@dataclass(frozen=True)
+@dataclass
 class FeedbackTarget:
-    """The chat a ``send_feedback`` call reports on."""
+    """The chat and the stored user message a ``send_feedback`` call reports on.
+
+    ``user_message_id`` is mutable: when the user steers a running turn, the
+    router stores the steer message and points the target at it, so a
+    complaint in the steer gets its own report.
+    """
 
     engine: Engine
     username: str
     conversation_id: str
+    user_message_id: int
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -68,31 +74,13 @@ def _clip(text: Any, limit: int) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
-def _current_turn(session: Session, conversation_id: str) -> int:
-    """Count the chat's stored user messages: the router stores the current one before the turn runs.
+def _has_report(session: Session, conversation_id: str, user_message_id: int) -> bool:
+    """Tell whether the chat already has a report for this user message.
 
     Args:
         session: An open session.
         conversation_id: The chat.
-
-    Returns:
-        The 1-based number of the current user turn.
-    """
-    count = session.scalar(
-        select(func.count(AgentMessageModel.id)).where(
-            AgentMessageModel.conversation_id == conversation_id, AgentMessageModel.role == "user"
-        )
-    )
-    return int(count or 0)
-
-
-def _has_report(session: Session, conversation_id: str, turn: int) -> bool:
-    """Tell whether the chat already has a report for this turn.
-
-    Args:
-        session: An open session.
-        conversation_id: The chat.
-        turn: The user turn.
+        user_message_id: The stored user message.
 
     Returns:
         ``True`` when a report row exists.
@@ -100,67 +88,39 @@ def _has_report(session: Session, conversation_id: str, turn: int) -> bool:
     return (
         session.scalar(
             select(AgentFeedbackReportModel.id).where(
-                AgentFeedbackReportModel.conversation_id == conversation_id, AgentFeedbackReportModel.turn == turn
+                AgentFeedbackReportModel.conversation_id == conversation_id,
+                AgentFeedbackReportModel.user_message_id == user_message_id,
             )
         )
         is not None
     )
 
 
-def discard_reports_from_message(session: Session, conversation_id: str, first_message_id: int) -> None:
-    """Delete the reports for the user turns that a history cut removes.
-
-    Edit-and-resend and regenerate delete the stored messages from
-    ``first_message_id`` on. The turn number counts the stored user messages,
-    so the next user turn reuses a cut turn's number; without this its new
-    complaint would hit the unique key and be lost. Call it in the same session,
-    before the messages are deleted.
-
-    Args:
-        session: The session that deletes the messages.
-        conversation_id: The chat.
-        first_message_id: The id of the first message that the cut deletes.
-    """
-    kept_user_turns = session.scalar(
-        select(func.count(AgentMessageModel.id)).where(
-            AgentMessageModel.conversation_id == conversation_id,
-            AgentMessageModel.role == "user",
-            AgentMessageModel.id < first_message_id,
-        )
-    )
-    session.execute(
-        delete(AgentFeedbackReportModel).where(
-            AgentFeedbackReportModel.conversation_id == conversation_id,
-            AgentFeedbackReportModel.turn > int(kept_user_turns or 0),
-        )
-    )
-
-
 def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_quote: str, summary: str) -> bool:
-    """Store one feedback report for the chat's current turn.
+    """Store one feedback report for the target's user message.
 
     Args:
-        target: The chat.
+        target: The chat and the user message.
         agent: Which agent chat sends it, for example ``generalist`` or a setup screen.
         tool_name: The tool whose result did not satisfy the user.
         user_quote: A short quote of what the user wrote.
         summary: What the user expected and what the tool did.
 
     Returns:
-        ``True`` when the report is new, ``False`` when this turn already has one.
+        ``True`` when the report is new, ``False`` when this message already has one.
 
     Raises:
         LookupError: The chat no longer exists, for example after a delete in another tab.
-        IntegrityError: The insert failed for a reason other than this turn's existing report.
+        IntegrityError: The insert failed for a reason other than this message's existing report.
     """
+    message_id = target.user_message_id
     with Session(target.engine) as session:
         if session.get(AgentConversationModel, target.conversation_id) is None:
             raise LookupError("chat not found")
-        turn = _current_turn(session, target.conversation_id)
         session.add(
             AgentFeedbackReportModel(
                 conversation_id=target.conversation_id,
-                turn=turn,
+                user_message_id=message_id,
                 username=target.username,
                 agent=_clip(agent, MAX_AGENT_CHARS),
                 tool_name=_clip(tool_name, MAX_TOOL_NAME_CHARS),
@@ -171,14 +131,14 @@ def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_
         try:
             session.commit()
         except IntegrityError:
-            # Only an existing report for this turn means "already sent". A chat
-            # deleted after the check above fails its foreign key; that must
+            # Only an existing report for this message means "already sent". A
+            # chat deleted after the check above fails its foreign key; that must
             # reach the caller as a failure, not as a duplicate.
             session.rollback()
-            if _has_report(session, target.conversation_id, turn):
+            if _has_report(session, target.conversation_id, message_id):
                 return False
             raise
-    logger.info("Agent feedback stored: conversation=%s turn=%d", target.conversation_id, turn)
+    logger.info("Agent feedback stored: conversation=%s user_message=%d", target.conversation_id, message_id)
     return True
 
 

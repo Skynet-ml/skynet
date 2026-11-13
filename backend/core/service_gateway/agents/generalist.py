@@ -3442,6 +3442,7 @@ async def _drive_generalist_agent(
     steer_key: str | None = None,
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
+    on_steer: Callable[[str], None] | None = None,
 ) -> str:
     """Open the MCP session, run the turn on Pi, and return the final assistant message.
 
@@ -3473,6 +3474,8 @@ async def _drive_generalist_agent(
             Metric screen's coding agent reads a repository run with it.
         feedback_target: The stored chat the ``send_feedback`` tool reports
             on; ``None`` (a chat that is not stored) leaves the tool out.
+        on_steer: Runs in a worker thread with each steered text before the
+            agent reads it; the router stores the steer message there.
 
     Returns:
         The full assistant reply text after the loop completes.
@@ -3588,6 +3591,7 @@ async def _drive_generalist_agent(
                 input_field="user_message",
                 emit=emit,
                 store=get_steer_store(),
+                on_taken=on_steer,
             )
             if steer_key and approval_owner
             else None
@@ -3629,6 +3633,7 @@ async def run_generalist_agent(
     steer_key: str | None = None,
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
+    on_steer: Callable[[str], None] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
@@ -3684,6 +3689,8 @@ async def run_generalist_agent(
             Metric screen's coding agent reads a repository run with it.
         feedback_target: The stored chat the ``send_feedback`` tool reports
             on, or ``None`` when the chat is not stored.
+        on_steer: Runs in a worker thread with each steered text before the
+            agent reads it, or ``None``.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -3738,6 +3745,7 @@ async def run_generalist_agent(
             steer_key=steer_key,
             github_token=github_token,
             feedback_target=feedback_target,
+            on_steer=on_steer,
         )
     )
     try:

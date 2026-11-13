@@ -678,6 +678,38 @@ async def test_steer_joins_the_prompt_from_the_second_call() -> None:
     assert events == [{"event": STEER_APPLIED_EVENT, "data": {"ids": ["s1"], "text": "Use the cheaper model."}}]
 
 
+async def test_steer_hook_runs_before_the_steer_reaches_the_prompt() -> None:
+    """The inbox hook gets the steer text before the next model call; a failing hook still delivers the steer."""
+    lm = _ScriptedLM([("_lookup", {"name": "a"}), ("submit", {_REPLY: "ok"}), ("submit", {_REPLY: "unused"})])
+    calls: list[tuple[str, int]] = []
+
+    def on_taken(text: str) -> None:
+        """Record the text and how many model calls ran so far, then fail.
+
+        Args:
+            text: The steered text.
+
+        Raises:
+            RuntimeError: Always, to check that a hook failure does not drop the steer.
+        """
+        calls.append((text, len(lm.requests)))
+        raise RuntimeError("store down")
+
+    inbox = SteerInbox(
+        owner="u",
+        steer_key="k",
+        input_field="user_message",
+        emit=lambda event: None,
+        store=cast(Any, _SteerStore()),
+        on_taken=on_taken,
+    )
+    handlers, _ = await _run(lm, inbox=inbox)
+
+    assert handlers.reply == "ok"
+    assert calls == [("Use the cheaper model.", 1)]
+    assert lm.requests[1]["messages"][-1]["content"] == "[[ ## user_message ## ]]\nUse the cheaper model."
+
+
 def _stream_chunks(tool: str, args: dict[str, Any]) -> list[ModelResponseStream]:
     """Build a provider stream that calls one tool and reports usage.
 

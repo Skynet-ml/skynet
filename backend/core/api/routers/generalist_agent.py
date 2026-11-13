@@ -37,7 +37,7 @@ from ...connectors.vault import ConnectorVault
 from ...constants import TOKEN_SOURCE_MANAGED
 from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
-from ...service_gateway.agents.feedback import FeedbackTarget, discard_reports_from_message
+from ...service_gateway.agents.feedback import FeedbackTarget
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
     TrustMode,
@@ -51,7 +51,6 @@ from ...service_gateway.agents.generalist import (
 )
 from ...service_gateway.agents.next_prompt import suggest_next_prompt
 from ...service_gateway.agents.steering import (
-    STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
     STEER_TEXT_MAX_CHARS,
     SteerInputError,
@@ -474,26 +473,29 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
         return new_id, title
 
 
-def _persist_user_turn(job_store, conversation_id: str, content: str) -> None:
+def _persist_user_turn(job_store, conversation_id: str, content: str) -> int:
     """Insert the user's message into ``agent_messages``.
 
     Args:
         job_store: Job-store instance whose engine backs the DB session.
         conversation_id: Owning conversation id.
         content: User message text exactly as received from the client.
+
+    Returns:
+        The id of the stored message.
     """
     with Session(job_store.engine) as session:
-        session.add(
-            AgentMessageModel(
-                conversation_id=conversation_id,
-                role="user",
-                content=content,
-                tool_calls=None,
-                model=None,
-                created_at=datetime.now(UTC),
-            )
+        row = AgentMessageModel(
+            conversation_id=conversation_id,
+            role="user",
+            content=content,
+            tool_calls=None,
+            model=None,
+            created_at=datetime.now(UTC),
         )
+        session.add(row)
         session.commit()
+        return row.id
 
 
 def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> None:
@@ -523,7 +525,6 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
         )
         if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
             return
-        discard_reports_from_message(session, conversation_id, latest_user.id)
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
@@ -565,7 +566,6 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
         )
         if edited is None:
             return False
-        discard_reports_from_message(session, conversation_id, edited.id)
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= edited.id,
@@ -800,14 +800,6 @@ async def _wrap_with_persistence(
                     tool_schema_hashes = {str(k): str(v) for k, v in raw_hashes.items()}
                 # Internal envelope — never forward to the frontend.
                 continue
-            elif name == STEER_APPLIED_EVENT:
-                # The steered message is a user turn of this conversation; it
-                # goes in now so it sits before the reply written on ``done``.
-                if conversation_id and job_store is not None and isinstance(data.get("text"), str):
-                    try:
-                        await asyncio.to_thread(_persist_user_turn, job_store, conversation_id, data["text"])
-                    except Exception:
-                        logger.exception("Failed to persist a steered user message")
             elif name == "tool_start":
                 tid = str(data.get("id", ""))
                 if tid:
@@ -940,7 +932,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             A :class:`StreamingResponse` of Server-Sent Events.
         """
 
-        def _setup_turn() -> tuple[str | None, str | None]:
+        def _setup_turn() -> tuple[str | None, str | None, int | None]:
             """Persist the user turn off the event loop.
 
             Runs the blocking conversation upsert and user-message insert in a
@@ -950,11 +942,12 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             ``DomainError`` (403/404) is allowed to propagate.
 
             Returns:
-                ``(conversation_id, title)`` — both ``None`` when persistence is
-                off (no ``job_store`` or ``persist`` is False) or failed non-fatally.
+                ``(conversation_id, title, user_message_id)`` — all ``None`` when
+                persistence is off (no ``job_store`` or ``persist`` is False) or
+                failed non-fatally.
             """
             if job_store is None or not req.persist:
-                return None, None
+                return None, None, None
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
                 if req.edit_user_text is not None:
@@ -969,13 +962,13 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     # A retry of a send refused before it was stored also
                     # sends regenerate; the text check keeps the previous turn.
                     _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
-                _persist_user_turn(job_store, cid, req.user_message)
+                message_id = _persist_user_turn(job_store, cid, req.user_message)
             except DomainError:
                 raise
             except Exception:
                 logger.exception("Failed to persist user turn")
-                return None, None
-            return cid, ttl
+                return None, None, None
+            return cid, ttl, message_id
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
 
@@ -1001,8 +994,31 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
-        conversation_id, title = await asyncio.to_thread(_setup_turn)
+        conversation_id, title, user_message_id = await asyncio.to_thread(_setup_turn)
         usage_sink: list = []
+        feedback_target = (
+            FeedbackTarget(
+                engine=engine,
+                username=current_user.username,
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+            )
+            if engine is not None and conversation_id and user_message_id is not None
+            else None
+        )
+
+        def _store_steer(text: str) -> None:
+            """Store a steered user message before the agent reads it.
+
+            The row must exist before the steer reaches the prompt, so a
+            ``send_feedback`` call about the steer keys its report on it.
+
+            Args:
+                text: The steered text the agent receives.
+            """
+            message_id = _persist_user_turn(job_store, conversation_id, text)
+            if feedback_target is not None:
+                feedback_target.user_message_id = message_id
 
         def _github_token() -> str | None:
             """Load the caller's token for the run's repository host, for the coding agent's reads.
@@ -1030,11 +1046,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             usage_sink=usage_sink,
             steer_key=req.steer_key,
             github_token=_github_token,
-            feedback_target=(
-                FeedbackTarget(engine=engine, username=current_user.username, conversation_id=conversation_id)
-                if engine is not None and conversation_id
-                else None
-            ),
+            feedback_target=feedback_target,
+            on_steer=_store_steer if conversation_id and job_store is not None else None,
         )
         metered = stream_with_llm_metering(
             source,

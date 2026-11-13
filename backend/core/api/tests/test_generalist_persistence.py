@@ -1189,3 +1189,42 @@ def test_turn_does_not_block_the_event_loop_on_a_cold_catalog(
     assert resp.status_code == 200, resp.text
     assert builds
     assert all(builds)
+
+
+def test_steer_is_stored_before_the_agent_reads_it_and_feedback_keys_on_it(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The steer hook stores the steer row once and points the feedback target at it (SKY-580)."""
+    client, engine = persistence_client
+    _fund(engine)
+    seen: dict[str, Any] = {}
+
+    async def steer_stream(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Take one steer the way the agent loop does, then finish the turn.
+
+        Args:
+            **kwargs: The router's arguments for the turn.
+
+        Yields:
+            The steer event and the terminal ``done`` event.
+        """
+        first_id = kwargs["feedback_target"].user_message_id
+        await asyncio.to_thread(kwargs["on_steer"], "also the score is wrong")
+        seen.update(kwargs, first_id=first_id)
+        yield {"event": "steer_applied", "data": {"ids": ["s1"], "text": "also the score is wrong"}}
+        yield {"event": "done", "data": {"assistant_message": "ok", "model": "m"}}
+
+    monkeypatch.setattr(agent_mod, "run_generalist_agent", steer_stream)
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={"user_message": "hi", "chat_history": [], "wizard_state": {}, "trust_mode": "ask"},
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert _stored_contents(engine) == ["hi", "also the score is wrong", "ok"]
+    with Session(engine) as session:
+        ids = {m.content: m.id for m in session.query(AgentMessageModel).all()}
+    assert seen["first_id"] == ids["hi"]
+    assert seen["feedback_target"].user_message_id == ids["also the score is wrong"]

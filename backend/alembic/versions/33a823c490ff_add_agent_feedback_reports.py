@@ -6,7 +6,9 @@ Create Date: 2026-11-12 12:00:00.000000
 
 SKY-580 adds ``agent_feedback_reports``. The agent's ``send_feedback`` tool
 writes one row when a user is not satisfied with a tool result. The unique
-key on ``(conversation_id, turn)`` keeps it to one report for each complaint.
+key on ``(conversation_id, user_message_id)`` keeps it to one report for each
+complaint. ``user_message_id`` has no foreign key on purpose, so an edit or a
+regenerate that deletes the message keeps the report.
 The admin feedback endpoint reads the table, newest first.
 """
 
@@ -35,14 +37,14 @@ def upgrade() -> None:
             sa.ForeignKey("agent_conversations.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("turn", sa.Integer(), nullable=False),
+        sa.Column("user_message_id", sa.Integer(), nullable=False),
         sa.Column("username", sa.String(255), nullable=False),
         sa.Column("agent", sa.String(64), nullable=False),
         sa.Column("tool_name", sa.String(100), nullable=False),
         sa.Column("user_quote", sa.String(300), nullable=False),
         sa.Column("summary", sa.String(1000), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.UniqueConstraint("conversation_id", "turn", name="uq_agent_feedback_reports_turn"),
+        sa.UniqueConstraint("conversation_id", "user_message_id", name="uq_agent_feedback_reports_message"),
     )
     op.create_index("ix_agent_feedback_reports_created_at", "agent_feedback_reports", ["created_at"])
 

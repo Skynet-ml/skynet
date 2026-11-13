@@ -306,7 +306,7 @@ class AgentFeedbackReport(BaseModel):
     created_at: datetime
     username: str
     conversation_id: str
-    turn: int
+    user_message_id: int
     agent: str
     tool_name: str
     user_quote: str
@@ -389,7 +389,7 @@ def create_admin_dashboard_router(*, job_store) -> APIRouter:
                         created_at=row.created_at,
                         username=row.username,
                         conversation_id=row.conversation_id,
-                        turn=row.turn,
+                        user_message_id=row.user_message_id,
                         agent=row.agent,
                         tool_name=row.tool_name,
                         user_quote=row.user_quote,

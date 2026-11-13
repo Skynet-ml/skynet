@@ -199,12 +199,12 @@ def test_dashboard_rejects_out_of_range_window() -> None:
     assert client.get("/admin/dashboard", params={"days": 366}).status_code == 422
 
 
-def _feedback(report_id: str, turn: int, created: datetime) -> AgentFeedbackReportModel:
+def _feedback(report_id: str, user_message_id: int, created: datetime) -> AgentFeedbackReportModel:
     """Build a feedback report row for the chat ``c1``.
 
     Args:
         report_id: Row id.
-        turn: The user turn it reports on.
+        user_message_id: The stored user message it reports on.
         created: When the agent sent it.
 
     Returns:
@@ -213,11 +213,11 @@ def _feedback(report_id: str, turn: int, created: datetime) -> AgentFeedbackRepo
     return AgentFeedbackReportModel(
         id=report_id,
         conversation_id="c1",
-        turn=turn,
+        user_message_id=user_message_id,
         username="bob",
         agent="generalist",
         tool_name="validate_code",
-        user_quote=f"wrong score {turn}",
+        user_quote=f"wrong score {user_message_id}",
         summary="Expected 1 for an exact match; the tool gave 0.",
         created_at=created,
     )
@@ -240,7 +240,7 @@ def test_agent_feedback_lists_reports_newest_first_for_an_admin() -> None:
         "id": "r2",
         "username": "bob",
         "conversation_id": "c1",
-        "turn": 2,
+        "user_message_id": 2,
         "agent": "generalist",
         "tool_name": "validate_code",
         "user_quote": "wrong score 2",

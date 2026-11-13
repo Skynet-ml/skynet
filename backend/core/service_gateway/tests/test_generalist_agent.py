@@ -1760,7 +1760,7 @@ async def test_stored_chat_turn_offers_send_feedback_and_stores_one_report(monke
         emit=events.append,
         lm=lm,
         reply_language="English",
-        feedback_target=FeedbackTarget(engine=engine, username="bob", conversation_id="c1"),
+        feedback_target=FeedbackTarget(engine=engine, username="bob", conversation_id="c1", user_message_id=1),
     )
 
     assert reply == "I sent your feedback."
@@ -1769,7 +1769,7 @@ async def test_stored_chat_turn_offers_send_feedback_and_stores_one_report(monke
     assert [(e["tool"], e["status"]) for e in ends] == [("send_feedback", "ok")]
     with Session(engine) as session:
         [report] = session.scalars(select(AgentFeedbackReportModel)).all()
-    assert (report.conversation_id, report.turn, report.agent, report.tool_name) == (
+    assert (report.conversation_id, report.user_message_id, report.agent, report.tool_name) == (
         "c1",
         1,
         "generalist",
