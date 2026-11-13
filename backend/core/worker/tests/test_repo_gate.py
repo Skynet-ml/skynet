@@ -69,6 +69,15 @@ def test_a_clean_file_passes(tmp_path: Path) -> None:
     assert check_repository(archive, (), place="cloud") == []
 
 
+def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> None:
+    """A new run needs version = 1; a started run reads a missing version as 1 (SKY-690)."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[paths]\neditable = ["bot"]\n'})
+
+    with pytest.raises(ConstraintsError, match="version is missing"):
+        check_repository(archive, (), place="local")
+    assert check_repository(archive, (), place="local", require_version=False) == []
+
+
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     """No optimize.toml asks for nothing."""
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []

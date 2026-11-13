@@ -832,11 +832,17 @@ def _score_value(value: Any, setting: str, section: str, key: str) -> float:
         ConstraintsError: When the value is not a finite number.
     """
     # bool is an int in Python, so ``target = true`` would otherwise read as 1.
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+    number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else math.nan
+    try:
+        number = float(number)
+    except OverflowError:
+        # A TOML integer can have hundreds of digits, more than a float holds.
+        number = math.nan
+    if not math.isfinite(number):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {setting} must be a finite number, such as 0.9.", section=section, key=key
         )
-    return float(value)
+    return number
 
 
 def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]]:
@@ -868,6 +874,14 @@ def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]
                 f"{CONSTRAINTS_FILE}: [outcome.require] has an empty score name. Use the name the metric gives"
                 " the score.",
                 section="outcome.require",
+            )
+        # TOML reads an unquoted ``rouge.l = 0.5`` as the table ``rouge = {l = 0.5}``.
+        if isinstance(value, dict):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [outcome.require] {name} is a table. Quote a score name that has a dot,"
+                f' such as "{name}.{next(iter(value), "l")}" = 0.9.',
+                section="outcome.require",
+                key=name,
             )
         minimums[name] = _score_value(value, f"[outcome.require] {name}", "outcome.require", name)
     return target, minimums
@@ -1345,7 +1359,7 @@ def _refuse_hidden_visible_files(
             )
 
 
-def parse_constraints(raw: bytes) -> RepoConstraints:
+def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
     Unknown sections and keys fail rather than being ignored, so a rule the
@@ -1353,6 +1367,9 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
 
     Args:
         raw: The file's contents.
+        require_version: Whether a file with no ``version`` fails. ``False``
+            reads it as version 1, for a run that started before the key
+            was required (SKY-690); a wrong ``version`` fails either way.
 
     Returns:
         The validated proposal.
@@ -1367,13 +1384,14 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         document = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is not valid TOML: {error}") from error
-    if "version" not in document:
+    if "version" not in document and require_version:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: version is missing. Put version = 1 at the top of the file, before any section.",
             key="version",
         )
-    version = document.pop("version")
-    if version != 1:
+    version = document.pop("version", 1)
+    # ``true == 1`` and ``1.0 == 1`` in Python, so the type is checked too.
+    if type(version) is not int or version != 1:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: version {version!r} is not supported; use version = 1.", key="version"
         )
@@ -1509,11 +1527,12 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     )
 
 
-def read_constraints(archive: Path) -> RepoConstraints | None:
+def read_constraints(archive: Path, *, require_version: bool = True) -> RepoConstraints | None:
     """Read the constraints file at the root of a packed snapshot.
 
     Args:
         archive: Packed tree from :func:`fetch_snapshot`.
+        require_version: Passed to :func:`parse_constraints`.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
@@ -1531,7 +1550,7 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
     raw = read_constraints_file(archive)
     if raw is None:
         return None
-    constraints = _load_mcp_files(parse_constraints(raw), archive)
+    constraints = _load_mcp_files(parse_constraints(raw, require_version=require_version), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
     return _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
 

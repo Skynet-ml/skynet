@@ -146,6 +146,7 @@ def _stage_with(
     monkeypatch: pytest.MonkeyPatch,
     payload: dict[str, Any] | None = None,
     links: dict[str, tuple[bytes, str]] | None = None,
+    started: bool = False,
 ) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
     """Stage the fixture payload over a tree holding ``files``.
 
@@ -154,6 +155,7 @@ def _stage_with(
         monkeypatch: Pytest monkeypatch.
         payload: Payload to stage; the fixture payload pinned to ``c * 40`` when omitted.
         links: Links in the fetched tree, as ``_tree`` takes them.
+        started: Whether the caller's job already started, as ``stage_repository`` takes it.
 
     Returns:
         The staged payload and repository.
@@ -168,7 +170,9 @@ def _stage_with(
             commit=pinned, archive=_tree(workdir, files, links), readonly_paths=(), size_bytes=1
         ),
     )
-    return repo_staging.stage_repository(payload or _payload("c" * 40), username="alice", binding_id="b", engine=None)
+    return repo_staging.stage_repository(
+        payload or _payload("c" * 40), username="alice", binding_id="b", engine=None, started=started
+    )
 
 
 _CONSTRAINTS = """
@@ -411,6 +415,35 @@ def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monk
 
     with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
         _stage_with(_TARGETED, monkeypatch, resumed)
+
+
+def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment means the run started, maybe before ``version`` was required (SKY-690)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    assert staged.require_version is True
+    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+
+    again, staged = _stage_with(unversioned, monkeypatch, resumed)
+    staged.cleanup()
+
+    assert staged.require_version is False
+    assert again["target"]["repo"]["editable_paths"] == ["src/geocode"]
+    with pytest.raises(ConstraintsError, match="version is missing"):
+        _stage_with(unversioned, monkeypatch)
+
+
+def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
+    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+
+    staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
+    staged.cleanup()
+
+    assert staged.require_version is False
+    assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
 
 
 _RULED = {

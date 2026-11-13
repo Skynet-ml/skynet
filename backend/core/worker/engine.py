@@ -871,6 +871,7 @@ class BackgroundWorker:
                             place=sandbox_place(settings.local_mode),
                             bindings=secret_bindings,
                             allowed_hosts=secret_allowed_hosts,
+                            require_version=staged_repository.require_version,
                         )
                         if gate_failures:
                             raise RepoGateError(gate_failures)
