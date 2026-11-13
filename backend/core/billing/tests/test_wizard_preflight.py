@@ -455,7 +455,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     client, _engine, calls = setup_client
     archive = tmp_path / "tree.tgz"
     raw = (
-        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+        b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
         b'[services.maps]\nurl = "https://maps.example.com"\n'
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
     )

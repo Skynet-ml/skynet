@@ -175,7 +175,8 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
                 apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
             except DraftFileError as error:
                 raise ConstraintsError(str(error)) from None
-        hidden = hidden_repo_paths(read_constraints(snapshot.archive))
+        # Only a run that started can be served, maybe from before version was required (SKY-690).
+        hidden = hidden_repo_paths(read_constraints(snapshot.archive, require_version=False))
         # Run start refuses these links since SKY-387; a run started before that can still reach serving.
         if linked := linked_hidden_paths(snapshot.archive, hidden):
             raise ConstraintsError(

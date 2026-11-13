@@ -32,6 +32,7 @@ from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
 _TOML = b"""
+version = 1
 [run]
 entry = "a.py:f"
 
@@ -133,6 +134,7 @@ class Recorder:
         self.held: list[float] = []
         self.agent_names: set[str] = set()
         self.gate_secrets: Any = None
+        self.gate_require_version: bool | None = None
 
     def reserve(self, job: HardeningJob, usd: float) -> None:
         """Record a budget hold.
@@ -149,7 +151,7 @@ class Recorder:
 
         Args:
             payload: The run-shaped payload.
-            **kwargs: username, binding_id and engine.
+            **kwargs: username, binding_id, engine and started.
 
         Returns:
             The staged payload and repository.
@@ -159,30 +161,37 @@ class Recorder:
         workdir = self.tmp_path / "staged"
         workdir.mkdir()
         full = _archive(workdir / "tree.tgz", self.files, self.links)
-        constraints = read_constraints(full)
+        require_version = not kwargs["started"]
+        constraints = read_constraints(full, require_version=require_version)
         assert constraints is not None
         hidden = (*constraints.metric.files, constraints.metric.exploits)
         agent = strip_archive(full, hidden, workdir / "agent-tree.tgz")
         snapshot = type("Snapshot", (), {"archive": full, "commit": "c0ffee", "readonly_paths": ()})()
         self.staged = StagedRepository(
-            snapshot=snapshot, secrets={"API_KEY": "x"}, workdir=workdir, hidden_paths=hidden
+            snapshot=snapshot,
+            secrets={"API_KEY": "x"},
+            workdir=workdir,
+            hidden_paths=hidden,
+            require_version=require_version,
         )
         target = {**payload["target"], "repo": {**payload["target"]["repo"], "commit": "c0ffee"}}
         return {**payload, "target": target, REPO_SNAPSHOT_KEY: {"archive": str(agent)}}, self.staged
 
-    def gate(self, archive: Path, secrets: Any, *, place: str) -> list[GateFailure]:
+    def gate(self, archive: Path, secrets: Any, *, place: str, require_version: bool) -> list[GateFailure]:
         """Record the preflight gate.
 
         Args:
             archive: The full tree.
             secrets: The run's secret names.
             place: local or cloud.
+            require_version: Whether a file with no version fails.
 
         Returns:
             The configured failures.
         """
         self.events.append(f"gate:{place}")
         self.gate_secrets = secrets
+        self.gate_require_version = require_version
         return self.failures
 
     @contextmanager
@@ -402,7 +411,13 @@ def test_staging_gets_the_run_shaped_target_and_binding(tmp_path: Path) -> None:
 
     _run(recorder, _cloud_job(), local_mode=False)
 
-    assert recorder.stage_kwargs == {"payload": _PAYLOAD, "username": "alice", "binding_id": "budget-1", "engine": None}
+    assert recorder.stage_kwargs == {
+        "payload": _PAYLOAD,
+        "username": "alice",
+        "binding_id": "budget-1",
+        "engine": None,
+        "started": False,
+    }
 
 
 def test_a_cloud_job_holds_rounds_times_cap_before_paid_work(tmp_path: Path) -> None:
@@ -648,13 +663,14 @@ def test_a_gate_that_raises_fails_the_job(tmp_path: Path) -> None:
     """A gate error ends the job as failed, frees the hold, opens no sandbox and removes the workdir."""
     recorder = Recorder(tmp_path)
 
-    def broken(archive: Path, secret_names: Any, *, place: str) -> list[GateFailure]:
+    def broken(archive: Path, secret_names: Any, *, place: str, require_version: bool) -> list[GateFailure]:
         """Fail inside the gate.
 
         Args:
             archive: The full tree.
             secret_names: The run's secret names.
             place: local or cloud.
+            require_version: Whether a file with no version fails.
 
         Raises:
             OSError: Always.
@@ -675,13 +691,14 @@ def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> No
     """A bad optimize.toml found by the gate is a preflight failure with its reason, not a failed job."""
     recorder = Recorder(tmp_path)
 
-    def refuse(archive: Path, secret_names: Any, *, place: str) -> list[GateFailure]:
+    def refuse(archive: Path, secret_names: Any, *, place: str, require_version: bool) -> list[GateFailure]:
         """Refuse the constraints file.
 
         Args:
             archive: The full tree.
             secret_names: The run's secret names.
             place: local or cloud.
+            require_version: Whether a file with no version fails.
 
         Raises:
             ConstraintsError: Always.
@@ -749,6 +766,35 @@ def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
     assert job.preflight_failures == failures
     assert job.reserved_usd == 0.0
     assert "sandbox" not in recorder.events
+
+
+def test_a_new_job_refuses_an_optimize_toml_with_no_version(tmp_path: Path) -> None:
+    """The first pass of a job is strict: a file with no version is a preflight failure (SKY-690)."""
+    recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: _TOML.replace(b"version = 1\n", b"")})
+
+    job = _run(recorder, _cloud_job(), local_mode=False)
+
+    assert recorder.stage_kwargs["started"] is False
+    assert job.status == "preflight_failed"
+    assert "version is missing" in job.preflight_failures[0]
+
+
+def test_a_started_job_reads_an_optimize_toml_with_no_version_as_version_1(tmp_path: Path) -> None:
+    """A job past its preflight may predate the version key, so every read of its tree in the pass is lenient."""
+    (tmp_path / "first").mkdir()
+    (tmp_path / "later").mkdir()
+    job = _run(Recorder(tmp_path / "first"), _cloud_job(), local_mode=False)
+    job = record_verdict(job, job.rounds_detail[0].exploits[0].id, confirmed=True)
+    assert job.status == "running"
+    recorder = Recorder(tmp_path / "later", files={**_FILES, CONSTRAINTS_FILE: _TOML.replace(b"version = 1\n", b"")})
+
+    job = _run(recorder, job, local_mode=False)
+
+    assert job.status == "waiting_fix"
+    assert recorder.stage_kwargs["started"] is True
+    assert recorder.gate_require_version is False
+    assert recorder.workspace is not None
+    assert recorder.workspace.require_version is False
 
 
 def test_a_later_pass_restores_the_suite_and_fixes_of_earlier_rounds(tmp_path: Path) -> None:
