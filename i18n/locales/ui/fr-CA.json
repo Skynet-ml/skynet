@@ -21,6 +21,9 @@
   "submit.budget.byok_note": "Votre fournisseur facture les jetons du modèle sur votre clé. {term.appName} ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable.",
   "submit.blackbox.roles.optimization.managed_hint": "Utilise les paramètres d'échantillonnage par défaut du modèle ; la facturation peut utiliser votre solde {term.appName} ou votre clé OpenRouter.",
   "submit.nav.screen": "Écran {index} sur {count}",
+  "submit.nav.slide_to_start": "Glissez pour lancer l’optimisation",
+  "submit.nav.slide_hint": "Faites glisser l’avion jusqu’au bout de la barre, ou appuyez sur Entrée.",
+  "submit.nav.slide_tooltip": "Faites glisser ou cliquez sur l’avion pour lancer l’exécution",
   "shared.agent.worked_for": "A travaillé pendant {duration}",
   "shared.agent.working_for": "Travaille depuis {duration}",
   "shared.agent.pasted_text": "Texte collé",
@@ -48,9 +51,5 @@
   "agent.tool.github_repos.found": "{count} trouvés",
   "agent.tool.github_repos.none": "Aucun trouvé",
   "agent.tool.github_repos.private": "Privé",
-  "submit.draft.title": "Reprendre votre configuration précédente ?",
-  "submit.draft.continue": "Reprendre le brouillon",
-  "submit.draft.start_new": "Recommencer",
-  "submit.draft.left_named": "Vous avez quitté « {name} » {time}.",
-  "submit.draft.left": "Vous avez quitté une configuration {time}."
+  "submit.draft.title": "Reprendre votre configuration précédente ?"
 }
