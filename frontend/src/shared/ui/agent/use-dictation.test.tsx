@@ -144,8 +144,9 @@ globalThis.fetch = async (_url, init) => {
   return reply.promise;
 };
 
-const ok = (text: string) =>
-  new Response(JSON.stringify({ text, provider: "test" }), {
+// The backend marks a preview answer as partial; the final call does not read the mark.
+const ok = (text: string, partial = true) =>
+  new Response(JSON.stringify({ text, provider: "test", partial }), {
     headers: { "Content-Type": "application/json" },
   });
 
@@ -259,6 +260,27 @@ void it("shows live words while recording", async () => {
   await React.act(async () => calls[0]!.reply.resolve(ok("hello there")));
   assert.equal(view.current!.live, "hello there");
   await unmount();
+});
+
+void it("an answer without the partial mark stops the take's live updates, and the final text still arrives", async () => {
+  const { view, unmount } = await mount();
+  await startTake(view);
+  recorders[0]!.speak();
+  await tickTo(3000);
+  await React.act(async () => calls[0]!.reply.resolve(ok("hello", false)));
+  const live = view.current!.live;
+  recorders[0]!.speak();
+  await tickTo(10_000);
+  const partials = calls.length;
+  await React.act(async () => view.current!.finish());
+  const final = calls.at(-1)!;
+  await React.act(async () => final.reply.resolve(ok("final words", false)));
+  const texts = [...view.texts];
+  await unmount();
+  assert.equal(live, "hello");
+  assert.equal(partials, 1);
+  assert.equal(final.partial, false);
+  assert.deepEqual(texts, ["final words"]);
 });
 
 void it("with no Intl.Segmenter, a take sends no live update and the final text still arrives", async () => {

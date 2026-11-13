@@ -272,8 +272,11 @@ export function useDictation({
       const blob = new Blob(parts, { type: mimeRef.current });
       const filename = mp4 ? "take.m4a" : "take.webm";
       transcribeAudio(blob, filename, language, { partial: true, signal: ctrl.signal })
-        .then(({ text }) => {
+        .then(({ text, partial }) => {
           failures = 0;
+          // An older backend counts each preview against the clip cap, which the
+          // final call needs, so the take sends no more previews.
+          if (partial !== true) livePaused = true;
           if (ctrl.signal.aborted || recorderRef.current !== recorder) return;
           heardBytes = end;
           const words = (text ?? "").trim();

@@ -3351,6 +3351,8 @@ export async function extractAttachmentText(file: File): Promise<string> {
 export interface TranscriptionResult {
   text: string;
   provider: string;
+  /** True when the backend counted the call as a live preview; an older backend omits it. */
+  partial?: boolean;
 }
 
 /** Transcribe one recorded clip; ``language`` is a soft BCP-47 locale hint.

@@ -127,7 +127,7 @@ def test_openrouter_leg_returns_transcript(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
     resp = _post_audio(_client())
     assert resp.status_code == 200
-    assert resp.json() == {"text": "מהיר מאוד", "provider": "openrouter"}
+    assert resp.json() == {"text": "מהיר מאוד", "provider": "openrouter", "partial": False}
     assert seen == {"key": "sk-or-test"}
 
 
@@ -180,9 +180,12 @@ def test_router_passes_partial_to_the_openrouter_leg(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
     client = _client()
-    client.post("/transcribe", files={"audio": ("take.webm", b"12", "audio/webm")}, data={"partial": "true"})
-    assert _post_audio(client).status_code == 200
+    preview = client.post("/transcribe", files={"audio": ("take.webm", b"12", "audio/webm")}, data={"partial": "true"})
+    final = _post_audio(client)
+    assert final.status_code == 200
     assert seen == [True, False]
+    # The composer stops previews when this mark is missing (an older backend).
+    assert [preview.json()["partial"], final.json()["partial"]] == [True, False]
 
 
 def test_clip_cost_uses_reported_cost_then_falls_back_to_seconds() -> None:

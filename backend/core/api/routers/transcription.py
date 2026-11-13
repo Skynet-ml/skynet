@@ -31,7 +31,7 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ...billing.byok_vault import ProviderKeyVault
 from ...billing.protected_credentials import _openrouter_endpoint
@@ -89,6 +89,10 @@ class TranscriptionResponse(BaseModel):
 
     text: str
     provider: str
+    # An older backend ignores the ``partial`` form field and counts each
+    # preview against the clip cap, so the composer stops its previews when an
+    # answer to one lacks this mark.
+    partial: bool = Field(default=False, description="True when the call was counted as a live preview.")
 
 
 async def _openrouter_transcribe(
@@ -232,6 +236,6 @@ def create_transcription_router(job_store: Any) -> APIRouter:
                 raise DomainError("transcription.failed", status=502) from err
         if own_key is None:
             record_spend(_BUDGET_SERVICE, cost, budget)
-        return TranscriptionResponse(text=text, provider="openrouter")
+        return TranscriptionResponse(text=text, provider="openrouter", partial=partial)
 
     return router
