@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "جلسه {i}",
   "submit.v2.harden.node.thinking": "در حال فکر",
   "submit.v2.harden.node.scoring": "در حال امتیازدهی",
+  "submit.v2.harden.node.done": "تمام شد، در انتظار داور",
   "submit.v2.harden.node.found": "سوءاستفاده پیدا شد",
   "submit.v2.harden.node.clean": "سالم",
   "submit.v2.harden.node.failed": "ناموفق",

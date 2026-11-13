@@ -118,6 +118,18 @@ void describe("treeRounds", () => {
     assert.equal(stopped.length, 0);
   });
 
+  void it("shows a done session in the live round as waiting for the judge, not clean", () => {
+    const liveJob = job({ live_sessions: [session(1, "done"), session(2, "running")] });
+    const live = treeRounds(liveJob)[0]!;
+    assert.equal(nodeStatus(live.sessions[0]!, live.exploits, live.live), "done");
+    const detail = [
+      { index: 1, status: "waiting_review", exploits: [exploit()], fix: null, sessions: [session(1, "done"), session(2, "done")] },
+    ];
+    const judged = treeRounds(job({ status: "waiting_review", round: 1, rounds_detail: detail as never }))[0]!;
+    const statuses = judged.sessions.map((s) => nodeStatus(s, judged.exploits.filter((e) => e.session === s.index), judged.live));
+    assert.deepEqual(statuses, ["found", "clean"]);
+  });
+
   void it("keeps a round with a status the page does not know, and its lists", () => {
     const detail = [
       { index: 1, status: "failed", fix: null },
@@ -235,6 +247,12 @@ void describe("HardenMetricScreen", () => {
     renderToStaticMarkup(
       <HardenMetricScreen active guided={false} onBack={() => {}} hardening={state(j)} reflectionModel={null} />,
     );
+
+  void it("draws a done session in the live round as waiting for the judge", () => {
+    const html = render(job({ live_sessions: [session(1, "done"), session(2, "running")] }));
+    assert.match(html, /data-status="done"/);
+    assert.doesNotMatch(html, /data-status="clean"/);
+  });
 
   void it("draws no tree before the first round, and draws it while the job runs", () => {
     assert.doesNotMatch(render(job({ status: "preflight" })), /role="tree"/);

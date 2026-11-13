@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "الجلسة {i}",
   "submit.v2.harden.node.thinking": "يفكّر",
   "submit.v2.harden.node.scoring": "يحسب الدرجة",
+  "submit.v2.harden.node.done": "انتهت، بانتظار الحَكَم",
   "submit.v2.harden.node.found": "وُجدت ثغرة",
   "submit.v2.harden.node.clean": "نظيفة",
   "submit.v2.harden.node.failed": "فشلت",

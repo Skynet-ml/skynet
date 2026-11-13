@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "會話 {i}",
   "submit.v2.harden.node.thinking": "諗緊",
   "submit.v2.harden.node.scoring": "評分緊",
+  "submit.v2.harden.node.done": "完成，等緊評審",
   "submit.v2.harden.node.found": "搵到漏洞",
   "submit.v2.harden.node.clean": "冇問題",
   "submit.v2.harden.node.failed": "失敗",

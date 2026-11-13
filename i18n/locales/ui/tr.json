@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "Oturum {i}",
   "submit.v2.harden.node.thinking": "Düşünüyor",
   "submit.v2.harden.node.scoring": "Puanlıyor",
+  "submit.v2.harden.node.done": "Bitti, hakem bekleniyor",
   "submit.v2.harden.node.found": "Açık bulundu",
   "submit.v2.harden.node.clean": "Temiz",
   "submit.v2.harden.node.failed": "Başarısız",

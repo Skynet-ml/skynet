@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "Сессия {i}",
   "submit.v2.harden.node.thinking": "Думает",
   "submit.v2.harden.node.scoring": "Оценивает",
+  "submit.v2.harden.node.done": "Готово, ждёт судью",
   "submit.v2.harden.node.found": "Найден эксплойт",
   "submit.v2.harden.node.clean": "Чисто",
   "submit.v2.harden.node.failed": "Ошибка",

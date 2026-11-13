@@ -13,7 +13,7 @@ import { Crown } from "@/shared/ui/icons";
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 
-export type NodeStatus = "thinking" | "scoring" | "found" | "clean" | "failed";
+export type NodeStatus = "thinking" | "scoring" | "done" | "found" | "clean" | "failed";
 
 /** The lead agent's node; a session node is its 1-based session index. */
 export const LEAD_NODE = 0;
@@ -195,14 +195,20 @@ export function sessionExploits(exploits: HardeningExploit[], session: number): 
  * Args:
  *   session: The attacker session.
  *   exploits: The session's claims.
+ *   live: The session is in the live round, so the judge has not read its claims.
  *
  * Returns:
  *   The status the node shows.
  */
-export function nodeStatus(session: HardeningSession, exploits: HardeningExploit[]): NodeStatus {
+export function nodeStatus(session: HardeningSession, exploits: HardeningExploit[], live = false): NodeStatus {
   if (session.status === "failed") return "failed";
   // Only a running session is live; a status this page does not know ended it.
-  if (session.status !== "running") return exploits.length ? "found" : "clean";
+  // A live round has no claims yet: the worker judges them after every session
+  // ends, so a finished session there is neither clean nor found.
+  if (session.status !== "running") {
+    if (live) return "done";
+    return exploits.length ? "found" : "clean";
+  }
   const calls = (session.transcript ?? []).flatMap((m) => m.toolCalls ?? []);
   return calls.some((c) => c.status === "running" && SCORE_TOOLS.has(c.tool)) ? "scoring" : "thinking";
 }
@@ -251,6 +257,7 @@ function formatScore(n: number): string {
 const STATUS_TONE: Record<NodeStatus, string> = {
   thinking: "text-muted-foreground",
   scoring: "text-muted-foreground",
+  done: "text-muted-foreground",
   found: "text-foreground",
   clean: "text-muted-foreground",
   failed: "text-destructive",
@@ -401,7 +408,7 @@ export function HardenTree({
         <ol role="group" className="mt-2 space-y-2">
           {round.sessions.map((session, i) => {
             const exploits = sessionExploits(round.exploits, session.index);
-            const status = nodeStatus(session, exploits);
+            const status = nodeStatus(session, exploits, round.live);
             const best = bestScore(session, exploits);
             const beats = best !== null && base !== null && best > base;
             const last = i === round.sessions.length - 1 && !noise;

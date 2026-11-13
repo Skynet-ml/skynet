@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "Sessione {i}",
   "submit.v2.harden.node.thinking": "Sta ragionando",
   "submit.v2.harden.node.scoring": "Calcolo del punteggio",
+  "submit.v2.harden.node.done": "Terminata, in attesa del giudice",
   "submit.v2.harden.node.found": "Exploit trovato",
   "submit.v2.harden.node.clean": "Pulita",
   "submit.v2.harden.node.failed": "Non riuscita",

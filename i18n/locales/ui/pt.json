@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "Sessão {i}",
   "submit.v2.harden.node.thinking": "A pensar",
   "submit.v2.harden.node.scoring": "A pontuar",
+  "submit.v2.harden.node.done": "Terminada, à espera do juiz",
   "submit.v2.harden.node.found": "Exploit encontrado",
   "submit.v2.harden.node.clean": "Limpa",
   "submit.v2.harden.node.failed": "Falhou",

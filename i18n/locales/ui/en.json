@@ -3765,6 +3765,7 @@
   "submit.v2.harden.tree.session": "Session {i}",
   "submit.v2.harden.node.thinking": "Thinking",
   "submit.v2.harden.node.scoring": "Scoring",
+  "submit.v2.harden.node.done": "Done, waiting for the judge",
   "submit.v2.harden.node.found": "Found an exploit",
   "submit.v2.harden.node.clean": "Clean",
   "submit.v2.harden.node.failed": "Failed",

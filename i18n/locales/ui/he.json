@@ -3765,6 +3765,7 @@
   "submit.v2.harden.tree.session": "סשן {i}",
   "submit.v2.harden.node.thinking": "חושב",
   "submit.v2.harden.node.scoring": "מנקד",
+  "submit.v2.harden.node.done": "הסתיים, ממתין לשופט",
   "submit.v2.harden.node.found": "נמצאה פרצה",
   "submit.v2.harden.node.clean": "נקי",
   "submit.v2.harden.node.failed": "נכשל",

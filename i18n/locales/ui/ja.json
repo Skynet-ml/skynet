@@ -259,6 +259,7 @@
   "submit.v2.harden.tree.session": "セッション {i}",
   "submit.v2.harden.node.thinking": "思考中",
   "submit.v2.harden.node.scoring": "採点中",
+  "submit.v2.harden.node.done": "完了、判定待ち",
   "submit.v2.harden.node.found": "エクスプロイトを発見",
   "submit.v2.harden.node.clean": "問題なし",
   "submit.v2.harden.node.failed": "失敗",
