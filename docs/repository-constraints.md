@@ -36,7 +36,7 @@ network = ["docs.python.org"]
 cases = "data/cases.jsonl"
 
 [outcome]
-# Optional. The score that is good enough. Runs cannot use [outcome] yet.
+# Optional. The score that is good enough. The search stops when it reaches it.
 target = 0.9
 
 [outcome.require]
@@ -96,8 +96,9 @@ an `[outcome]` with only `[outcome.require]`, is valid.
 setting. Every run opens a pull request, as before. Skynet does not merge it
 by itself.
 
-Runs cannot use `[outcome]` yet. The parser reads it, but the setup check
-refuses a file that sets `target` or `[outcome.require]`.
+The search stops when its score reaches `target`. A file without `target`
+has no stop score. Runs cannot check `[outcome.require]` yet, so the setup
+check refuses a file that sets it.
 
 ## Cases: `[data] cases`
 
@@ -357,8 +358,8 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A service or MCP server that breaks the secret rules below.
-- `[outcome] target` or an `[outcome.require]` table. Runs cannot use these
-  settings yet. An empty `[outcome]` passes.
+- An `[outcome.require]` table. Runs cannot check it yet. An empty
+  `[outcome]`, or one with only `target`, passes.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
   A `tool` value or a `tool.<name>` value that is not a table.

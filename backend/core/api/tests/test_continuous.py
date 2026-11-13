@@ -572,6 +572,29 @@ def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env
     assert env.count(JobModel) == 2
 
 
+def test_an_incumbent_with_the_retired_stop_score_still_starts_a_cycle(env: _Env) -> None:
+    """A run stored with ``budget.stop_at_score`` still starts a check; the new request drops the key (SKY-691)."""
+    source_id = _incumbent(env)
+    stored = env.payload(source_id)
+    env.store.update_job(source_id, payload={**stored, "budget": {**stored["budget"], "stop_at_score": 0.9}})
+    _enable(env, source_id)
+    env.better()
+    env.sweep(_due(env))
+
+    cycle = env.cycles()[-1]
+    assert cycle.status == "optimizing", cycle.detail_code
+    assert "stop_at_score" not in env.payload(cycle.optimization_id)["budget"]
+
+
+@pytest.mark.parametrize("value", [0.9, None])
+def test_a_new_run_with_the_retired_stop_score_is_refused(env: _Env, value: float | None) -> None:
+    """``/blackbox/run`` refuses ``budget.stop_at_score``, also as null, and names ``[outcome] target`` (SKY-691)."""
+    response = env.client.post("/blackbox/run", json={**_incumbent_payload(), "budget": {"stop_at_score": value}})
+
+    assert response.status_code == 422
+    assert "[outcome] target" in response.text
+
+
 @pytest.mark.parametrize(
     "models",
     [

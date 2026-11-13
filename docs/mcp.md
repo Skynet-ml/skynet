@@ -67,7 +67,7 @@ knows what to fix and what to do next:
 | Scorer | `repo_draft_set_scorer` (Python metric code) | Yes |
 | Models | `repo_draft_set_models` (reflection model, token source, more models) | Yes |
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |
-| Budget | `repo_draft_set_budget` (scorer runs, iterations, stop score) | No |
+| Budget | `repo_draft_set_budget` (scorer runs, iterations; the run stops at `[outcome] target` in optimize.toml) | No |
 | Review | `repo_draft_review` | Yes |
 | Setup check | `repo_draft_preflight` (paid; it runs the setup check of the run once) | No |
 | Submit | `repo_draft_submit` (optional `hardening_job_id`) | Yes |

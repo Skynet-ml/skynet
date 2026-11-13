@@ -307,7 +307,7 @@ class RepoConstraints:
     # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
     compose_file: str | None = None
     compose_services: tuple[ComposeService, ...] = ()
-    # [outcome]: no run reads these yet, so the worker's gate refuses a file that sets them.
+    # [outcome]: the run stops at the target (SKY-691); the worker's gate still refuses minimums (SKY-692).
     outcome_target: float | None = None
     outcome_minimums: Mapping[str, float] = field(default_factory=dict)
 
@@ -400,6 +400,10 @@ class RepoEnvironment:
             "instructions": {"path": file.instructions_file, "intent": file.intent} if file and file.intent else None,
             "rules": list(self.rules),
             "notes": list(self.notes),
+            "outcome": {
+                "target": file.outcome_target if file else None,
+                "require": dict(file.outcome_minimums) if file else {},
+            },
         }
 
 

@@ -78,6 +78,7 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
+from ..models.blackbox import STORED_PAYLOAD_CONTEXT
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -653,7 +654,7 @@ class BackgroundWorker:
 
             if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
                 raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
-            execution_payload = BlackboxRunRequest.model_validate(payload_dict)
+            execution_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
 
             self._update_owned_job(
                 optimization_id,

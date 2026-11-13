@@ -68,7 +68,6 @@ Un agente de código lee los comentarios de tu evaluador y aplica parches a la v
 | Ajuste                                  | Valor predeterminado | Rango                                                             |
 | --------------------------------------- | -------------------- | ----------------------------------------------------------------- |
 | Máximo de ejecuciones del evaluador     | 200                  | De 1 a 100000                                  |
-| Detener al llegar a la puntuación       | Desactivado          | 0 o más                                                           |
 | Iteraciones máx.                        | Desactivado          | De 1 a 1000. Solo Meta-Harness, AutoSaddler y ShinkaEvolve.       |
 
 Una ejecución del evaluador es una llamada de tu evaluador sobre un caso. La nueva puntuación final de la versión inicial y de la ganadora no cuenta para **Máximo de ejecuciones del evaluador**.

@@ -64,6 +64,19 @@ test("a repository run submits its repo, commit, paths and setup command", () =>
   assert.equal(request.task_model_config, null);
 });
 
+test("a repository run never sends the retired stop score, also from a clone or a restored setup", () => {
+  for (const stop of [0.9, null]) {
+    const state = repoState();
+    state.optimizer.budget = { max_scorer_runs: 8, max_iterations: 4, stop_at_score: stop } as typeof state.optimizer.budget;
+    const request = repoRunRequest(state, options);
+    assert.ok(request);
+    assert.deepEqual(request.budget, { max_scorer_runs: 8, max_iterations: 4 });
+  }
+  const fresh = repoRunRequest(repoState(), options);
+  assert.ok(fresh);
+  assert.equal("stop_at_score" in fresh.budget, false);
+});
+
 test("a repository run sends the chosen sandbox provider and omits it when none is chosen", () => {
   const unset = repoRunRequest(repoState(), options);
   assert.ok(unset);

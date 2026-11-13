@@ -111,9 +111,9 @@ MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
 UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove the uploaded cases."
 # Rules the run is held to; a resumed run must arrive at exactly these again.
-_ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules")
+_ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
-_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": []}
+_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}}}
 _SETUP_ANSWER_TOKENS = 1_024
 _JUDGE_ROLE = "judge"
 # The per-run watch hook setting: ``{"enabled", "model", "threshold"}``, each
@@ -472,6 +472,7 @@ def stage_repository(
         "proposer_hosts": list(hosts),
         # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
         "hidden_hashes": hidden_hashes(hidden),
+        "outcome": record["outcome"],
     }
     return result, StagedRepository(
         snapshot=snapshot,

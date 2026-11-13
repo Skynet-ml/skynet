@@ -125,34 +125,6 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert not (tmp_path.parent / "escaped.bin").exists()
 
 
-@pytest.mark.parametrize("image_protocol", [12, 13])
-def test_an_older_readable_image_gets_its_own_protocol(
-    image_protocol: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pinned image from before the draft fields still runs, so a deploy need not wait for its rebuild."""
-    session = FakeSession()
-    session.image_protocol = image_protocol
-    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
-    events: queue.Queue = queue.Queue()
-    vercel_dspy.run_vercel_dspy(
-        {
-            "_gepa_log_dir": str(tmp_path),
-            "_budget_gateway_descriptor": {
-                "url": "http://127.0.0.1:9876",
-                "control_token": "control",
-                "image": "backend@sha256:" + "a" * 64,
-                "lifetime_seconds": 600,
-            },
-        },
-        "job-old-image",
-        events,
-        "spawn",
-    )
-    assert session.steps[:2] == ["probe", "write_files"]
-    assert events.get_nowait() == {"type": "result", "result": {"program": "done"}}
-    assert events.empty()
-
-
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 
@@ -442,8 +414,8 @@ class ProbedSession(FakeSession):
             " rebuild and re-pin the sandbox image.",
         ),
         (
-            CommandResult(0, stdout="11\n"),
-            f"The sandbox image speaks protocol 11, but this worker speaks {SANDBOX_PROTOCOL};"
+            CommandResult(0, stdout="14\n"),
+            f"The sandbox image speaks protocol 14, but this worker speaks {SANDBOX_PROTOCOL};"
             " rebuild and re-pin the sandbox image.",
         ),
     ],

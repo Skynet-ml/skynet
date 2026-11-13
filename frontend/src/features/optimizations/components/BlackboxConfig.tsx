@@ -141,6 +141,18 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
  * scorer secret is deliberately never surfaced — only the scorer kind and,
  * for remote scorers, the endpoint URL.
  */
+/**
+ * The score that stops a run's search: `[outcome] target` from optimize.toml
+ * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
+ */
+export function runStopScore(
+  budget: Partial<BlackboxBudget>,
+  target: Partial<BlackboxTarget>,
+): number | null {
+  const legacy = (budget as { stop_at_score?: number | null }).stop_at_score;
+  return target.repo?.environment?.outcome?.target ?? legacy ?? null;
+}
+
 export function BlackboxConfigCard({
   job,
   payload,
@@ -298,10 +310,11 @@ export function BlackboxConfigCard({
       icon: <Repeat />,
     });
   }
-  if (budget.stop_at_score != null) {
+  const stopScore = runStopScore(budget, target);
+  if (stopScore != null) {
     optimizationRows.push({
       label: msg("optimization.blackbox.config.budget_stop_label"),
-      value: String(budget.stop_at_score),
+      value: String(stopScore),
       icon: <Target />,
     });
   }

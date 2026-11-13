@@ -1224,7 +1224,7 @@ def _run_job(
         proposer_token_budget_usd=token_budget,
         run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
         seed=job.seed or 0,
-        stop_at_score=job.budget.stop_at_score,
+        stop_at_score=((repo_snapshot or {}).get("outcome") or {}).get("target"),
         max_iterations=job.budget.max_iterations,
         concurrency=concurrency,
         target_label=f"{target.harness} · {target.model}" if caps.agent_target else None,

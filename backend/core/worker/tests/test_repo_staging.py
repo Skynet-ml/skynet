@@ -376,6 +376,43 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
+_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + "\n[outcome]\ntarget = 0.9\n"}
+
+
+def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file's target reaches the run snapshot and the record, and a resume under another target is refused."""
+    first, staged = _stage_with(_TARGETED, monkeypatch)
+    staged.cleanup()
+
+    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": 0.9, "require": {}}
+    assert first["target"]["repo"]["environment"]["outcome"] == {"target": 0.9, "require": {}}
+
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+    with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
+        _stage_with(_FILES, monkeypatch, resumed)
+
+
+def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An environment saved before the outcome field existed counts as having no target."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}}
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = {
+        key: value for key, value in first["target"]["repo"]["environment"].items() if key != "outcome"
+    }
+
+    again, staged = _stage_with(_FILES, monkeypatch, resumed)
+    staged.cleanup()
+    assert again[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}}
+
+    with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
+        _stage_with(_TARGETED, monkeypatch, resumed)
+
+
 _RULED = {
     **_FILES,
     "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
