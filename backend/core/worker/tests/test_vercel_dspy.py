@@ -183,12 +183,12 @@ def _run_with_outcome(
     return session, seen
 
 
-@pytest.mark.parametrize("image_protocol", [12, 13, 14])
+@pytest.mark.parametrize("image_protocol", [12, 13, 14, 15])
 @pytest.mark.parametrize("outcome", [{"target": 0.9, "require": {}}, {"target": None, "require": {"latency": 0.5}}])
 def test_an_older_image_is_refused_for_a_run_with_outcome_values(
     image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An older image reads only ``budget.stop_at_score``, so it would drop the file's target or minimums (SKY-691)."""
+    """An image before 16 drops the file's target or minimums, or gives no run end verdict (SKY-691, SKY-692)."""
     session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
 
     assert session.steps == ["probe"]
@@ -202,7 +202,12 @@ def test_an_older_image_is_refused_for_a_run_with_outcome_values(
 
 @pytest.mark.parametrize(
     ("image_protocol", "outcome"),
-    [(12, {"target": None, "require": {}}), (14, {}), (SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}})],
+    [
+        (12, {"target": None, "require": {}}),
+        (14, {}),
+        (15, {"target": None, "require": {}}),
+        (SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}}),
+    ],
 )
 def test_an_image_runs_when_it_can_read_the_runs_outcome(
     image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch

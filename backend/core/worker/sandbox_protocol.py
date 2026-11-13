@@ -8,7 +8,7 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 15
+SANDBOX_PROTOCOL = 16
 
 # Older image protocols that read this worker's guest request the same way, so a
 # deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
@@ -17,8 +17,12 @@ SANDBOX_PROTOCOL = 15
 # writes the drafts into the staged tree and removes both fields before the
 # guest request, for a run and for serving, so an older image never sees them.
 # Protocol 15 (SKY-691) moves the stop score from ``budget.stop_at_score`` to the
-# staged snapshot's ``outcome``. An older image reads only the budget key, which
-# a run stored before protocol 15 still carries, so the worker refuses an older
-# image only for a run whose snapshot ``outcome`` sets a target or a minimum.
-# The worker sends such an image the image's own protocol number.
-READABLE_PROTOCOLS = frozenset({12, 13, 14, SANDBOX_PROTOCOL})
+# staged snapshot's ``outcome``. An image before 15 reads only the budget key,
+# which a run stored before protocol 15 still carries.
+# Protocol 16 (SKY-692) does not change the request shape. The image at 16
+# writes the run end verdict of the ``[outcome]`` target and minimums into the
+# result details. An image at 15 stops at the target but reports no verdict, so
+# the worker refuses every image before 16 for a run whose snapshot ``outcome``
+# sets a target or a minimum. The worker sends such an image the image's own
+# protocol number.
+READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, SANDBOX_PROTOCOL})
