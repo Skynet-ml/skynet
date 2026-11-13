@@ -1,5 +1,5 @@
 /*
- * node --test cannot load .tsx, so this runs through jiti (edge-case-schema.test.ts
+ * node --test cannot load .tsx, so this runs through jiti (EdgeCaseView.render.test.ts
  * spawns it inside `npm run test:unit`). To run it by hand from frontend/:
  * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
  */
@@ -64,12 +64,16 @@ void describe("EdgeCaseView", () => {
         rows: [
           ["a", 1],
           ["b", 0.5],
+          [null, true],
         ],
       },
     ]);
     assert.equal(html.match(/<th /g)?.length, 2);
-    assert.equal(html.match(/<tr /g)?.length, 3);
+    assert.equal(html.match(/<tr /g)?.length, 4);
     assert.match(html, /<bdi dir="ltr">0\.5<\/bdi>/);
+    // React drops booleans and null, so the view writes them as text.
+    assert.match(html, /<bdi dir="ltr">true<\/bdi>/);
+    assert.match(html, /<bdi dir="ltr"><\/bdi>/);
   });
 
   void it("draws each Callout tone with its own role", () => {
@@ -80,7 +84,7 @@ void describe("EdgeCaseView", () => {
 
   void it("draws a Chart frame with its label and point count", () => {
     for (const kind of ["bar", "line"]) {
-      const html = render([{ type: "Chart", kind, label: "Scores", points: [{ x: 1, y: 2 }] }]);
+      const html = render([{ type: "Chart", kind, title: "Scores", points: [{ x: 1, y: 2 }] }]);
       assert.match(html, /role="img"/);
       assert.match(html, /aria-label="submit\.v2\.edge_case\.chart"/);
       assert.match(html, />Scores</);
@@ -96,6 +100,15 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /<ol class="list-decimal[^"]*ps-5/);
     assert.equal(html.match(/<li /g)?.length, 2);
     assert.match(html, /<li dir="auto"><figure/);
+  });
+
+  void it("draws a nested Steps of strings inside a step", () => {
+    const html = render([
+      { type: "Steps", items: ["Outer.", { type: "Steps", items: ["Inner a.", "Inner b."] }] },
+    ]);
+    assert.equal(html.match(/<ol /g)?.length, 2);
+    assert.equal(html.match(/<li /g)?.length, 4);
+    assert.match(html, />Inner b\.</);
   });
 
   void it("falls back to patch.diff and why.md when the tree is invalid", () => {

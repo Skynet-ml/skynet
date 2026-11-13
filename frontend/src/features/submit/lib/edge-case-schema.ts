@@ -4,8 +4,8 @@
  * here and draws only the node types below. The backend (SKY-682) writes the
  * same node names and fields.
  *
- * A tree is a list of nodes. A Steps item may hold one child node, so the
- * deepest tree has two levels.
+ * A tree is a list of nodes. A Steps item may hold one child node, for
+ * example a nested Steps of strings, so the deepest tree has two levels.
  */
 
 export const MAX_NODES = 30;
@@ -19,7 +19,7 @@ export const MAX_STRING = 100_000;
 
 export type CalloutTone = "info" | "warn" | "danger";
 export type ChartKind = "bar" | "line";
-export type Cell = string | number;
+export type Cell = string | number | boolean | null;
 
 export interface ScoreCompareNode {
   type: "ScoreCompare";
@@ -55,7 +55,7 @@ export interface CalloutNode {
 }
 
 export interface ChartPoint {
-  x: Cell;
+  x: string | number;
   y: number;
 }
 
@@ -63,7 +63,7 @@ export interface ChartNode {
   type: "Chart";
   kind: ChartKind;
   points: ChartPoint[];
-  label?: string;
+  title?: string;
 }
 
 export interface TextNode {
@@ -118,8 +118,12 @@ function num(value: unknown): number {
   return value;
 }
 
-function cell(value: unknown): Cell {
+function key(value: unknown): string | number {
   return typeof value === "number" ? num(value) : str(value);
+}
+
+function cell(value: unknown): Cell {
+  return value === null || typeof value === "boolean" ? value : key(value);
 }
 
 /** Checks the length before any element is read, so a huge array costs nothing. */
@@ -177,11 +181,11 @@ function node(value: unknown, depth: number, budget: Budget): EdgeCaseNode {
       if (raw.kind !== "bar" && raw.kind !== "line") fail();
       const points = list(raw.points, MAX_CHART_POINTS, 1).map((p) => {
         const point = record(p);
-        return { x: cell(point.x), y: num(point.y) };
+        return { x: key(point.x), y: num(point.y) };
       });
       return withOptional<ChartNode>(
         { type: "Chart", kind: raw.kind, points },
-        { label: optStr(raw.label) },
+        { title: optStr(raw.title) },
       );
     }
     case "Text":

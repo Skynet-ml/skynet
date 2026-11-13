@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -31,6 +29,8 @@ const ONE_OF_EACH = [
     rows: [
       ["a", 1],
       ["b", 0.5],
+      ["c", true],
+      [null, false],
     ],
   },
   { type: "Callout", tone: "warn", text: "The metric reads the label." },
@@ -41,10 +41,11 @@ const ONE_OF_EACH = [
       { x: "base", y: 0.4 },
       { x: "exploit", y: 1 },
     ],
-    label: "Scores",
+    title: "Scores",
   },
   { type: "Text", text: "Plain words." },
   { type: "Steps", items: ["Read the label.", { type: "Text", text: "Echo it." }] },
+  { type: "Steps", items: ["Outer step.", { type: "Steps", items: ["Inner a.", "Inner b."] }] },
 ];
 
 function text(value: string) {
@@ -187,24 +188,4 @@ void describe("parseEdgeCase", () => {
       assert.equal(parseEdgeCase(value), null);
     }
   });
-});
-
-const frontend = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../../..");
-
-// node --test only loads .ts, so the EdgeCaseView .tsx render tests run in a jiti child.
-void it("EdgeCaseView render tests pass", () => {
-  const result = spawnSync(
-    path.join(frontend, "node_modules/.bin/jiti"),
-    ["src/features/submit/components/v2/EdgeCaseView.test.tsx"],
-    {
-      cwd: frontend,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        JITI_JSX: "1",
-        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
-      },
-    },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });

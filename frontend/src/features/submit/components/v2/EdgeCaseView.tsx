@@ -42,7 +42,10 @@ const FIGURE_CLASS = "overflow-hidden rounded-lg border border-border/60 bg-mute
 const CAPTION_CLASS =
   "border-b border-border/50 px-3 py-1.5 text-start font-mono text-xs text-muted-foreground";
 
-/** A unified diff, read-only, with added and removed lines tinted as the harden screen does. */
+/**
+ * A unified diff, read-only, with added and removed lines tinted. It mirrors
+ * DiffView in HardenMetricScreen.tsx; SKY-684 (the harden page) will share one copy.
+ */
 function DiffBlock({ diff, label }: { diff: string; label: string }) {
   return (
     <figure className={FIGURE_CLASS}>
@@ -141,7 +144,7 @@ function DataTable({ node }: { node: TableNode }) {
             <TableRow key={r}>
               {row.map((value, c) => (
                 <TableCell key={c} dir="auto">
-                  {typeof value === "number" ? <bdi dir="ltr">{value}</bdi> : value}
+                  {typeof value === "string" ? value : <bdi dir="ltr">{String(value ?? "")}</bdi>}
                 </TableCell>
               ))}
             </TableRow>
@@ -178,9 +181,9 @@ function Chart({ node }: { node: ChartNode }) {
   };
   return (
     <figure className={FIGURE_CLASS}>
-      {node.label && (
+      {node.title && (
         <figcaption className={CAPTION_CLASS} dir="auto">
-          {node.label}
+          {node.title}
         </figcaption>
       )}
       {/* Axes read left to right in every language, as the score chart does. */}
