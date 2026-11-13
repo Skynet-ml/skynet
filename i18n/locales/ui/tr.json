@@ -277,7 +277,7 @@
   "submit.v2.harden.fix.cancel": "İptal",
   "submit.v2.harden.fix.redrafting": "Ajan, notunuza göre düzeltmeyi yeniden yazıyor.",
   "submit.v2.harden.fix.not_applied": "Düzeltme düzenleyicideki metric.py dosyasına uygulanamadı. Çalıştırmadan önce metric.py dosyasını kontrol edin.",
-  "submit.v2.edge_case.score.exploit": "İstismar puanı",
+  "submit.v2.edge_case.score.exploit": "Açık puanı",
   "submit.v2.edge_case.score.base": "Temel puan",
   "submit.v2.edge_case.io.input": "Girdi",
   "submit.v2.edge_case.io.expected": "Beklenen",

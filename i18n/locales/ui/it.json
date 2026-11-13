@@ -278,7 +278,7 @@
   "submit.v2.harden.fix.redrafting": "L'agente sta riscrivendo la correzione in base alla tua nota.",
   "submit.v2.harden.fix.not_applied": "La correzione non si applica a metric.py nell'editor. Controlla metric.py prima di avviare.",
   "submit.v2.edge_case.score.exploit": "Punteggio dell'exploit",
-  "submit.v2.edge_case.score.base": "Punteggio di base",
+  "submit.v2.edge_case.score.base": "Punteggio base",
   "submit.v2.edge_case.io.input": "Input",
   "submit.v2.edge_case.io.expected": "Atteso",
   "submit.v2.edge_case.io.got": "Ottenuto",

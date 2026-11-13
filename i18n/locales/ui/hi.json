@@ -277,7 +277,7 @@
   "submit.v2.harden.fix.cancel": "रद्द करें",
   "submit.v2.harden.fix.redrafting": "एजेंट आपके नोट के आधार पर सुधार फिर से लिख रहा है।",
   "submit.v2.harden.fix.not_applied": "सुधार एडिटर में metric.py पर लागू नहीं हुआ। चलाने से पहले metric.py जाँचें।",
-  "submit.v2.edge_case.score.exploit": "एक्सप्लॉइट स्कोर",
+  "submit.v2.edge_case.score.exploit": "exploit स्कोर",
   "submit.v2.edge_case.score.base": "आधार स्कोर",
   "submit.v2.edge_case.io.input": "इनपुट",
   "submit.v2.edge_case.io.expected": "अपेक्षित",
