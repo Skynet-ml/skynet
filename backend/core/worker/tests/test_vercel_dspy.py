@@ -125,6 +125,96 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert not (tmp_path.parent / "escaped.bin").exists()
 
 
+@pytest.mark.parametrize("image_protocol", [12, 13, 14])
+def test_an_older_readable_image_gets_its_own_protocol(
+    image_protocol: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned older image still runs, so a deploy need not wait for its rebuild."""
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    vercel_dspy.run_vercel_dspy(
+        {
+            "_gepa_log_dir": str(tmp_path),
+            "_budget_gateway_descriptor": {
+                "url": "http://127.0.0.1:9876",
+                "control_token": "control",
+                "image": "backend@sha256:" + "a" * 64,
+                "lifetime_seconds": 600,
+            },
+        },
+        "job-old-image",
+        events,
+        "spawn",
+    )
+    assert session.steps[:2] == ["probe", "write_files"]
+    assert events.get_nowait() == {"type": "result", "result": {"program": "done"}}
+    assert events.empty()
+
+
+def _run_with_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_protocol: int, outcome: dict[str, Any]
+) -> tuple[FakeSession, list[dict[str, Any]]]:
+    """Run a repository payload whose staged snapshot holds ``outcome`` on an image of ``image_protocol``.
+
+    Args:
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+        image_protocol: The protocol the image answers to the probe.
+        outcome: The snapshot's ``outcome`` entry.
+
+    Returns:
+        The session and every event the run put on the queue.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    events: queue.Queue = queue.Queue()
+    payload = _descriptor_payload(
+        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "outcome": outcome}
+    )
+    vercel_dspy.run_vercel_dspy(payload, "job-outcome", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+    return session, seen
+
+
+@pytest.mark.parametrize("image_protocol", [12, 13, 14])
+@pytest.mark.parametrize("outcome", [{"target": 0.9, "require": {}}, {"target": None, "require": {"latency": 0.5}}])
+def test_an_older_image_is_refused_for_a_run_with_outcome_values(
+    image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older image reads only ``budget.stop_at_score``, so it would drop the file's target or minimums (SKY-691)."""
+    session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
+
+    assert session.steps == ["probe"]
+    assert session.files == {}
+    assert session.closed
+    [event] = events
+    assert event["type"] == "error"
+    assert event["error"] == vercel_dspy.OUTCOME_IMAGE_MESSAGE
+    assert event["failure_kind"] == DETERMINISTIC_FAILURE
+
+
+@pytest.mark.parametrize(
+    ("image_protocol", "outcome"),
+    [(12, {"target": None, "require": {}}), (14, {}), (SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}})],
+)
+def test_an_image_runs_when_it_can_read_the_runs_outcome(
+    image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older image runs a run with no outcome values; a current image runs one with a target."""
+    session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
+
+    assert session.steps[0] == "probe"
+    assert "optimizer" in session.steps
+    assert all(event.get("error") != vercel_dspy.OUTCOME_IMAGE_MESSAGE for event in events)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 
@@ -414,8 +504,8 @@ class ProbedSession(FakeSession):
             " rebuild and re-pin the sandbox image.",
         ),
         (
-            CommandResult(0, stdout="14\n"),
-            f"The sandbox image speaks protocol 14, but this worker speaks {SANDBOX_PROTOCOL};"
+            CommandResult(0, stdout="11\n"),
+            f"The sandbox image speaks protocol 11, but this worker speaks {SANDBOX_PROTOCOL};"
             " rebuild and re-pin the sandbox image.",
         ),
     ],

@@ -11,9 +11,14 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 SANDBOX_PROTOCOL = 15
 
 # Older image protocols that read this worker's guest request the same way, so a
-# deploy keeps its pinned image until the image is rebuilt. The worker sends such
-# an image the image's own protocol number. Protocol 15 (SKY-691) moves the stop
-# score from ``budget.stop_at_score`` to the staged snapshot's ``outcome``; an
-# older image reads only the budget key and would run a new run without its
-# ``[outcome] target``, so no older protocol can read this request.
-READABLE_PROTOCOLS = frozenset({SANDBOX_PROTOCOL})
+# deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
+# ``conversation_id``, which the submit route clears before it stores the run.
+# Protocol 14 added ``target.repo.draft_files`` and ``draft_base``: the parent
+# writes the drafts into the staged tree and removes both fields before the
+# guest request, for a run and for serving, so an older image never sees them.
+# Protocol 15 (SKY-691) moves the stop score from ``budget.stop_at_score`` to the
+# staged snapshot's ``outcome``. An older image reads only the budget key, which
+# a run stored before protocol 15 still carries, so the worker refuses an older
+# image only for a run whose snapshot ``outcome`` sets a target or a minimum.
+# The worker sends such an image the image's own protocol number.
+READABLE_PROTOCOLS = frozenset({12, 13, 14, SANDBOX_PROTOCOL})

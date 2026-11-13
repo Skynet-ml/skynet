@@ -33,6 +33,9 @@ BROKEN_IMAGE_MESSAGE = "The sandbox image cannot start its optimizer; rebuild th
 OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
 )
+OUTCOME_IMAGE_MESSAGE = (
+    "The sandbox image is older than [outcome] support in optimize.toml; rebuild and re-pin the sandbox image."
+)
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
 )
@@ -143,6 +146,28 @@ def _require_image_protocol(session: Any, lifetime: float) -> int:
     raise _guest_failure(result)
 
 
+def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[outcome]`` values.
+
+    An image before protocol 15 reads the stop score only from
+    ``budget.stop_at_score``, so it would run without the file's target or
+    minimums and report no error.
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and the snapshot's outcome sets
+            a target or a minimum.
+    """
+    if image_protocol >= SANDBOX_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    outcome = snapshot.get("outcome") or {}
+    if outcome.get("target") is not None or outcome.get("require"):
+        raise RuntimeError(OUTCOME_IMAGE_MESSAGE)
+
+
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
     """Execute the full optimizer in the pinned backend image without provider credentials.
 
@@ -200,6 +225,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             )
         )
         image_protocol = _require_image_protocol(session, lifetime)
+        _require_outcome_support(image_protocol, staged)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip
