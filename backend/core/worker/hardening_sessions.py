@@ -72,10 +72,11 @@ Score = Callable[[str], dict[str, Any]]
 
 
 # The edge-case catalog nodes (SKY-682). ``frontend/src/shared/types/hardening.ts``
-# mirrors them for the renderer (SKY-683); keep the two in step. Each node names
-# its component in ``type``; only ``Steps`` holds other nodes, which makes the
-# depth limit of 2. NaN and infinity are refused: JSON responses and JSONB
-# columns cannot hold them.
+# mirrors their types, and ``frontend/src/features/submit/lib/edge-case-schema.ts``
+# mirrors them with the same caps for the renderer (SKY-683); keep all three in
+# step. Each node names its component in ``type``; only ``Steps`` holds other
+# nodes, which makes the depth limit of 2. NaN and infinity are refused: JSON
+# responses and JSONB columns cannot hold them.
 class _Node(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
