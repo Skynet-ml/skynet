@@ -724,6 +724,47 @@ def _case_results(baseline: FinalRun | None, best: FinalRun | None) -> list[Blac
     return rows
 
 
+def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
+    """Judge the ``[outcome]`` target and minimums of ``optimize.toml`` on the reported final run.
+
+    The engine may stop on its search-time score; this verdict uses the final
+    run of the reported version, so the search can stop and the target still
+    fail. The verdict only reports: it never changes what the run publishes.
+
+    Args:
+        outcome: The snapshot's ``{"target": float | None, "require": {name: minimum}}``.
+        best: The reported version's final run, if it had one.
+
+    Returns:
+        ``target`` and ``target_reached`` when the file sets a target, and
+        ``minimums_passed`` and ``failed_minimums`` when it sets minimums.
+        A version with no final score reaches no target and passes no minimum.
+    """
+    score = best.score if best else None
+    verdict: dict[str, Any] = {}
+    if outcome.get("target") is not None:
+        target = float(outcome["target"])
+        verdict.update(target=target, target_reached=score is not None and score >= target)
+    minimums = outcome.get("require") or {}
+    if minimums:
+        failed = []
+        for name, minimum in minimums.items():
+            entry = best.named.get(name) if best and score is not None else None
+            if score is None:
+                reason = f"The final run has no score, so {name!r} has no value."
+            elif entry is None:
+                reason = f"The metric returned no score named {name!r}."
+            elif entry.score < float(minimum):
+                reason = f"{name!r} scored {entry.score:.3f}, below its minimum {float(minimum):g}."
+            else:
+                continue
+            failed.append(
+                {"name": name, "minimum": float(minimum), "value": entry.score if entry else None, "reason": reason}
+            )
+        verdict.update(minimums_passed=not failed, failed_minimums=failed)
+    return verdict
+
+
 # Side info persisted with the version history is capped so a run whose scorer
 # returns renders for every version cannot bloat the job row; images are shed
 # from the weakest versions first and the best version always keeps its own.
@@ -1419,6 +1460,7 @@ def _run_job(
         for node in result.metadata.pop("candidate_tree", [])
     ]
     optimizer_best_score = None if engine_pick_error is not None else result.best_score
+    verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,
@@ -1469,6 +1511,8 @@ def _run_job(
             **finite_json(result.metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
+            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
+            **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,

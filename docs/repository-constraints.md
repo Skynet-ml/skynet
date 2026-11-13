@@ -92,6 +92,21 @@ because the scorer sets no range for a score. A score name must not be
 empty. `[outcome.require]` holds at most 50 names. An empty `[outcome]`, or
 an `[outcome]` with only `[outcome.require]`, is valid.
 
+At the end of a run, Skynet judges `[outcome]` on the final score of the
+reported version. Skynet splits the cases 70/15/15 with the run seed. The
+engine can stop on its search score, but the verdict uses the held-out
+score: the mean of `score()` over the held-out cases. With fewer than 5
+cases there is no held-out part, so the run uses its validation cases, or
+its train cases when there are none. A
+run with no cases has no split, so the verdict uses the one `score()` of
+the version. "Target reached" is true when that score is equal to or above
+`target`. "Minimums passed" is true when each named score is equal to or
+above its minimum. A named score is its mean over the same cases. A minimum
+fails when the metric does not return that name, and the reason names the
+score. The run stores the verdict as `details.outcome` in its result, with
+the list of the failed minimums. The verdict does not change what the run
+publishes.
+
 `[outcome]` has no `accept` key, and an `accept` key fails as an unknown
 setting. Every run opens a pull request, as before. Skynet does not merge it
 by itself.
