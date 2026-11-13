@@ -9,3 +9,12 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
 SANDBOX_PROTOCOL = 14
+
+# Older image protocols that read this worker's guest request the same way, so a
+# deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
+# ``conversation_id``, which the submit route clears before it stores the run.
+# Protocol 14 added ``target.repo.draft_files`` and ``draft_base``: the parent
+# writes the drafts into the staged tree and removes both fields, and an older
+# image ignores a ``draft_base`` that serving keeps. The worker sends such an
+# image the image's own protocol number.
+READABLE_PROTOCOLS = frozenset({12, 13, SANDBOX_PROTOCOL})
