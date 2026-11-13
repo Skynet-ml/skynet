@@ -250,7 +250,7 @@ def test_a_saved_steer_stays_in_the_turn_that_started_the_run() -> None:
 
 
 def test_a_lost_reply_does_not_show_the_next_turn() -> None:
-    """When the start turn saved no reply, the owner's next turn and its reply stay hidden."""
+    """When the start turn saved no reply, the chat user's next turn and its reply stay hidden."""
     store = _store()
     _bind_setup_chat(store, "opt-1", "alice", "c-alice")
     with Session(store.engine) as session:

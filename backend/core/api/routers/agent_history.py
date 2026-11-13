@@ -588,8 +588,8 @@ def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
     Pinned conversations are preserved regardless of age — the user explicitly
     marked them as worth keeping. The setup chat of a run is preserved too,
     because the chat's own user and admins still read it from the run.
-    Messages cascade
-    via the ``ON DELETE CASCADE`` FK on :class:`AgentMessageModel.conversation_id`.
+    Messages cascade via the ``ON DELETE CASCADE`` FK on
+    :class:`AgentMessageModel.conversation_id`.
 
     Args:
         engine: SQLAlchemy engine the conversations table is bound to.
