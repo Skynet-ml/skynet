@@ -208,12 +208,11 @@ def test_screen_allows_only_screenless_fields_on_a_screen_without_fields() -> No
     assert validate_wizard_screen("update_wizard_state", {"seed": 1}, state) is not None
 
 
-def test_screen_lets_only_the_code_screens_write_code() -> None:
-    """The Metric and Check screens write run and metric code; earlier screens may not."""
-    code = {"run_code": "x", "metric_code": "y"}
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="metric")) is None
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="check")) is None
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="brief")) is not None
+def test_no_screen_writes_code_through_the_wizard_write() -> None:
+    """metric.py goes only through the file tools, which ask in Ask mode; the wizard write never asks."""
+    for code in ({"run_code": "x"}, {"metric_code": "y"}):
+        for screen in ("metric", "check", "brief"):
+            assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen=screen)) is not None
 
 
 @pytest.mark.asyncio
@@ -226,7 +225,7 @@ async def test_wrap_reports_previous_values_of_a_wizard_write() -> None:
         registry=ApprovalRegistry(),
         emit=events.append,
         outer_loop=asyncio.get_running_loop(),
-        wizard_state=cast(WizardState, {**_READY, "wizard_screen": "metric", "run_code": "old"}),
+        wizard_state=cast(WizardState, {**_READY, "run_code": "old"}),
     )
     await tool.func._async_body(run_code="new", metric_code="score", job_description="Sorts mail")
     end = next(e for e in events if e["event"] == "tool_end")
@@ -494,19 +493,6 @@ def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")
     assert "Say only what a tool result confirms." in screen_signature("brief").instructions
     assert "the only kind new runs take" not in SCREEN_FOCUS["artifact"]
-
-
-def test_screen_snapshot_names_the_failed_setup_check() -> None:
-    """The snapshot carries the failed setup check's errors, stripped, under a named key."""
-    errors = "Fix these errors:\n- optimize.toml:3 [run] command: required"
-    for extra in ({}, {"cloned_run": True}):
-        state = cast(WizardState, {"wizard_screen": "brief", "setup_check": f"  {errors}\n", **extra})
-        snapshot = screen_snapshot(state)
-        assert snapshot["setup_check_failed"] == errors
-        assert "setup_check" not in snapshot
-    assert "setup_check_failed" not in screen_snapshot(
-        cast(WizardState, {"wizard_screen": "brief", "setup_check": " "})
-    )
 
 
 def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
@@ -1545,6 +1531,7 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
         "list_models_for_agent",
         "search_docs",
         "request_secret",
+        "ask_user",
         "share_plan",
         "submit",
     ]
@@ -1552,6 +1539,7 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert lm.requests[1]["messages"][: len(first)] == first
     assert events[0]["event"] == "turn_metadata"
     assert events[0]["data"]["allowed_tools"] == [
+        "ask_user",
         "list_models_for_agent",
         "request_secret",
         "search_docs",
@@ -1670,7 +1658,7 @@ async def test_turn_offers_web_tools_when_firecrawl_is_configured(monkeypatch: p
 
     assert reply == "found it"
     assert events[0]["data"]["allowed_tools"] == sorted(
-        {*web_tools.WEB_TOOLS, "request_secret", "search_docs", "share_plan"}
+        {*web_tools.WEB_TOOLS, "ask_user", "request_secret", "search_docs", "share_plan"}
     )
     assert posted == [("/search", {"query": "dspy gepa", "limit": 5})]
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
@@ -1720,6 +1708,56 @@ async def test_turn_answers_from_the_docs_tool(monkeypatch: pytest.MonkeyPatch, 
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("search_docs", "ok")]
     assert "/docs/limits" in json.dumps(lm.requests[1]["messages"])
+
+
+@pytest.mark.asyncio
+async def test_chat_without_a_screen_asks_with_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat with no wizard screen offers ``ask_user`` and runs it with no approval, even in Ask mode."""
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield an empty fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    options = [{"label": "Tag a dataset", "description": "Open the tagger."}, {"label": "Start a run"}]
+    lm = _ScriptedLM(
+        [
+            ("ask_user", {"question": "What next?", "options_json": json.dumps(options)}),
+            ("submit", {"assistant_message": "What next?"}),
+        ]
+    )
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="hi",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+    )
+
+    assert reply == "What next?"
+    assert "ask_user" in events[0]["data"]["allowed_tools"]
+    assert not [e for e in events if e["event"] == "pending_approval"]
+    ends = [e["data"] for e in events if e["event"] == "tool_end"]
+    assert [(e["tool"], e["status"]) for e in ends] == [("ask_user", "ok")]
+    assert ends[0]["result"] == {
+        "question": "What next?",
+        "options": [
+            {"label": "Tag a dataset", "description": "Open the tagger."},
+            {"label": "Start a run", "description": ""},
+        ],
+    }
 
 
 def test_share_plan_streams_a_plan_event_and_no_tool_row() -> None:
@@ -2136,6 +2174,8 @@ def test_turn_guard_refuses_a_statement_once_on_a_done_screen() -> None:
     assert events[1]["data"]["tool"] == "turn_check"
     assert events[1]["data"]["arguments"] == {"reply": "I saved the goal."}
     assert events[2]["data"]["result"] == {"missing": [], "feedback": refusal}
+    # The panel and the saved chat read any other status as a failed step.
+    assert events[2]["data"]["status"] == "ok"
     assert guard({"assistant_message": "I saved the goal."}) is None
 
 
@@ -2233,32 +2273,30 @@ def test_chat_replay_drops_turn_checks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hand-off sends the current optimize.toml and puts the returned file into the turn's patch (SKY-184)."""
-    seen: dict[str, Any] = {}
-
-    def fake_coder(context: dict[str, Any], request: str, **_kwargs: Any) -> dict[str, Any]:
-        """Record the context and return a new optimize.toml."""
-        seen.update(context)
-        return {"wizard_state": {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}, "summary": "", "open_questions": []}
-
-    monkeypatch.setattr(generalist_module, "run_coding_agent", fake_coder)
+async def test_workspace_edit_puts_the_changed_optimize_toml_into_the_draft() -> None:
+    """An edit starts from the draft's optimize.toml and puts the changed file into the turn's patch (SKY-184)."""
     state = cast(WizardState, {"wizard_screen": "metric", "optimize_toml": "version = 1\n"})
     turn = _TurnAuthoringFlag()
-    (tool,) = generalist_module.coding_agent_tools(state, turn, lm=None, emit=lambda _e: None, github_token=None)
+    tools = {tool.name: tool for tool in generalist_module.workspace_tools(state, turn, github_token=None)}
 
-    await tool.func("Run the tests.")
-
-    assert seen["optimize_toml"] == "version = 1\n"
-    assert turn.wizard_patch == {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}
-
-
-def test_hand_off_desc_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
-    """The setup agent shows the returned optimize.toml in full, so the user sees the file (SKY-184)."""
-    state = cast(WizardState, {"wizard_screen": "metric"})
-    (tool,) = generalist_module.coding_agent_tools(
-        state, _TurnAuthoringFlag(), lm=None, emit=lambda _e: None, github_token=None
+    await tools["edit_workspace_file"].acall(
+        path="optimize.toml", old_text="version = 1\n", new_text="version = 1\n\n[run]\nentry = 'a.py:run'\n"
     )
 
-    assert "show the user the returned optimize_toml in full" in tool.desc
-    assert "Do not write the same code again with update_wizard_state." in tool.desc
+    assert turn.wizard_patch == {"optimize_toml": "version = 1\n\n[run]\nentry = 'a.py:run'\n"}
+
+
+@pytest.mark.asyncio
+async def test_list_repo_folder_without_a_path_lists_the_root() -> None:
+    """A call with no path reads the root, so a model that drops the path gets an answer, not a TypeError."""
+    state = cast(WizardState, {"wizard_screen": "metric"})
+    tools = {
+        tool.name: tool for tool in generalist_module.workspace_tools(state, _TurnAuthoringFlag(), github_token=None)
+    }
+
+    assert await tools["list_repo_folder"].acall() == {"error": "No repository is chosen yet."}
+
+
+def test_metric_focus_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
+    """The setup agent shows the optimize.toml it wrote in full, so the user sees the file (SKY-184)."""
+    assert "When you write optimize.toml, show the user the file in full." in SCREEN_FOCUS["metric"]

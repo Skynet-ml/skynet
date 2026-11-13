@@ -22,6 +22,7 @@ const {
   listChange,
   liveValues,
   lockedCodeFiles,
+  mergedPatch,
   rolesFields,
   wizardWriteChanges,
   writeSummary,
@@ -177,4 +178,13 @@ test("a column-role write shows the roles card's old and new values", () => {
     { field: "input_fields", before: ["a"], after: ["q"] },
     { field: "expected_field", before: "q", after: "a" },
   ]);
+});
+
+test("a file tool's patch merges its file over the files the state holds", () => {
+  const state = { workspace_files: { "src/a.py": "a = 1\n", "src/b.py": "b = 1\n" } };
+  assert.deepEqual(mergedPatch(state, { workspace_files: { "src/b.py": "b = 2\n" } }), {
+    workspace_files: { "src/a.py": "a = 1\n", "src/b.py": "b = 2\n" },
+  });
+  const plain = { metric_code: "x = 1\n" };
+  assert.equal(mergedPatch(state, plain), plain);
 });

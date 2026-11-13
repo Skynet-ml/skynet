@@ -1,8 +1,9 @@
 /**
  * The files one agent turn edited, read from the turn's tool calls, so the
- * chat can show an "Edited N files" card and the Changes pane a "Last turn"
- * scope. A call edits a file when its result's ``wizard_state`` sets a code
- * field (the coding agent's metric, run code or optimize.toml).
+ * chat can show an "Edited N files" card. A call edits a file when its
+ * result's ``wizard_state`` sets a code field (the metric, run code or
+ * optimize.toml that a workspace tool wrote) or a ``workspace_files`` entry
+ * (any other repository file).
  */
 
 import { diffStats, lineDiff } from "@/shared/lib/line-diff";
@@ -54,19 +55,22 @@ export function messageEdits(
     const result = call.payload?.result;
     if (!before || !isRecord(result)) continue;
     const state = isRecord(result.wizard_state) ? result.wizard_state : result;
-    for (const [field, path] of Object.entries(CODE_FIELD_FILES)) {
-      const after = state[field];
-      if (typeof after !== "string") continue;
+    const note = (path: string, after: unknown, prior: unknown) => {
+      if (typeof after !== "string") return;
       const held = byPath.get(path);
       if (held) held.after = after;
-      else {
-        const prior = before[field];
+      else
         byPath.set(path, {
           before: typeof prior === "string" ? prior : (base?.get(path) ?? ""),
           after,
         });
-      }
-    }
+    };
+    for (const [field, path] of Object.entries(CODE_FIELD_FILES))
+      note(path, state[field], before[field]);
+    // Any other repository file the agent wrote; the patch holds only that file.
+    const files = isRecord(state.workspace_files) ? state.workspace_files : {};
+    const priorFiles = isRecord(before.workspace_files) ? before.workspace_files : {};
+    for (const [path, after] of Object.entries(files)) note(path, after, priorFiles[path]);
   }
   return [...byPath]
     .filter(([, { before, after }]) => body(before) !== body(after))
@@ -76,29 +80,6 @@ export function messageEdits(
       after,
       ...diffStats(lineDiff(body(before), body(after))),
     }));
-}
-
-/**
- * Find the edits of the newest turn that edited files.
- *
- * Args:
- *   messages: The chat on view.
- *   writeBefore: As for ``messageEdits``.
- *   base: As for ``messageEdits``.
- *
- * Returns:
- *   That turn's edits, empty when no turn edited a file.
- */
-export function latestTurnEdits(
-  messages: readonly AgentMessage[],
-  writeBefore: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
-  base?: ReadonlyMap<string, string> | null,
-): FileEdit[] {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const edits = messageEdits(messages[i]!, writeBefore, base);
-    if (edits.length > 0) return edits;
-  }
-  return [];
 }
 
 /**

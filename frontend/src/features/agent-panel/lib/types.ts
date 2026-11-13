@@ -11,6 +11,8 @@ export interface ChatTurn {
   // Compact trace of the tools an assistant turn ran, so the next turn can
   // reason about earlier results instead of only the prose reply.
   tool_calls?: Array<{ tool: string; status: "done" | "error"; result?: string }>;
+  /** The saved message id; the backend stores a compaction on the user message it names. */
+  id?: number;
 }
 
 /**
@@ -30,6 +32,8 @@ export interface WizardState {
   repository?: string;
   /** The host of `repository`; the user picks it, the agent only reads it. */
   repo_provider?: "github" | "gitlab" | "bitbucket";
+  /** The ref the run starts from: its pinned commit, else its branch; unset for the default branch. */
+  repo_branch?: string;
   /** The agent created `repository` on GitHub, so the run request marks it `created_by_skynet`. */
   repo_created_by_skynet?: boolean;
   /** Whether the user linked a GitHub account; unset until the wizard knows. */
@@ -62,8 +66,12 @@ export interface WizardState {
   spending_floor_cents?: number;
   run_code?: string;
   metric_code?: string;
-  /** A repository run's optimize.toml in the setup draft; only the coding agent writes it. */
+  /** A repository run's optimize.toml in the setup draft; only the Metric screen's workspace tools write it. */
   optimize_toml?: string;
+  /** The other repository files in the setup draft, by path; the run writes them over its checkout. */
+  workspace_files?: Record<string, string>;
+  /** The commit the agent read the draft files at; the run refuses them on any other commit. */
+  workspace_base?: string;
   /** The wizard screen on view; the agent may edit only the fields on it. */
   wizard_screen?: string;
   /** Notes screen agents left for later screens, oldest first. */
@@ -72,8 +80,6 @@ export interface WizardState {
   screen_issue?: string;
   /** The later screen a go-back left from; Continue returns there. */
   return_screen?: string;
-  /** The failed setup check's errors, as the "Ask the agent to fix" turn words them. */
-  setup_check?: string;
   /** The setup is a copy of an earlier run, so the agent waits for the user. */
   cloned_run?: boolean;
 }
