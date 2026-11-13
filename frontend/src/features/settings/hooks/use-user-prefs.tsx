@@ -15,7 +15,12 @@ import {
 
 interface UserPrefsContextValue {
   prefs: UserPrefs;
-  setPref: <K extends keyof UserPrefs>(key: K, value: UserPrefs[K]) => void;
+  /** Save one pref. `quiet` skips the "saved" toast for controls whose own state shows the change. */
+  setPref: <K extends keyof UserPrefs>(
+    key: K,
+    value: UserPrefs[K],
+    opts?: { quiet?: boolean },
+  ) => void;
   updatePrefs: (patch: AgentPreferencePatch) => void;
   resetAll: () => void;
 }
@@ -48,11 +53,15 @@ export function UserPrefsProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("storage", handler);
   }, []);
 
-  const setPref = React.useCallback(<K extends keyof UserPrefs>(key: K, value: UserPrefs[K]) => {
-    setPrefs((prev) => ({ ...prev, [key]: value }));
-    writePref(key, value);
-    toast.success(msg("settings.saved"), { autoClose: 1500, toastId: "settings-saved" });
-  }, []);
+  const setPref = React.useCallback(
+    <K extends keyof UserPrefs>(key: K, value: UserPrefs[K], opts?: { quiet?: boolean }) => {
+      setPrefs((prev) => ({ ...prev, [key]: value }));
+      writePref(key, value);
+      if (!opts?.quiet)
+        toast.success(msg("settings.saved"), { autoClose: 1500, toastId: "settings-saved" });
+    },
+    [],
+  );
 
   const updatePrefs = React.useCallback((patch: AgentPreferencePatch) => {
     const entries = Object.entries(patch) as Array<[keyof AgentPreferencePatch, unknown]>;

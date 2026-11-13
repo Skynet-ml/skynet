@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Lightning, Shield, ShieldCheck } from "@/shared/ui/icons";
-import { formatMsg, msg } from "@/shared/lib/messages";
+import { FastForward, Pause, Play } from "@/shared/ui/icons";
+import { formatMsg } from "@/shared/lib/messages";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { cn } from "@/shared/lib/utils";
@@ -14,15 +14,17 @@ interface TrustToggleProps {
   mode: TrustMode;
   onCycle: () => void;
   className?: string;
-  /** Codex-style borderless variant for the composer's control row: colored
-   *  icon + label only, sized to sit beside the h-9 composer controls. */
+  /** Borderless variant for the composer's control row, as tall as the
+   *  composer's other buttons. It shows the icon and the mode name. */
   plain?: boolean;
 }
 
+// A media scale from strict to free: pause asks first, play runs the safe
+// steps, fast-forward runs everything at full speed.
 const ICONS: Record<TrustMode, React.ComponentType<{ className?: string }>> = {
-  ask: Shield,
-  auto_safe: ShieldCheck,
-  yolo: Lightning,
+  ask: Pause,
+  auto_safe: Play,
+  yolo: FastForward,
 };
 
 const MODE_ORDER: TrustMode[] = ["ask", "auto_safe", "yolo"];
@@ -31,65 +33,73 @@ export function TrustToggle({ mode, onCycle, className, plain }: TrustToggleProp
   const Icon = ICONS[mode];
   const hue = TRUST_MODE_HUE[mode];
   const label = TRUST_MODE_LABEL[mode]();
+  // A focused button's new name is not read reliably, so a tap also writes
+  // the new mode to a live region. It stays empty until the first tap.
+  const [announce, setAnnounce] = React.useState(false);
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          onClick={onCycle}
-          aria-label={formatMsg("auto.features.agent.panel.components.trusttoggle.template.1", {
-            p1: label,
-          })}
-          className={cn(
-            plain
-              ? "inline-flex h-9 items-center gap-1.5 rounded-full px-2.5 text-xs"
-              : "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[0.6875rem]",
-            "min-h-[44px] transition-all duration-150 hover:bg-accent/60 active:scale-[0.97] cursor-pointer md:min-h-0 [@media(hover:none)_and_(pointer:coarse)]:min-h-[44px]",
-            className,
-          )}
-          style={
-            plain
-              ? { color: hue }
-              : {
-                  borderColor: `color-mix(in srgb, ${hue} 19%, transparent)`,
-                  color: hue,
-                  backgroundColor: `color-mix(in srgb, ${hue} 4%, transparent)`,
-                }
-          }
-        >
-          <Icon className={plain ? "size-3.5" : "size-3"} aria-hidden="true" />
-          <span className="font-medium leading-none">{label}</span>
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-64 text-start leading-relaxed">
-        <div className="font-medium">
-          {msg("auto.features.agent.panel.components.trusttoggle.1")}
-        </div>
-        <ul className="mt-1.5 space-y-1">
-          {MODE_ORDER.map((m) => {
-            const ModeIcon = ICONS[m];
-            const active = m === mode;
-            return (
-              <li
-                key={m}
-                className={cn(
-                  "flex items-start gap-1.5 leading-tight",
-                  active ? "opacity-100" : "opacity-60",
-                )}
-              >
-                <ModeIcon className="size-3 shrink-0 mt-[2px]" aria-hidden="true" />
-                <span>
-                  <span className={active ? "font-semibold" : "font-medium"}>
-                    {TRUST_MODE_LABEL[m]()}
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={() => {
+              setAnnounce(true);
+              onCycle();
+            }}
+            aria-label={formatMsg("auto.features.agent.panel.components.trusttoggle.template.1", {
+              p1: label,
+            })}
+            className={cn(
+              plain
+                ? "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs"
+                : "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[0.6875rem]",
+              "min-h-[44px] transition-all duration-150 hover:bg-accent/60 active:scale-[0.97] cursor-pointer md:min-h-0 [@media(hover:none)_and_(pointer:coarse)]:min-h-[44px]",
+              className,
+            )}
+            style={
+              plain
+                ? { color: hue }
+                : {
+                    borderColor: `color-mix(in srgb, ${hue} 19%, transparent)`,
+                    color: hue,
+                    backgroundColor: `color-mix(in srgb, ${hue} 4%, transparent)`,
+                  }
+            }
+          >
+            <Icon className={plain ? "size-4" : "size-3"} aria-hidden="true" />
+            <span className="font-medium leading-none">{label}</span>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-64 text-start leading-relaxed">
+          <ul className="space-y-1">
+            {MODE_ORDER.map((m) => {
+              const ModeIcon = ICONS[m];
+              const active = m === mode;
+              return (
+                <li
+                  key={m}
+                  className={cn(
+                    "flex items-start gap-1.5 leading-tight",
+                    active ? "opacity-100" : "opacity-60",
+                  )}
+                >
+                  <ModeIcon className="size-3 shrink-0 mt-[2px]" aria-hidden="true" />
+                  <span>
+                    <span className={active ? "font-semibold" : "font-medium"}>
+                      {TRUST_MODE_LABEL[m]()}
+                    </span>
+                    <span className="opacity-80"> — {TRUST_MODE_DESCRIPTION[m]()}</span>
                   </span>
-                  <span className="opacity-80"> — {TRUST_MODE_DESCRIPTION[m]()}</span>
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      </TooltipContent>
-    </Tooltip>
+                </li>
+              );
+            })}
+          </ul>
+        </TooltipContent>
+      </Tooltip>
+      <span aria-live="polite" className="sr-only">
+        {announce ? label : ""}
+      </span>
+    </>
   );
 }
