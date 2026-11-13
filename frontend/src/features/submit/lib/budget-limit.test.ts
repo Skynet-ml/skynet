@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { budgetContinueBlock, budgetShortfall, runBalance } = await import("./budget-limit.ts");
+const { budgetContinueBlock, budgetShortfall, limitMissing, runBalance } = await import("./budget-limit.ts");
 
 const floor = 119;
 
@@ -71,4 +71,12 @@ test("a Web run is funded by the hosted balance, a Mac run by the Mac wallet", (
   assert.equal(runBalance("hosted", mac, web), 40);
   assert.equal(runBalance("hosted", mac, { available: false, totalCents: 0 }), null);
   assert.equal(runBalance("local", { available: false, totalCents: 0 }, web), null);
+});
+
+test("limitMissing holds only an empty capped limit on a limit screen", () => {
+  assert.equal(limitMissing("budget", { uncapped: false, limit: null, balance: null }), true);
+  assert.equal(limitMissing("plan", { uncapped: false, limit: null, balance: null }), true);
+  assert.equal(limitMissing("budget", { uncapped: true, limit: null, balance: null }), false);
+  assert.equal(limitMissing("budget", { uncapped: false, limit: 500, balance: null }), false);
+  assert.equal(limitMissing("models", { uncapped: false, limit: null, balance: null }), false);
 });

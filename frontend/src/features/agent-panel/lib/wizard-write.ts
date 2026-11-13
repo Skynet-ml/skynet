@@ -7,6 +7,8 @@
 import { diffStats, lineDiff } from "@/shared/lib/line-diff";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 
+import type { WizardState } from "./types";
+
 export const WIZARD_WRITE_TOOL = "update_wizard_state";
 /** The agent's column-role tool; its roles land on the Inputs roles card. */
 export const ROLES_WRITE_TOOL = "set_column_roles_datasets_column_roles_post";
@@ -165,6 +167,25 @@ export function listChange(
     ...[...next].map((item) => ({ item, state: old.has(item) ? ("same" as const) : ("add" as const) })),
     ...[...old].filter((item) => !next.has(item)).map((item) => ({ item, state: "del" as const })),
   ];
+}
+
+/**
+ * Merge a patch's `workspace_files` over the files the state holds: a file
+ * tool's patch carries only the file it wrote.
+ *
+ * Args:
+ *   state: The wizard state the patch lands on.
+ *   patch: A wizard patch from a tool result.
+ *
+ * Returns:
+ *   The patch, with the whole file map when it writes files.
+ */
+export function mergedPatch(
+  state: Readonly<Partial<WizardState>>,
+  patch: Partial<WizardState>,
+): Partial<WizardState> {
+  if (!patch.workspace_files) return patch;
+  return { ...patch, workspace_files: { ...state.workspace_files, ...patch.workspace_files } };
 }
 
 /**

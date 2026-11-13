@@ -6,6 +6,7 @@ import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { TERMS } from "@/shared/lib/terms";
 
 import { UUID_RE } from "../lib/entry-format";
+import { hostOf } from "../lib/tool-results";
 
 import { AnalyticsSummaryCard } from "./AnalyticsSummaryCard";
 import { GithubReposCard } from "./GithubReposCard";
@@ -25,6 +26,28 @@ import {
 } from "./SetupToolCards";
 import { SubmitSummaryCard } from "./SubmitSummaryCard";
 import { TaggingSessionsCard } from "./TaggingSessionsCard";
+import {
+  CreatedRepoCard,
+  GithubToolCard,
+  JobListCard,
+  JobLogsCard,
+  LinkResultsCard,
+  OpenPageCard,
+  RegistryCard,
+  RepoFileCard,
+  RepoFolderCard,
+  RunLifecycleCard,
+  ServeInfoCard,
+  SettingsListCard,
+  SettingValuesCard,
+  SetupCheckCard,
+  StatusCountsCard,
+  TaggingGuideCard,
+  ToolCardBoundary,
+  UsageStatsCard,
+  WebPagesCard,
+  WorkspaceWriteCard,
+} from "./ToolResultCards";
 import { WalletCard } from "./WalletCard";
 import { TurnCheckCard } from "./TurnCheckCard";
 import { WizardBackCard, WizardContinueCard } from "./WizardNavCard";
@@ -70,6 +93,7 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   change_protected_setting: "act",
   open_page: "act",
   validate_code_validate_code_post: "check",
+  check_setup: "check",
   validate_datasets_validate_post: "check",
   public_search_dashboard_search_post: "search",
   web_search: "search",
@@ -77,11 +101,18 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   discover_models_models_discover_post: "search",
   crawl_site: "read",
   fetch_url: "read",
+  read_repo_file: "read",
+  list_repo_folder: "read",
+  write_workspace_file: "act",
+  edit_workspace_file: "act",
+  save_tagging_guide_for_agent: "act",
+  create_github_repository_connectors_github_repos_post: "act",
+  search_repositories: "search",
+  search_code: "search",
+  search_commits: "search",
   profile_datasets_profile_post: "read",
   serve_info_serve: "read",
   blackbox_engines_blackbox_engines_get: "read",
-  shared_chat_item: "read",
-  read_shared_chat_item: "read",
 };
 
 /**
@@ -138,46 +169,62 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-// A shared chat replaces each private tool call of the owner with a
-// ``shared_chat_item`` row. It names only the items that the link ticks;
-// every other call shows as "Not shared" (SKY-294).
-function sharedItemLabels(call: AgentToolCall): string | null {
-  const result = getResult(call);
-  if (!result || typeof result !== "object") return null;
-  const r = result as Record<string, unknown>;
-  if (r.status !== "shared" || !Array.isArray(r.items)) return null;
-  const labels = r.items
-    .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).label : null))
-    .filter((label): label is string => typeof label === "string" && label.length > 0);
-  return labels.length > 0 ? truncate(labels.join(", "), 80) : null;
+function argStr(call: AgentToolCall, ...keys: string[]): string {
+  const args = getArgs(call);
+  for (const k of keys) {
+    const v = args[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
 }
 
+/** The step line names what the call looked at: its query, site, path or id. */
+function querySummary(call: AgentToolCall): string | null {
+  const q = argStr(call, "query", "q");
+  return q ? `“${truncate(q, 48)}”` : null;
+}
+
+function siteSummary(call: AgentToolCall): string | null {
+  const url = argStr(call, "url");
+  return url ? hostOf(url) || truncate(url, 48) : null;
+}
+
+function pathSummary(call: AgentToolCall): string | null {
+  // Old saved repo reads carry the path only in ``reason``.
+  const path = argStr(call, "path") || call.reason?.trim();
+  return path ? truncate(path, 56) : null;
+}
+
+function githubSummary(call: AgentToolCall): string | null {
+  const query = querySummary(call);
+  if (query) return query;
+  const owner = argStr(call, "owner");
+  const repo = argStr(call, "repo");
+  const where = owner && repo ? `${owner}/${repo}` : repo;
+  const ref = argStr(call, "path", "sha", "tag", "branch");
+  return [where, ref].filter(Boolean).join(" · ") || null;
+}
+
+function idSummary(call: AgentToolCall): string | null {
+  return pickId(getArgs(call)) ?? null;
+}
+
+const GITHUB_TOOLS = [
+  "search_repositories",
+  "search_code",
+  "search_commits",
+  "get_file_contents",
+  "list_branches",
+  "list_commits",
+  "get_commit",
+  "list_tags",
+  "get_tag",
+  "list_releases",
+  "get_latest_release",
+  "get_release_by_tag",
+];
+
 const RENDERERS: Record<string, ToolRenderer> = {
-  shared_chat_item: {
-    summary: (call) => {
-      const labels = sharedItemLabels(call);
-      return labels
-        ? formatMsg("shared.agent.share_item_shared", { p1: labels })
-        : msg("shared.agent.share_item_not_shared");
-    },
-  },
-
-  read_shared_chat_item: {
-    summary: (call) => {
-      const result = getResult(call);
-      const label =
-        result && typeof result === "object" ? (result as Record<string, unknown>).label : null;
-      return byStatus(call, {
-        running: msg("shared.agent.share_item_reading"),
-        done:
-          typeof label === "string" && label
-            ? formatMsg("shared.agent.share_item_read", { p1: truncate(label, 80) })
-            : msg("shared.agent.share_item_reading"),
-        error: msg("shared.agent.share_item_not_available"),
-      });
-    },
-  },
-
   delete_job_optimizations: {
     summary: (call) => {
       const id = pickId(getArgs(call));
@@ -371,6 +418,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
   },
 
   list_jobs_optimizations_get: {
+    card: (call) => <JobListCard call={call} />,
     summary: (call) => {
       if (call.status === "running")
         return formatMsg("auto.features.agent.panel.lib.tool.renderers.template.32", {
@@ -389,6 +437,20 @@ const RENDERERS: Record<string, ToolRenderer> = {
       return count !== null
         ? `${count} ${TERMS.optimizationPlural}`
         : msg("auto.features.agent.panel.lib.tool.renderers.literal.27");
+    },
+  },
+
+  check_setup: {
+    card: (call) => <SetupCheckCard call={call} />,
+    summary: (call) => {
+      if (call.status === "running") return msg("agent.tool.check_setup.running");
+      const result = getResult(call);
+      if (result && typeof result === "object") {
+        const ok = (result as Record<string, unknown>).ok;
+        if (ok === true) return msg("agent.tool.check_setup.ok");
+        if (ok === false) return msg("agent.tool.check_setup.failed");
+      }
+      return null;
     },
   },
 
@@ -518,8 +580,104 @@ const RENDERERS: Record<string, ToolRenderer> = {
     card: (call) => <StagedSampleCard call={call} />,
   },
 
+  web_search: { card: (call) => <LinkResultsCard call={call} />, summary: querySummary },
+  search_docs: { card: (call) => <LinkResultsCard call={call} />, summary: querySummary },
+  fetch_url: { card: (call) => <WebPagesCard call={call} />, summary: siteSummary },
+  crawl_site: { card: (call) => <WebPagesCard call={call} />, summary: siteSummary },
+
+  read_repo_file: { card: (call) => <RepoFileCard call={call} />, summary: pathSummary },
+  list_repo_folder: {
+    card: (call) => <RepoFolderCard call={call} />,
+    summary: (call) => pathSummary(call) ?? "/",
+  },
+  write_workspace_file: {
+    card: (call) => <WorkspaceWriteCard call={call} />,
+    summary: pathSummary,
+  },
+  edit_workspace_file: {
+    card: (call) => <WorkspaceWriteCard call={call} />,
+    summary: pathSummary,
+  },
+
+  ...Object.fromEntries(
+    GITHUB_TOOLS.map((tool): [string, ToolRenderer] => [
+      tool,
+      { card: (call) => <GithubToolCard call={call} />, summary: githubSummary },
+    ]),
+  ),
+
+  get_job_logs_optimizations: {
+    card: (call) => <JobLogsCard call={call} />,
+    summary: idSummary,
+  },
+  pause_job_optimizations: {
+    card: (call) => <RunLifecycleCard call={call} />,
+    summary: idSummary,
+  },
+  resume_job_optimizations: {
+    card: (call) => <RunLifecycleCard call={call} />,
+    summary: idSummary,
+  },
+  restart_job_optimizations: {
+    card: (call) => <RunLifecycleCard call={call} />,
+    summary: idSummary,
+  },
+  get_optimizer_stats_analytics_optimizers_get: {
+    card: (call) => <UsageStatsCard call={call} />,
+  },
+  get_model_stats_analytics_models_get: {
+    card: (call) => <UsageStatsCard call={call} />,
+  },
+  get_optimization_counts_optimizations_counts_get: {
+    card: (call) => <StatusCountsCard call={call} />,
+  },
+  get_registry_snapshot_registry_get: {
+    card: (call) => <RegistryCard call={call} />,
+  },
+  serve_info_serve: {
+    card: (call) => <ServeInfoCard call={call} />,
+  },
+
+  list_settings: { card: (call) => <SettingsListCard call={call} /> },
+  get_setting: {
+    card: (call) => <SettingValuesCard call={call} />,
+    summary: (call) => argStr(call, "key") || null,
+  },
+  change_setting: {
+    card: (call) => <SettingValuesCard call={call} />,
+    summary: (call) => argStr(call, "key") || null,
+  },
+  change_protected_setting: {
+    card: (call) => <SettingValuesCard call={call} />,
+    summary: (call) => argStr(call, "action") || null,
+  },
+  open_page: {
+    card: (call) => <OpenPageCard call={call} />,
+    summary: (call) => argStr(call, "tab", "path") || null,
+  },
+
+  get_tagging_guide_for_agent: { card: (call) => <TaggingGuideCard call={call} /> },
+  save_tagging_guide_for_agent: { card: (call) => <TaggingGuideCard call={call} /> },
+  create_github_repository_connectors_github_repos_post: {
+    card: (call) => <CreatedRepoCard call={call} />,
+    summary: (call) => argStr(call, "name") || null,
+  },
 };
 
+const GUARDED = new Map<string, ToolRenderer>();
+
 export function getToolRenderer(tool: string): ToolRenderer | undefined {
-  return RENDERERS[tool];
+  const renderer = RENDERERS[tool];
+  const card = renderer?.card;
+  if (!renderer || !card) return renderer;
+  // One wrapped renderer for each tool, so its card keeps the same identity.
+  let guarded = GUARDED.get(tool);
+  if (!guarded) {
+    guarded = {
+      ...renderer,
+      card: (call) => <ToolCardBoundary call={call} card={card} />,
+    };
+    GUARDED.set(tool, guarded);
+  }
+  return guarded;
 }

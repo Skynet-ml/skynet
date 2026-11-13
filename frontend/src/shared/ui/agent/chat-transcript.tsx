@@ -5,17 +5,14 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 
-import { formatMsg } from "@/shared/lib/messages";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
-import { cn } from "@/shared/lib/utils";
 
 import { AgentBubble } from "./agent-bubble";
+import { compactionSlots, placeSlots, type SlotPlace } from "./compaction-slots";
 import { MessageActions } from "./message-actions";
-import { startsTimeGroup, timeDividerLabel } from "./message-time";
 import { pairMessages, type Pair as TranscriptPair } from "./transcript-pairs";
 import { TtftIndicator } from "./ttft-indicator";
 import { UserBubble, UserBubbleEditor } from "./user-bubble";
-import type { AgentMessage, AgentThinking, AgentToolCall } from "./types";
+import type { AgentMessage, AgentThinking, AgentToolCall, ChatCompaction } from "./types";
 
 type Pair = TranscriptPair<AgentMessage>;
 
@@ -32,8 +29,6 @@ interface ChatTranscriptProps {
   thinking?: AgentThinking;
   renderToolCall?: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   isStepCall?: (call: AgentToolCall) => boolean;
-  /** Cards that stay shown when a block's history folds; without it, every card does. */
-  isPinnedCall?: (call: AgentToolCall) => boolean;
   stepKind?: (call: AgentToolCall) => ActivityKind;
   toolCallsBeforeContent?: boolean;
   onRunCode?: (code: string, language: string) => void;
@@ -43,6 +38,12 @@ interface ChatTranscriptProps {
   renderAfterContent?: (msg: AgentMessage) => React.ReactNode;
   animatePairs?: boolean;
   trailing?: (state: ChatTranscriptState) => React.ReactNode;
+  /** Start a new chat from the message at `index`; no fork button without it. */
+  onFork?: (index: number) => void;
+  /** The row of a compaction, drawn where it ran: after its turn's user message, or after the chat's last message. */
+  renderCompaction?: (entry: ChatCompaction) => React.ReactNode;
+  /** The live row of a compaction that the streaming turn runs before its answer. */
+  compacting?: React.ReactNode;
 }
 
 // Owns the "messages → user/agent pairs → bubbles + edit-and-resend wiring"
@@ -56,7 +57,6 @@ export function ChatTranscript({
   thinking,
   renderToolCall,
   isStepCall,
-  isPinnedCall,
   stepKind,
   toolCallsBeforeContent,
   onRunCode,
@@ -64,14 +64,28 @@ export function ChatTranscript({
   renderAfterContent,
   animatePairs,
   trailing,
+  onFork,
+  renderCompaction,
+  compacting,
 }: ChatTranscriptProps) {
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
-  // "Today" and "Yesterday" on the dividers count from when the chat opened.
-  const [now] = React.useState(() => Date.now());
   const [editDraft, setEditDraft] = React.useState("");
   const isEditingAny = editingIndex !== null;
 
   const pairs = React.useMemo(() => pairMessages(messages), [messages]);
+
+  const compactionsByPair = React.useMemo(
+    () =>
+      placeSlots(
+        compactionSlots(messages),
+        pairs.map((pair) => ({
+          key: pair.key,
+          user: pair.user?.index ?? null,
+          last: pair.agent ? messages.indexOf(pair.agent) : (pair.user?.index ?? -1),
+        })),
+      ),
+    [pairs, messages],
+  );
 
   const latestAgentKey = React.useMemo(() => {
     for (let i = pairs.length - 1; i >= 0; i--) {
@@ -119,7 +133,7 @@ export function ChatTranscript({
     [streaming, editAndResend],
   );
 
-  const renderPairBody = (pair: Pair, divider: string | null) => {
+  const renderPairBody = (pair: Pair) => {
     const isEditing = pair.user !== null && editingIndex === pair.user.index;
     const agentMsg = pair.agent;
     const agentText = agentMsg?.content.trim() ?? "";
@@ -143,20 +157,28 @@ export function ChatTranscript({
             (pairThinking.reasoning || (pairThinking.streaming && pairThinking.startedAt)),
         );
     // A turn with a history shows Codex's own "Thinking" line from the start.
+    const compactingHere = isStreamingThisPair ? compacting : undefined;
     const isWaitingFirstToken =
+      !compactingHere &&
       !(renderToolCall && isStepCall) &&
       isStreamingThisPair &&
       agentText.length === 0 &&
       !(agentMsg?.toolCalls?.length ?? 0) &&
       !hasThinking;
 
+    const agentIndex = agentMsg ? messages.indexOf(agentMsg) : -1;
+    const rows = (place: SlotPlace) =>
+      renderCompaction &&
+      compactionsByPair
+        .get(pair.key)
+        ?.filter((row) => row.place === place)
+        .map(({ slot }) => (
+          <React.Fragment key={slot.anchor}>{renderCompaction(slot.entry)}</React.Fragment>
+        ));
+
     return (
       <>
-        {divider && (
-          <div className="flex justify-center pt-1">
-            <span dir="auto" className="text-[0.6875rem] tabular-nums text-muted-foreground">{divider}</span>
-          </div>
-        )}
+        {rows("before")}
         {pair.user &&
           (isEditing ? (
             <UserBubbleEditor
@@ -172,11 +194,14 @@ export function ChatTranscript({
               createdAt={pair.user.msg.createdAt}
               editable={!streaming}
               onEdit={() => pair.user && startEdit(pair.user.index, pair.user.msg.content)}
+              onFork={onFork && (() => pair.user && onFork(pair.user.index))}
             />
           ))}
+        {rows("afterUser")}
+        {compactingHere}
 
         {agentMsg && !isEditing && (
-          <div className="flex group/turn">
+          <div className="flex">
             <div className="flex w-full min-w-0 flex-col items-start gap-1.5 pt-1">
               {isWaitingFirstToken && <TtftIndicator />}
               <AgentBubble
@@ -186,7 +211,6 @@ export function ChatTranscript({
                 streaming={isStreamingThisPair}
                 renderToolCall={renderToolCall}
                 isStepCall={isStepCall}
-                isPinnedCall={isPinnedCall}
                 stepKind={stepKind}
                 toolCallsBeforeContent={toolCallsBeforeContent}
                 onRunCode={onRunCode}
@@ -208,17 +232,13 @@ export function ChatTranscript({
                           handleRegenerate(pair.user.index, pair.user.msg.content)
                       : undefined
                   }
-                  className={cn(
-                    "opacity-0 transition-opacity group-hover/turn:opacity-100 focus-within:opacity-100",
-                    // Tailwind's `hover:` media query covers the `group-hover:`
-                    // spelling, so touch screens (iPad) need their own.
-                    "any-pointer-coarse:opacity-100",
-                  )}
+                  onFork={onFork && agentIndex >= 0 ? () => onFork(agentIndex) : undefined}
                 />
               )}
             </div>
           </div>
         )}
+        {rows("after")}
       </>
     );
   };
@@ -229,29 +249,9 @@ export function ChatTranscript({
     return pair.user.index <= editingIndex;
   });
 
-  // A centered "Today 8:14 PM" opens each group of turns: the first timed
-  // turn, and any turn after a long quiet gap or on a new day.
-  const locale = getActiveIntlLocale();
-  // A chat left open past midnight reads its days from the newest turn.
-  const today = visiblePairs.reduce(
-    (latest, p) => Math.max(latest, p.user?.msg.createdAt ?? p.agent?.createdAt ?? 0),
-    now,
-  );
-  const times = visiblePairs.map((pair) => pair.user?.msg.createdAt ?? pair.agent?.createdAt);
-  const dividers = times.map((time, i) => {
-    const prevTime = times.slice(0, i).findLast((t) => t != null);
-    const opens = startsTimeGroup(prevTime, time);
-    return opens && time != null
-      ? timeDividerLabel(time, today, locale, {
-          today: (t) => formatMsg("shared.agent.today_at", { time: t }),
-          yesterday: (t) => formatMsg("shared.agent.yesterday_at", { time: t }),
-        })
-      : null;
-  });
-
   const pairsNode = animatePairs ? (
     <AnimatePresence initial={false}>
-      {visiblePairs.map((pair, i) => (
+      {visiblePairs.map((pair) => (
         <motion.div
           key={pair.key}
           initial={{ opacity: 0, y: 4 }}
@@ -259,14 +259,14 @@ export function ChatTranscript({
           transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
           className="space-y-3"
         >
-          {renderPairBody(pair, dividers[i] ?? null)}
+          {renderPairBody(pair)}
         </motion.div>
       ))}
     </AnimatePresence>
   ) : (
-    visiblePairs.map((pair, i) => (
+    visiblePairs.map((pair) => (
       <div key={pair.key} className="space-y-3">
-        {renderPairBody(pair, dividers[i] ?? null)}
+        {renderPairBody(pair)}
       </div>
     ))
   );

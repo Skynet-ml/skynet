@@ -16,7 +16,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
-import { flushSetupChat, useWizardStateOptional } from "@/features/agent-panel";
+import {
+  SETUP_CHAT_KEY,
+  flushSetupChat,
+  runSetupChatId,
+  useWizardStateOptional,
+} from "@/features/agent-panel";
 import { useConnectors } from "@/features/connectors";
 import { usePricingTerms } from "@/features/billing";
 import {
@@ -108,6 +113,7 @@ import {
   initialWizardV2State,
   presetEngine,
   withRepository,
+  withTaskPatch,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -133,6 +139,22 @@ import {
 
 // A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
 const OPTIMIZE_TOML = "optimize.toml";
+
+/** The draft's repository files other than optimize.toml, or undefined when there are none. */
+function otherFiles(files: Readonly<Record<string, string>>): Record<string, string> | undefined {
+  const rest = Object.entries(files).filter(([path]) => path !== OPTIMIZE_TOML);
+  return rest.length > 0 ? Object.fromEntries(rest) : undefined;
+}
+
+function isTextMap(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Whether two path-to-text maps hold the same files, in any key order. */
+function sameTextMap(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
 
 export type SubmitPhase = "idle" | "sending" | "splash" | "done";
 
@@ -234,6 +256,7 @@ function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.slice === "optimizer") {
     return { ...state, optimizer: withOptimizerPatch(state.optimizer, action.patch) };
   }
+  if (action.slice === "task") return withTaskPatch(state, action.patch);
   return { ...state, [action.slice]: { ...state[action.slice], ...action.patch } };
 }
 
@@ -696,8 +719,13 @@ export function WizardV2Provider({
         readSessionValue(WIZARD_HARDENING_KEY),
         getLatestHardeningJob,
       );
+      const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
       const result = await submitRepoRun(
-        hardeningJobId ? { ...request, hardening_job_id: hardeningJobId } : request,
+        {
+          ...request,
+          ...(hardeningJobId ? { hardening_job_id: hardeningJobId } : {}),
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        },
         undefined,
         runOn,
       );
@@ -1002,6 +1030,15 @@ export function WizardV2Provider({
           if (typeof shared.optimize_toml === "string")
             setWorkspaceFile(OPTIMIZE_TOML, shared.optimize_toml);
           break;
+        case "workspace_files":
+          for (const [path, text] of Object.entries(shared.workspace_files ?? {}))
+            if (typeof text === "string" && state.workspace.files[path] !== text)
+              setWorkspaceFile(path, text);
+          break;
+        case "workspace_base":
+          if (typeof shared.workspace_base === "string")
+            patchWorkspace({ filesBase: shared.workspace_base });
+          break;
         case "staged_dataset_id": {
           const stagedId = shared.staged_dataset_id;
           if (typeof stagedId !== "string" || stagedId === state.inputs.stagedDatasetId) break;
@@ -1053,6 +1090,8 @@ export function WizardV2Provider({
       task_background: task.background || undefined,
       repository: task.repo.repository.trim() || undefined,
       repo_provider: task.repo.provider ?? "github",
+      // The agent reads the tree the run starts from: the pinned commit, else the branch.
+      repo_branch: task.repo.commit.trim() || task.repo.branch.trim() || undefined,
       github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,
@@ -1060,6 +1099,11 @@ export function WizardV2Provider({
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
       optimize_toml: workspace.files[OPTIMIZE_TOML] || undefined,
+      // optimize.toml has its own field; the agent sees the other repo files here.
+      workspace_files: otherFiles(workspace.files),
+      // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
+      workspace_base:
+        Object.keys(workspace.files).length > 0 ? workspace.filesBase || undefined : undefined,
       dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,
@@ -1073,7 +1117,9 @@ export function WizardV2Provider({
       const same =
         Array.isArray(value) && Array.isArray(held)
           ? value.length === held.length && value.every((v, i) => v === held[i])
-          : held === value;
+          : isTextMap(value) && isTextMap(held)
+            ? sameTextMap(value, held)
+            : held === value;
       if (same) continue;
       if (value === undefined) wizardCtx.clearField(key);
       else wizardCtx.setField(key, value, "user");

@@ -87,6 +87,121 @@ def test_push_creates_one_commit_on_the_pinned_commit(tmp_path: Path) -> None:
     assert _git(origin, "log", "-1", "--format=%an %s", head) == f"{APP_NAME} Apply it"
 
 
+def test_push_commits_the_draft_files_under_the_version(tmp_path: Path) -> None:
+    """The run started from the drafted tree, so the branch holds the drafts and the version on top of them."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+    patch = _patch(origin, pinned)
+    drafts = {"src/settings.py": "debug = False\n", "optimize.toml": "version = 1\n"}
+
+    push_version(
+        "acme/app", pinned, patch, "skynet/optimize-1", "Apply it", None, remote=f"file://{origin}", drafts=drafts
+    )
+
+    head = _git(origin, "rev-parse", "skynet/optimize-1")
+    assert _git(origin, "rev-parse", f"{head}^") == pinned
+    assert _git(origin, "show", f"{head}:src/app.py") == "x = 2"
+    assert _git(origin, "show", f"{head}:src/settings.py") == "debug = False"
+    assert _git(origin, "show", f"{head}:optimize.toml") == "version = 1"
+
+
+def test_push_refuses_a_draft_path_that_leaves_the_repository(tmp_path: Path) -> None:
+    """A stored draft path is checked again, and a bad one pushes nothing."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+
+    with pytest.raises(RepoPublishError):
+        push_version(
+            "acme/app",
+            pinned,
+            "",
+            "skynet/optimize-1",
+            "Apply it",
+            None,
+            remote=f"file://{origin}",
+            drafts={"../escape.py": "x"},
+        )
+
+    assert "skynet/optimize-1" not in _git(origin, "branch", "--list")
+    assert not (tmp_path / "escape.py").exists()
+
+
+@pytest.mark.parametrize("name", [":note.md", "src/a*.py"])
+def test_push_adds_a_draft_path_as_a_literal_name_never_a_pattern(tmp_path: Path, name: str) -> None:
+    """A draft named like pathspec magic or a glob is added as that one file, and nothing else is added."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+    patch = _patch(origin, pinned)
+
+    push_version(
+        "acme/app",
+        pinned,
+        patch,
+        "skynet/optimize-1",
+        "Apply it",
+        None,
+        remote=f"file://{origin}",
+        drafts={name: "z\n"},
+    )
+
+    head = _git(origin, "rev-parse", "skynet/optimize-1")
+    assert _git(origin, "show", f"{head}:{name}") == "z"
+    assert sorted(_git(origin, "diff", "--name-only", pinned, head).splitlines()) == sorted(
+        [name, "src/app.py", "src/new.py"]
+    )
+
+
+def test_push_commits_a_draft_path_that_the_gitignore_ignores(tmp_path: Path) -> None:
+    """The user chose each draft, so an ignored draft path is still committed on the branch."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "--quiet", "-b", "main")
+    _git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+    (origin / ".gitignore").write_text("data/\n.env\n")
+    (origin / "app.py").write_text("x = 1\n")
+    _git(origin, "add", "--all")
+    _git(origin, "commit", "--quiet", "-m", "init")
+    pinned = _git(origin, "rev-parse", "HEAD")
+    patch = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+
+    push_version(
+        "acme/app",
+        pinned,
+        patch,
+        "skynet/optimize-1",
+        "Apply it",
+        None,
+        remote=f"file://{origin}",
+        drafts={"data/train.jsonl": "{}\n", ".env": "MODE=test\n"},
+    )
+
+    head = _git(origin, "rev-parse", "skynet/optimize-1")
+    assert _git(origin, "show", f"{head}:data/train.jsonl") == "{}"
+    assert _git(origin, "show", f"{head}:.env") == "MODE=test"
+    assert _git(origin, "show", f"{head}:app.py") == "x = 2"
+
+
+def test_push_refuses_a_draft_in_a_read_only_path(tmp_path: Path) -> None:
+    """A draft inside a submodule or over a Git LFS file is refused, and nothing is pushed."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+
+    with pytest.raises(RepoPublishError, match="read-only"):
+        push_version(
+            "acme/app",
+            pinned,
+            "",
+            "skynet/optimize-1",
+            "Apply it",
+            None,
+            remote=f"file://{origin}",
+            drafts={"vendor/lib/x.py": "x"},
+            readonly_paths=("vendor/lib",),
+        )
+
+    assert "skynet/optimize-1" not in _git(origin, "branch", "--list")
+
+
 def test_push_refuses_a_version_that_does_not_apply(tmp_path: Path) -> None:
     """A stale patch fails in plain words and pushes nothing."""
     origin = tmp_path / "origin"
@@ -112,6 +227,20 @@ def _github(monkeypatch: pytest.MonkeyPatch, refuse_draft: bool = False) -> list
     sent: list[dict[str, Any]] = []
 
     def fake_request(method: str, url: str, *, json: dict[str, Any], **_: Any) -> httpx.Response:
+        """Record the pull request body and answer as GitHub does.
+
+        Args:
+            method: HTTP method.
+            url: Request URL.
+            json: Pull request body.
+            **_: Other request options, ignored.
+
+        Returns:
+            The created pull request response.
+
+        Raises:
+            DomainError: A draft request when ``refuse_draft`` is set.
+        """
         assert (method, url) == ("POST", "https://api.github.com/repos/acme/app/pulls")
         sent.append(json)
         if refuse_draft and json.get("draft"):

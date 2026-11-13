@@ -654,7 +654,7 @@ export function ModelConfigModal({
           )}
         </div>
 
-        <DialogFooter className="shrink-0 border-t border-border/40 px-4 pb-4 pt-4 sm:px-6 sm:pb-6">
+        <DialogFooter className="mx-0 mt-0 mb-0 shrink-0 px-4 sm:px-6">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {msg("auto.features.submit.components.modelconfigmodal.10")}
           </Button>

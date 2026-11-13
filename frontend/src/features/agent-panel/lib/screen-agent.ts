@@ -4,6 +4,7 @@
  * the wizard through the same code its buttons run.
  */
 
+import { parseSourceKey, type ApiSource } from "@/shared/lib/api-route";
 import { closeThinking } from "@/shared/lib/thinking-segments";
 import type { AgentMessage } from "@/shared/ui/agent/types";
 
@@ -56,7 +57,8 @@ export function newSetupChatStart(
 /** A reopened chat stores the wizard's kickoff and Back turns as user turns; they stay unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>
-    m.role === "user" && (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK.trim()))
+    m.role === "user" &&
+    (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK.trim()))
       ? { ...m, hidden: true }
       : m,
   );
@@ -73,7 +75,10 @@ export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
  * Returns:
  *   The server's messages, each user turn hidden when its matching tab turn was.
  */
-export function keepHiddenTurns(server: AgentMessage[], tab: readonly AgentMessage[]): AgentMessage[] {
+export function keepHiddenTurns(
+  server: AgentMessage[],
+  tab: readonly AgentMessage[],
+): AgentMessage[] {
   const tabTurns = tab.filter((m) => m.role === "user");
   let next = 0;
   return server.map((m) => {
@@ -95,7 +100,10 @@ export function keepHiddenTurns(server: AgentMessage[], tab: readonly AgentMessa
  * Returns:
  *   The messages before that turn, and the turn (null when the last message is no user turn).
  */
-export function unansweredTurn(messages: AgentMessage[]): { kept: AgentMessage[]; turn: AgentMessage | null } {
+export function unansweredTurn(messages: AgentMessage[]): {
+  kept: AgentMessage[];
+  turn: AgentMessage | null;
+} {
   const last = messages[messages.length - 1];
   if (last?.role !== "user") return { kept: messages, turn: null };
   return { kept: messages.slice(0, -1), turn: last };
@@ -111,11 +119,11 @@ export type ScreenNav =
 export interface ScreenNavigator {
   /** The screen on view. */
   screen: string;
-  /** The Continue button's own handler. */
+  /** The Continue button's handler, without its optimize.toml check: the server holds the agent's moves on that check. */
   forward: () => void;
   /** Jump back to an earlier screen. */
   goToScreen: (screen: string) => void;
-  /** Jump forward to a later screen; the Continue button's checks still apply. */
+  /** Jump forward to a later screen; the Continue button's checks, except the optimize.toml check, still apply. */
   goForwardTo: (screen: string) => void;
 }
 
@@ -191,7 +199,11 @@ function laterScreen(a: string | null, b: string | null): string | null {
  * Returns:
  *   The return screen after the move.
  */
-export function nextReturnScreen(current: string | null, nav: ScreenNav, shown: string | null = null): string | null {
+export function nextReturnScreen(
+  current: string | null,
+  nav: ScreenNav,
+  shown: string | null = null,
+): string | null {
   if (nav.action !== "back") return current;
   return laterScreen(current, laterScreen(nav.from || null, shown));
 }
@@ -230,8 +242,8 @@ export interface SetupChat {
   messages: AgentMessage[];
   /**
    * What each of the chat's wizard writes found on the form, by tool call
-   * id: the before-state of each turn's edits, so the "Edited N files" card,
-   * its Undo and the Changes pane's "Last turn" survive a reload.
+   * id: the before-state of each turn's edits, so the "Edited N files" card
+   * and its Undo survive a reload.
    */
   ledger?: Record<string, Record<string, unknown>>;
 }
@@ -301,7 +313,7 @@ export function handedOverSetupChat(
 /**
  * The id the setup chat keeps when a turn's server conversation arrives. A
  * chat with no server copy yet takes the server's id, so the tab's copy and
- * the Share button point at the saved conversation.
+ * the run it starts point at the saved conversation.
  *
  * Args:
  *   current: The setup chat's id, or null when no setup is open.
@@ -360,7 +372,11 @@ export function setupChatUnchanged(
  * Returns:
  *   True when the setup chat must move to a new browser id.
  */
-export function setupChatGone(setupId: string | null, liveId: string | null, errorCode: string | null): boolean {
+export function setupChatGone(
+  setupId: string | null,
+  liveId: string | null,
+  errorCode: string | null,
+): boolean {
   return setupId !== null && liveId === setupId && errorCode === "agent.conversation.not_found";
 }
 
@@ -374,7 +390,9 @@ export function encodeSetupChat(chat: SetupChat): string {
   // The edits read each write's result, so without results the ledger is dead weight.
   const { ledger: _ledger, ...lean } = chat;
   const messages = lean.messages.map((m) =>
-    m.toolCalls?.length ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) } : m,
+    m.toolCalls?.length
+      ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) }
+      : m,
   );
   // Each message costs its own text plus one comma. The array has one comma
   // fewer than messages, so starting one below the empty chat makes the sum exact.
@@ -401,7 +419,9 @@ export function decodeSetupChat(raw: string | null): SetupChat | null {
       : [];
     const messages = value.messages.filter(
       (m): m is AgentMessage =>
-        isRecord(m) && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
+        isRecord(m) &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string",
     );
     const ledger = isRecord(value.ledger)
       ? Object.fromEntries(Object.entries(value.ledger).filter(([, before]) => isRecord(before)))
@@ -432,6 +452,26 @@ export function legacySetupChatId(raw: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The server id of the setup chat that a submitted run keeps. Only the
+ * chat's own user reads it raw, admins read it with secrets masked, and
+ * anyone else, also a new owner after a transfer, gets 404.
+ *
+ * Args:
+ *   raw: The tab's stored setup chat.
+ *   runSource: The server the run starts on.
+ *
+ * Returns:
+ *   The chat's id on that server, or null when the chat has no server copy
+ *   yet or lives on the other server.
+ */
+export function runSetupChatId(raw: string | null, runSource: ApiSource): string | null {
+  const chat = decodeSetupChat(raw);
+  if (!chat) return null;
+  const { source, id } = parseSourceKey(chat.id);
+  return source === runSource && isSavedSetupChat(id) ? id : null;
 }
 
 /**
@@ -467,7 +507,9 @@ export function setupChatSnapshot(
   const ended: AgentMessage = {
     ...last,
     ...(last.toolCalls ? { toolCalls: stopToolCalls(last.toolCalls, now) } : {}),
-    ...(last.thinkingSegments ? { thinkingSegments: closeThinking(last.thinkingSegments, now) } : {}),
+    ...(last.thinkingSegments
+      ? { thinkingSegments: closeThinking(last.thinkingSegments, now) }
+      : {}),
   };
   if (!ended.content && !ended.toolCalls?.length) kept.pop();
   else kept[kept.length - 1] = ended;
@@ -496,7 +538,10 @@ export function trackKickoffTurn(turn: KickoffTurn | null, busy: boolean): Kicko
 }
 
 /** The screens the tab's copy counts as started: a kickoff still running does not count. */
-export function storedKickedScreens(kicked: Iterable<string>, running: KickoffTurn | null): string[] {
+export function storedKickedScreens(
+  kicked: Iterable<string>,
+  running: KickoffTurn | null,
+): string[] {
   return [...kicked].filter((s) => s !== running?.screen);
 }
 

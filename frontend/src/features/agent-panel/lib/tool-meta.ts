@@ -18,12 +18,14 @@ import {
   FileCode,
   FileMagnifyingGlass,
   FileText,
+  FloppyDisk,
   FlowArrow,
   FolderOpen,
   Gauge,
   Gear,
   GearSix,
   GitBranch,
+  GitCommit,
   GithubLogo,
   Globe,
   Hash,
@@ -31,6 +33,7 @@ import {
   Key,
   LinkSimple,
   ListBullets,
+  ListChecks,
   MagicWand,
   MagnifyingGlass,
   Megaphone,
@@ -39,9 +42,9 @@ import {
   PencilSimple,
   Play,
   PushPin,
+  RocketLaunch,
   Scroll,
   SealCheck,
-  ShareNetwork,
   ShieldCheck,
   Sparkle,
   Square,
@@ -364,6 +367,21 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     severity: "info",
     icon: Key,
   },
+  // The setup agent's file tools ask only in Ask mode; they change the setup draft, never the repository.
+  write_workspace_file: {
+    title: () => msg("agent.tool.write_workspace_file.title"),
+    description: () => msg("agent.tool.write_workspace_file.description"),
+    confirmLabel: () => msg("agent.tool.workspace_file.confirm"),
+    severity: "info",
+    icon: Code,
+  },
+  edit_workspace_file: {
+    title: () => msg("agent.tool.edit_workspace_file.title"),
+    description: () => msg("agent.tool.edit_workspace_file.description"),
+    confirmLabel: () => msg("agent.tool.workspace_file.confirm"),
+    severity: "info",
+    icon: PencilSimple,
+  },
 };
 
 // Read-only / lookup tools (no TOOL_META entry, no approval card) fall through
@@ -406,9 +424,12 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   web_search: () => msg("agent.tool.web_search.title"),
   search_docs: () => msg("agent.tool.search_docs.title"),
   fetch_url: () => msg("agent.tool.fetch_url.title"),
+  // The hand-off tool is gone; this keeps its steps readable in old saved chats only.
   hand_off_to_coding_agent: () => msg("agent.tool.coding_agent.title"),
   read_repo_file: () => msg("agent.tool.read_repo_file.title"),
   list_repo_folder: () => msg("agent.tool.list_repo_folder.title"),
+  write_workspace_file: () => msg("agent.tool.write_workspace_file.title"),
+  edit_workspace_file: () => msg("agent.tool.edit_workspace_file.title"),
   crawl_site: () => msg("agent.tool.crawl_site.title"),
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
   optimizer_catalog_optimizers_get: () => msg("agent.tool.optimizers.title"),
@@ -422,8 +443,23 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   open_page: () => msg("agent.tool.open_page.title"),
   remember_for_later: () => msg("agent.note.title"),
   continue_to_next_screen: () => msg("agent.screen_nav.continued"),
+  check_setup: () => msg("agent.tool.check_setup.title"),
   go_back_to_screen: () => msg("agent.screen_nav.back_running"),
   turn_check: () => msg("agent.turn_check.title"),
+  search_repositories: () => msg("agent.tool.github.search_repositories.title"),
+  search_code: () => msg("agent.tool.github.search_code.title"),
+  search_commits: () => msg("agent.tool.github.search_commits.title"),
+  get_file_contents: () => msg("agent.tool.github.get_file_contents.title"),
+  list_branches: () => msg("agent.tool.github.list_branches.title"),
+  list_commits: () => msg("agent.tool.github.list_commits.title"),
+  get_commit: () => msg("agent.tool.github.get_commit.title"),
+  list_tags: () => msg("agent.tool.github.list_tags.title"),
+  get_tag: () => msg("agent.tool.github.get_tag.title"),
+  list_releases: () => msg("agent.tool.github.list_releases.title"),
+  get_latest_release: () => msg("agent.tool.github.get_latest_release.title"),
+  get_release_by_tag: () => msg("agent.tool.github.get_release_by_tag.title"),
+  get_tagging_guide_for_agent: () => msg("agent.tool.tagging_guide.get.title"),
+  save_tagging_guide_for_agent: () => msg("agent.tool.tagging_guide.save.title"),
   send_feedback: () => msg("agent.tool.send_feedback.title"),
 };
 
@@ -441,9 +477,12 @@ export const TOOL_ICONS: Record<string, Icon> = {
   web_search: Globe,
   search_docs: BookOpen,
   fetch_url: LinkSimple,
+  // Only for old saved chats: the hand-off tool is gone.
   hand_off_to_coding_agent: Code,
   read_repo_file: FileCode,
   list_repo_folder: FolderOpen,
+  write_workspace_file: Code,
+  edit_workspace_file: PencilSimple,
   crawl_site: TreeStructure,
   blackbox_engines_blackbox_engines_get: Cube,
   optimizer_catalog_optimizers_get: Target,
@@ -456,10 +495,24 @@ export const TOOL_ICONS: Record<string, Icon> = {
   open_page: ArrowSquareOut,
   remember_for_later: Feather,
   continue_to_next_screen: FlowArrow,
+  check_setup: SealCheck,
   go_back_to_screen: ClockCounterClockwise,
   ask_user: ChatCenteredDots,
-  read_shared_chat_item: ShareNetwork,
   turn_check: Check,
+  search_repositories: GithubLogo,
+  search_code: FileMagnifyingGlass,
+  search_commits: GitCommit,
+  get_file_contents: FileCode,
+  list_branches: GitBranch,
+  list_commits: GitCommit,
+  get_commit: GitCommit,
+  list_tags: Tag,
+  get_tag: Tag,
+  list_releases: RocketLaunch,
+  get_latest_release: RocketLaunch,
+  get_release_by_tag: RocketLaunch,
+  get_tagging_guide_for_agent: ListChecks,
+  save_tagging_guide_for_agent: FloppyDisk,
   send_feedback: Megaphone,
 };
 
@@ -482,7 +535,11 @@ function resolveMeta(def: ToolMetaDef): ToolMeta {
 }
 
 export function getToolMeta(tool: string): ToolMeta {
-  return resolveMeta(TOOL_META[tool] ?? DEFAULT_META);
+  const def = TOOL_META[tool];
+  if (def) return resolveMeta(def);
+  // A read tool has no approval meta; keep its own icon so its running row
+  // does not show the default check mark.
+  return { ...resolveMeta(DEFAULT_META), icon: TOOL_ICONS[tool] ?? DEFAULT_META.icon };
 }
 
 export function getToolTitle(tool: string): string {

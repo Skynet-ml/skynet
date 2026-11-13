@@ -253,28 +253,43 @@ const key = (k: string, mods: Partial<Record<"shiftKey" | "altKey" | "ctrlKey" |
   ...mods,
 });
 
-test("Enter steers while a steerable turn runs, Tab queues, Shift+Enter is left alone", () => {
-  const ctx = { streaming: true, draft: "hi", canSteer: true, queuedCount: 0 };
-  assert.equal(midTurnKeyAction(key("Enter"), ctx), "steer");
+test("Enter and Tab queue while a turn runs, Cmd/Ctrl+Enter steers, Shift+Enter is left alone", () => {
+  const ctx = { streaming: true, draft: "hi", queuedCount: 0 };
+  assert.equal(midTurnKeyAction(key("Enter"), ctx), "queue");
   assert.equal(midTurnKeyAction(key("Tab"), ctx), "queue");
+  assert.equal(midTurnKeyAction(key("Enter", { metaKey: true }), ctx), "steer");
+  assert.equal(midTurnKeyAction(key("Enter", { ctrlKey: true }), ctx), "steer");
+  assert.equal(midTurnKeyAction(key("Enter", { metaKey: true, shiftKey: true }), ctx), null);
   assert.equal(midTurnKeyAction(key("Enter", { shiftKey: true }), ctx), null);
 });
 
-test("Enter queues in a chat that cannot steer", () => {
-  const ctx = { streaming: true, draft: "hi", canSteer: false, queuedCount: 0 };
-  assert.equal(midTurnKeyAction(key("Enter"), ctx), "queue");
+test("Cmd+Enter does nothing special when idle or with an empty draft", () => {
+  assert.equal(midTurnKeyAction(key("Enter", { metaKey: true }), { streaming: false, draft: "hi", queuedCount: 0 }), null);
+  assert.equal(midTurnKeyAction(key("Enter", { metaKey: true }), { streaming: true, draft: " ", queuedCount: 0 }), null);
+});
+
+test("interruptWith queues the text and sends it first once the stopped turn ends", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("waiting");
+  queue.interruptWith("  urgent ");
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["urgent"]);
+  assert.deepEqual(queue.getSnapshot().queued.map((q) => q.text), ["waiting"]);
 });
 
 test("keys do nothing special when idle or with an empty draft", () => {
-  assert.equal(midTurnKeyAction(key("Enter"), { streaming: false, draft: "hi", canSteer: false, queuedCount: 0 }), null);
-  assert.equal(midTurnKeyAction(key("Tab"), { streaming: false, draft: "hi", canSteer: false, queuedCount: 0 }), null);
-  assert.equal(midTurnKeyAction(key("Tab"), { streaming: true, draft: "  ", canSteer: true, queuedCount: 0 }), null);
+  assert.equal(midTurnKeyAction(key("Enter"), { streaming: false, draft: "hi", queuedCount: 0 }), null);
+  assert.equal(midTurnKeyAction(key("Tab"), { streaming: false, draft: "hi", queuedCount: 0 }), null);
+  assert.equal(midTurnKeyAction(key("Tab"), { streaming: true, draft: "  ", queuedCount: 0 }), null);
 });
 
 test("Up in an empty composer recalls only when something is queued", () => {
-  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "", canSteer: true, queuedCount: 1 }), "recall");
-  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "", canSteer: true, queuedCount: 0 }), null);
-  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "x", canSteer: true, queuedCount: 1 }), null);
+  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "", queuedCount: 1 }), "recall");
+  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "", queuedCount: 0 }), null);
+  assert.equal(midTurnKeyAction(key("ArrowUp"), { streaming: true, draft: "x", queuedCount: 1 }), null);
 });
 
 test("steer posts into the open turn and shows as steering until applied", async () => {
@@ -412,6 +427,39 @@ test("Steer on a paused idle queue sends that message, then the queue continues"
   queue.setBusy(false);
   await flush();
   assert.deepEqual(sent, ["second", "first"]);
+});
+
+test("interrupt sends the message first once Stop ends the turn, then the queue continues", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("first");
+  queue.enqueue("second");
+  queue.interrupt(queue.getSnapshot().queued[1].id);
+  await flush();
+  assert.deepEqual(sent, []);
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["second"]);
+  assert.equal(queue.getSnapshot().paused, false);
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["second", "first"]);
+});
+
+test("interrupt waits for unread steers to come back before it sends", async () => {
+  const { queue, sent } = setup();
+  const channel = fakeChannel();
+  queue.openTurn(channel);
+  queue.steer("unread");
+  queue.enqueue("now");
+  await flush();
+  queue.interrupt(queue.getSnapshot().queued[0].id);
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["now"]);
+  assert.deepEqual(queue.getSnapshot().queued.map((q) => q.text), ["unread"]);
 });
 
 test("promote is a no-op when no steerable turn runs", () => {

@@ -28,9 +28,14 @@ function recorder(): { calls: Call[]; handlers: GeneralistAgentHandlers } {
       onMessagePatch: record("message"),
       onMessageReset: record("messageReset"),
       onConversationMeta: record("conversationMeta"),
+      onConversationTitle: record("conversationTitle"),
       onDone: record("done"),
       onTurnStats: record("turnStats"),
       onError: record("error"),
+      onCompactionStart: record("compactionStart"),
+      onCompaction: record("compaction"),
+      onCompactionError: record("compactionError"),
+      onSteerApplied: record("steerApplied"),
     },
   };
 }
@@ -125,6 +130,31 @@ test("conversation metadata reaches its handler", () => {
   ]);
 });
 
+test("conversation metadata passes the saved user message id", () => {
+  assert.deepEqual(
+    dispatch([["conversation_meta", { conversation_id: "k", title: "T", user_message_id: 9 }]]),
+    [["conversationMeta", { conversation_id: "k", title: "T", user_message_id: 9 }]],
+  );
+});
+
+test("a steer passes its saved row id only when the server sends a number", () => {
+  assert.deepEqual(
+    dispatch([
+      ["steer_applied", { ids: ["s1"], text: "less", message_id: 12 }],
+      ["steer_applied", { ids: ["s2"], text: "more", message_id: "12" }],
+    ]),
+    [
+      ["steerApplied", { ids: ["s1"], text: "less", message_id: 12 }],
+      ["steerApplied", { ids: ["s2"], text: "more" }],
+    ],
+  );
+});
+
+test("a model title reaches its own handler, not the meta handler", () => {
+  const ev = { conversation_id: "k", title: "New", cut_title: "Old" };
+  assert.deepEqual(dispatch([["conversation_title", ev]]), [["conversationTitle", ev]]);
+});
+
 test("done reports the requested and the served model, blank ones as null", () => {
   const calls = dispatch([
     ["done", { assistant_message: "hi", model: "openrouter/auto", served_model: "vendor/m" }],
@@ -168,4 +198,22 @@ test("a step start clears the pending tool rows", () => {
     ["tool_pending_clear", {}],
   ]);
   assert.deepEqual(calls, [["toolPending", { tool: "list_models" }], ["toolPendingClear"]]);
+});
+
+test("compaction events reach their handlers in order", () => {
+  const entry = { summary: "s", kept_turns: 2 };
+  const calls = dispatch([
+    ["compaction_start", { reason: "threshold", kept_turns: 2 }],
+    ["compaction_start", { reason: "manual", summarized_turns: 4 }],
+    ["compaction", entry],
+    ["compaction_error", { message: "x" }],
+    ["compaction_error", { reason: "threshold", cents: 2.5 }],
+  ]);
+  assert.deepEqual(calls, [
+    ["compactionStart", { reason: "threshold", summarizedTurns: null }],
+    ["compactionStart", { reason: "manual", summarizedTurns: 4 }],
+    ["compaction", entry],
+    ["compactionError", { cents: null }],
+    ["compactionError", { cents: 2.5 }],
+  ]);
 });

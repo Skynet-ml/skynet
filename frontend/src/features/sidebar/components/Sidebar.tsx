@@ -72,6 +72,7 @@ import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
+import { useNewOptimization } from "@/features/submit";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { perLocale } from "@/shared/lib/per-locale";
@@ -140,6 +141,7 @@ function clampSidebarWidth(n: number): number {
 
 export function Sidebar() {
   const pathname = usePathname();
+  const newOptimization = useNewOptimization();
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeSource = sourceFromParam(searchParams.get("source"));
@@ -701,9 +703,15 @@ export function Sidebar() {
                   ? { kind: "optimization", detailBase: "/optimizations" }
                   : undefined
               }
+              onStart={
+                item.href === "/submit" && pathname !== "/submit"
+                  ? newOptimization.start
+                  : undefined
+              }
             />
           ))}
         </nav>
+        {newOptimization.dialog}
 
         <div
           aria-hidden="true"
@@ -934,6 +942,7 @@ function NavItem({
   tooltipSide,
   setupAnchor,
   resume,
+  onStart,
 }: {
   href: string;
   label: string;
@@ -947,6 +956,8 @@ function NavItem({
   /** ``data-setup`` anchor for the entry a first-login setup stop points at. */
   setupAnchor?: string;
   resume?: { kind: "tagger" | "optimization"; detailBase: string };
+  /** Opens the entry in place of its link, as a new optimization offers a left setup. */
+  onStart?: () => void;
 }) {
   const router = useRouter();
   // When this entry can resume a recent session, decide at click time: if the
@@ -958,9 +969,10 @@ function NavItem({
         // Let modifier-clicks (open-in-new-tab) fall through to the plain href.
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         const id = recentResumableId(resume.kind);
-        if (!id) return;
+        if (!id && !onStart) return;
         e.preventDefault();
-        router.push(`${resume.detailBase}/${id}`);
+        if (id) router.push(`${resume.detailBase}/${id}`);
+        else onStart?.();
       }
     : undefined;
 

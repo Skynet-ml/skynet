@@ -46,11 +46,15 @@ export interface GeneralistAgentRequest {
   steer_key?: string;
   /** False runs the turn without saving it as a conversation; absent saves it. */
   persist?: boolean;
+  /** The summary that stands in for the turns before `chat_history`, after a compaction. */
+  compaction_summary?: string | null;
 }
 
 interface ConversationMetaPayload {
   conversation_id: string;
   title: string;
+  /** The saved row of the turn's user message. */
+  user_message_id?: number;
 }
 
 export interface GeneralistAgentHandlers {
@@ -71,8 +75,10 @@ export interface GeneralistAgentHandlers {
   /** The reply streamed so far prefaced a tool call and is not the reply. */
   onMessageReset?: () => void;
   onConversationMeta?: (ev: ConversationMetaPayload) => void;
+  /** A model title for a new chat; apply it only while its row still shows `cut_title`. */
+  onConversationTitle?: (ev: ConversationMetaPayload & { cut_title: string }) => void;
   /** The agent read these steered messages at a step boundary; `text` joins them. */
-  onSteerApplied?: (ev: { ids: string[]; text: string }) => void;
+  onSteerApplied?: (ev: { ids: string[]; text: string; message_id?: number }) => void;
   onDone: (result: {
     assistant_message: string;
     model: string | null;
@@ -80,24 +86,59 @@ export interface GeneralistAgentHandlers {
     /** Raw `stats` block; read it with `parseTurnStats`. */
     stats: unknown;
   }) => void;
+  /** The backend started to condense older turns before the reply. */
+  onCompactionStart?: (ev: { reason: string; summarizedTurns: number | null }) => void;
+  /** The compaction entry: read it with `parseCompaction`. */
+  onCompaction?: (raw: unknown) => void;
+  /** The summary call failed; the turn runs on without it. `cents` is the failed call's cost. */
+  onCompactionError?: (ev: { cents: number | null }) => void;
   /** The turn's final `stats`, sent after `done` when later model calls changed its cost. */
   onTurnStats?: (stats: unknown) => void;
   onError: (message: string, code?: string) => void;
   signal?: AbortSignal;
 }
 
+/** What `/compact` sends: the chat window to condense and what to focus on. */
+export interface CompactChatRequest {
+  chat_history: ChatTurn[];
+  compaction_summary?: string | null;
+  instructions?: string;
+  conversation_id?: string | null;
+  model?: string;
+  reasoning_effort?: string;
+  fast_mode?: boolean;
+}
+
 /**
  * Stream generalist-agent events via SSE. `source` "hosted" runs the turn on
  * the linked web account; `req.conversation_id` is then that account's id.
  */
-export async function streamGeneralistAgent(
+export function streamGeneralistAgent(
   req: GeneralistAgentRequest,
   handlers: GeneralistAgentHandlers,
   source: ApiSource = "local",
 ): Promise<void> {
+  return streamAgentRoute("/optimizations/generalist-agent", req, handlers, source);
+}
+
+/** Condense a chat's older turns now (`/compact`); the events are the turn's compaction events. */
+export function streamCompaction(
+  req: CompactChatRequest,
+  handlers: GeneralistAgentHandlers,
+  source: ApiSource = "local",
+): Promise<void> {
+  return streamAgentRoute("/optimizations/generalist-agent/compact", req, handlers, source);
+}
+
+async function streamAgentRoute(
+  path: string,
+  req: object,
+  handlers: GeneralistAgentHandlers,
+  source: ApiSource,
+): Promise<void> {
   let res: Response;
   try {
-    res = await fetchWithAuthRetry(agentUrl("/optimizations/generalist-agent", source), {
+    res = await fetchWithAuthRetry(agentUrl(path, source), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -129,10 +170,14 @@ export async function streamGeneralistAgent(
     );
     return;
   }
-  const processEvent = ({ event, data }: { event: string; data: Record<string, unknown> }) =>
+  const processEvent = ({ event, data }: { event: string; data: Record<string, unknown> }) => {
     dispatchGeneralistEvent(handlers, event, data, () =>
       msg("auto.features.agent.panel.lib.stream.literal.2"),
     );
+    // The stream can stay open for the chat title after the turn. The server
+    // sends ``turn_billed`` once the debit ran, so the balance needs no wait.
+    if (event === "turn_billed") announceWalletChange();
+  };
   try {
     await readServerSentEvents(res.body, processEvent);
   } catch (err) {

@@ -35,6 +35,8 @@ _COSMETIC_FIELDS = {
     "max_cost_cents",
     "dataset_filename",
     "recipe",
+    # The setup chat names the run's origin, not an input it executes.
+    "conversation_id",
 }
 _EVALUATION_FIELDS = {
     "scorer",

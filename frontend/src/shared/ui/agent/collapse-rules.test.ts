@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   COLLAPSED_LINES,
   COLLAPSE_ANIMATION_MS,
+  collapseDurationMs,
   bodyMaxHeight,
   clampHeight,
   needsScrollBack,
@@ -56,8 +57,11 @@ test("toggling flips the label between Show more and Show less", () => {
   assert.equal(toggleLabelKey(true), "shared.agent.show_less");
 });
 
-test("the animation sits in the 200-250 ms ease-out window", () => {
-  assert.ok(COLLAPSE_ANIMATION_MS >= 200 && COLLAPSE_ANIMATION_MS <= 250);
+test("the animation grows with the height change, from 240 ms to 480 ms", () => {
+  assert.equal(collapseDurationMs(0), COLLAPSE_ANIMATION_MS);
+  assert.equal(collapseDurationMs(-50), COLLAPSE_ANIMATION_MS);
+  assert.equal(collapseDurationMs(400), 360);
+  assert.equal(collapseDurationMs(5000), 480);
 });
 
 test("collapsing scrolls back only when the message top is out of view", () => {

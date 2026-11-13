@@ -46,6 +46,9 @@
   "tooltip.submit.blackbox.scorer_install": "Runs once inside the offline cloud sandbox. Use packages already in the pinned image or deployment-owned package artifacts; public apt and package registries are unavailable.",
   "submit.blackbox.roles.optimization.managed_hint": "Uses the model's default sampling settings; billing can use your {term.appName} balance or your OpenRouter key.",
   "submit.nav.screen": "Screen {index} of {count}",
+  "submit.nav.slide_to_start": "Slide to start the optimisation",
+  "submit.nav.slide_hint": "Drag the plane to the end of the track, or press Enter.",
+  "submit.nav.slide_tooltip": "Drag or click the plane to start the run",
   "shared.agent.worked_for": "Worked for {duration}",
   "shared.agent.working_for": "Working for {duration}",
   "shared.agent.pasted_text": "Pasted text",
@@ -73,9 +76,5 @@
   "agent.tool.github_repos.found": "{count} found",
   "agent.tool.github_repos.none": "None found",
   "agent.tool.github_repos.private": "Private",
-  "submit.draft.title": "Continue from your previous setup?",
-  "submit.draft.continue": "Continue draft",
-  "submit.draft.start_new": "Start new",
-  "submit.draft.left_named": "You left “{name}” {time}.",
-  "submit.draft.left": "You left a run setup {time}."
+  "submit.draft.title": "Continue from your previous setup?"
 }

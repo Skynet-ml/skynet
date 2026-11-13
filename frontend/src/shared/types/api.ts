@@ -394,6 +394,10 @@ interface BlackboxRepoSource {
   secrets?: BlackboxRepoSecret[];
   /** True when Skynet created the repository for this run. */
   created_by_skynet?: boolean;
+  /** Setup draft files by repository path; the server writes them over the checkout before the run. */
+  draft_files?: Record<string, string>;
+  /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
+  draft_base?: string;
 }
 
 export interface BlackboxTarget {
@@ -473,6 +477,8 @@ export interface BlackboxRunRequest {
   preflight_fingerprint?: string;
   // The setup's finished hardening job; the run's PR ships its exploit suite.
   hardening_job_id?: string | null;
+  // The setup chat that created the run; sharing the run also shares it.
+  conversation_id?: string | null;
 
   name?: string;
   description?: string;

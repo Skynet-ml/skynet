@@ -78,12 +78,21 @@ export function dispatchGeneralistEvent(
       handlers.onSteerApplied?.({
         ids: Array.isArray(data.ids) ? data.ids.map(String) : [],
         text: String(data.text ?? ""),
+        ...(typeof data.message_id === "number" ? { message_id: data.message_id } : {}),
       });
       break;
     case "conversation_meta":
       handlers.onConversationMeta?.({
         conversation_id: String(data.conversation_id ?? ""),
         title: String(data.title ?? ""),
+        ...(typeof data.user_message_id === "number" ? { user_message_id: data.user_message_id } : {}),
+      });
+      break;
+    case "conversation_title":
+      handlers.onConversationTitle?.({
+        conversation_id: String(data.conversation_id ?? ""),
+        title: String(data.title ?? ""),
+        cut_title: String(data.cut_title ?? ""),
       });
       break;
     case "done": {
@@ -97,6 +106,23 @@ export function dispatchGeneralistEvent(
       });
       break;
     }
+    case "compaction_start":
+      handlers.onCompactionStart?.({
+        reason: String(data.reason ?? "threshold"),
+        summarizedTurns:
+          typeof data.summarized_turns === "number" && data.summarized_turns >= 0
+            ? data.summarized_turns
+            : null,
+      });
+      break;
+    case "compaction":
+      handlers.onCompaction?.(data);
+      break;
+    case "compaction_error":
+      handlers.onCompactionError?.({
+        cents: typeof data.cents === "number" && Number.isFinite(data.cents) ? data.cents : null,
+      });
+      break;
     case "turn_stats":
       if (data.stats) handlers.onTurnStats?.(data.stats);
       break;

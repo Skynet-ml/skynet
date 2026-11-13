@@ -52,3 +52,20 @@ test("a created repository keeps its created-by-Skynet mark", () => {
   });
   assert.deepEqual(patch, { repository: "acme/new-bot", repo_created_by_skynet: true });
 });
+
+test("an agent's repository files pass through, and only their text values", () => {
+  const patch = extractWizardPatch({
+    wizard_state: { workspace_files: { "src/app.py": "x = 2\n", "bad.py": 3 } },
+  });
+  assert.deepEqual(patch, { workspace_files: { "src/app.py": "x = 2\n" } });
+  assert.deepEqual(extractWizardPatch({ wizard_state: { workspace_files: { "bad.py": null } } }), {});
+});
+
+test("the commit the agent read its drafts at passes through, never an empty one", () => {
+  const base = "c".repeat(40);
+  const patch = extractWizardPatch({
+    wizard_state: { workspace_base: base, workspace_files: { "src/app.py": "x = 2\n" } },
+  });
+  assert.deepEqual(patch, { workspace_base: base, workspace_files: { "src/app.py": "x = 2\n" } });
+  assert.deepEqual(extractWizardPatch({ wizard_state: { workspace_base: "" } }), {});
+});

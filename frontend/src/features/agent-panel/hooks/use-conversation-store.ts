@@ -23,6 +23,7 @@ import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap"
 
 import {
   deleteConversation,
+  getConversation,
   listConversations,
   patchConversation,
   type ConversationPatch,
@@ -75,6 +76,11 @@ export interface ConversationStoreState {
   togglePin: (id: string, pinned: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   upsertFromMeta: (id: string, title: string) => void;
+  /** Set a model title, only on a listed row that still shows ``cutTitle``. */
+  applyTitle: (id: string, title: string, cutTitle: string) => void;
+  /** Read a chat's saved title again, when its stream closed before the model title came.
+   *  Resolves true when the model title is there. */
+  reloadTitle: (id: string, cutTitle: string) => Promise<boolean>;
   markSeen: (id: string) => void;
 }
 
@@ -93,6 +99,10 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   const swapping = useSourceSwap(web) || rowsSide !== web;
   const isCurrentSide = useIsCurrentSide(web);
 
+  // Each chat's cut title that a model title replaced. A later meta event or
+  // an older list reply can still carry the cut title; neither may undo it.
+  const replacedCutTitles = React.useRef(new Map<string, string>());
+
   const refresh = React.useCallback(
     async (params?: ListConversationsParams) => {
       if (!enabled) return;
@@ -100,7 +110,22 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
       const rows = await listConversations(params);
       if (!isCurrentSide(web)) return;
       setLoading(false);
-      if (rows !== null) setConversations(rows);
+      // A list that left before a model title came back still holds the cut
+      // title; keep the model title on those rows.
+      if (rows !== null) {
+        // A row past its cut title ends the guard, so a later rename back to
+        // that text (also from another tab) shows.
+        for (const row of rows) {
+          if (replacedCutTitles.current.get(row.id) !== row.title) replacedCutTitles.current.delete(row.id);
+        }
+        setConversations((prev) =>
+          rows.map((row) => {
+            if (replacedCutTitles.current.get(row.id) !== row.title) return row;
+            const shown = prev.find((p) => p.id === row.id);
+            return shown ? { ...row, title: shown.title } : row;
+          }),
+        );
+      }
       setRowsSide(web);
     },
     [enabled, web, isCurrentSide],
@@ -119,7 +144,9 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
     async (id: string, title: string) => {
       const trimmed = title.trim();
       if (!trimmed) return;
-      const prevRows = conversations;
+      const replacedCut = replacedCutTitles.current.get(id);
+      replacedCutTitles.current.delete(id);
+      const prevTitle = conversations.find((row) => row.id === id)?.title;
       setConversations((rows) =>
         rows.map((row) => (row.id === id ? { ...row, title: trimmed } : row)),
       );
@@ -127,9 +154,18 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
       const updated = await patchConversation(id, patch);
       if (updated) {
         applyPatch(updated);
-      } else {
-        setConversations(prevRows);
+        return;
       }
+      // The server may have saved a model title while the rename was in
+      // flight, so the earlier title can be stale: read the saved one, and
+      // undo only this row's edit.
+      if (replacedCut !== undefined) replacedCutTitles.current.set(id, replacedCut);
+      const detail = await getConversation(id);
+      const restored = detail?.title || prevTitle;
+      if (restored === undefined) return;
+      setConversations((rows) =>
+        rows.map((row) => (row.id === id && row.title === trimmed ? { ...row, title: restored } : row)),
+      );
     },
     [conversations, applyPatch],
   );
@@ -162,12 +198,17 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
 
   const upsertFromMeta = React.useCallback((id: string, title: string) => {
     setConversations((prev) => {
+      // Read in the updater: ``applyTitle`` writes the map in its own updater,
+      // which runs only when React processes the queue.
+      const stale = replacedCutTitles.current.get(id) === title;
       const existing = prev.find((row) => row.id === id);
       const now = new Date().toISOString();
       if (existing) {
         // Conversation already in the index — just bump updated_at so it
         // floats to the top after the next sort.
-        return prev.map((row) => (row.id === id ? { ...row, updatedAt: now, title } : row));
+        return prev.map((row) =>
+          row.id === id ? { ...row, updatedAt: now, title: stale ? row.title : title } : row,
+        );
       }
       const stub: ConversationSummary = {
         id,
@@ -181,6 +222,27 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
       return [stub, ...prev];
     });
   }, []);
+
+  // The title lands seconds after the chat starts. A row the user deleted
+  // stays gone, and a row the user renamed (also while the PATCH is in
+  // flight, as the rename sets the title at once) keeps the user's title.
+  const applyTitle = React.useCallback((id: string, title: string, cutTitle: string) => {
+    setConversations((prev) => {
+      if (!prev.some((row) => row.id === id && row.title === cutTitle)) return prev;
+      replacedCutTitles.current.set(id, cutTitle);
+      return prev.map((row) => (row.id === id ? { ...row, title } : row));
+    });
+  }, []);
+
+  const reloadTitle = React.useCallback(
+    async (id: string, cutTitle: string) => {
+      const detail = await getConversation(id);
+      if (!detail || !detail.title || detail.title === cutTitle) return false;
+      applyTitle(id, detail.title, cutTitle);
+      return true;
+    },
+    [applyTitle],
+  );
 
   const markSeen = React.useCallback((id: string) => {
     setLastSeen((prev) => {
@@ -213,6 +275,8 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
     togglePin,
     remove,
     upsertFromMeta,
+    applyTitle,
+    reloadTitle,
     markSeen,
   };
 }

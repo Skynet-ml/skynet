@@ -1,49 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 
-import { SETUP_CHAT_KEY, deleteConversation, legacySetupChatId } from "@/features/agent-panel";
-import { setupDraftApi } from "@/shared/lib/api";
 import { sessionIdentity } from "@/shared/lib/session-identity";
-import { clearSetupDraft, type SetupDraft } from "@/shared/lib/setup-draft";
+import type { SetupDraft } from "@/shared/lib/setup-draft";
 
 import {
-  WIZARD_SESSION_KEY,
-  decodeWizardSession,
-  keepSessionValue,
-  offersLeftSetup,
-  readSessionValue,
-} from "../lib/session-state";
-import { deleteSetupDraft, loadSetupDraft } from "../lib/setup-draft-sync";
-import { WIZARD_V2_STEPS } from "../lib/wizard-v2";
+  continueSetupOffer,
+  discardSetupOffer,
+  findSetupOffer,
+  offerState,
+} from "../lib/setup-offer";
 import { SetupDraftDialog } from "./SetupDraftDialog";
 import { UnifiedWizard } from "./v2/UnifiedWizard";
 
-// Setups were once saved as drafts in this browser and offered back on
-// return; that feature is gone, so whatever an older build left is dropped.
-const RETIRED_DRAFT_DATABASE = "skynet-wizard-drafts";
-const RETIRED_DRAFT_RESUME_KEY = "skynet.wizard-draft.resume";
-
-function clearRetiredDrafts() {
-  try {
-    window.indexedDB?.deleteDatabase(RETIRED_DRAFT_DATABASE);
-  } catch {}
-  try {
-    window.sessionStorage.removeItem(RETIRED_DRAFT_RESUME_KEY);
-  } catch {}
-}
-
-/** Drop a left setup; a chat an older build saved on the server goes with it. */
-function discardSetupDraft(account: string, draft: SetupDraft | null) {
-  void deleteSetupDraft(account, setupDraftApi);
-  const legacy = legacySetupChatId(draft?.values[SETUP_CHAT_KEY] ?? null);
-  if (legacy) void deleteConversation(legacy);
-}
-
 /** `/submit` root: the one submission wizard, once the session is known. */
 export function SubmitEntry() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   // Read once: a run started from a folder's menu should land in that folder.
   const [folderId] = useState(() => searchParams.get("folder"));
@@ -57,20 +32,10 @@ export function SubmitEntry() {
   const [offer, setOffer] = useState<SetupDraft | null>(null);
   useEffect(() => {
     if (accountId === null) return;
-    clearRetiredDrafts();
     let live = true;
-    const tab = readSessionValue(WIZARD_SESSION_KEY);
-    void loadSetupDraft(accountId, setupDraftApi).then((draft) => {
+    void findSetupOffer(accountId, searchParams.has("clone")).then((draft) => {
       if (!live) return;
-      const steps = WIZARD_V2_STEPS as readonly string[];
-      const left = draft?.values[WIZARD_SESSION_KEY] ?? null;
-      const cloning = searchParams.has("clone");
-      const usable = decodeWizardSession(left, accountId, steps) !== null;
-      const offered = offersLeftSetup({ tab, leftReadable: usable, account: accountId, steps, cloning });
-      if (draft && offered) setOffer(draft);
-      // A draft this build cannot read may come from a newer build on another
-      // device, so only this browser's copy goes; the server keeps it.
-      else if (draft && !usable) clearSetupDraft();
+      setOffer(draft);
       setHydrated(true);
     });
     return () => {
@@ -81,24 +46,20 @@ export function SubmitEntry() {
 
   if (accountId === null || !hydrated) return null;
   if (offer) {
-    const left = decodeWizardSession(
-      offer.values[WIZARD_SESSION_KEY] ?? null,
-      accountId,
-      WIZARD_V2_STEPS as readonly string[],
-    );
+    // A link straight to /submit has no page behind it, so dismissing the
+    // offer goes home.
     return (
       <SetupDraftDialog
-        name={left?.meta.name.trim() || left?.task.objective.trim() || ""}
-        leftAt={offer.leftAt}
+        state={offerState(accountId, offer)}
         onContinue={() => {
-          for (const [key, value] of Object.entries(offer.values)) keepSessionValue(key, value);
-          clearSetupDraft();
+          continueSetupOffer(offer);
           setOffer(null);
         }}
         onStartNew={() => {
-          discardSetupDraft(accountId, offer);
+          discardSetupOffer(accountId, offer);
           setOffer(null);
         }}
+        onDismiss={() => router.push("/")}
       />
     );
   }

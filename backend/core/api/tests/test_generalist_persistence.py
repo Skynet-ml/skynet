@@ -407,6 +407,55 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
 
 
+def _store_compaction(engine: Engine, content: str, entry: dict[str, Any]) -> None:
+    """Store ``entry`` as the compaction of the user row with ``content``, as a /compact save does."""
+    with Session(engine) as session:
+        row = session.query(AgentMessageModel).filter_by(role="user", content=content).one()
+        row.router_metadata = {**(row.router_metadata or {}), "compaction": entry}
+        session.commit()
+
+
+def _user_compactions(engine: Engine) -> list[tuple[str, Any]]:
+    """Return each stored user row's text and compaction entry, in insertion order."""
+    with Session(engine) as session:
+        rows = session.query(AgentMessageModel).filter_by(role="user").order_by(AgentMessageModel.id).all()
+        return [(row.content, (row.router_metadata or {}).get("compaction")) for row in rows]
+
+
+def test_regenerate_keeps_the_compaction_of_the_replaced_turn(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A /compact that kept only the latest turn stays, with its cost, when that turn is regenerated."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    entry = {"summary": "s", "cents": 3.0, "kept_turns": 2}
+    _store_compaction(engine, "second", entry)
+
+    assert _post_turn(client, "second", token, conversation_id=conversation_id, regenerate=True).status_code == 200
+
+    assert _user_compactions(engine) == [("first", None), ("second", entry)]
+
+
+def test_edit_keeps_the_compaction_of_the_edited_turn_only(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """The edited turn's summary covers only earlier turns, so it stays; a later turn's summary goes with its turns."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second", "third"])
+    entry = {"summary": "s2", "cents": 2.0, "kept_turns": 4}
+    _store_compaction(engine, "second", entry)
+    _store_compaction(engine, "third", {"summary": "s3", "cents": 1.0, "kept_turns": 2})
+
+    edited = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert edited.status_code == 200
+    assert _user_compactions(engine) == [("first", None), ("second, edited", entry)]
+
+
 def test_unsaved_turn_streams_the_reply_and_stores_nothing(
     persistence_client: tuple[TestClient, Engine],
 ) -> None:
@@ -1026,21 +1075,20 @@ def test_history_for_agent_attaches_tool_trace_to_assistant_turns() -> None:
     ]
 
 
-def test_history_for_agent_bounds_turns_text_and_tool_results() -> None:
-    """A long conversation is clipped to the newest turns, with each field capped."""
+def test_history_for_agent_keeps_every_turn_and_tool_result_in_full() -> None:
+    """No turn, tool call or result is cut: compaction alone bounds the history."""
     calls = [ChatToolCall(tool=f"t{i}", status="done", result="r" * 5000) for i in range(50)]
-    turns = [ChatTurn(role="user", content=f"m{i}") for i in range(agent_mod.HISTORY_MAX_TURNS + 5)]
-    turns.append(ChatTurn(role="assistant", content="x" * (agent_mod.HISTORY_TURN_MAX_CHARS + 50), tool_calls=calls))
+    turns = [ChatTurn(role="user", content=f"m{i}") for i in range(30)]
+    turns.append(ChatTurn(role="assistant", content="x" * 9000, tool_calls=calls))
 
     history = history_for_agent(turns)
 
-    assert len(history) == agent_mod.HISTORY_MAX_TURNS
-    assert history[0]["content"] == "m6"
+    assert len(history) == 31
+    assert history[0]["content"] == "m0"
     last = history[-1]
-    assert len(last["content"]) == agent_mod.HISTORY_TURN_MAX_CHARS
-    assert len(last["tools"]) == agent_mod.HISTORY_MAX_TOOL_CALLS
-    assert last["tools"][-1]["tool"] == "t49"
-    assert all(len(call["result"]) == agent_mod.HISTORY_TOOL_RESULT_MAX_CHARS for call in last["tools"])
+    assert len(last["content"]) == 9000
+    assert [call["tool"] for call in last["tools"]] == [f"t{i}" for i in range(50)]
+    assert all(len(call["result"]) == 5000 for call in last["tools"])
 
 
 def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
@@ -1242,13 +1290,14 @@ def test_failed_steer_store_gives_feedback_not_sent(
     persist = agent_mod._persist_user_turn
     seen: dict[str, Any] = {}
 
-    def failing_persist(job_store: Any, conversation_id: str, text: str) -> int:
+    def failing_persist(job_store: Any, conversation_id: str, text: str, **kwargs: Any) -> int:
         """Store the first message, and fail on the steer.
 
         Args:
             job_store: The router's store.
             conversation_id: The chat.
             text: The user text.
+            **kwargs: The store options, such as ``steer``.
 
         Returns:
             The stored message id.
@@ -1258,7 +1307,7 @@ def test_failed_steer_store_gives_feedback_not_sent(
         """
         if text == "also the score is wrong":
             raise RuntimeError("store down")
-        return persist(job_store, conversation_id, text)
+        return persist(job_store, conversation_id, text, **kwargs)
 
     async def steer_stream(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Take one steer whose store fails, then send feedback about it.

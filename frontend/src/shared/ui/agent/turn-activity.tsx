@@ -1,16 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { CaretRight } from "@/shared/ui/icons";
 
-import { cn } from "@/shared/lib/utils";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
 
 import { ActivityGroup } from "./activity-steps";
-import { Reveal, RevealMounted } from "./reveal";
 import { RevealText } from "./reveal-text";
 import {
   blockWorkMs,
@@ -29,8 +26,6 @@ type Step = {
   isRetry: boolean;
   index: number;
   card?: boolean;
-  /** A card that stays shown when the history folds; every card does unless false. */
-  pinned?: boolean;
 };
 
 /** A finished earlier turn of the same work block, shown inside its history. */
@@ -48,8 +43,8 @@ interface TurnActivityProps {
   thinking: readonly TurnThinking[];
   /**
    * Each call with its index among the turn's tool calls. A ``card`` call
-   * renders on its own at its place in the history and stays shown when the
-   * history is folded; every other call is a one-line step.
+   * renders on its own at its place in the history; every other call is a
+   * one-line step.
    */
   steps: Step[];
   /** The turn is still running. */
@@ -65,17 +60,16 @@ interface TurnActivityProps {
   durationMs?: number | null;
   /** The turn's start, when the caller knows it better than the steps do. */
   startedAt?: number | null;
-  /** Earlier turns of the same work block; they open with the history. */
+  /** Earlier turns of the same work block, shown before this one. */
   earlier?: readonly EarlierTurn[];
 }
 
 // Mirrors Codex's local turn: a "Working for 14s" line over what the agent
 // said and the tools it ran, then a single shimmering line at the bottom
 // naming what it is thinking about, which gives way to a running tool or to
-// the answer. Reasoning itself never shows as rows. Once done, a "Worked for
-// 39s" line folds the history away and leaves the answer; a click opens it.
-// Cards the user acts on sit at their place in the history and stay shown
-// when it folds.
+// the answer. Reasoning itself never shows as rows. Once done, the line reads
+// "Worked for 39s". The history always stays open, with no fold of its own;
+// only each burst of steps folds into its summary line.
 export function TurnActivity({
   thinking,
   steps,
@@ -95,9 +89,6 @@ export function TurnActivity({
   const isLive =
     streaming ||
     allSteps.some(({ call, card }) => call.working || (!card && call.status === "running"));
-  // Open while the turn runs, folded once it ends, unless the reader chose.
-  const [choice, setChoice] = React.useState<boolean | null>(null);
-  const open = choice ?? isLive;
   const [nowTs, setNowTs] = React.useState(() => Date.now());
   const [mountedAt] = React.useState(() => Date.now());
   // One start for the whole turn, so the live timer only ever counts up.
@@ -117,22 +108,9 @@ export function TurnActivity({
 
   const pieces = interleaveThinking([], steps);
   const earlierPieces = earlier.map((t) => interleaveThinking([], t.steps));
-  const hasCards = [pieces, ...earlierPieces].some((list) =>
-    list.some((piece) => piece.kind === "card"),
-  );
   const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
-  const isPinned = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card" && piece.step.pinned !== false;
-  const anyPinned = [pieces, ...earlierPieces].some((list) => list.some(isPinned));
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
-
-  const pieceKey = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card"
-      ? piece.step.call.id
-      : piece.kind === "steps"
-        ? (piece.steps[0]?.call.id ?? "")
-        : "";
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
@@ -165,47 +143,19 @@ export function TurnActivity({
     ) : null;
   const planLine = renderPlan(plan, "plan");
 
-  // A pinned card stands outside the fold and never moves. Everything else
-  // rolls up behind it: a card stays mounted, since one can wait on the user,
-  // and a burst of steps leaves once it has rolled away.
-  const renderPieces = (list: typeof pieces, shown: boolean) =>
-    list.map((piece) => {
-      if (isPinned(piece)) return renderPiece(piece);
-      const key = `fold-${pieceKey(piece)}`;
-      return piece.kind === "card" ? (
-        <RevealMounted key={key} shown={shown} depth="block">
-          {renderPiece(piece)}
-        </RevealMounted>
-      ) : (
-        <Reveal key={key} open={shown} depth="block">
-          {renderPiece(piece)}
-        </Reveal>
-      );
-    });
-
-  // Folded, an earlier turn keeps only its pinned cards; its reply stays inside.
-  const earlierNodes = (shown: boolean) =>
-    earlier.map((turn, i) => (
-      <React.Fragment key={`earlier-${i}`}>
-        {turn.plan && (
-          <Reveal open={shown} depth="block">
-            {renderPlan(turn.plan, `plan-${i}`)}
-          </Reveal>
-        )}
-        {renderPieces(earlierPieces[i] ?? [], shown)}
-        {turn.answer && (
-          <Reveal open={shown} depth="block">
-            <div className="py-1">{turn.answer}</div>
-          </Reveal>
-        )}
-      </React.Fragment>
-    ));
+  const earlierNodes = earlier.map((turn, i) => (
+    <React.Fragment key={`earlier-${i}`}>
+      {renderPlan(turn.plan, `plan-${i}`)}
+      {(earlierPieces[i] ?? []).map(renderPiece)}
+      {turn.answer && <div className="py-1">{turn.answer}</div>}
+    </React.Fragment>
+  ));
 
   const thinkingLine = showThinking && (
     <ThinkingLine label={latestHeading(thinking) ?? msg("shared.agent.thinking")} />
   );
 
-  // Codex shows no header until the turn has something to fold.
+  // Codex shows no header until the turn has history to show.
   if (isLive && !hasHistory) return thinkingLine || null;
 
   const workedMs = blockWorkMs(
@@ -223,28 +173,12 @@ export function TurnActivity({
 
   return (
     <div className="flex flex-col">
-      <Header label={label} open={open} onToggle={() => setChoice(!open)} />
-      {hasCards ? (
-        // Folding keeps the cards mounted where they are, so one waiting on
-        // the user (an upload, the coding tool) keeps its state.
-        <div className={cn("flex flex-col", (open || anyPinned) && "pt-1.5")}>
-          {earlierNodes(open)}
-          {planLine && (
-            <Reveal open={open} depth="block">
-              {planLine}
-            </Reveal>
-          )}
-          {renderPieces(pieces, open)}
-        </div>
-      ) : (
-        <Reveal open={open} depth="block">
-          <div className="flex flex-col pt-1.5">
-            {earlierNodes(true)}
-            {planLine}
-            {pieces.map((piece) => renderPiece(piece))}
-          </div>
-        </Reveal>
-      )}
+      <Header label={label} />
+      <div className="flex flex-col pt-1.5">
+        {earlierNodes}
+        {planLine}
+        {pieces.map(renderPiece)}
+      </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
   );
@@ -281,49 +215,16 @@ function ThinkingLine({ label }: { label: string }) {
   );
 }
 
-function Header({
-  label,
-  open = false,
-  onToggle,
-}: {
-  label: string;
-  open?: boolean;
-  onToggle?: () => void;
-}) {
-  const content = (
-    <>
-      <span className="truncate">{label}</span>
-      {onToggle && (
-        <CaretRight
-          className={cn(
-            "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
-            open ? "rotate-90" : "rtl:-scale-x-100",
-          )}
-          aria-hidden
-        />
-      )}
-    </>
-  );
-  const className =
-    "flex w-full items-center gap-1.5 border-b border-border/60 pb-2 text-start text-[0.8125rem] text-muted-foreground";
-  if (!onToggle) return <div className={className}>{content}</div>;
+function Header({ label }: { label: string }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={open}
-      className={cn(
-        className,
-        "cursor-pointer transition-colors hover:text-foreground",
-        open && "text-foreground/80",
-      )}
-    >
-      {content}
-    </button>
+    <div className="flex w-full items-center border-b border-border/60 pb-2 text-[0.8125rem] text-muted-foreground">
+      <span className="truncate">{label}</span>
+    </div>
   );
 }
 
-function formatSpan(ms: number): string {
+/** A duration as "8s" or "1m 5s", in the active locale. */
+export function formatSpan(ms: number): string {
   const total = Math.max(1, Math.round(ms / 1000));
   const unit = (value: number, u: "minute" | "second") =>
     new Intl.NumberFormat(getActiveIntlLocale(), {

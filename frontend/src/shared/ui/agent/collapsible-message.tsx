@@ -7,8 +7,9 @@ import { msg } from "@/shared/lib/messages";
 import { CaretDown } from "@/shared/ui/icons";
 
 import {
-  COLLAPSE_ANIMATION_MS,
+  COLLAPSE_EASING,
   bodyMaxHeight,
+  collapseDurationMs,
   clampHeight,
   needsScrollBack,
   shouldCollapse,
@@ -73,6 +74,11 @@ export function CollapsibleMessage({
   }, [collapsible]);
 
   const overflowing = collapsible && shouldCollapse(size.full, size.clamp);
+  // The body, the fade and the caret share one length and curve, so they move as one.
+  const motion = {
+    transitionDuration: `${collapseDurationMs(size.full - (size.clamp ?? 0))}ms`,
+    transitionTimingFunction: COLLAPSE_EASING,
+  };
 
   const scrollBack = React.useCallback(() => {
     const root = rootRef.current;
@@ -106,13 +112,13 @@ export function CollapsibleMessage({
       <div
         className={cn(
           overflowing &&
-            "relative overflow-hidden transition-[max-height] ease-out motion-reduce:transition-none",
+            "relative overflow-hidden transition-[max-height] motion-reduce:transition-none",
         )}
         style={
           overflowing
             ? {
                 maxHeight: bodyMaxHeight(expanded, size.full, size.clamp),
-                transitionDuration: `${COLLAPSE_ANIMATION_MS}ms`,
+                ...motion,
               }
             : undefined
         }
@@ -126,11 +132,11 @@ export function CollapsibleMessage({
             aria-hidden
             className={cn(
               "pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t to-transparent",
-              "transition-opacity ease-out motion-reduce:transition-none",
+              "transition-opacity motion-reduce:transition-none",
               fadeFromClass,
               expanded ? "opacity-0" : "opacity-100",
             )}
-            style={{ transitionDuration: `${COLLAPSE_ANIMATION_MS}ms` }}
+            style={motion}
           />
         )}
       </div>
@@ -149,10 +155,10 @@ export function CollapsibleMessage({
           <CaretDown
             aria-hidden
             className={cn(
-              "size-3 transition-transform ease-out motion-reduce:transition-none",
+              "size-3 transition-transform motion-reduce:transition-none",
               expanded && "rotate-180",
             )}
-            style={{ transitionDuration: `${COLLAPSE_ANIMATION_MS}ms` }}
+            style={motion}
           />
         </button>
       )}

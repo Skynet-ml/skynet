@@ -233,6 +233,10 @@ export function repoRunRequest(
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
   const secrets = repo.secrets ?? [];
+  // An empty optimize.toml would replace the repository's own file, so it is not sent.
+  const draftFiles = Object.fromEntries(
+    Object.entries(workspace.files).filter(([path, text]) => path !== OPTIMIZE_TOML || text.trim()),
+  );
   const fromAccount = savedServiceSecrets(
     workspace.files[OPTIMIZE_TOML] ?? "",
     savedSecrets,
@@ -271,6 +275,11 @@ export function repoRunRequest(
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
         ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
+        // optimize.toml and every repository file the setup changed; metric.py goes as the scorer.
+        ...(Object.keys(draftFiles).length > 0 && { draft_files: draftFiles }),
+        // The run refuses drafts read at another commit than the one it starts from.
+        ...(Object.keys(draftFiles).length > 0 &&
+          workspace.filesBase && { draft_base: workspace.filesBase }),
         ...(secrets.length + fromAccount.length > 0 && {
           secrets: [
             ...secrets.map((secret) => ({

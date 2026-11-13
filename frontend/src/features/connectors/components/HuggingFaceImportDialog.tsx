@@ -495,7 +495,7 @@ export function HuggingFaceImportDialog({
             </div>
 
             {!splitsLoading && (
-              <DialogFooter className="shrink-0 px-5 pb-5">
+              <DialogFooter className="mx-0 mt-0 mb-0 shrink-0 px-5">
                 <Button variant="outline" onClick={() => onOpenChange(false)}>
                   {msg("hf_import.cancel")}
                 </Button>

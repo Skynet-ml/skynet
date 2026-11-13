@@ -8,7 +8,7 @@ import {
   useWizardStateOptional,
 } from "@/features/agent-panel";
 import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api";
-import { AgenticIde, type OpenRequest } from "../../agentic-ide/AgenticIde";
+import { AgenticIde } from "../../agentic-ide/AgenticIde";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
@@ -105,13 +105,13 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   }, [page, metricCode, setMetricCode]);
 
   // A repository run's setup is the agentic IDE: the chat beside its changes,
-  // with the workbench one click away for direct edits.
+  // which the user edits in place.
   const agentic = isGeneralistAgentEnabled();
   const draftTexts = React.useMemo(
     () => workspaceTexts(workspace.runCode, workspace.metricCode, workspace.files),
     [workspace.runCode, workspace.metricCode, workspace.files],
   );
-  const ideWorkspace = (sidePanel: React.ReactNode, openRequest: OpenRequest | null) => (
+  const ideWorkspace = (sidePanel: React.ReactNode) => (
     <IdeWorkspace
       runCode={workspace.runCode}
       metricCode={workspace.metricCode}
@@ -122,10 +122,8 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       lockedFiles={lockedFiles}
       guided={guided}
       sidePanel={sidePanel}
-      openRequest={openRequest}
     />
   );
-  const renderEditor = (request: OpenRequest | null) => ideWorkspace(null, request);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -138,14 +136,12 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
             repo={repoFiles}
             busy={agent?.agentBusy ?? false}
             onWrite={setWorkspaceFile}
-            renderEditor={renderEditor}
           />
         ) : (
           ideWorkspace(
             onScreen && isGeneralistAgentEnabled() ? (
               <AgentPanelDock className="absolute inset-0" />
             ) : null,
-            null,
           )
         )}
       </WizardScreen>

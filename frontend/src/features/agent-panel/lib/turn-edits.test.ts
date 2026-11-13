@@ -14,11 +14,11 @@ registerHooks({
   },
 });
 
-const { editTotals, latestTurnEdits, messageEdits, turnState } = await import("./turn-edits.ts");
+const { editTotals, messageEdits, turnState } = await import("./turn-edits.ts");
 
 const call = (id: string, wizard_state: Record<string, unknown>) => ({
   id,
-  tool: "hand_off_to_coding_agent",
+  tool: "write_workspace_file",
   reason: "",
   status: "done" as const,
   startedAt: 0,
@@ -64,7 +64,6 @@ test("a file the draft did not hold diffs against the repository's text", () => 
       removed: 1,
     },
   ]);
-  assert.equal(latestTurnEdits([message], writeBefore, base)[0]!.before, repoToml);
 });
 
 test("a final newline is not an added line, and a newline-only change is no edit", () => {
@@ -87,20 +86,6 @@ test("a call with no recorded before-state and a write that changes nothing show
     toolCalls: [call("a", { metric_code: "same" }), call("b", { metric_code: "new" })],
   };
   assert.deepEqual(messageEdits(message, { a: { metric_code: "same" } }), []);
-});
-
-test("the latest turn is the newest message that edited a file", () => {
-  const older = {
-    role: "assistant" as const,
-    content: "",
-    toolCalls: [call("a", { metric_code: "1" })],
-  };
-  const user = { role: "user" as const, content: "thanks" };
-  const reply = { role: "assistant" as const, content: "done" };
-  const edits = latestTurnEdits([older, user, reply], { a: { metric_code: "" } });
-  assert.equal(edits.length, 1);
-  assert.equal(edits[0]!.path, "metric.py");
-  assert.deepEqual(latestTurnEdits([user, reply], {}), []);
 });
 
 test("a turn is applied or undone only when every file still matches that side", () => {
@@ -128,4 +113,21 @@ test("a hand edit after Undo blocks Reapply", () => {
   assert.equal(turnState(edits, (path) => texts[path] ?? ""), "undone");
   texts["metric.py"] = "x = 5\n";
   assert.equal(turnState(edits, (path) => texts[path] ?? ""), "changed");
+});
+
+test("a repository file the agent wrote diffs against the draft, else the repository", () => {
+  const message = {
+    role: "assistant" as const,
+    content: "",
+    toolCalls: [
+      call("a", { workspace_files: { "src/app.py": "x = 2\n" } }),
+      call("b", { workspace_files: { "src/new.py": "y = 1\n" } }),
+    ],
+  };
+  const writeBefore = { a: { workspace_files: { "src/app.py": "x = 1\n" } }, b: {} };
+  const base = new Map([["src/new.py", ""]]);
+  assert.deepEqual(messageEdits(message, writeBefore, base), [
+    { path: "src/app.py", before: "x = 1\n", after: "x = 2\n", added: 1, removed: 1 },
+    { path: "src/new.py", before: "", after: "y = 1\n", added: 1, removed: 0 },
+  ]);
 });

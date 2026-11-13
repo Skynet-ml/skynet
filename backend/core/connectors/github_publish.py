@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from ..api.errors import DomainError
 from ..brand import APP_NAME
 from .github import API_URL, PROVIDER, _headers
 from .github_repo import RepoFetchError, _git, git_auth_env, git_host
+from .repo_drafts import DraftFileError, write_to_checkout
 from .transport import get_json, request
 
 COMMIT_AUTHOR = ["-c", f"user.name={APP_NAME}", "-c", "user.email=noreply@skynetml.com", "-c", "commit.gpgsign=false"]
@@ -106,8 +107,13 @@ def push_version(
     *,
     remote: str | None = None,
     provider: str = "github",
+    drafts: Mapping[str, str] | None = None,
+    readonly_paths: Iterable[str] = (),
 ) -> None:
     """Commit ``patch`` on top of ``commit`` and push it as a new branch.
+
+    The run's draft files go into the same commit, under the patch, because
+    the version was made against the tree with them.
 
     Args:
         repository: ``owner/name``.
@@ -118,9 +124,11 @@ def push_version(
         token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
         provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
+        drafts: The run's ``draft_files``; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
 
     Raises:
-        RepoPublishError: When the clone, the patch or the push fails.
+        RepoPublishError: When the clone, a draft file, the patch or the push fails.
     """
     workdir = Path(tempfile.mkdtemp(prefix="app-publish-"))
     try:
@@ -130,6 +138,7 @@ def push_version(
         _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], workdir, environment)
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         _git([*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], workdir, environment)
+        _stage_drafts(workdir, drafts, readonly_paths, environment)
         applied = subprocess.run(
             ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
             cwd=workdir,
@@ -174,6 +183,8 @@ def push_candidates(
     *,
     remote: str | None = None,
     provider: str = "github",
+    drafts: Mapping[str, str] | None = None,
+    readonly_paths: Iterable[str] = (),
 ) -> dict[str, str]:
     """Push each version to its own branch and move the best branch to one of them.
 
@@ -190,13 +201,15 @@ def push_candidates(
         token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
         provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
+        drafts: The run's ``draft_files``, committed with every version; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
 
     Returns:
         Each pushed branch, ``skynet/best`` included, mapped to its commit id.
 
     Raises:
         RepoPublishError: When an id is invalid or repeated, ``best_id`` is
-            not a version, a patch does not apply, or the push fails.
+            not a version, a draft file or a patch does not apply, or the push fails.
     """
     branches = [candidate_branch(version_id) for version_id, _ in versions]
     if len(set(branches)) != len(branches):
@@ -217,8 +230,10 @@ def push_candidates(
             _git(
                 [*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", commit], workdir, dated
             )
+            staged = _stage_drafts(workdir, drafts, readonly_paths, dated)
             if patch.strip():
                 _apply(workdir, patch, version_id)
+            if patch.strip() or staged:
                 message = f"{APP_NAME} candidate {version_id}"
                 _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, dated)
             pushed[branch] = _git(["rev-parse", "HEAD"], workdir, dated).strip()
@@ -234,6 +249,36 @@ def push_candidates(
         raise RepoPublishError(f"Could not push the candidate branches: {error}") from error
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _stage_drafts(
+    workdir: Path, drafts: Mapping[str, str] | None, readonly_paths: Iterable[str], environment: dict[str, str]
+) -> bool:
+    """Write the run's draft files into the checkout and add them to the index.
+
+    Args:
+        workdir: Checkout of the pinned commit.
+        drafts: The run's ``draft_files``; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
+        environment: The git environment.
+
+    Returns:
+        Whether the drafts changed the index.
+
+    Raises:
+        RepoPublishError: When a draft file cannot be written.
+    """
+    try:
+        paths = write_to_checkout(workdir, drafts, readonly_paths)
+    except DraftFileError as error:
+        raise RepoPublishError(f"A draft file of the run cannot be written: {error}") from None
+    if not paths:
+        return False
+    # A draft path is a file name, never a pattern: "a*.py" must not also add "ab.py".
+    # --force: the user chose each draft, so a path the repo's .gitignore ignores is still published.
+    _git([*_NO_LFS, "--literal-pathspecs", "add", "--force", "--", *paths], workdir, environment)
+    changed = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=workdir, capture_output=True, check=False)
+    return changed.returncode != 0
 
 
 def _apply(workdir: Path, patch: str, version_id: str) -> None:
