@@ -159,22 +159,30 @@ void describe("cardStep", () => {
 });
 
 void describe("cardKeyStep", () => {
-  const press = (code: string, over: Partial<KeyboardEvent> = {}, target: unknown = null) =>
-    cardKeyStep({ code, metaKey: false, ctrlKey: false, altKey: false, ...over, target: target as EventTarget });
+  const press = (key: string, code: string, over: Partial<KeyboardEvent> = {}, target: unknown = null) =>
+    cardKeyStep({ key, code, metaKey: false, ctrlKey: false, altKey: false, ...over, target: target as EventTarget });
 
-  void it("reads the physical J and K keys, so the Hebrew layout and Caps Lock work", () => {
-    // On the Hebrew layout the J key types ח and the K key types ל; code stays KeyJ and KeyK.
-    assert.equal(press("KeyJ"), 1);
-    assert.equal(press("KeyK"), -1);
-    assert.equal(press("KeyL"), 0);
+  void it("reads the typed letter first, and the physical key for a non-Latin layout", () => {
+    assert.equal(press("j", "KeyJ"), 1);
+    assert.equal(press("k", "KeyK"), -1);
+    assert.equal(press("l", "KeyL"), 0);
+    // Dvorak types j on the C key.
+    assert.equal(press("j", "KeyC"), 1);
+    // The Hebrew layout types ח on the J key and ל on the K key.
+    assert.equal(press("ח", "KeyJ"), 1);
+    assert.equal(press("ל", "KeyK"), -1);
+    // Caps Lock.
+    assert.equal(press("J", "KeyJ"), 1);
+    // Colemak types n on the J key, so that is no step.
+    assert.equal(press("n", "KeyJ"), 0);
   });
 
   void it("does nothing with a modifier or in a text field", () => {
-    assert.equal(press("KeyJ", { ctrlKey: true }), 0);
-    assert.equal(press("KeyJ", { metaKey: true }), 0);
-    assert.equal(press("KeyK", { altKey: true }), 0);
-    assert.equal(press("KeyJ", {}, { closest: () => ({}) }), 0);
-    assert.equal(press("KeyJ", {}, { closest: () => null }), 1);
+    assert.equal(press("j", "KeyJ", { ctrlKey: true }), 0);
+    assert.equal(press("j", "KeyJ", { metaKey: true }), 0);
+    assert.equal(press("k", "KeyK", { altKey: true }), 0);
+    assert.equal(press("j", "KeyJ", {}, { closest: () => ({}) }), 0);
+    assert.equal(press("j", "KeyJ", {}, { closest: () => null }), 1);
   });
 });
 

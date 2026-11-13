@@ -117,8 +117,9 @@ export function cardStep(
 
 /**
  * The card step a key press asks for: J is the next card, K the previous.
- * It reads the physical key, so it works on the Hebrew and other non-Latin
- * layouts and with Caps Lock. A press in a text field or with a modifier is no step.
+ * The typed letter wins, so Dvorak and Colemak work. Only when the key types
+ * no Latin letter (Hebrew and other layouts) does the physical key decide.
+ * A press in a text field or with a modifier is no step.
  *
  * Args:
  *   event: The key press.
@@ -127,12 +128,14 @@ export function cardStep(
  *   1, -1, or 0 for no step.
  */
 export function cardKeyStep(
-  event: Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKey"> & { target: EventTarget | null },
+  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey"> & { target: EventTarget | null },
 ): 1 | -1 | 0 {
   const target = event.target as HTMLElement | null;
   if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return 0;
   if (event.metaKey || event.ctrlKey || event.altKey) return 0;
-  return event.code === "KeyJ" ? 1 : event.code === "KeyK" ? -1 : 0;
+  const key = event.key.toLowerCase();
+  const letter = /^[a-z]$/.test(key) ? key : event.code === "KeyJ" ? "j" : event.code === "KeyK" ? "k" : "";
+  return letter === "j" ? 1 : letter === "k" ? -1 : 0;
 }
 
 /**
