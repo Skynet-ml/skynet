@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -17,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from core.api.routers.generalist_agent import _discard_from_user_turn, _discard_latest_turn, _persist_user_turn
 from core.service_gateway.agents import feedback
 from core.service_gateway.agents.feedback import (
     FEEDBACK_ALREADY_SENT,
@@ -148,3 +150,32 @@ def test_logs_never_hold_the_quote_or_the_summary(caplog: pytest.LogCaptureFixtu
     assert "OperationalError" in logged
     assert "metric tool gave me" not in logged
     assert "exact matches" not in logged
+
+
+def test_edit_and_resend_frees_the_cut_turn_for_a_new_complaint() -> None:
+    """An edited turn loses its report, so the complaint in the new text is stored, not called a duplicate."""
+    engine = _engine()
+    store = SimpleNamespace(engine=engine)
+    _persist_user_turn(store, _CHAT, "the score tool is wrong")
+    assert _send(engine, user_quote="old complaint") == FEEDBACK_SENT
+
+    assert _discard_from_user_turn(store, _CHAT, "the score tool is wrong", 0)
+    _persist_user_turn(store, _CHAT, "the search tool is broken")
+
+    assert _send(engine, user_quote="new complaint") == FEEDBACK_SENT
+    assert [(r.turn, r.user_quote) for r in _reports(engine)] == [(2, "new complaint")]
+
+
+def test_regenerate_frees_the_cut_turn_and_keeps_earlier_reports() -> None:
+    """Regenerate drops only the latest turn's report; reports of earlier turns stay."""
+    engine = _engine()
+    store = SimpleNamespace(engine=engine)
+    assert _send(engine, user_quote="turn one") == FEEDBACK_SENT
+    _persist_user_turn(store, _CHAT, "retry this")
+    assert _send(engine, user_quote="turn two") == FEEDBACK_SENT
+
+    _discard_latest_turn(store, _CHAT)
+    _persist_user_turn(store, _CHAT, "retry this")
+
+    assert _send(engine, user_quote="turn two again") == FEEDBACK_SENT
+    assert [(r.turn, r.user_quote) for r in _reports(engine)] == [(1, "turn one"), (2, "turn two again")]

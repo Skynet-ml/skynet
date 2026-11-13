@@ -37,7 +37,7 @@ from ...connectors.vault import ConnectorVault
 from ...constants import TOKEN_SOURCE_MANAGED
 from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
-from ...service_gateway.agents.feedback import FeedbackTarget
+from ...service_gateway.agents.feedback import FeedbackTarget, discard_reports_from_message
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
     TrustMode,
@@ -523,6 +523,7 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
         )
         if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
             return
+        discard_reports_from_message(session, conversation_id, latest_user.id)
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
@@ -564,6 +565,7 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
         )
         if edited is None:
             return False
+        discard_reports_from_message(session, conversation_id, edited.id)
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= edited.id,

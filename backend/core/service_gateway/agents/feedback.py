@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import dspy
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -86,6 +86,35 @@ def _current_turn(session: Session, conversation_id: str) -> int:
     return int(count or 0)
 
 
+def discard_reports_from_message(session: Session, conversation_id: str, first_message_id: int) -> None:
+    """Delete the reports for the user turns that a history cut removes.
+
+    Edit-and-resend and regenerate delete the stored messages from
+    ``first_message_id`` on. The turn number counts the stored user messages,
+    so the next user turn reuses a cut turn's number; without this its new
+    complaint would hit the unique key and be lost. Call it in the same session,
+    before the messages are deleted.
+
+    Args:
+        session: The session that deletes the messages.
+        conversation_id: The chat.
+        first_message_id: The id of the first message that the cut deletes.
+    """
+    kept_user_turns = session.scalar(
+        select(func.count(AgentMessageModel.id)).where(
+            AgentMessageModel.conversation_id == conversation_id,
+            AgentMessageModel.role == "user",
+            AgentMessageModel.id < first_message_id,
+        )
+    )
+    session.execute(
+        delete(AgentFeedbackReportModel).where(
+            AgentFeedbackReportModel.conversation_id == conversation_id,
+            AgentFeedbackReportModel.turn > int(kept_user_turns or 0),
+        )
+    )
+
+
 def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_quote: str, summary: str) -> bool:
     """Store one feedback report for the chat's current turn.
 
@@ -134,7 +163,16 @@ def send_feedback_tool(target: FeedbackTarget, *, agent: str) -> dspy.Tool:
     """
 
     async def send_feedback(tool_name: str, user_quote: str, summary: str) -> str:
-        """Send one dissatisfaction report to the Skynet team."""
+        """Send one dissatisfaction report to the Skynet team.
+
+        Args:
+            tool_name: The tool whose result did not satisfy the user.
+            user_quote: A short quote of what the user wrote.
+            summary: What the user expected and what the tool did.
+
+        Returns:
+            The result text that tells the agent what to say to the user.
+        """
         try:
             stored = await asyncio.to_thread(
                 record_feedback, target, agent=agent, tool_name=tool_name, user_quote=user_quote, summary=summary
