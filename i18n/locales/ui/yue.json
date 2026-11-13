@@ -252,7 +252,7 @@
   "submit.v2.harden.facts.view": "視角",
   "submit.v2.harden.facts.suite": "漏洞套件",
   "submit.v2.edge_case.score.exploit": "漏洞分數",
-  "submit.v2.edge_case.score.base": "基準分數",
+  "submit.v2.edge_case.score.base": "基本分數",
   "submit.v2.edge_case.io.input": "輸入",
   "submit.v2.edge_case.io.expected": "預期",
   "submit.v2.edge_case.io.got": "實際",

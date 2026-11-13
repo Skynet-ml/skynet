@@ -251,7 +251,7 @@
   "submit.v2.harden.facts.judge": "Hakem",
   "submit.v2.harden.facts.view": "Görünüm",
   "submit.v2.harden.facts.suite": "Açık paketi",
-  "submit.v2.edge_case.score.exploit": "İstismar puanı",
+  "submit.v2.edge_case.score.exploit": "Açık puanı",
   "submit.v2.edge_case.score.base": "Temel puan",
   "submit.v2.edge_case.io.input": "Girdi",
   "submit.v2.edge_case.io.expected": "Beklenen",

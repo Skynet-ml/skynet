@@ -251,7 +251,7 @@
   "submit.v2.harden.facts.judge": "निर्णायक",
   "submit.v2.harden.facts.view": "दृश्य",
   "submit.v2.harden.facts.suite": "exploit सूट",
-  "submit.v2.edge_case.score.exploit": "एक्सप्लॉइट स्कोर",
+  "submit.v2.edge_case.score.exploit": "exploit स्कोर",
   "submit.v2.edge_case.score.base": "आधार स्कोर",
   "submit.v2.edge_case.io.input": "इनपुट",
   "submit.v2.edge_case.io.expected": "अपेक्षित",

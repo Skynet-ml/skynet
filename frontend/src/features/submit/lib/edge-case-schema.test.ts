@@ -224,4 +224,30 @@ void describe("parseEdgeCase", () => {
       assert.equal(parseEdgeCase(value), null);
     }
   });
+
+  void it("reads each field once, so a getter cannot change it after the check", () => {
+    let toneReads = 0;
+    const flippingTone = Object.defineProperty({ type: "Callout", text: "t" }, "tone", {
+      enumerable: true,
+      get() {
+        toneReads += 1;
+        return toneReads === 1 ? "info" : "<script>";
+      },
+    });
+    assert.deepEqual(parseEdgeCase([flippingTone]), [{ type: "Callout", tone: "info", text: "t" }]);
+
+    let lengthReads = 0;
+    const real = Array.from({ length: MAX_CHART_POINTS + 1 }, (_, i) => ({ x: i, y: i }));
+    const growing = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === "length") {
+          lengthReads += 1;
+          return lengthReads === 1 ? 1 : target.length;
+        }
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+    const tree = parseEdgeCase([{ type: "Chart", kind: "line", points: growing }]);
+    assert.deepEqual(tree, [{ type: "Chart", kind: "line", points: [{ x: 0, y: 0 }] }]);
+  });
 });

@@ -134,10 +134,16 @@ function cell(value: unknown): Cell {
   return value === null || typeof value === "boolean" ? value : key(value);
 }
 
-/** Checks the length before any element is read, so a huge array costs nothing. */
+/**
+ * Checks the length before any element is read, so a huge array costs nothing.
+ * The length is read once and the elements are copied, so a getter or a proxy
+ * cannot change the array after the check.
+ */
 function list(value: unknown, max: number, min = 0): unknown[] {
-  if (!Array.isArray(value) || value.length > max || value.length < min) fail();
-  return value;
+  if (!Array.isArray(value)) fail();
+  const length: unknown = value.length;
+  if (typeof length !== "number" || length > max || length < min) fail();
+  return Array.from({ length }, (_, i) => (value as unknown[])[i]);
 }
 
 function withOptional<T extends object>(node: T, extras: Record<string, string | undefined>): T {
@@ -154,9 +160,10 @@ function counted(value: unknown, budget: Budget): Record<string, unknown> {
   return record(value);
 }
 
-function leaf(raw: Record<string, unknown>): EdgeCaseLeafNode {
+// Each field is read once, so a getter cannot pass the check and then return another value.
+function leaf(type: unknown, raw: Record<string, unknown>): EdgeCaseLeafNode {
   // Only known fields are copied, so extra keys from the model never reach the view.
-  switch (raw.type) {
+  switch (type) {
     case "ScoreCompare":
       return withOptional<ScoreCompareNode>(
         {
@@ -182,19 +189,19 @@ function leaf(raw: Record<string, unknown>): EdgeCaseLeafNode {
       );
       return { type: "Table", columns, rows };
     }
-    case "Callout":
-      if (raw.tone !== "info" && raw.tone !== "warn" && raw.tone !== "danger") fail();
-      return { type: "Callout", tone: raw.tone, text: str(raw.text) };
+    case "Callout": {
+      const tone = raw.tone;
+      if (tone !== "info" && tone !== "warn" && tone !== "danger") fail();
+      return { type: "Callout", tone, text: str(raw.text) };
+    }
     case "Chart": {
-      if (raw.kind !== "bar" && raw.kind !== "line") fail();
+      const kind = raw.kind;
+      if (kind !== "bar" && kind !== "line") fail();
       const points = list(raw.points, MAX_CHART_POINTS, 1).map((p) => {
         const point = record(p);
         return { x: key(point.x), y: num(point.y) };
       });
-      return withOptional<ChartNode>(
-        { type: "Chart", kind: raw.kind, points },
-        { title: optStr(raw.title) },
-      );
+      return withOptional<ChartNode>({ type: "Chart", kind, points }, { title: optStr(raw.title) });
     }
     case "Text":
       return { type: "Text", text: str(raw.text) };
@@ -206,22 +213,24 @@ function leaf(raw: Record<string, unknown>): EdgeCaseLeafNode {
 function stepItem(value: unknown, budget: Budget): StepItem {
   if (typeof value === "string") return str(value);
   const raw = counted(value, budget);
-  if (raw.type === "Steps") {
+  const type = raw.type;
+  if (type === "Steps") {
     // The second level is the last one, so a nested Steps holds only strings.
     return { type: "Steps", items: list(raw.items, MAX_STEPS, 1).map(str) };
   }
-  return leaf(raw);
+  return leaf(type, raw);
 }
 
 function node(value: unknown, budget: Budget): EdgeCaseNode {
   const raw = counted(value, budget);
-  if (raw.type === "Steps") {
+  const type = raw.type;
+  if (type === "Steps") {
     return {
       type: "Steps",
       items: list(raw.items, MAX_STEPS, 1).map((item) => stepItem(item, budget)),
     };
   }
-  return leaf(raw);
+  return leaf(type, raw);
 }
 
 /**
