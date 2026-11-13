@@ -47,10 +47,10 @@ export function numberFormat(): Intl.NumberFormat {
 }
 
 /**
- * A unified diff, read-only, with added and removed lines tinted. It mirrors
- * DiffView in HardenMetricScreen.tsx; SKY-684 (the harden page) will share one copy.
+ * A unified diff, read-only, with added and removed lines tinted. The harden
+ * page's fix step uses it too.
  */
-function DiffBlock({ diff, label }: { diff: string; label?: string }) {
+export function DiffBlock({ diff, label }: { diff: string; label?: string }) {
   return (
     <figure className={FIGURE_CLASS}>
       {label && (
