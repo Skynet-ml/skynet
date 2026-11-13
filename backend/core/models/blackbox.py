@@ -13,11 +13,22 @@ above each class, not in class bodies.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
@@ -158,7 +169,9 @@ STOP_AT_SCORE_RETIRED = (
     "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in optimize.toml."
 )
 # A stored run's payload passes this context to ``model_validate``: it may
-# still hold the retired ``budget.stop_at_score``, which then drops (SKY-691).
+# still hold the retired ``budget.stop_at_score``. The value leaves the public
+# model and stays private, so an older run keeps its stop score when its
+# snapshot has no ``[outcome] target`` (SKY-691).
 STORED_PAYLOAD_KEY = "stored_payload"
 STORED_PAYLOAD_CONTEXT = {STORED_PAYLOAD_KEY: True}
 
@@ -173,28 +186,41 @@ class BlackboxBudget(BaseModel):
     max_scorer_runs: int = Field(default=200, ge=1, le=100_000)
     max_iterations: int | None = Field(default=None, ge=1, le=1_000)
 
-    @model_validator(mode="before")
+    # A private attribute is not a field: it stays out of ``model_dump()``,
+    # the JSON schema and ``openapi.json``.
+    _legacy_stop_at_score: float | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
     @classmethod
-    def _refuse_stop_at_score(cls, data: Any, info: ValidationInfo) -> Any:
-        """Refuse the retired stop score in a new request, also when its value is null.
+    def _refuse_stop_at_score(
+        cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxBudget], info: ValidationInfo
+    ) -> BlackboxBudget:
+        """Refuse the retired stop score in a new request, and keep it privately for a stored run.
 
         The model ignores unknown keys, so without this check a client that
-        still sends the key would lose its stop score with no error.
+        still sends the key would lose its stop score with no error. A stored
+        run keeps a finite number as ``_legacy_stop_at_score``; a null or a
+        value of another type gives ``None``.
 
         Args:
             data: The raw budget before field validation.
+            handler: The standard validation of the budget fields.
             info: Validation info; its context marks a stored run's payload.
 
         Returns:
-            ``data`` unchanged.
+            The validated budget.
 
         Raises:
             ValueError: When a new request holds ``stop_at_score``.
         """
         stored = bool((info.context or {}).get(STORED_PAYLOAD_KEY))
+        legacy = data.get("stop_at_score") if isinstance(data, dict) else None
         if isinstance(data, dict) and "stop_at_score" in data and not stored:
             raise ValueError(STOP_AT_SCORE_RETIRED)
-        return data
+        model = handler(data)
+        if stored and isinstance(legacy, int | float) and not isinstance(legacy, bool) and math.isfinite(legacy):
+            model._legacy_stop_at_score = float(legacy)
+        return model
 
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"

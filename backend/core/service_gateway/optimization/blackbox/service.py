@@ -1218,13 +1218,16 @@ def _run_job(
         valset=list(splits.val),
         context=job.context,
     )
+    # A run stored before SKY-691 has no ``[outcome]`` in its snapshot; its
+    # retired ``budget.stop_at_score`` stays its stop score.
+    outcome_target = ((repo_snapshot or {}).get("outcome") or {}).get("target")
     ctx = EngineContext(
         reflection_lm=reflection_lm,
         native_options=native_options,
         proposer_token_budget_usd=token_budget,
         run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
         seed=job.seed or 0,
-        stop_at_score=((repo_snapshot or {}).get("outcome") or {}).get("target"),
+        stop_at_score=outcome_target if outcome_target is not None else job.budget._legacy_stop_at_score,
         max_iterations=job.budget.max_iterations,
         concurrency=concurrency,
         target_label=f"{target.harness} · {target.model}" if caps.agent_target else None,

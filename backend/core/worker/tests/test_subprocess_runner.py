@@ -332,7 +332,11 @@ def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization
 
 
 def test_run_service_in_subprocess_runs_a_stored_payload_with_the_retired_stop_score() -> None:
-    """A run stored with ``budget.stop_at_score`` still starts; the stop score comes from the snapshot (SKY-691)."""
+    """A run stored with ``budget.stop_at_score`` still starts and keeps that stop score on its budget (SKY-691).
+
+    ``_run_job`` reads this same budget object when the snapshot has no
+    ``[outcome] target``; ``test_service.py`` covers that half.
+    """
     q: queue.Queue[dict] = queue.Queue()
     payload = {**_BLACKBOX_PAYLOAD, "budget": {"max_scorer_runs": 10, "stop_at_score": 0.9}}
 
@@ -341,6 +345,7 @@ def test_run_service_in_subprocess_runs_a_stored_payload_with_the_retired_stop_s
 
     run_bb.assert_called_once()
     assert run_bb.call_args.args[0].budget.max_scorer_runs == 10
+    assert run_bb.call_args.args[0].budget._legacy_stop_at_score == 0.9
     assert [e for e in _drain_queue(q) if e.get("type") == EVENT_ERROR] == []
 
 
