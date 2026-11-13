@@ -13,8 +13,14 @@ from typing import Any
 import pytest
 
 from core.i18n_keys import I18nKey
-from core.models.hardening import HardeningJob
-from core.service_gateway.optimization.blackbox.hardening import Candidate, decide_fix, new_job, record_verdict
+from core.models.hardening import HardeningJob, HardeningNoise
+from core.service_gateway.optimization.blackbox.hardening import (
+    AttackResult,
+    Candidate,
+    decide_fix,
+    new_job,
+    record_verdict,
+)
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     ConstraintsError,
@@ -224,7 +230,7 @@ class FakeRunner:
         self.recorder.events.append("preflight")
         return []
 
-    def attack(self, **kwargs: Any) -> tuple[list[Candidate], float]:
+    def attack(self, **kwargs: Any) -> AttackResult:
         """Return one candidate.
 
         Args:
@@ -234,7 +240,8 @@ class FakeRunner:
             One candidate and its cost.
         """
         self.recorder.events.append("attack")
-        return [Candidate(kind="case", patch_diff="", why_md="Prints the answer key.")], 0.5
+        candidate = Candidate(kind="case", patch_diff="", why_md="Prints the answer key.")
+        return AttackResult(candidates=[candidate], cost_usd=0.5)
 
     def judge(self, **kwargs: Any) -> tuple[Any, float]:
         """Label the candidate an exploit.
@@ -289,6 +296,17 @@ class FakeRunner:
             fix_diff: The fix.
         """
         self.recorder.events.append("apply_fix")
+
+    def noise_check(self, **kwargs: Any) -> tuple[HardeningNoise, float]:
+        """Skip the noise check.
+
+        Args:
+            **kwargs: The model and budget.
+
+        Returns:
+            A skipped check and no cost.
+        """
+        return HardeningNoise(skipped=True, reason="Deterministic."), 0.0
 
 
 def _run(recorder: Recorder, job: HardeningJob, *, local_mode: bool) -> HardeningJob:

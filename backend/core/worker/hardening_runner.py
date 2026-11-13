@@ -3,7 +3,8 @@
 The SKY-355 core asks a runner to attack, judge, draft fixes and score. This
 module answers with the job's attacker and judge models through a metered
 model gateway, and scores in parent-owned boxes on the trusted tree. The
-attacker sees only the stripped tree (SKY-353).
+attacker sees only the stripped tree (SKY-353). Each attack round runs a lead
+agent and K parallel Pi sessions (SKY-682, :mod:`.hardening_sessions`).
 
 A cloud job holds rounds × cap once, as one setup-phase operation keyed
 ``hardening:<job_id>``. Every model call settles its cost into that
@@ -17,9 +18,8 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import json
 import logging
-import re
+import math
 import shutil
 import tarfile
 import tempfile
@@ -48,15 +48,38 @@ from ..billing.runtime import BudgetRuntime, PaidResult, ProviderFailedError, ge
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import Settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
-from ..models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningView
+from ..models.hardening import (
+    HardeningExploit,
+    HardeningJob,
+    HardeningJobModel,
+    HardeningNoise,
+    HardeningSession,
+    HardeningView,
+)
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
-from ..service_gateway.optimization.blackbox.hardening import Candidate, HardeningRunner
+from ..service_gateway.optimization.blackbox.hardening import (
+    AttackFailedError,
+    AttackResult,
+    Candidate,
+    HardeningRunner,
+)
 from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from .hardening_job import HardeningWorkspace, run_hardening_job
+from .hardening_sessions import (
+    BRIEF_ANSWER_TOKENS,
+    brief_prompt,
+    noise_prompt,
+    parse_message,
+    read_briefs,
+    read_noise_decision,
+    run_sessions,
+    session_prompt,
+    spread,
+)
 from .repo_staging import _judge_limits, _reply_text, _repo_model_gateway, _role_hosts, hidden_repo_paths
 
 T = TypeVar("T")
@@ -78,8 +101,11 @@ _last_sweep = 0.0
 # cost more than a round may spend, so the rest of the tree is cut.
 MAX_TREE_CHARS = 120_000
 MAX_FILE_CHARS = 20_000
-ATTACK_ANSWER_TOKENS = 8_000
+# A monorepo can list many thousands of files; the lead agent needs only an outline.
+MAX_LEAD_FILES = 500
 FIX_ANSWER_TOKENS = 8_000
+# Three base scores show a noisy metric's spread for the price of three runs.
+NOISE_REPEATS = 3
 SCORE_TIMEOUT_SECONDS = 600.0
 
 
@@ -140,6 +166,15 @@ class HardeningMeter(BudgetRuntime):
         # into the last of the hold.
         self._lock = threading.Lock()
         self._inflight = Decimal(0)
+
+    @property
+    def stopped(self) -> bool:
+        """Return whether the meter refuses new model calls.
+
+        Returns:
+            True when the hold is spent or this pod lost its claim.
+        """
+        return self._exhausted.is_set() or self._lost.is_set()
 
     def execute(
         self,
@@ -349,8 +384,12 @@ class RepoHardeningRunner(HardeningRunner):
         *,
         gateway: ModelGateway,
         meter: HardeningMeter,
-        open_scorer: Callable[[Path, tuple[str, ...]], RepoScorer],
+        open_scorer: Callable[..., RepoScorer],
         managed_key: str,
+        pi_binary: str = "pi",
+        intent: str = "",
+        metric_uses_model: bool = False,
+        on_live: Callable[[list[HardeningSession]], object] = lambda _sessions: None,
     ) -> None:
         """Create the runner.
 
@@ -360,8 +399,13 @@ class RepoHardeningRunner(HardeningRunner):
             gateway: The metered model gateway.
             meter: The gateway's runtime, which counts the dollars spent.
             open_scorer: Opens and prepares a scorer box on one archive and
-                the fixes packed into it.
+                the fixes packed into it; a ``lane`` keyword gives an attacker
+                session its own box.
             managed_key: The platform's OpenRouter key.
+            pi_binary: The ``pi`` executable of the attacker sessions.
+            intent: What the repository says its metric rewards.
+            metric_uses_model: Whether the metric calls a model, for the noise check.
+            on_live: Receives the attacker sessions while they run.
         """
         self.workspace = workspace
         self.job = job
@@ -370,8 +414,15 @@ class RepoHardeningRunner(HardeningRunner):
         self.open_scorer = open_scorer
         self.fixes: list[str] = list(workspace.applied_fixes)
         self._scorers: dict[tuple[str, ...], RepoScorer] = {}
+        # A box that failed to open is not opened again: a new box would reuse
+        # its operation key, so its paid setup would run under the old hold.
+        self._score_failures: dict[tuple[str, ...], Exception] = {}
         self._routes: dict[str, dict[str, str]] = {}
         self._managed_key = managed_key
+        self._pi_binary = pi_binary
+        self._intent = intent
+        self._metric_uses_model = metric_uses_model
+        self._on_live = on_live
         self._scratch = Path(tempfile.mkdtemp(prefix="hardening-"))
 
     def preflight(self, *, view: HardeningView) -> list[str]:
@@ -386,34 +437,161 @@ class RepoHardeningRunner(HardeningRunner):
         return []
 
     def attack(
-        self, *, round_index: int, view: HardeningView, model: str, exploits_path: Path, budget_usd: float | None
-    ) -> tuple[list[Candidate], float]:
-        """Ask the attacker model for exploits of the metric.
+        self,
+        *,
+        round_index: int,
+        view: HardeningView,
+        model: str,
+        exploits_path: Path,
+        budget_usd: float | None,
+        sessions: int,
+    ) -> AttackResult:
+        """Let the lead agent write K briefs, then run K attacker sessions in parallel.
 
         Args:
             round_index: The 1-based round.
             view: What the attacker may see.
-            model: The attacker model.
+            model: The attacker model, for the lead agent and the sessions.
             exploits_path: The suite folder.
-            budget_usd: Unused; the hold bounds the spend.
+            budget_usd: The dollars the round may still spend, or None when local.
+            sessions: K.
 
         Returns:
-            The candidates and the dollars spent.
+            The claims, the dollars spent, the briefs and the sessions.
+
+        Raises:
+            AttackFailedError: When every session failed; it keeps the cost,
+                the briefs and the sessions.
         """
+        before = self.meter.spent_usd
         known = sorted(p.name for p in exploits_path.iterdir() if p.is_dir()) if exploits_path.is_dir() else []
-        metric = ""
-        if view == "white_box":
-            metric = f"\nThe metric code:\n{self.job.scorer.get('metric_code', '') if self.job.scorer else ''}\n"
-        prompt = (
-            f"Round {round_index}. Find ways to raise this repository's metric score without a real improvement.\n"
-            f"Known exploits, which you must not repeat: {', '.join(known) or 'none'}.{metric}\n"
-            "The repository files:\n"
-            f"{_tree_text(self.workspace.agent_archive)}\n"
-            'Answer with JSON only: {"candidates": [{"kind": "case" or "method", '
-            '"patch_diff": "<git diff against the repository>", "why_md": "<why it games the metric>"}]}'
+        metric = self._metric_code() if view == "white_box" else ""
+        lead, _ = self._ask(
+            model,
+            "attacker",
+            brief_prompt(
+                count=sessions,
+                round_index=round_index,
+                intent=self._intent,
+                files=_tree_files(self.workspace.agent_archive),
+                known=known,
+                metric=metric,
+            ),
+            {"max_tokens": BRIEF_ANSWER_TOKENS},
         )
-        reply, cost = self._ask(model, "attacker", prompt, {"max_tokens": ATTACK_ANSWER_TOKENS})
-        return _candidates(reply), cost
+        briefs = read_briefs(lead, sessions)
+        tree = _tree_text(self.workspace.agent_archive)
+        route = self._route(model, "attacker")
+        lanes: list[RepoScorer] = []
+        lanes_lock = threading.Lock()
+
+        def ask(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, max_tokens: int) -> dict[str, Any]:
+            """Send one session step through the metered attacker route.
+
+            Args:
+                messages: The session's messages.
+                tools: The session's tools.
+                max_tokens: The answer limit.
+
+            Returns:
+                The parsed message; empty when the provider refused or failed.
+            """
+            body: dict[str, Any] = {"model": route["model"], "messages": messages, "max_tokens": max_tokens}
+            if tools:
+                body["tools"] = tools
+                body["parallel_tool_calls"] = False
+            response = self.gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+            if 200 <= response.status < 300:
+                return parse_message(response.body)
+            logger.warning("Hardening job %s: an attacker step got HTTP %s.", self.job.id, response.status)
+            return {"text": "", "tool_calls": []}
+
+        def scorer_for(index: int) -> Callable[[str], dict[str, Any]]:
+            """Return one session's scorer, which opens its own box on first use.
+
+            A box scores one patch at a time, so each session gets its own box
+            to keep the sessions parallel.
+
+            Args:
+                index: The 1-based session.
+
+            Returns:
+                The session's scorer.
+            """
+            box: list[RepoScorer] = []
+            failed: list[Exception] = []
+
+            def score(patch: str) -> dict[str, Any]:
+                """Score one patch on the trusted metric with the approved fixes.
+
+                Args:
+                    patch: The solution as a git patch.
+
+                Returns:
+                    What a run's proposer gets: the score, the feedback
+                    without hidden metric frames, and the named scores.
+
+                Raises:
+                    Exception: The box's first open failure, again on each
+                        later call.
+                """
+                if failed:
+                    # A new box would reuse the failed box's operation key, so its
+                    # paid setup would run under the old hold (as RepoWorkspace.prepare).
+                    raise failed[0]
+                if not box:
+                    fixes = tuple(self.fixes)
+                    try:
+                        opened = self.open_scorer(self._fixed_archive(fixes), fixes, lane=f"r{round_index}s{index}")
+                    except Exception as exc:
+                        failed.append(exc)
+                        raise
+                    box.append(opened)
+                    with lanes_lock:
+                        lanes.append(box[0])
+                # The same filter as RepoScorer.dispatch: a metric traceback
+                # must not name hidden metric files to the attacker (SKY-353).
+                return box[0].for_proposer(box[0].score(patch))
+
+            return score
+
+        def should_stop() -> bool:
+            """Return whether the sessions must stop asking the model.
+
+            Returns:
+                True when the round's dollars are spent or the meter refuses calls.
+            """
+            spent = self.meter.spent_usd - before
+            return self.meter.stopped or (budget_usd is not None and spent >= budget_usd)
+
+        try:
+            outcome = run_sessions(
+                briefs,
+                prompt_for=lambda brief: session_prompt(
+                    brief=brief, round_index=round_index, tree=tree, known=known, metric=metric
+                ),
+                ask=ask,
+                scorer_for=scorer_for,
+                model=model,
+                pi_binary=self._pi_binary,
+                should_stop=should_stop,
+                on_live=self._on_live,
+            )
+        finally:
+            for lane in lanes:
+                # The gateway still stops a box that fails to close.
+                with contextlib.suppress(Exception):
+                    lane.close()
+        result = AttackResult(
+            candidates=outcome.candidates,
+            cost_usd=self.meter.spent_usd - before,
+            briefs=briefs,
+            sessions=outcome.sessions,
+            stopped=should_stop(),
+        )
+        if outcome.sessions and all(s.status == "failed" for s in outcome.sessions):
+            raise AttackFailedError(result)
+        return result
 
     def judge(self, *, candidate: Candidate, model: str, budget_usd: float | None) -> tuple[Any, float]:
         """Ask the judge model whether one candidate games the metric.
@@ -435,7 +613,13 @@ class RepoHardeningRunner(HardeningRunner):
         return reply or "", cost
 
     def draft_fix(
-        self, *, exploits: list[HardeningExploit], model: str, exploits_path: Path, budget_usd: float | None
+        self,
+        *,
+        exploits: list[HardeningExploit],
+        model: str,
+        exploits_path: Path,
+        budget_usd: float | None,
+        notes: list[str],
     ) -> tuple[str, float]:
         """Ask the attacker model for a metric fix that defeats the confirmed exploits.
 
@@ -444,14 +628,18 @@ class RepoHardeningRunner(HardeningRunner):
             model: The model that drafts the fix.
             exploits_path: The suite folder.
             budget_usd: Unused; the hold bounds the spend.
+            notes: The user's notes on the fixes they rejected in this round.
 
         Returns:
             The fix as a unified diff, and the dollars spent.
         """
         listed = "\n\n".join(f"Exploit {e.id}:\n{e.why_md}\n{e.patch_diff}" for e in exploits)
+        feedback = "".join(f"- {note}\n" for note in notes)
+        if feedback:
+            feedback = f"The user rejected earlier drafts with these notes; follow them:\n{feedback}\n"
         prompt = (
             "These changes raise the metric score without a real improvement:\n"
-            f"{listed}\n\nThe metric code:\n{self.job.scorer.get('metric_code', '') if self.job.scorer else ''}\n\n"
+            f"{listed}\n\nThe metric code:\n{self._metric_code()}\n\n{feedback}"
             "Write a git diff to the repository's metric files that stops these exploits and "
             "keeps the score of honest solutions. Answer with the diff only."
         )
@@ -491,6 +679,28 @@ class RepoHardeningRunner(HardeningRunner):
         """
         self.fixes.append(fix_diff)
 
+    def noise_check(self, *, model: str, budget_usd: float | None) -> tuple[HardeningNoise, float]:
+        """Let an agent decide if the newest metric is deterministic; if not, score the base solution again.
+
+        Args:
+            model: The model that decides.
+            budget_usd: Unused; the hold bounds the spend.
+
+        Returns:
+            The noise result and the dollars spent on the model call.
+        """
+        metric = self._metric_code()
+        if self.fixes:
+            metric += "\n\nThe approved fixes to the metric:\n" + "\n".join(self.fixes)
+        reply, cost = self._ask(
+            model, "noise", noise_prompt(metric=metric, judged_by_model=self._metric_uses_model), None
+        )
+        deterministic, reason = read_noise_decision(reply)
+        if deterministic:
+            return HardeningNoise(skipped=True, reason=reason), cost
+        scores = [s for s in (self._score(None, "") for _ in range(NOISE_REPEATS)) if math.isfinite(s)]
+        return HardeningNoise(skipped=False, reason=reason, scores=scores, spread=spread(scores)), cost
+
     def close(self) -> None:
         """Close every scorer box and delete the scratch trees."""
         scorers, self._scorers = list(self._scorers.values()), {}
@@ -499,6 +709,14 @@ class RepoHardeningRunner(HardeningRunner):
             with contextlib.suppress(Exception):
                 scorer.close()
         shutil.rmtree(self._scratch, ignore_errors=True)
+
+    def _metric_code(self) -> str:
+        """Return the job's metric code.
+
+        Returns:
+            The code; empty when the job has no scorer.
+        """
+        return str(self.job.scorer.get("metric_code", "")) if self.job.scorer else ""
 
     def _ask(self, model: str, role: str, prompt: str, limits: dict[str, Any] | None) -> tuple[str | None, float]:
         """Send one prompt through a metered route and count its cost.
@@ -520,8 +738,11 @@ class RepoHardeningRunner(HardeningRunner):
             **(limits if limits is not None else _judge_limits(route["model"])),
         }
         response = self.gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
-        text = _reply_text(response.body) if 200 <= response.status < 300 else None
-        return text, self.meter.spent_usd - before
+        if 200 <= response.status < 300:
+            return _reply_text(response.body), self.meter.spent_usd - before
+        # Callers fall back (the lead agent to fixed briefs), so the log is the only trace.
+        logger.warning("Hardening job %s: the %s call got HTTP %s.", self.job.id, role, response.status)
+        return None, self.meter.spent_usd - before
 
     def _route(self, model: str, role: str) -> dict[str, str]:
         """Register a parent-only route for one model, once.
@@ -553,8 +774,14 @@ class RepoHardeningRunner(HardeningRunner):
 
         Returns:
             The metric score, or NaN when ``fix_diff`` does not apply.
+
+        Raises:
+            Exception: The box's first open failure, again on each later call
+                with the same fixes.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
+        if fixes in self._score_failures:
+            raise self._score_failures[fixes]
         scorer = self._scorers.get(fixes)
         if scorer is None:
             try:
@@ -568,7 +795,11 @@ class RepoHardeningRunner(HardeningRunner):
                 # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
                 return float("nan")
-            scorer = self.open_scorer(archive, fixes)
+            try:
+                scorer = self.open_scorer(archive, fixes)
+            except Exception as exc:
+                self._score_failures[fixes] = exc
+                raise
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 
@@ -633,6 +864,7 @@ def open_hardening_runner(
     lost: threading.Event | None = None,
     exhausted: threading.Event | None = None,
     on_commit: Callable[[str | None], None] = lambda _commit: None,
+    on_live: Callable[[list[HardeningSession]], object] = lambda _sessions: None,
 ) -> Iterator[RepoHardeningRunner]:
     """Open the gateway, sandbox broker and runner for one pass, and close them on exit.
 
@@ -649,6 +881,7 @@ def open_hardening_runner(
         lost: Set when this pod loses its claim, so the meter stops paying.
         exhausted: Set when the hold cannot cover another model call.
         on_commit: Receives the commit the pass staged, so later passes pin it.
+        on_live: Receives the attacker sessions while they run.
 
     Yields:
         The runner.
@@ -702,7 +935,7 @@ def open_hardening_runner(
         compose_services = constraints.compose_services if constraints is not None else ()
         hidden = hidden_repo_paths(constraints)
 
-        def open_scorer(archive: Path, fixes: tuple[str, ...]) -> RepoScorer:
+        def open_scorer(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> RepoScorer:
             """Open and prepare one scorer box on a packed tree.
 
             Each box has its own operation key: a pass opens one box for each
@@ -711,11 +944,16 @@ def open_hardening_runner(
             Args:
                 archive: The packed trusted tree.
                 fixes: The metric fixes packed into the tree.
+                lane: The attacker session that owns the box; empty for the
+                    runner's own boxes, so their keys stay as they were.
 
             Returns:
                 The prepared scorer.
             """
-            box = json_fingerprint({"claim": claim, "fixes": list(fixes)})[:24]
+            keyed: dict[str, Any] = {"claim": claim, "fixes": list(fixes)}
+            if lane:
+                keyed["lane"] = lane
+            box = json_fingerprint(keyed)[:24]
             scorer = RepoScorer(
                 RepoWorkspace(
                     runtime=gateway.parent_sandbox_runtime(),
@@ -745,11 +983,26 @@ def open_hardening_runner(
                 run_entry=constraints.run_entry if constraints is not None else None,
                 run_timeout=constraints.run_timeout if constraints is not None else 60.0,
             )
-            scorer.prepare()
+            try:
+                scorer.prepare()
+            except BaseException:
+                # The caller never gets this scorer, so only this close frees its snapshots and folder.
+                with contextlib.suppress(Exception):
+                    scorer.close()
+                raise
             return scorer
 
         runner = RepoHardeningRunner(
-            workspace, job, gateway=gateway, meter=meter, open_scorer=open_scorer, managed_key=managed_key
+            workspace,
+            job,
+            gateway=gateway,
+            meter=meter,
+            open_scorer=open_scorer,
+            managed_key=managed_key,
+            pi_binary=settings.pi_binary,
+            intent=(constraints.intent or "") if constraints is not None else "",
+            metric_uses_model=model_gateway is not None,
+            on_live=on_live,
         )
         yield runner
     finally:
@@ -803,6 +1056,10 @@ def claim_hardening_job(
             row = session.get(HardeningJobModel, job_id)
             assert row is not None
             session.refresh(row)
+            if row.job.get("live_sessions"):
+                # A pass whose lease lapsed may have left its live sessions; they are not running now.
+                row.job = {**row.job, "live_sessions": []}
+                session.commit()
             return row.id, row.username, HardeningJob.model_validate(row.job), row.budget_operation_id, claim
         return None
 
@@ -879,12 +1136,38 @@ def store_hardening_result(
             BudgetService(engine=engine), result, row.username, operation_id
         ):
             operation_id = None
-        row.job = result.model_dump(mode="json")
+        # Live sessions are only for a running round; the stored round keeps the final ones.
+        row.job = result.model_copy(update={"live_sessions": []}).model_dump(mode="json")
         row.status = result.status
         row.updated_at = datetime.now(UTC)
         row.claimed_by = None
         row.lease_expires_at = None
         row.budget_operation_id = operation_id
+        session.commit()
+        return True
+
+
+def store_live_sessions(engine: Engine, job_id: str, sessions: list[HardeningSession], *, claim: str) -> bool:
+    """Write the running attacker sessions to the job row, so the page can show them live.
+
+    The pass's result later replaces the row's job, and its round keeps the
+    final sessions.
+
+    Args:
+        engine: SQLAlchemy engine of the job store.
+        job_id: The job.
+        sessions: The sessions so far.
+        claim: The pass's claim token.
+
+    Returns:
+        Whether the sessions were written; False when the claim is lost.
+    """
+    with Session(engine) as session:
+        row = session.scalars(select(HardeningJobModel).where(HardeningJobModel.id == job_id).with_for_update()).first()
+        if row is None or row.claimed_by != claim:
+            return False
+        # A new dict, so SQLAlchemy sees the JSON column change.
+        row.job = {**row.job, "live_sessions": [s.model_dump(mode="json") for s in sessions]}
         session.commit()
         return True
 
@@ -968,6 +1251,7 @@ def process_next_hardening_job(
                 lost=lost,
                 exhausted=exhausted,
                 on_commit=lambda commit: state.__setitem__("commit", commit),
+                on_live=lambda sessions: store_live_sessions(engine, job_id, sessions, claim=claim),
             )
 
         stop = threading.Event()
@@ -1207,32 +1491,21 @@ def _tree_text(archive: Path) -> str:
     return "".join(parts)
 
 
-def _candidates(reply: str | None) -> list[Candidate]:
-    """Read the attacker's candidates from its reply, skipping malformed ones.
+def _tree_files(archive: Path) -> list[str]:
+    """Return the file paths of a packed tree, for the lead agent.
 
     Args:
-        reply: The reply text.
+        archive: The stripped tree.
 
     Returns:
-        The candidates; empty when the reply has no JSON object.
+        The regular files' paths, at most :data:`MAX_LEAD_FILES`, then a
+        "(cut)" line when the tree has more.
     """
-    if not reply:
-        return []
-    match = re.search(r"\{.*\}", reply, re.DOTALL)
-    if match is None:
-        return []
-    try:
-        document = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
-    found: list[Candidate] = []
-    for item in document.get("candidates") or [] if isinstance(document, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        kind, diff, why = item.get("kind"), item.get("patch_diff"), item.get("why_md")
-        if kind in ("case", "method") and isinstance(diff, str) and isinstance(why, str):
-            found.append(Candidate(kind=kind, patch_diff=diff, why_md=why))
-    return found
+    with tarfile.open(archive) as tree:
+        files = [member.name for member in tree if member.isreg()]
+    if len(files) <= MAX_LEAD_FILES:
+        return files
+    return [*files[:MAX_LEAD_FILES], f"(cut: {len(files) - MAX_LEAD_FILES} more files)"]
 
 
 def _diff_only(reply: str) -> str:

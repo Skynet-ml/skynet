@@ -1,9 +1,12 @@
 """The metric-hardening loop: attack, judge, user review, metric fix and exploit suite.
 
-An attacker model tries to score high without solving the task. A judge labels
-each claim. The user confirms the real exploits, the agent drafts a metric fix,
+A lead agent writes one brief for each of K attacker sessions, and the
+sessions try to score high without solving the task (SKY-682). A judge labels
+each claim, and each claim gets its score and the base score on the current
+metric. The user confirms the real exploits, the agent drafts a metric fix,
 three automatic checks run on it, and the user approves it. Approved rounds add
 their exploits to the suite at ``.optimize/exploits/<id>/{patch.diff, why.md}``.
+After the last round, a noise check measures the newest metric.
 
 Every function here is pure state logic over a :class:`HardeningJob`. The
 caller passes the run/sandbox runner, the exploits path and the reference, so
@@ -16,23 +19,27 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from ....constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS, HARDENING_UNSURE_CONFIDENCE
 from ....models.hardening import (
+    HARDENING_DEFAULT_SESSIONS,
     HardeningExploit,
     HardeningFix,
     HardeningFixChecks,
     HardeningJob,
+    HardeningNoise,
     HardeningPlace,
     HardeningRound,
+    HardeningSession,
     HardeningView,
 )
 from .classification import JudgeClassification, parse_judge_reply
 
 RETRYABLE_STATUSES: frozenset[str] = frozenset({"failed", "preflight_failed", "stale", "rejected"})
+STOPPABLE_STATUSES: frozenset[str] = frozenset({"waiting_review", "waiting_fix"})
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"preflight_failed", "clean_stop", "budget_stop", "done", "rejected", "failed", "stale"}
 )
@@ -57,6 +64,34 @@ class Candidate:
     kind: Literal["case", "method"]
     patch_diff: str
     why_md: str
+    edge_case: list[dict[str, Any]] | None = None
+    session: int | None = None
+
+
+@dataclass(frozen=True)
+class AttackResult:
+    """What one attack round returns: the claims, the cost, and the lead agent's work."""
+
+    candidates: list[Candidate]
+    cost_usd: float
+    briefs: list[str] = field(default_factory=list)
+    sessions: list[HardeningSession] = field(default_factory=list)
+    # True when the round's money ran out or the meter refused calls, so a
+    # round without claims did not find the metric clean.
+    stopped: bool = False
+
+
+class AttackFailedError(RuntimeError):
+    """Every attacker session of a round failed; the error keeps what the round spent and did."""
+
+    def __init__(self, result: AttackResult) -> None:
+        """Keep the round's result for the job.
+
+        Args:
+            result: The cost, the briefs and the failed sessions.
+        """
+        super().__init__("Every attacker session failed.")
+        self.result = result
 
 
 class HardeningRunner(Protocol):
@@ -80,7 +115,8 @@ class HardeningRunner(Protocol):
         model: str,
         exploits_path: Path,
         budget_usd: float | None,
-    ) -> tuple[list[Candidate], float]:
+        sessions: int,
+    ) -> AttackResult:
         """Run one attack round.
 
         Args:
@@ -89,9 +125,10 @@ class HardeningRunner(Protocol):
             model: The attacker model.
             exploits_path: The suite folder, so the attacker can skip known exploits.
             budget_usd: The dollars the round may still spend, or None when local.
+            sessions: K, the attacker sessions to run in parallel.
 
         Returns:
-            The candidates and the dollars spent.
+            The candidates, the dollars spent, the briefs and the sessions.
         """
 
     def judge(self, *, candidate: Candidate, model: str, budget_usd: float | None) -> tuple[Any, float]:
@@ -113,6 +150,7 @@ class HardeningRunner(Protocol):
         model: str,
         exploits_path: Path,
         budget_usd: float | None,
+        notes: list[str],
     ) -> tuple[str, float]:
         """Draft a metric fix for the confirmed exploits.
 
@@ -121,6 +159,7 @@ class HardeningRunner(Protocol):
             model: The model that drafts the fix.
             exploits_path: The suite folder.
             budget_usd: The dollars the round may still spend, or None when local.
+            notes: The user's notes on the fixes they rejected in this round.
 
         Returns:
             The fix as a unified diff, and the dollars spent.
@@ -153,6 +192,17 @@ class HardeningRunner(Protocol):
 
         Args:
             fix_diff: The approved fix.
+        """
+
+    def noise_check(self, *, model: str, budget_usd: float | None) -> tuple[HardeningNoise, float]:
+        """Let an agent decide if the newest metric needs a noise check, and run it.
+
+        Args:
+            model: The model that decides.
+            budget_usd: The dollars the job may still spend, or None when local.
+
+        Returns:
+            The noise result and the dollars spent.
         """
 
 
@@ -195,6 +245,7 @@ def new_job(
     round_cap_usd: float = HARDENING_DEFAULT_ROUND_CAP_USD,
     view: HardeningView = "black_box",
     job_id: str | None = None,
+    parallel_sessions: int = HARDENING_DEFAULT_SESSIONS,
 ) -> HardeningJob:
     """Build a job that waits for its preflight.
 
@@ -206,6 +257,7 @@ def new_job(
         round_cap_usd: The dollars each round may spend.
         view: What the attacker may see.
         job_id: The id to use; a new one when None.
+        parallel_sessions: K, the attacker sessions of each round.
 
     Returns:
         The job.
@@ -222,6 +274,7 @@ def new_job(
         attacker_model=attacker_model,
         judge_model=judge_model,
         view=view,
+        parallel_sessions=parallel_sessions,
     )
     _reserve(job)
     return job
@@ -326,15 +379,20 @@ def record_verdict(job: HardeningJob, exploit_id: str, *, confirmed: bool) -> Ha
     return job
 
 
-def decide_fix(job: HardeningJob, *, approve: bool) -> HardeningJob:
+def decide_fix(job: HardeningJob, *, approve: bool, note: str | None = None) -> HardeningJob:
     """Store the user's decision on the drafted fix.
+
+    A reject with a note keeps the job going: the round goes back to drafting
+    and the next draft reads the note.
 
     Args:
         job: The job.
         approve: Whether the user approves the fix.
+        note: What the user wants changed, for a reject.
 
     Returns:
-        The job after the decision: running when approved, rejected otherwise.
+        The job after the decision: running when approved or rejected with a
+        note, rejected otherwise.
 
     Raises:
         HardeningStateError: When the job has no fix that waits for a decision.
@@ -353,11 +411,41 @@ def decide_fix(job: HardeningJob, *, approve: bool) -> HardeningJob:
         current.fix.user_decision = "approved"
         current.status = "approved"
         job.status = "running"
+    elif note is not None and note.strip():
+        current.fix_notes.append(note.strip())
+        current.fix = None
+        current.status = "running"
+        job.status = "running"
     else:
         current.fix.user_decision = "rejected"
         current.status = "rejected"
         job.status = "rejected"
         _release(job)
+    return job
+
+
+def stop(job: HardeningJob) -> HardeningJob:
+    """End a job that waits for the user as a clean stop.
+
+    Only a waiting job can stop: no worker holds it, so nothing else writes
+    the row or spends from the hold.
+
+    Args:
+        job: The job.
+
+    Returns:
+        The job, stopped clean.
+
+    Raises:
+        HardeningStateError: When the job does not wait for the user.
+    """
+    if job.status not in STOPPABLE_STATUSES:
+        raise HardeningStateError(job.status)
+    job = job.model_copy(deep=True)
+    if job.rounds_detail:
+        job.rounds_detail[-1].status = "stopped"
+    job.status = "clean_stop"
+    _release(job)
     return job
 
 
@@ -433,8 +521,7 @@ def _step(job: HardeningJob, runner: HardeningRunner, exploits_path: Path, refer
     elif current is not None and current.status == "running":
         _draft_fix(job, current, runner, exploits_path, reference)
     elif job.round >= job.rounds:
-        job.status = "done"
-        _release(job)
+        _finish(job, runner)
     else:
         _attack_round(job, runner, exploits_path)
 
@@ -447,23 +534,47 @@ def _attack_round(job: HardeningJob, runner: HardeningRunner, exploits_path: Pat
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
     """
+    if job.rounds_detail and job.rounds_detail[-1].status == "failed":
+        # A failed round stays on the job only until the retry runs it again.
+        job.rounds_detail.pop()
     round_index = job.round + 1
     budget = _round_budget(job, round_index)
     if budget is not None and budget <= 0:
         _budget_stop(job)
         return
-    candidates, cost = runner.attack(
-        round_index=round_index,
-        view=job.view,
-        model=job.attacker_model,
-        exploits_path=exploits_path,
-        budget_usd=budget,
-    )
-    _spend(job, cost)
+    try:
+        attack = runner.attack(
+            round_index=round_index,
+            view=job.view,
+            model=job.attacker_model,
+            exploits_path=exploits_path,
+            budget_usd=budget,
+            sessions=job.parallel_sessions,
+        )
+    except AttackFailedError as error:
+        # The sessions spent money; the retry's round budget must count it.
+        _spend(job, error.result.cost_usd)
+        job.rounds_detail.append(
+            HardeningRound(
+                index=round_index,
+                status="failed",
+                briefs=list(error.result.briefs),
+                sessions=list(error.result.sessions),
+            )
+        )
+        raise
+    _spend(job, attack.cost_usd)
     job.round = round_index
-    current = HardeningRound(index=round_index, status="running")
+    current = HardeningRound(
+        index=round_index, status="running", briefs=list(attack.briefs), sessions=list(attack.sessions)
+    )
     job.rounds_detail.append(current)
-    for candidate in candidates:
+    if not attack.candidates and attack.stopped:
+        current.status = "stopped"
+        _budget_stop(job)
+        return
+    base_score = _measure(runner, None) if attack.candidates else None
+    for candidate in attack.candidates:
         budget = _round_budget(job, round_index)
         if budget is not None and budget <= 0:
             current.status = "stopped"
@@ -472,18 +583,22 @@ def _attack_round(job: HardeningJob, runner: HardeningRunner, exploits_path: Pat
         raw, cost = runner.judge(candidate=candidate, model=job.judge_model, budget_usd=budget)
         _spend(job, cost)
         verdict = parse_verdict(raw)
-        current.exploits.append(
-            HardeningExploit(
-                id=uuid.uuid4().hex,
-                kind=candidate.kind,
-                label=verdict.label,
-                confidence=verdict.confidence,
-                reason=verdict.reason,
-                unsure=verdict.confidence < HARDENING_UNSURE_CONFIDENCE,
-                patch_diff=candidate.patch_diff,
-                why_md=candidate.why_md,
-            )
+        exploit = HardeningExploit(
+            id=uuid.uuid4().hex,
+            kind=candidate.kind,
+            label=verdict.label,
+            confidence=verdict.confidence,
+            reason=verdict.reason,
+            unsure=verdict.confidence < HARDENING_UNSURE_CONFIDENCE,
+            patch_diff=candidate.patch_diff,
+            why_md=candidate.why_md,
+            base_score=base_score,
+            edge_case=candidate.edge_case,
+            session=candidate.session,
         )
+        exploit.exploit_score = _measure(runner, exploit)
+        exploit.edge_case = _measured_tree(exploit.edge_case, exploit.exploit_score, base_score)
+        current.exploits.append(exploit)
     if any(_needs_review(e) for e in current.exploits):
         current.status = "waiting_review"
         job.status = "waiting_review"
@@ -516,7 +631,11 @@ def _draft_fix(
         return
     confirmed = _confirmed(current)
     diff, cost = runner.draft_fix(
-        exploits=confirmed, model=job.attacker_model, exploits_path=exploits_path, budget_usd=budget
+        exploits=confirmed,
+        model=job.attacker_model,
+        exploits_path=exploits_path,
+        budget_usd=budget,
+        notes=list(current.fix_notes),
     )
     _spend(job, cost)
     base_before = runner.score(fix_diff=None, exploit=None)
@@ -564,8 +683,96 @@ def _apply_fix(job: HardeningJob, current: HardeningRound, runner: HardeningRunn
     job.suite_count = len(_saved_exploits(exploits_path))
     job.fixed_count += len(confirmed)
     if job.round >= job.rounds:
-        job.status = "done"
-        _release(job)
+        _finish(job, runner)
+
+
+def _finish(job: HardeningJob, runner: HardeningRunner) -> None:
+    """Run the noise check on the newest metric once, then end the job as done.
+
+    A noise check that fails or has no money left is skipped with its
+    reason: it must not fail a job whose rounds all ended.
+
+    Args:
+        job: The job, changed in place.
+        runner: The run/sandbox runner.
+    """
+    if job.noise is None:
+        budget = _round_budget(job, job.rounds)
+        if budget is not None and budget <= 0:
+            job.noise = HardeningNoise(skipped=True, reason="No budget was left for the noise check.")
+        else:
+            try:
+                noise, cost = runner.noise_check(model=job.judge_model, budget_usd=budget)
+                _spend(job, cost)
+                job.noise = noise
+            except Exception as exc:
+                job.noise = HardeningNoise(skipped=True, reason=f"The noise check failed: {type(exc).__name__}.")
+    job.status = "done"
+    _release(job)
+
+
+def _measure(runner: HardeningRunner, exploit: HardeningExploit | None) -> float | None:
+    """Score the base solution or one claim on the current metric, for the exploit card.
+
+    The score only informs the user, so a scorer error leaves it null instead
+    of failing the round.
+
+    Args:
+        runner: The run/sandbox runner.
+        exploit: The claim, or None for the base solution.
+
+    Returns:
+        The finite score, or None when the scorer failed.
+    """
+    try:
+        value = float(runner.score(fix_diff=None, exploit=exploit))
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _measured_tree(
+    tree: list[dict[str, Any]] | None, exploit_score: float | None, base_score: float | None
+) -> list[dict[str, Any]] | None:
+    """Put the measured scores into every ScoreCompare node of an edge-case tree.
+
+    The session writes its own numbers, which the card must not show as
+    measured. Without a measured score a ScoreCompare node goes, and a Steps
+    node that loses all its items goes too.
+
+    Args:
+        tree: The validated tree, or None.
+        exploit_score: The claim's measured score.
+        base_score: The base solution's measured score.
+
+    Returns:
+        The tree with measured scores; None when no node is left.
+    """
+    if not tree:
+        return tree
+
+    def fixed(node: Any) -> Any:
+        """Return one node with measured scores, or None when it must go.
+
+        Args:
+            node: A node, or a Steps text item.
+
+        Returns:
+            The node, or None.
+        """
+        if not isinstance(node, dict):
+            return node
+        if node.get("type") == "ScoreCompare":
+            if exploit_score is None or base_score is None:
+                return None
+            return {**node, "exploit_score": exploit_score, "base_score": base_score}
+        if node.get("type") == "Steps":
+            items = [item for item in (fixed(i) for i in node.get("items") or []) if item is not None]
+            return {**node, "items": items} if items else None
+        return node
+
+    kept = [node for node in (fixed(n) for n in tree) if node is not None]
+    return kept or None
 
 
 def _saved_exploits(exploits_path: Path) -> list[HardeningExploit]:

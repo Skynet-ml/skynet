@@ -34,7 +34,16 @@ HardeningStatus = Literal[
 HardeningView = Literal["black_box", "white_box"]
 HardeningPlace = Literal["local", "cloud"]
 CheckResult = Literal["pass", "fail", "pending"]
-RoundStatus = Literal["running", "waiting_review", "waiting_fix", "clean", "approved", "fixed", "rejected", "stopped"]
+RoundStatus = Literal[
+    "running", "waiting_review", "waiting_fix", "clean", "approved", "fixed", "rejected", "stopped", "failed"
+]
+
+SessionStatus = Literal["running", "done", "failed"]
+
+# K, the attacker sessions of each round (SKY-682). Three keeps a five-round
+# job inside the default round cap until a staging measurement sets it.
+HARDENING_DEFAULT_SESSIONS = 3
+HARDENING_MAX_SESSIONS = 8
 
 ACTIVE_STATUSES: frozenset[str] = frozenset({"preflight", "running", "waiting_review", "waiting_fix"})
 _ACTIVE_WHERE = text("status IN ('preflight', 'running', 'waiting_review', 'waiting_fix')")
@@ -52,6 +61,14 @@ class HardeningExploit(BaseModel):
     patch_diff: str
     why_md: str
     user_verdict: Literal["confirmed", "rejected"] | None = None
+    # SKY-682: the claim's score and the base score on the metric of its round,
+    # null when the scorer failed. ``edge_case`` is the session's validated
+    # catalog tree, null when the tree was missing or invalid; the card then
+    # shows ``patch_diff`` and ``why_md``.
+    exploit_score: float | None = None
+    base_score: float | None = None
+    edge_case: list[dict[str, Any]] | None = None
+    session: int | None = None
 
 
 # reference_not_lower stays null when the metric has no reference solution.
@@ -68,12 +85,36 @@ class HardeningFix(BaseModel):
     user_decision: Literal["approved", "rejected"] | None = None
 
 
-# One attack round with its exploits and, once drafted, its fix.
+# One attacker session of a round (SKY-682). ``transcript`` holds entries in
+# the setup agent chat's message shape, so the page renders them the same way.
+class HardeningSession(BaseModel):
+    index: int = Field(ge=1)
+    brief: str
+    status: SessionStatus = "running"
+    transcript: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+# The noise check after the last round. A deterministic metric skips the
+# repeats and keeps only the reason; ``spread`` is max minus min of ``scores``.
+class HardeningNoise(BaseModel):
+    skipped: bool
+    reason: str
+    scores: list[float] = Field(default_factory=list)
+    spread: float | None = None
+
+
+# One attack round with its exploits and, once drafted, its fix. ``briefs`` are
+# the lead agent's session briefs; ``fix_notes`` are the user's notes on
+# rejected fixes, which the next draft reads.
 class HardeningRound(BaseModel):
     index: int = Field(ge=1)
     status: RoundStatus
     exploits: list[HardeningExploit] = Field(default_factory=list)
     fix: HardeningFix | None = None
+    briefs: list[str] = Field(default_factory=list)
+    sessions: list[HardeningSession] = Field(default_factory=list)
+    fix_notes: list[str] = Field(default_factory=list)
 
 
 # The contract the hardening page polls (SKY-357). Keep fields in step with it.
@@ -104,6 +145,11 @@ class HardeningJob(BaseModel):
     # (SKY-369). JSON for the same schema reason as ``target``; the secret is
     # dropped because GET returns the job. Without it the job fails.
     scorer: dict[str, Any] | None = None
+    # SKY-682: K, the parallel attacker sessions of each round. While a round
+    # runs, ``live_sessions`` holds its sessions so the page can poll them.
+    parallel_sessions: int = Field(default=HARDENING_DEFAULT_SESSIONS, ge=1)
+    live_sessions: list[HardeningSession] = Field(default_factory=list)
+    noise: HardeningNoise | None = None
 
 
 # Body of POST /hardening/jobs. ``target`` has the run submit's repository
@@ -120,6 +166,7 @@ class CreateHardeningJobRequest(BaseModel):
     target: BlackboxTarget | None = None
     binding_id: str | None = Field(default=None, min_length=1, max_length=64)
     scorer: BlackboxScorer | None = None
+    parallel_sessions: int = Field(default=HARDENING_DEFAULT_SESSIONS, ge=1, le=HARDENING_MAX_SESSIONS)
 
     @model_validator(mode="after")
     def _ensure_repo_target(self) -> CreateHardeningJobRequest:
@@ -152,9 +199,11 @@ class HardeningVerdictRequest(BaseModel):
     confirmed: bool
 
 
-# Body of POST /hardening/jobs/{job_id}/fix.
+# Body of POST /hardening/jobs/{job_id}/fix. A reject with a ``note`` sends
+# the round back to the agent, which drafts a new fix that reads the note.
 class HardeningFixDecisionRequest(BaseModel):
     approve: bool
+    note: str | None = Field(default=None, max_length=4000)
 
 
 class HardeningJobModel(Base):
