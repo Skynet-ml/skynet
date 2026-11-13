@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import * as React from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { setClientLocale } from "@/shared/lib/runtime-locale";
@@ -30,6 +31,8 @@ const {
   "./HardenTree"
 );
 const { HardenMetricScreen } = await import("./HardenMetricScreen");
+const { HardenSessionDrawer } = await import("./HardenSessionDrawer");
+const { JSDOM } = await import("jsdom");
 
 // The tree takes its translator as a prop, so the test sees each key and its params.
 const t = (key: string, params?: Record<string, string | number>) =>
@@ -294,5 +297,55 @@ void describe("HardenTree", () => {
     assert.match(skipped, /submit\.v2\.harden\.noise\.skipped <bdi dir="auto">deterministic<\/bdi>/);
     const scored = render({ skipped: false, reason: "", scores: [0.5, 0.75], spread: 0.25 });
     assert.match(scored, /submit\.v2\.harden\.noise\.scores\(0\.5, 0\.75\|0\.25\)/);
+  });
+});
+
+void describe("HardenSessionDrawer keys after a verdict", () => {
+  void it("keeps focus on the card, and J moves on with focus outside the drawer", async () => {
+    const dom = new JSDOM("<div id='root'></div>", { url: "https://app.test" });
+    Object.assign(globalThis, {
+      window: dom.window,
+      document: dom.window.document,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    });
+    const cards = [exploit({ id: "e1", session: LEAD_NODE }), exploit({ id: "e2", session: LEAD_NODE })];
+    const round = { index: 1, sessions: [], exploits: cards, briefs: ["Brief"], live: false };
+    const verdicts: string[] = [];
+    const drawer = (busy: boolean) => (
+      <HardenSessionDrawer
+        node={LEAD_NODE}
+        round={round}
+        canReview
+        busy={busy}
+        toReview={2}
+        focusCard="e1"
+        onVerdict={(id, confirmed) => verdicts.push(`${id}:${confirmed}`)}
+        onNextCard={() => {}}
+        onClose={() => {}}
+        t={t}
+      />
+    );
+    const root = createRoot(document.getElementById("root")!);
+    const active = () => (document.activeElement as HTMLElement | null)?.getAttribute("data-exploit") ?? null;
+    try {
+      await React.act(async () => root.render(drawer(false)));
+      assert.equal(active(), "e1");
+      const confirm = document.querySelector<HTMLButtonElement>('[data-exploit="e1"] button')!;
+      confirm.focus();
+      await React.act(async () => confirm.click());
+      // The verdict sets busy; the disabled button can no longer hold focus.
+      await React.act(async () => root.render(drawer(true)));
+      assert.deepEqual(verdicts, ["e1:true"]);
+      assert.equal(active(), "e1");
+      // Chromium moves focus to the body when the focused button turns disabled.
+      (document.activeElement as HTMLElement).blur();
+      assert.equal(document.activeElement, document.body);
+      await React.act(async () => {
+        document.body.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "j", code: "KeyJ", bubbles: true }));
+      });
+      assert.equal(active(), "e2");
+    } finally {
+      await React.act(async () => root.unmount());
+    }
   });
 });

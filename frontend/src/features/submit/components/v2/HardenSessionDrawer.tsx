@@ -45,6 +45,13 @@ function ExploitCard({
   React.useEffect(() => {
     if (focused) ref.current?.focus();
   }, [focused]);
+  // A verdict sets busy, which disables the clicked button, and the browser then
+  // drops focus to the body. Focus the card first, so keyboard and screen-reader
+  // users keep their place.
+  const verdict = (confirmed: boolean) => {
+    ref.current?.focus();
+    onVerdict(confirmed);
+  };
   const pct = new Intl.NumberFormat(getActiveIntlLocale(), { style: "percent" }).format(
     exploit.confidence,
   );
@@ -85,7 +92,7 @@ function ExploitCard({
             size="sm"
             variant={exploit.user_verdict === "confirmed" ? "default" : "outline"}
             disabled={busy}
-            onClick={() => onVerdict(true)}
+            onClick={() => verdict(true)}
           >
             {t("submit.v2.harden.exploit.confirm")}
           </Button>
@@ -93,7 +100,7 @@ function ExploitCard({
             size="sm"
             variant={exploit.user_verdict === "rejected" ? "secondary" : "ghost"}
             disabled={busy}
-            onClick={() => onVerdict(false)}
+            onClick={() => verdict(false)}
           >
             {t("submit.v2.harden.exploit.reject")}
           </Button>
@@ -157,20 +164,23 @@ export function HardenSessionDrawer({
     // Focus follows a new node or a new target card, not each poll's new array.
   }, [node, focusCard]);
 
+  // The keys listen on the window, so they work wherever focus is, also after
+  // focus left the drawer. The page's own J and K are off while the drawer is open.
+  const count = cards.length;
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      const step = cardKeyStep(event);
+      if (!step || !count) return;
+      event.preventDefault();
+      setFocus((i) => Math.min(count - 1, Math.max(0, i + step)));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const onKeyDown = (event: React.KeyboardEvent) => {
-    const step = cardKeyStep(event);
-    if (!step || !cards.length) return;
-    event.preventDefault();
-    setFocus((i) => Math.min(cards.length - 1, Math.max(0, i + step)));
-  };
+  }, [onClose, count]);
 
   const running = session?.status === "running";
   const title =
@@ -183,7 +193,6 @@ export function HardenSessionDrawer({
       role="dialog"
       aria-modal={false}
       aria-label={title}
-      onKeyDown={onKeyDown}
       className={cn(
         "fixed inset-0 z-40 flex flex-col bg-background outline-none",
         "sm:inset-y-0 sm:start-auto sm:end-0 sm:w-[30rem] sm:border-s sm:border-border/60 sm:shadow-xl",
