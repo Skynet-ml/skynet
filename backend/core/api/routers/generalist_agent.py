@@ -37,6 +37,7 @@ from ...connectors.vault import ConnectorVault
 from ...constants import TOKEN_SOURCE_MANAGED
 from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
+from ...service_gateway.agents.feedback import FeedbackTarget
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
     TrustMode,
@@ -1027,6 +1028,11 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             usage_sink=usage_sink,
             steer_key=req.steer_key,
             github_token=_github_token,
+            feedback_target=(
+                FeedbackTarget(engine=engine, username=current_user.username, conversation_id=conversation_id)
+                if engine is not None and conversation_id
+                else None
+            ),
         )
         metered = stream_with_llm_metering(
             source,

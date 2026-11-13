@@ -16,7 +16,8 @@ import litellm
 import pytest
 from fastapi.routing import APIRoute
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
@@ -25,6 +26,7 @@ from core.service_gateway.agents import docs_tools, pi_bridge, pi_react, web_too
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
+from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
     AUTOMATIC_TURN_PREFIX,
     CLONE_FOCUS,
@@ -55,7 +57,7 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_patch_order,
     validate_wizard_screen,
 )
-from core.storage.models import Base
+from core.storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel, Base
 
 from .test_pi_react import _simulated_pi
 
@@ -1720,6 +1722,59 @@ async def test_turn_answers_from_the_docs_tool(monkeypatch: pytest.MonkeyPatch, 
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("search_docs", "ok")]
     assert "/docs/limits" in json.dumps(lm.requests[1]["messages"])
+
+
+@pytest.mark.asyncio
+async def test_stored_chat_turn_offers_send_feedback_and_stores_one_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored chat's turn on Pi lists ``send_feedback``, and the call stores one report for the turn (SKY-580)."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id="c1", username="bob", title="t"))
+        session.add(AgentMessageModel(conversation_id="c1", role="user", content="the score is wrong"))
+        session.commit()
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield an empty fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    args = {"tool_name": "validate_code", "user_quote": "the score is wrong", "summary": "Expected 1, got 0."}
+    lm = _ScriptedLM([("send_feedback", args), ("submit", {"assistant_message": "I sent your feedback."})])
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="the score is wrong",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(engine=engine, username="bob", conversation_id="c1"),
+    )
+
+    assert reply == "I sent your feedback."
+    assert "send_feedback" in events[0]["data"]["allowed_tools"]
+    ends = [e["data"] for e in events if e["event"] == "tool_end"]
+    assert [(e["tool"], e["status"]) for e in ends] == [("send_feedback", "ok")]
+    with Session(engine) as session:
+        [report] = session.scalars(select(AgentFeedbackReportModel)).all()
+    assert (report.conversation_id, report.turn, report.agent, report.tool_name) == (
+        "c1",
+        1,
+        "generalist",
+        "validate_code",
+    )
 
 
 def test_share_plan_streams_a_plan_event_and_no_tool_row() -> None:

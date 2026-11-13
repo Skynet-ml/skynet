@@ -4,6 +4,9 @@
 failure reasons, money, served programs and product events over a trailing
 window. It is admin-only; internal and test accounts (``users.is_internal``)
 are excluded from every per-user figure.
+
+``GET /admin/agent-feedback`` lists the reports the agents sent with their
+``send_feedback`` tool (SKY-580), newest first. It is admin-only too.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from ...constants import PAYLOAD_OVERVIEW_NAME
 from ...models.common import OptimizationStatus
-from ...storage.models import JobModel, TelemetryEventModel, UserModel, WalletLedgerModel
+from ...storage.models import AgentFeedbackReportModel, JobModel, TelemetryEventModel, UserModel, WalletLedgerModel
 from ..auth import AuthenticatedUser, get_authenticated_user, require_admin_user
 from .serve import SERVE_INFERENCE_EVENT
 
@@ -296,6 +299,25 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
     )
 
 
+# One report from an agent's ``send_feedback`` tool. No class docstring: it
+# would become this schema's OpenAPI description.
+class AgentFeedbackReport(BaseModel):
+    id: str
+    created_at: datetime
+    username: str
+    conversation_id: str
+    turn: int
+    agent: str
+    tool_name: str
+    user_quote: str
+    summary: str
+
+
+# The newest feedback reports, newest first.
+class AgentFeedbackResponse(BaseModel):
+    reports: list[AgentFeedbackReport]
+
+
 def create_admin_dashboard_router(*, job_store) -> APIRouter:
     """Build the admin dashboard router.
 
@@ -331,5 +353,50 @@ def create_admin_dashboard_router(*, job_store) -> APIRouter:
         require_admin_user(current_user)
         with Session(job_store.engine) as session:
             return read_dashboard(session, days=days, now=datetime.now(UTC))
+
+    @router.get(
+        "/admin/agent-feedback",
+        response_model=AgentFeedbackResponse,
+        summary="Admin: the newest reports the agents sent when a user was not satisfied with a tool",
+    )
+    def get_agent_feedback(
+        current_user: AuthenticatedUserDep,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> AgentFeedbackResponse:
+        """Return the newest agent feedback reports.
+
+        Args:
+            current_user: Authenticated caller; must be a backend admin.
+            limit: Maximum reports to return, clamped to ``1..500``.
+
+        Returns:
+            An :class:`AgentFeedbackResponse`, newest first.
+
+        Raises:
+            DomainError: 403 when the caller is not a backend admin.
+        """
+        require_admin_user(current_user)
+        with Session(job_store.engine) as session:
+            rows = session.scalars(
+                select(AgentFeedbackReportModel)
+                .order_by(AgentFeedbackReportModel.created_at.desc(), AgentFeedbackReportModel.id)
+                .limit(limit)
+            ).all()
+            return AgentFeedbackResponse(
+                reports=[
+                    AgentFeedbackReport(
+                        id=row.id,
+                        created_at=row.created_at,
+                        username=row.username,
+                        conversation_id=row.conversation_id,
+                        turn=row.turn,
+                        agent=row.agent,
+                        tool_name=row.tool_name,
+                        user_quote=row.user_quote,
+                        summary=row.summary,
+                    )
+                    for row in rows
+                ]
+            )
 
     return router
