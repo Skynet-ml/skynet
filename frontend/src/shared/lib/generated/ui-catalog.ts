@@ -3499,6 +3499,13 @@ export type MessageKey =
   | "submit.summary.estimate_capped"
   | "submit.summary.estimate_cost"
   | "submit.summary.estimate_range"
+  | "submit.v2.edge_case.chart"
+  | "submit.v2.edge_case.empty"
+  | "submit.v2.edge_case.io.expected"
+  | "submit.v2.edge_case.io.got"
+  | "submit.v2.edge_case.io.input"
+  | "submit.v2.edge_case.score.base"
+  | "submit.v2.edge_case.score.exploit"
   | "submit.v2.harden.attacker"
   | "submit.v2.harden.back_to_editor"
   | "submit.v2.harden.budget"
@@ -7853,6 +7860,13 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.summary.estimate_capped": "תקרה קשיחה {cap}",
   "submit.summary.estimate_cost": "עלות משוערת",
   "submit.summary.estimate_range": "{low}–{high}",
+  "submit.v2.edge_case.chart": "תרשים עם {n} נקודות",
+  "submit.v2.edge_case.empty": "אין פרטים לממצא הזה.",
+  "submit.v2.edge_case.io.expected": "צפוי",
+  "submit.v2.edge_case.io.got": "התקבל",
+  "submit.v2.edge_case.io.input": "קלט",
+  "submit.v2.edge_case.score.base": "ציון הבסיס",
+  "submit.v2.edge_case.score.exploit": "ציון הפרצה",
   "submit.v2.harden.attacker": "מודל תוקף",
   "submit.v2.harden.back_to_editor": "חזרה לעורך",
   "submit.v2.harden.budget": "נעצר בתקציב אחרי {k} סבבים. {m} פרצות תוקנו.",
@@ -20972,6 +20986,13 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.summary.estimate_capped": "Hard cap {cap}",
   "submit.summary.estimate_cost": "Estimated cost",
   "submit.summary.estimate_range": "{low}–{high}",
+  "submit.v2.edge_case.chart": "Chart with {n} points",
+  "submit.v2.edge_case.empty": "This finding has no details.",
+  "submit.v2.edge_case.io.expected": "Expected",
+  "submit.v2.edge_case.io.got": "Got",
+  "submit.v2.edge_case.io.input": "Input",
+  "submit.v2.edge_case.score.base": "Base score",
+  "submit.v2.edge_case.score.exploit": "Exploit score",
   "submit.v2.harden.attacker": "Attacker model",
   "submit.v2.harden.back_to_editor": "Back to the editor",
   "submit.v2.harden.budget": "Stopped at the budget after {k} rounds. {m} exploits fixed.",
