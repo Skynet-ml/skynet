@@ -165,7 +165,6 @@ function setupChat(options: {
     shownScreenRef, setupRunRef, kickedScreensRef,
     newSession: () => log.push(["new"]),
     activateConversation: (id: string) => (log.push(["activate", id]), options.active ?? false),
-    setSetupLoad: (id: string | null) => log.push(["loading", id]),
     setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
     loadConversation: (id: string) => (log.push(["load", id]), (options.load ?? (async () => ({ detail: null, missing: false })))(id)),
   });
@@ -187,31 +186,30 @@ const server = [{ role: "user", content: "server" }];
 test("a new setup chat starts with no server id and its kickoff, so its first turn saves it", async () => {
   const chat = setupChat({ setupId: null });
   await chat.openSetupChat(null, "brief");
-  assert.equal(chat.log.length, 4);
-  assert.deepEqual(chat.log[0], ["loading", null]);
-  assert.match(String(chat.log[1][1]), /^setup-/);
-  assert.deepEqual(chat.log.slice(2), [["new"], ["kickoff", "brief"]]);
+  assert.equal(chat.log.length, 3);
+  assert.match(String(chat.log[0][1]), /^setup-/);
+  assert.deepEqual(chat.log.slice(1), [["new"], ["kickoff", "brief"]]);
 });
 
 test("a tab-only setup chat from an older build opens with no server id", async () => {
   const chat = setupChat({ setupId: "setup-1" });
   await chat.openSetupChat({ id: "setup-1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["loading", null], ["open", null, tab], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["open", null, tab], ["kickoff", "brief"]]);
 });
 
 test("a reopened setup chat shows the tab copy, loads the server copy, then sends its kickoff", async () => {
   const chat = setupChat({ live: { id: null, messages: [] }, load: async () => ({ detail: { messages: server }, missing: false }) });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
   assert.deepEqual(chat.log, [
-    ["loading", null], ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
-    ["loading", null], ["open", "c1", server], ["kickoff", "brief"],
+    ["activate", "c1"], ["open", "c1", tab], ["load", "c1"],
+    ["open", "c1", server], ["kickoff", "brief"],
   ]);
 });
 
 test("a setup chat already open in the panel sends its kickoff at once", async () => {
   const chat = setupChat({ active: true });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["loading", null], ["activate", "c1"], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["activate", "c1"], ["kickoff", "brief"]]);
 });
 
 test("a load for a setup that closed changes nothing and sends no kickoff", async () => {
@@ -221,7 +219,7 @@ test("a load for a setup that closed changes nothing and sends no kickoff", asyn
   chat.setupChatRef.current = null;
   load.finish({ detail: null, missing: true });
   await done;
-  assert.deepEqual(chat.log.slice(-2), [["load", "c1"], ["loading", null]]);
+  assert.deepEqual(chat.log.at(-1), ["load", "c1"]);
 });
 
 test("a load for a setup that opened again leaves the new setup's chat and kickoff alone", async () => {
@@ -314,7 +312,7 @@ test("a kickoff sent again after not found counts as the kickoff of the screen o
   assert.equal(plain.kickoffTurnRef.current, null);
 });
 
-test("the agent's Back request stays hidden in a shared link and in the chat history", async () => {
+test("the agent's Back request stays hidden in the chat history", async () => {
   const back = backRequest("Change the metric to accuracy");
   assert.match(back, /Change the metric to accuracy$/);
   const stored = [
@@ -323,9 +321,6 @@ test("the agent's Back request stays hidden in a shared link and in the chat his
     { role: "user", content: back },
     { role: "user", content: "Change the metric to accuracy" },
   ];
-  const sharedView = "src/features/agent-panel/components/SharedChatView.tsx";
-  const visible = expression(sharedView, "visible", { hideKickoffs, messages: stored })();
-  assert.deepEqual(visible.map((m: { hidden?: boolean }) => m.hidden === true), [true, false, true, false]);
   const opened: unknown[][] = [];
   const pick = expression(panel, "handlePickConversation", {
     setDrawerOpen: () => {}, hideKickoffs,
@@ -336,32 +331,6 @@ test("the agent's Back request stays hidden in a shared link and in the chat his
   await pick("c1");
   const shown = opened[0][1] as { hidden?: boolean }[];
   assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, true, false]);
-});
-
-test("Copy chat on a share page gets the wizard's kickoff and Back turns as hidden turns", () => {
-  const sharePage = "src/app/share/chat/[token]/page.tsx";
-  const tree = ts.createSourceFile(sharePage, source(sharePage), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let found: ts.Expression | undefined;
-  const visit = (node: ts.Node) => {
-    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "CopyChatMenu") {
-      for (const attr of node.attributes.properties) {
-        if (ts.isJsxAttribute(attr) && attr.name.getText(tree) === "messages" && attr.initializer
-          && ts.isJsxExpression(attr.initializer)) found = attr.initializer.expression;
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(tree);
-  assert.ok(found, "CopyChatMenu messages");
-  const chat = {
-    messages: [
-      { role: "user", content: SCREEN_KICKOFF },
-      { role: "user", content: backRequest("Change the metric") },
-      { role: "user", content: "typed" },
-    ],
-  };
-  const copied = new Function("hideKickoffs", "chat", `return ${found.getText(tree)}`)(hideKickoffs, chat);
-  assert.deepEqual(copied.map((m: { hidden?: boolean }) => m.hidden === true), [true, true, false]);
 });
 
 test("closing the setup stops its chat, even before the server gave it an id", () => {
@@ -400,32 +369,9 @@ test("discardActive stops and drops the chat on view and shows a new one", () =>
   assert.equal(activeKeyRef.current, "k2");
 });
 
-test("an old load that ends late leaves the newer load's Share block on", async () => {
-  const first = pendingLoad();
-  let calls = 0;
-  const chat = setupChat({ load: () => (calls++ === 0 ? first.start() : new Promise(() => {})) });
-  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  first.load.finish({ detail: null, missing: false });
-  await done;
-  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [
-    ["loading", null], ["loading", "c1"], ["loading", null], ["loading", "c1"],
-  ]);
-});
-
 test("a Back request of only spaces stays hidden after send trims it", () => {
   const sent = backRequest("   ").trim();
   assert.deepEqual(hideKickoffs([{ role: "user", content: sent }]).map((m) => m.hidden), [true]);
-});
-
-test("a new setup chat clears the Share block an old load left on", async () => {
-  const first = pendingLoad();
-  const chat = setupChat({ load: first.start });
-  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  void chat.openSetupChat(null, null);
-  first.load.finish({ detail: null, missing: false });
-  await done;
-  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", null], ["loading", "c1"], ["loading", null]]);
 });
 
 test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {
@@ -526,18 +472,6 @@ test("only a 404 marks a conversation as gone", async () => {
     await load(async () => ({ ok: true, status: 200, json: async () => ({ id: "c1", messages: server }) })),
     { detail: { id: "c1", messages: server }, missing: false },
   );
-});
-
-test("the setup chat shows Share only once the server saved it and its load ended", () => {
-  const share = (conversationId: string | null, setupLoad: string | null = null) =>
-    expression(panel, "canShareChat", {
-      canShare: true, webChat: false, setupLoad,
-      agent: { conversationId, messages: [{ role: "user", content: "q" }] },
-    });
-  assert.equal(share("c1"), true);
-  // An older build's tab-only chat, or one the server lost, opens with no id.
-  assert.equal(share(null), false);
-  assert.equal(share("c1", "c1"), false);
 });
 
 function keepWith(
@@ -676,15 +610,18 @@ test("a submitted setup leaves no draft behind", () => {
 });
 
 test("Start new deletes the server draft", () => {
-  const text = source("src/features/submit/components/SubmitEntry.tsx");
-  assert.match(text, /function discardSetupDraft\(account: string, draft: SetupDraft \| null\) \{\n\s+void deleteSetupDraft\(account, setupDraftApi\);/);
-  assert.match(text, /onStartNew=\{\(\) => \{\n\s+discardSetupDraft\(accountId, offer\);/);
+  const offer = source("src/features/submit/lib/setup-offer.ts");
+  assert.match(offer, /function discardSetupOffer\(account: string, offer: SetupDraft\): void \{\n\s+void deleteSetupDraft\(account, setupDraftApi\);/);
+  const entry = source("src/features/submit/components/SubmitEntry.tsx");
+  assert.match(entry, /onStartNew=\{\(\) => \{\n\s+discardSetupOffer\(accountId, offer\);/);
+  const newOptimization = source("src/features/submit/hooks/use-new-optimization.tsx");
+  assert.match(newOptimization, /onStartNew=\{\(\) => \{\n\s+discardSetupOffer\(offer\.account, offer\.draft\);/);
 });
 
 test("a draft this build cannot read stays on the server and is not offered", () => {
-  const text = source("src/features/submit/components/SubmitEntry.tsx");
-  assert.match(text, /else if \(draft && !usable\) clearSetupDraft\(\);/);
-  assert.equal(text.match(/discardSetupDraft\(/g)?.length, 2);
+  const text = source("src/features/submit/lib/setup-offer.ts");
+  assert.match(text, /if \(draft && !usable\) clearSetupDraft\(\);/);
+  assert.equal(text.match(/discardSetupOffer\(/g)?.length, 1);
   assert.equal(text.match(/deleteSetupDraft\(/g)?.length, 1);
 });
 
@@ -825,7 +762,7 @@ function screenEffect(options: { handoff: { id: string | null } | null; live: { 
     discardConversation: (id: string) => log.push(["discard", id]),
     newSetupChatStart, reopenedScreenRef: { current: null },
     kickedScreensRef: { current: new Set() }, setupRunRef: { current: 0 },
-    setSetupLoad: () => {}, setupMessagesRef: { current: [] },
+    setupMessagesRef: { current: [] },
     keepSetupChat: (id: string | null) => log.push(["keep", id]),
     setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
     setActiveConversation: (id: string | null) => log.push(["active", id]),
