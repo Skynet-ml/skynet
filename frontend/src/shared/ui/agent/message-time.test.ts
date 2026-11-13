@@ -4,33 +4,76 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  formatMessageTime,
+  formatMessageAge,
+  formatMessageDate,
+  minuteClockNow,
   parseMessageTime,
-  startsTimeGroup,
-  timeDividerLabel,
+  subscribeMinuteClock,
 } from "./message-time.ts";
 
-// ICU puts a narrow no-break space before AM/PM; compare as plain spaces.
-const plain = (s: string) => s.replace(/[  ]/g, " ");
 const at = (y: number, mo: number, d: number, h: number, mi: number) =>
   new Date(y, mo, d, h, mi).getTime();
-const words = { today: (t: string) => `Today ${t}`, yesterday: (t: string) => `Yesterday ${t}` };
+const now = at(2026, 10, 12, 14, 42);
+const MIN = 60_000;
 
-test("formats a time in 12-hour AM/PM form", () => {
-  assert.equal(plain(formatMessageTime(at(2026, 10, 1, 20, 25), "en-US")), "8:25 PM");
-  assert.equal(plain(formatMessageTime(at(2026, 10, 1, 0, 5), "en-US")), "12:05 AM");
+test("shows a recent message as how long ago it was sent", () => {
+  assert.equal(formatMessageAge(now - 20_000, now, "en-US"), "now");
+  assert.equal(formatMessageAge(now - 5 * MIN, now, "en-US"), "5 minutes ago");
+  assert.equal(formatMessageAge(now - 3 * 60 * MIN, now, "en-US"), "3 hours ago");
+  assert.equal(formatMessageAge(now - 26 * 60 * MIN, now, "en-US"), "1 day ago");
+  assert.equal(formatMessageAge(now - 6 * 24 * 60 * MIN, now, "en-US"), "6 days ago");
 });
 
-test("keeps the 12-hour form in a 24-hour locale", () => {
-  const he = formatMessageTime(at(2026, 10, 1, 20, 25), "he-IL");
-  assert.match(he, /8:25/);
-  assert.doesNotMatch(he, /20:25/);
+test("shows the day and month from a week on, and the year only for other years", () => {
+  assert.equal(formatMessageAge(at(2026, 10, 5, 9, 3), now, "en-US"), "Nov 5");
+  assert.equal(formatMessageAge(at(2025, 10, 5, 9, 3), now, "en-US"), "Nov 5, 2025");
+});
+
+test("never shows a future time", () => {
+  assert.equal(formatMessageAge(now + 5 * MIN, now, "en-US"), "now");
 });
 
 test("shows no time when the message has none", () => {
-  assert.equal(formatMessageTime(undefined, "en-US"), "");
-  assert.equal(formatMessageTime(null, "en-US"), "");
-  assert.equal(formatMessageTime(Number.NaN, "en-US"), "");
+  assert.equal(formatMessageAge(undefined, now, "en-US"), "");
+  assert.equal(formatMessageAge(null, now, "en-US"), "");
+  assert.equal(formatMessageAge(Number.NaN, now, "en-US"), "");
+});
+
+test("gives the short date and time for the tooltip", () => {
+  const full = formatMessageDate(at(2026, 10, 7, 14, 42), "en-US").replace(/[\u202f\u00a0]/g, " ");
+  assert.equal(full, "Nov 7, 2026, 2:42 PM");
+});
+
+test("builds each Intl formatter once and reuses it", () => {
+  const real = { date: Intl.DateTimeFormat, relative: Intl.RelativeTimeFormat };
+  let built = 0;
+  class CountedDate extends real.date {
+    constructor(...args: ConstructorParameters<typeof Intl.DateTimeFormat>) {
+      super(...args);
+      built += 1;
+    }
+  }
+  class CountedRelative extends real.relative {
+    constructor(...args: ConstructorParameters<typeof Intl.RelativeTimeFormat>) {
+      super(...args);
+      built += 1;
+    }
+  }
+  Object.assign(Intl, { DateTimeFormat: CountedDate, RelativeTimeFormat: CountedRelative });
+  try {
+    const formatAll = () => [
+      formatMessageAge(now - 5 * MIN, now, "fr-CA"),
+      formatMessageAge(now - 3 * 24 * 60 * MIN, now, "fr-CA"),
+      formatMessageAge(at(2026, 10, 5, 9, 3), now, "fr-CA"),
+      formatMessageDate(now, "fr-CA"),
+    ];
+    const first = formatAll();
+    assert.equal(built, 4);
+    assert.deepEqual(formatAll(), first);
+    assert.equal(built, 4);
+  } finally {
+    Object.assign(Intl, { DateTimeFormat: real.date, RelativeTimeFormat: real.relative });
+  }
 });
 
 test("parses stored times, reading a zoneless time as UTC", () => {
@@ -43,25 +86,32 @@ test("parses stored times, reading a zoneless time as UTC", () => {
   assert.equal(parseMessageTime("not a date"), undefined);
 });
 
-test("opens a group on the first timed turn, a long gap, or a new day", () => {
-  const t = at(2026, 10, 1, 20, 14);
-  assert.equal(startsTimeGroup(undefined, t), true);
-  assert.equal(startsTimeGroup(t, t + 5 * 60_000), false);
-  assert.equal(startsTimeGroup(t, t + 30 * 60_000), true);
-  assert.equal(startsTimeGroup(at(2026, 10, 1, 23, 50), at(2026, 10, 2, 0, 5)), true);
-  assert.equal(startsTimeGroup(t, undefined), false);
-});
-
-test("labels dividers as today, yesterday, or a date", () => {
-  const now = at(2026, 10, 1, 21, 0);
-  assert.equal(plain(timeDividerLabel(at(2026, 10, 1, 20, 14), now, "en-US", words)), "Today 8:14 PM");
-  assert.equal(
-    plain(timeDividerLabel(at(2026, 9, 31, 9, 3), now, "en-US", words)),
-    "Yesterday 9:03 AM",
-  );
-  const older = plain(timeDividerLabel(at(2026, 9, 28, 9, 3), now, "en-US", words));
-  assert.match(older, /Oct 28/);
-  assert.match(older, /9:03 AM/);
-  assert.doesNotMatch(older, /2026/);
-  assert.match(plain(timeDividerLabel(at(2025, 9, 28, 9, 3), now, "en-US", words)), /2025/);
+test("every message time shares one minute timer", () => {
+  const real = { set: globalThis.setInterval, clear: globalThis.clearInterval };
+  const timers: Array<() => void> = [];
+  let cleared = 0;
+  Object.assign(globalThis, {
+    setInterval: (fn: () => void) => timers.push(fn),
+    clearInterval: () => {
+      cleared += 1;
+    },
+  });
+  try {
+    let ticks = 0;
+    const stopA = subscribeMinuteClock(() => (ticks += 1));
+    const stopB = subscribeMinuteClock(() => (ticks += 1));
+    assert.equal(timers.length, 1);
+    const before = minuteClockNow();
+    assert.equal(minuteClockNow(), before);
+    timers[0]!();
+    assert.equal(ticks, 2);
+    stopA();
+    assert.equal(cleared, 0);
+    stopB();
+    assert.equal(cleared, 1);
+    subscribeMinuteClock(() => {})();
+    assert.equal(timers.length, 2);
+  } finally {
+    Object.assign(globalThis, { setInterval: real.set, clearInterval: real.clear });
+  }
 });
