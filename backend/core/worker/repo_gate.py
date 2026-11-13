@@ -125,6 +125,7 @@ def check_repository(
     place: Place,
     bindings: Mapping[str, str] | None = None,
     allowed_hosts: Mapping[str, Collection[str]] | None = None,
+    require_version: bool = True,
 ) -> list[GateFailure]:
     """List every reason the repository's ``optimize.toml`` stops this run.
 
@@ -138,6 +139,8 @@ def check_repository(
             a name it does not hold binds to the user's secret.
         allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
             does not hold may go to no host.
+        require_version: Passed to :func:`read_constraints`; the staging of
+            the same tree gives it.
 
     Returns:
         The failures, in file order. An empty list means the run may start.
@@ -146,7 +149,7 @@ def check_repository(
         ConstraintsError: When the file or a role's MCP file is invalid.
     """
     raw = read_constraints_file(archive)
-    constraints = read_constraints(archive) if raw is not None else None
+    constraints = read_constraints(archive, require_version=require_version) if raw is not None else None
     if raw is None or constraints is None:
         return []
     failures = [

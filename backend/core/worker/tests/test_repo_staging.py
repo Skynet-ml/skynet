@@ -376,6 +376,24 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
+def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment means the run started, maybe before ``version`` was required (SKY-690)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    assert staged.require_version is True
+    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+
+    again, staged = _stage_with(unversioned, monkeypatch, resumed)
+    staged.cleanup()
+
+    assert staged.require_version is False
+    assert again["target"]["repo"]["editable_paths"] == ["src/geocode"]
+    with pytest.raises(ConstraintsError, match="version is missing"):
+        _stage_with(unversioned, monkeypatch)
+
+
 _RULED = {
     **_FILES,
     "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
