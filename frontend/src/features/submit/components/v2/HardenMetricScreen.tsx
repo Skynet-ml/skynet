@@ -622,6 +622,7 @@ export function HardenMetricScreen({
           busy={h.busy}
           toReview={pending.length}
           focusCard={focusCard}
+          onFocusCard={setFocusCard}
           onVerdict={(id, confirmed) => void h.verdict(id, confirmed)}
           onNextCard={nextCard}
           onClose={close}

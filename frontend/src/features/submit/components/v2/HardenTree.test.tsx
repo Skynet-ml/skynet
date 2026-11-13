@@ -301,6 +301,13 @@ void describe("HardenTree", () => {
   });
 });
 
+// The page owns the drawer's focused card; this host plays the page's part.
+type DrawerProps = React.ComponentProps<typeof HardenSessionDrawer>;
+function DrawerHost({ initial, ...props }: Omit<DrawerProps, "focusCard" | "onFocusCard"> & { initial: string }) {
+  const [focusCard, setFocusCard] = React.useState<string | null>(initial);
+  return <HardenSessionDrawer {...props} focusCard={focusCard} onFocusCard={setFocusCard} />;
+}
+
 void describe("HardenSessionDrawer keys after a verdict", () => {
   void it("keeps focus on the card, and J moves on with focus outside the drawer", async () => {
     const dom = new JSDOM("<div id='root'></div>", { url: "https://app.test" });
@@ -313,13 +320,13 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
     const round = { index: 1, sessions: [], exploits: cards, briefs: ["Brief"], live: false };
     const verdicts: string[] = [];
     const drawer = (busy: boolean) => (
-      <HardenSessionDrawer
+      <DrawerHost
         node={LEAD_NODE}
         round={round}
         canReview
         busy={busy}
         toReview={2}
-        focusCard="e1"
+        initial="e1"
         onVerdict={(id, confirmed) => verdicts.push(`${id}:${confirmed}`)}
         onNextCard={() => {}}
         onClose={() => {}}
@@ -375,13 +382,13 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
     try {
       await React.act(async () =>
         root.render(
-          <HardenSessionDrawer
+          <DrawerHost
             node={LEAD_NODE}
             round={round}
             canReview
             busy={false}
             toReview={2}
-            focusCard="e1"
+            initial="e1"
             onVerdict={() => {}}
             onNextCard={() => {}}
             onClose={() => closed++}
@@ -424,6 +431,62 @@ void describe("HardenSessionDrawer keys after a verdict", () => {
       await press(innerItem, { key: "Escape" });
       assert.equal(closed, 1);
       inner.remove();
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  });
+
+  void it("steps the drawer's to-review button from the card that J moved to", async () => {
+    const dom = new JSDOM("<div id='root'></div>", { url: "https://app.test" });
+    Object.assign(globalThis, {
+      window: dom.window,
+      document: dom.window.document,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    });
+    // c1 waits for a verdict; c2 is a valid case and needs none.
+    const exploits = [exploit({ id: "c1", session: 1 }), exploit({ id: "c2", session: 1, label: "valid" })];
+    const j = job({
+      status: "waiting_review",
+      round: 1,
+      rounds_detail: [{ index: 1, status: "waiting_review", exploits, fix: null, briefs: ["Brief"], sessions: [session(1, "done")] }],
+    });
+    const hardening = {
+      job: j,
+      loading: false,
+      busy: false,
+      hasScorer: true,
+      start: async () => {},
+      verdict: async () => {},
+      decideFix: async () => {},
+      stop: async () => {},
+      retry: async () => {},
+    };
+    const root = createRoot(document.getElementById("root")!);
+    const active = () => (document.activeElement as HTMLElement | null)?.getAttribute("data-exploit") ?? null;
+    const toReview = (inDrawer: boolean) =>
+      [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (b) =>
+          b.textContent?.startsWith("submit.v2.harden.drawer.to_review") &&
+          (b.closest('[role="dialog"]') !== null) === inDrawer,
+      )!;
+    const click = async (button: HTMLButtonElement) => React.act(async () => button.click());
+    try {
+      await React.act(async () =>
+        root.render(<HardenMetricScreen active guided={false} onBack={() => {}} hardening={hardening} reflectionModel={null} />),
+      );
+      await click(toReview(false));
+      assert.equal(active(), "c1");
+      await React.act(async () => {
+        document.body.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "j", code: "KeyJ", bubbles: true }));
+      });
+      assert.equal(active(), "c2");
+      // The page steps from c2, where the user is, so it lands on the one pending card.
+      await click(toReview(true));
+      assert.equal(active(), "c1");
+      // Again from c1 it wraps to c1: the page state stays the same, and focus still lands there.
+      (document.activeElement as HTMLElement).blur();
+      await click(toReview(true));
+      assert.equal(active(), "c1");
     } finally {
       await React.act(async () => root.unmount());
     }

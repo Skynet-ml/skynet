@@ -36,6 +36,7 @@ const isStepCall = () => true;
 function ExploitCard({
   exploit,
   focused,
+  nudge,
   canReview,
   busy,
   onVerdict,
@@ -43,6 +44,7 @@ function ExploitCard({
 }: {
   exploit: HardeningExploit;
   focused: boolean;
+  nudge: number;
   canReview: boolean;
   busy: boolean;
   onVerdict: (confirmed: boolean) => void;
@@ -51,7 +53,7 @@ function ExploitCard({
   const ref = React.useRef<HTMLElement>(null);
   React.useEffect(() => {
     if (focused) ref.current?.focus();
-  }, [focused]);
+  }, [focused, nudge]);
   // A verdict sets busy, which disables the clicked button, and the browser then
   // drops focus to the body. Focus the card first, so keyboard and screen-reader
   // users keep their place.
@@ -142,6 +144,7 @@ export function HardenSessionDrawer({
   busy,
   toReview,
   focusCard,
+  onFocusCard,
   onVerdict,
   onNextCard,
   onClose,
@@ -153,6 +156,7 @@ export function HardenSessionDrawer({
   busy: boolean;
   toReview: number;
   focusCard: string | null;
+  onFocusCard: (exploitId: string) => void;
   onVerdict: (exploitId: string, confirmed: boolean) => void;
   onNextCard: () => void;
   onClose: () => void;
@@ -161,19 +165,21 @@ export function HardenSessionDrawer({
   const session = round.sessions.find((s) => s.index === node) ?? null;
   const cards = React.useMemo(() => reviewOrder(sessionExploits(round.exploits, node)), [round.exploits, node]);
   const messages = React.useMemo(() => hideKickoffs([...(session?.transcript ?? [])]), [session]);
-  const [focus, setFocus] = React.useState(-1);
+  // The page owns the focused card, so its "to review" step starts from the card
+  // the user is on, also after J or K in here.
+  const focus = focusCard ? cards.findIndex((c) => c.id === focusCard) : -1;
+  // "To review" can land on the card that already has focus (one card left, or a
+  // wrap), so the page state does not change; the nudge still moves focus there.
+  const [nudge, setNudge] = React.useState(0);
   const panel = React.useRef<HTMLElement>(null);
 
   React.useEffect(() => {
-    const at = focusCard ? cards.findIndex((c) => c.id === focusCard) : -1;
-    setFocus(at);
-    if (at < 0) panel.current?.focus();
+    if (focus < 0) panel.current?.focus();
     // Focus follows a new node or a new target card, not each poll's new array.
   }, [node, focusCard]);
 
   // The keys listen on the window, so they work wherever focus is, also after
   // focus left the drawer. The page's own J and K are off while the drawer is open.
-  const count = cards.length;
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -181,13 +187,14 @@ export function HardenSessionDrawer({
         return;
       }
       const step = cardKeyStep(event, panel.current);
-      if (!step || !count) return;
+      const card = step ? cards[Math.min(cards.length - 1, Math.max(0, focus + step))] : undefined;
+      if (!card) return;
       event.preventDefault();
-      setFocus((i) => Math.min(count - 1, Math.max(0, i + step)));
+      onFocusCard(card.id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, count]);
+  }, [onClose, onFocusCard, cards, focus]);
 
   const running = session?.status === "running";
   const title =
@@ -213,7 +220,14 @@ export function HardenSessionDrawer({
         </Button>
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h3>
         {toReview > 0 && (
-          <Button variant="link" size="sm" onClick={onNextCard}>
+          <Button
+            variant="link"
+            size="sm"
+            onClick={() => {
+              onNextCard();
+              setNudge((n) => n + 1);
+            }}
+          >
             {t("submit.v2.harden.drawer.to_review", { n: toReview })}
           </Button>
         )}
@@ -260,10 +274,11 @@ export function HardenSessionDrawer({
             key={exploit.id}
             exploit={exploit}
             focused={i === focus}
+            nudge={nudge}
             canReview={canReview}
             busy={busy}
             onVerdict={(confirmed) => {
-              setFocus(i);
+              onFocusCard(exploit.id);
               onVerdict(exploit.id, confirmed);
             }}
             t={t}
