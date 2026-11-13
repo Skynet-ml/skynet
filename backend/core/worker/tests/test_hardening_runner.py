@@ -30,6 +30,7 @@ from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, _measure, new_job
+from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
 from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
 from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
@@ -1500,6 +1501,86 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     ) as hardening:
         assert hardening._score(None, "") == 13.0
         assert hardening._score(_KEY_FIX, "") == 23.0
+
+
+@pytest.mark.parametrize("require_version", [False, True])
+def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_version: bool
+) -> None:
+    """A started pass opens on an optimize.toml with no version; a new pass refuses it (SKY-690).
+
+    Args:
+        engine: The test database.
+        tmp_path: The folder for the trusted tree.
+        monkeypatch: Replaces the gateway and the sandbox binding.
+        require_version: The staging's rule for a file with no version.
+    """
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "src").mkdir(parents=True)
+    (trusted / "src" / "app.py").write_text("VALUE = 1\n")
+    (trusted / "intent.md").write_text("Keep the app fast.\n")
+    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n')
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+        require_version=require_version,
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    if require_version:
+        with pytest.raises(ConstraintsError, match="version is missing"), opened:
+            pass
+    else:
+        with opened as runner:
+            assert runner._intent == "Keep the app fast."
 
 
 async def _fake_pi_turn(*, binary: str, handlers: Any, translator: Any, prompt: str) -> None:

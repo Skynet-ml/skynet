@@ -135,13 +135,6 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
 }
 
 /**
- * Config view for a black-box run: the same carousel shell as the regular
- * path, with the payload grouped into general / optimization / models /
- * target & scorer / data slides. Reads the raw payload the wizard sent; the
- * scorer secret is deliberately never surfaced — only the scorer kind and,
- * for remote scorers, the endpoint URL.
- */
-/**
  * The score that stops a run's search: `[outcome] target` from optimize.toml
  * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
  */
@@ -153,6 +146,13 @@ export function runStopScore(
   return target.repo?.environment?.outcome?.target ?? legacy ?? null;
 }
 
+/**
+ * Config view for a black-box run: the same carousel shell as the regular
+ * path, with the payload grouped into general / optimization / models /
+ * target & scorer / data slides. Reads the raw payload the wizard sent; the
+ * scorer secret is deliberately never surfaced — only the scorer kind and,
+ * for remote scorers, the endpoint URL.
+ */
 export function BlackboxConfigCard({
   job,
   payload,
