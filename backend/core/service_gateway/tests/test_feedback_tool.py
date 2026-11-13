@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -179,3 +179,57 @@ def test_regenerate_frees_the_cut_turn_and_keeps_earlier_reports() -> None:
 
     assert _send(engine, user_quote="turn two again") == FEEDBACK_SENT
     assert [(r.turn, r.user_quote) for r in _reports(engine)] == [(1, "turn one"), (2, "turn two again")]
+
+
+def test_deleted_chat_is_not_sent_and_not_called_a_duplicate() -> None:
+    """A chat deleted during the turn gives "not sent" and no row, with foreign keys on or off."""
+    engine = _engine()
+    with Session(engine) as session:
+        session.query(AgentConversationModel).delete()
+        session.commit()
+
+    assert _send(engine) == FEEDBACK_NOT_SENT
+    assert _reports(engine) == []
+
+
+def test_foreign_key_failure_after_the_chat_check_is_not_called_a_duplicate() -> None:
+    """A foreign-key failure on insert (the chat goes away after the check) gives "not sent"."""
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+    @event.listens_for(engine, "connect")
+    def _foreign_keys_on(dbapi_connection, _record) -> None:
+        """Turn on SQLite foreign keys, as Postgres always checks them.
+
+        Args:
+            dbapi_connection: The raw SQLite connection.
+            _record: The pool record, unused.
+        """
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    real_get = Session.get
+
+    def _get_then_delete(self: Session, *args: object, **kwargs: object) -> object:
+        """Find the chat, then delete it before the insert, like a delete in another tab.
+
+        Args:
+            self: The session.
+            *args: The ``Session.get`` arguments.
+            **kwargs: The ``Session.get`` keyword arguments.
+
+        Returns:
+            The chat row found before the delete.
+        """
+        found = real_get(self, *args, **kwargs)
+        with Session(engine) as other:
+            other.query(AgentConversationModel).delete()
+            other.commit()
+        return found
+
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id=_CHAT, username="bob@example.test", title="t"))
+        session.commit()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Session, "get", _get_then_delete)
+        assert _send(engine) == FEEDBACK_NOT_SENT
+    assert _reports(engine) == []

@@ -24,7 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ...storage.models import AgentFeedbackReportModel, AgentMessageModel
+from ...storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,27 @@ def _current_turn(session: Session, conversation_id: str) -> int:
     return int(count or 0)
 
 
+def _has_report(session: Session, conversation_id: str, turn: int) -> bool:
+    """Tell whether the chat already has a report for this turn.
+
+    Args:
+        session: An open session.
+        conversation_id: The chat.
+        turn: The user turn.
+
+    Returns:
+        ``True`` when a report row exists.
+    """
+    return (
+        session.scalar(
+            select(AgentFeedbackReportModel.id).where(
+                AgentFeedbackReportModel.conversation_id == conversation_id, AgentFeedbackReportModel.turn == turn
+            )
+        )
+        is not None
+    )
+
+
 def discard_reports_from_message(session: Session, conversation_id: str, first_message_id: int) -> None:
     """Delete the reports for the user turns that a history cut removes.
 
@@ -127,8 +148,14 @@ def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_
 
     Returns:
         ``True`` when the report is new, ``False`` when this turn already has one.
+
+    Raises:
+        LookupError: The chat no longer exists, for example after a delete in another tab.
+        IntegrityError: The insert failed for a reason other than this turn's existing report.
     """
     with Session(target.engine) as session:
+        if session.get(AgentConversationModel, target.conversation_id) is None:
+            raise LookupError("chat not found")
         turn = _current_turn(session, target.conversation_id)
         session.add(
             AgentFeedbackReportModel(
@@ -144,9 +171,13 @@ def record_feedback(target: FeedbackTarget, *, agent: str, tool_name: str, user_
         try:
             session.commit()
         except IntegrityError:
-            # The unique (conversation_id, turn) key: this complaint has its report.
+            # Only an existing report for this turn means "already sent". A chat
+            # deleted after the check above fails its foreign key; that must
+            # reach the caller as a failure, not as a duplicate.
             session.rollback()
-            return False
+            if _has_report(session, target.conversation_id, turn):
+                return False
+            raise
     logger.info("Agent feedback stored: conversation=%s turn=%d", target.conversation_id, turn)
     return True
 
