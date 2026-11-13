@@ -25,8 +25,6 @@ Run:
 from __future__ import annotations
 
 import contextlib
-import json
-from pathlib import Path
 
 import pytest
 import requests  # type: ignore[import-untyped]
@@ -34,8 +32,45 @@ import requests  # type: ignore[import-untyped]
 from .conftest import backend_auth_headers, fund_account, requires_llm, requires_server, wait_for_terminal
 
 BASE_URL = "http://localhost:8000"
-DATASET_PATH = Path(__file__).resolve().parents[2] / "data" / "math_problems.json"
 MODEL = {"name": "openai/gpt-4o-mini"}
+MATH_ROWS = [
+    {
+        "question": "James has 43 magnets. Sarah has 39 magnets. How many magnets do they have altogether?",
+        "answer": "82",
+    },
+    {
+        "question": "Priya had 66 magnets. Priya gave 48 magnets to Li. How many magnets does Priya have left?",
+        "answer": "18",
+    },
+    {
+        "question": "Elena has 9 shelves of books. Each shelf contains 5 books. How many books does Elena have in total?",
+        "answer": "45",
+    },
+    {
+        "question": "Sarah has 44 books to divide equally among 4 friends. How many books does each friend receive?",
+        "answer": "11",
+    },
+    {
+        "question": "Ravi has 32 candies. Sarah has 5 times as many candies as Ravi. Sarah gives 6 candies to each of 5 friends. How many candies does Sarah have left?",
+        "answer": "130",
+    },
+    {"question": "Kenji buys 2 cards at $4 each and pays with $13. How much change does Kenji receive?", "answer": "5"},
+    {"question": "A train travels at 60 miles per hour for 6 hours. How many miles does it travel?", "answer": "360"},
+    {"question": "Li makes 13 stickers every hour. How many stickers does Li make in 2 hours?", "answer": "26"},
+    {
+        "question": "Maria has 100 books and gives 60% of them to Marcus. How many books does Maria have left?",
+        "answer": "40",
+    },
+    {
+        "question": "Amara buys 8 packs of apples, with 9 apples in each pack. Amara gives 2 apples to each of 5 friends, and Aisha gives Amara an extra 2 apples. How many apples does Amara have after sharing but before Aisha's gift?",
+        "answer": "62",
+    },
+    {"question": "Elena has 87 stamps. Yuki has 54 stamps. How many stamps do they have altogether?", "answer": "141"},
+    {
+        "question": "Kenji had 57 magnets. Kenji gave 7 magnets to Carlos. How many magnets does Kenji have left?",
+        "answer": "50",
+    },
+]
 
 # Submitted as user code and run in the sandbox, where ``skynet.llm`` calls the
 # task model.
@@ -53,12 +88,6 @@ def score(input, output, expected=None):
     want = str(expected).replace(",", "").strip()
     return float(got == want), {"feedback": f"expected {want}, got {got or 'no number'}"}
 """
-
-
-def _load_dataset(rows: int = 12) -> list[dict]:
-    """Read the math-problems fixture and return the first ``rows`` rows."""
-    with DATASET_PATH.open() as f:
-        return json.load(f)[:rows]
 
 
 def _cleanup(job_id: str, username: str) -> None:
@@ -88,7 +117,7 @@ def test_optimize_golden_path() -> None:
         },
         "data": {
             "mode": "pairs",
-            "cases": [{"input": {"question": row["question"]}, "expected": row["answer"]} for row in _load_dataset()],
+            "cases": [{"input": {"question": row["question"]}, "expected": row["answer"]} for row in MATH_ROWS],
             "input_fields": ["question"],
             "split": {"train": 0.5, "val": 0.25, "test": 0.25},
         },
