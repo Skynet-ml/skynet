@@ -64,8 +64,9 @@ export interface ScoreCompareNode {
   type: "ScoreCompare";
   exploit_score: number;
   base_score: number;
-  exploit_label: string;
-  base_label: string;
+  /** Absent when the session gave none; the page then shows its own translated label. */
+  exploit_label?: string;
+  base_label?: string;
 }
 
 export interface DiffNode {
@@ -80,7 +81,7 @@ export interface IOPairNode {
   got: string;
 }
 
-/** At most 50 rows; each row has one cell for each column. */
+/** At most 20 columns and 50 rows; each row has one cell for each column. */
 export interface TableNode {
   type: "Table";
   columns: string[];

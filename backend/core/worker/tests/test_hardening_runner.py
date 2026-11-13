@@ -30,6 +30,8 @@ from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED
+from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import hardening_runner, hardening_sessions
@@ -1532,7 +1534,7 @@ def _tool(name: str, **args: Any) -> list[dict[str, Any]]:
 
 
 def _session_runner(
-    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok"
 ) -> tuple[RepoHardeningRunner, list[str], list[str]]:
     """Build a runner with a fake gateway and lane boxes that record their lane.
 
@@ -1540,6 +1542,7 @@ def _session_runner(
         tmp_path: Pytest temporary folder.
         dispatch: The fake ``dispatch_guest``.
         monkeypatch: Swaps the Pi turn for a fake one.
+        feedback: The feedback each box's score gives.
 
     Returns:
         The runner, the lanes opened and the lanes closed.
@@ -1578,8 +1581,10 @@ def _session_runner(
         """
         opened.append(lane)
         return SimpleNamespace(
-            score=lambda patch: {"score": 0.5, "feedback": "ok", "hidden": "eval/metric.py"},
+            score=lambda patch: {"score": 0.5, "feedback": feedback, "hidden": "eval/metric.py"},
             close=lambda: closed.append(lane),
+            _root="/box",
+            _hidden=("eval/metric.py",),
         )
 
     monkeypatch.setattr(
@@ -1645,6 +1650,84 @@ def test_attack_runs_one_session_for_each_brief_in_its_own_lane_box(
     assert all(("def score(): return 1" in p) == (view == "white_box") for p in prompts)
     tool_text = json.dumps([b["messages"] for b in bodies if "tools" in b])
     assert "eval/metric.py" not in tool_text
+
+
+def test_a_session_sees_metric_feedback_without_hidden_traceback_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session score path filters like RepoScorer.dispatch: hidden metric frames go (SKY-353)."""
+    feedback = (
+        f"{RUN_FAILED}ValueError: boom\n"
+        "Traceback (most recent call last):\n"
+        f'  File "/box/{WORK_DIR}/eval/metric.py", line 3, in score\n'
+        "    secret_weight = 0.7\n"
+        f'  File "/box/{WORK_DIR}/bot/main.py", line 1, in <module>\n'
+        "    print(1)\n"
+        "ValueError: boom"
+    )
+    seen: list[str] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent, then run the metric once and write the patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["one"]}')
+        if len(body["messages"]) == 1:
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        seen.append(body["messages"][-1]["content"])
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch, feedback=feedback)
+    try:
+        runner.attack(
+            round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=1
+        )
+    finally:
+        runner.close()
+
+    shown = json.loads(seen[0])["feedback"]
+    assert "eval/metric.py" not in shown
+    assert "secret_weight" not in shown
+    assert 'File "bot/main.py"' in shown
+    assert "/box" not in shown
+
+
+def test_the_lead_agent_file_list_is_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A large tree gives the lead agent at most MAX_LEAD_FILES paths and a cut line."""
+    monkeypatch.setattr(hardening_runner, "MAX_LEAD_FILES", 2)
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as tree:
+        for name in ("a.py", "b.py", "c.py", "d.py"):
+            (tmp_path / name).write_text("x\n")
+            tree.add(tmp_path / name, arcname=name)
+
+    assert hardening_runner._tree_files(archive) == ["a.py", "b.py", "(cut: 2 more files)"]
+
+
+def test_a_refused_model_call_is_logged_without_its_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lead agent falls back to fixed briefs on a refusal, so the status goes to the log."""
+    refused = SimpleNamespace(status=429, body=b'{"error": "key sk-123 is over quota"}')
+    runner, _opened, _closed = _session_runner(tmp_path, lambda *args: refused, monkeypatch)
+    try:
+        with caplog.at_level("WARNING", logger=hardening_runner.__name__):
+            text, _cost = runner._ask("openai/m", "attacker", "Write briefs.", None)
+    finally:
+        runner.close()
+
+    assert text is None
+    assert "attacker call got HTTP 429" in caplog.text
+    assert "sk-123" not in caplog.text
 
 
 def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1713,3 +1796,16 @@ def test_live_sessions_are_written_only_while_the_claim_holds(engine: Engine) ->
     assert store_live_sessions(engine, job.id, live, claim=claimed[4]) is True
     stored = _row(engine, job.id).job["live_sessions"]
     assert [(s["index"], s["transcript"][0]["content"]) for s in stored] == [(1, "hi")]
+
+
+def test_the_stored_result_clears_the_live_sessions(engine: Engine) -> None:
+    """Live sessions are only for a running round; the pass's result must not keep claim-time ones."""
+    job = _seed(engine, binding_id=None)
+    claimed = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert claimed is not None
+    result = claimed[2].model_copy(
+        update={"live_sessions": [HardeningSession(index=1, brief="b")], "status": "waiting_review"}
+    )
+
+    assert store_hardening_result(engine, job.id, result, claim=claimed[4], operation_id=None)
+    assert _row(engine, job.id).job["live_sessions"] == []
