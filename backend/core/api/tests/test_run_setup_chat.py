@@ -181,8 +181,8 @@ def test_bind_ignores_another_users_chat_and_unknown_ids() -> None:
 
 
 @pytest.mark.parametrize(("username", "role", "key"), [("alice", "user", _SECRET), ("root", "admin", MASK)])
-def test_owner_and_admin_read_the_full_chat_up_to_the_run(username: str, role: str, key: str) -> None:
-    """The owner and an admin get the chat up to the run's final reply; only the owner sees keys."""
+def test_chat_user_and_admin_read_the_full_chat_up_to_the_run(username: str, role: str, key: str) -> None:
+    """The chat's own user and an admin get the chat up to the run's final reply; only the chat's user sees keys."""
     store = _store()
     _bind_setup_chat(store, "opt-1", "alice", "c-alice")
     resp = _client(store, username, role).get("/optimizations/opt-1/chat")
@@ -271,7 +271,7 @@ def test_a_run_started_after_the_reply_ends_at_the_next_user_turn() -> None:
 
 
 def test_chat_shows_no_later_pin_or_archive() -> None:
-    """The run's chat shows no pin or archive that the owner set after the run."""
+    """The run's chat shows no pin or archive that the chat's user set after the run."""
     store = _store()
     _bind_setup_chat(store, "opt-1", "alice", "c-alice")
     with Session(store.engine) as session:

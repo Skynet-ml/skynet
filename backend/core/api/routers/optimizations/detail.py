@@ -6,7 +6,7 @@ Public dev surface (in ``_SCALAR_PUBLIC_PATHS``):
 
 Internal (frontend-only, hidden from public docs):
 - ``GET /optimizations/{id}/agent-runs/{run_id}`` — one sandboxed agent run's answer and transcript.
-- ``GET /optimizations/{id}/chat`` — the setup chat that created the run, for its owner and admins.
+- ``GET /optimizations/{id}/chat`` — the setup chat that created the run: unmasked for the chat's own user, masked for admins, 404 for anyone else.
 - ``GET /optimizations/{id}/candidates`` — the run's candidates with state, call count and cost (owner only).
 - ``GET /optimizations/{id}/candidates/{candidate_id}/calls`` — one candidate's relay calls after a cursor (owner only).
 """

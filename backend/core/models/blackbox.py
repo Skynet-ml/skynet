@@ -637,7 +637,8 @@ class BlackboxRunRequest(BaseModel):
         max_length=36,
         description=(
             "The setup chat that created this run. The run keeps it only when the submitter owns "
-            "the chat; any other id is ignored. The run's owner and admins can read this chat."
+            "the chat; any other id is ignored. Only the chat's own user reads it unmasked, admins "
+            "read it masked, and anyone else, also a new owner after a transfer, gets 404."
         ),
     )
     # The setup's metric-hardening job (SKY-356). A finished job of the same

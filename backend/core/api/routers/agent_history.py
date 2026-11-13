@@ -7,7 +7,9 @@ that *populates* these tables lives in :mod:`generalist_agent` — this
 router only reads, renames, pins, and archives.
 
 A run keeps the setup chat that created it (``jobs.conversation_id``), and
-:func:`conversation_detail` also serves that chat to the run's editors.
+:func:`conversation_detail` builds that chat for ``GET /optimizations/{id}/chat``.
+Only the chat's own user reads it unmasked, admins read it masked, and anyone
+else, also a new owner after a transfer, gets 404.
 
 Hidden from the public Scalar reference — wizard-internal flow.
 """
@@ -585,7 +587,8 @@ def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
 
     Pinned conversations are preserved regardless of age — the user explicitly
     marked them as worth keeping. The setup chat of a run is preserved too,
-    because the run's owner and admins read that chat. Messages cascade
+    because the chat's own user and admins still read it from the run.
+    Messages cascade
     via the ``ON DELETE CASCADE`` FK on :class:`AgentMessageModel.conversation_id`.
 
     Args:

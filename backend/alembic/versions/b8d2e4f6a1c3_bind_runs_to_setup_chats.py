@@ -4,8 +4,9 @@ Revision ID: b8d2e4f6a1c3
 Revises: 33a823c490ff
 
 The "Share chat" feature (SKY-294) goes away. A run now names the setup chat
-that created it, and the run owner and admins can read that
-chat. The upgrade drops ``agent_chat_shares`` and the continued-copy column
+that created it. Only the chat's own user reads that chat unmasked, admins
+read it masked, and anyone else, also a new owner after a transfer, gets 404.
+The upgrade drops ``agent_chat_shares`` and the continued-copy column
 ``agent_conversations.source_share_token`` with its index, then adds
 ``jobs.conversation_id``. The new column is nullable and its FK sets it to
 NULL when the chat is deleted, so a run never blocks a chat delete.

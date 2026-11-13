@@ -358,7 +358,19 @@ _FULL_SNAPSHOT: dict[str, Any] = {
         ("optimizer", {"optimizer_choice", "data_mode"}),
         ("models", {"model_config", "model_configured", "optimizer_choice"}),
         ("budget", {"max_cost_cents", "optimizer_choice", "model_config"}),
-        ("metric", {"run_code", "metric_code", "task_objective", "repository", "input_fields"}),
+        (
+            "metric",
+            {
+                "run_code",
+                "metric_code",
+                "task_objective",
+                "task_background",
+                "repository",
+                "data_mode",
+                "dataset_columns",
+                "input_fields",
+            },
+        ),
         ("check", {"run_code", "metric_code", "input_fields"}),
     ],
 )
