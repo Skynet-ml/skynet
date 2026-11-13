@@ -32,6 +32,7 @@ from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
 _TOML = b"""
+version = 1
 [run]
 entry = "a.py:f"
 

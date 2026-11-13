@@ -6,6 +6,7 @@ owner approved. It cannot widen them. Each secret that a service needs comes
 from the run, never from the file.
 
 ```toml
+# Required. The only version. Put it at the top, before any section.
 version = 1
 # Optional. A markdown file with the run's intent. The optimization agent reads
 # it as guidance; it is not enforced. Put it before any section.
@@ -33,6 +34,18 @@ network = ["docs.python.org"]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
 # no cases.
 cases = "data/cases.jsonl"
+
+[outcome]
+# Optional. The score that is good enough. Runs cannot use [outcome] yet.
+target = 0.9
+
+[outcome.require]
+# Optional. A minimum for each named score that the metric returns.
+latency = 0.5
+
+[tool.my-team]
+# Optional. Skynet defines no key here and does not read this table.
+owner = "search team"
 ```
 
 `docs/rules.md` holds one rule in each top-level bullet:
@@ -48,6 +61,43 @@ The rule text lives in these files, not in `optimize.toml`. The old
 `[instructions]` and `[rules]` sections, and an `illegal` list written in
 the file, fail the setup check with a message that says to move the text
 into a file.
+
+## Rules of the file format
+
+- `version = 1` is required. A file without `version` fails the setup
+  check, and the message shows the fix: put `version = 1` at the top of the
+  file. An empty file fails too.
+- A `[tool.<name>]` table is accepted and skipped. Skynet defines no key
+  there and does not read its content. It is the one place for extra data,
+  for example the settings of another tool. `tool` must be a table, and each
+  `tool.<name>` must be a table.
+- A key that the format does not define is an error in every section.
+
+The worker never reads the metric. The metric lives in the repository, and
+the worker gets a copy of the repository without the metric files. Or the
+metric lives with the judge.
+
+## Outcome: `[outcome]`
+
+`[outcome]` says which score is good enough. It has two optional keys:
+
+- `target`: the score that is good enough, for example `0.9`.
+- `require`: written as an `[outcome.require]` table. Each key is a score
+  name from the `scores` that the metric returns, and each value is the
+  minimum for that score.
+
+Each value must be a finite number. `true`, `false`, `nan` and `inf` fail.
+An integer is read as a number, so `1` means `1.0`. Skynet sets no range,
+because the scorer sets no range for a score. A score name must not be
+empty. `[outcome.require]` holds at most 50 names. An empty `[outcome]`, or
+an `[outcome]` with only `[outcome.require]`, is valid.
+
+`[outcome]` has no `accept` key, and an `accept` key fails as an unknown
+setting. Every run opens a pull request, as before. Skynet does not merge it
+by itself.
+
+Runs cannot use `[outcome]` yet. The parser reads it, but the setup check
+refuses a file that sets `target` or `[outcome.require]`.
 
 ## Cases: `[data] cases`
 
@@ -307,7 +357,11 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A service or MCP server that breaks the secret rules below.
-- An unknown section or setting, a `version` other than `1`, or invalid TOML.
+- `[outcome] target` or an `[outcome.require]` table. Runs cannot use these
+  settings yet. An empty `[outcome]` passes.
+- An unknown section, or a setting that the format does not define in any
+  section. A missing `version`, a `version` that is not `1`, or invalid TOML.
+  A `tool` value or a `tool.<name>` value that is not a table.
 - A path that leaves the repository, names `.git`, or protects the whole tree.
 - A path with `*`, `?` or `[`. Paths are literal; patterns are not supported,
   so name the files or folders.

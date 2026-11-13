@@ -447,8 +447,8 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
     judges enforce it in every place. Every ``[run]`` and ``[target.<name>]``
-    key and the ``[metric]`` role keys are listed. ``ENFORCED`` decides which of them still stop the
-    run: a key whose runtime does not exist yet stops here instead of failing
+    key, the ``[metric]`` role keys and the ``[outcome]`` keys are listed. ``ENFORCED`` decides which
+    of them still stop the run: a key whose runtime does not exist yet stops here instead of failing
     later in the sandbox.
 
     Args:
@@ -477,6 +477,12 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
     metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
+    # No run reads [outcome] yet, so a file that sets it stops here (SKY-691, SKY-692).
+    outcome = document.get("outcome", {})
+    if "target" in outcome:
+        keys.append(("outcome.target", "[outcome] target"))
+    if "require" in outcome:
+        keys.append(("outcome.require", "[outcome.require]"))
     return keys
 
 

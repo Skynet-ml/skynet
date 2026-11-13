@@ -1101,7 +1101,7 @@ def test_repository_run_hands_its_hardening_job_id_to_the_publish(
 
 
 _MAPS_TOML = (
-    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 _MAPS_SECRET = {"name": "GOOGLE_MAPS_KEY", "credential_ref": "ref-maps", "credential_revision": 1}

@@ -252,7 +252,7 @@ async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatc
     write = wrap(tools[WRITE_FILE_TOOL])
     await write.func._async_body(path="run.py", text=_SCORER)
     await wrap(tools[EDIT_FILE_TOOL]).func._async_body(path="metric.py", old_text="nothing", new_text="x")
-    await write.func._async_body(path="optimize.toml", text="[run]\ntimeout = 30\n")
+    await write.func._async_body(path="optimize.toml", text="version = 1\n[run]\ntimeout = 30\n")
 
     ends = [event["data"] for event in events if event["event"] == "tool_end"]
     assert [end["status"] for end in ends] == ["error", "error", "ok"]
@@ -599,7 +599,7 @@ async def test_write_puts_the_file_into_the_turn_and_the_editor() -> None:
 async def test_write_reports_the_parser_error_of_optimize_toml() -> None:
     """A file the parser refuses still reaches the draft, with the error and its place for the agent."""
     turn = _TurnAuthoringFlag()
-    toml_text = "[run]\ntimeout = 30\n"
+    toml_text = "version = 1\n[run]\ntimeout = 30\n"
 
     result = await _tools(_REPO_METRIC, turn)[WRITE_FILE_TOOL].acall(path="optimize.toml", text=toml_text)
 
@@ -889,6 +889,7 @@ def test_guide_example_is_a_valid_optimize_toml() -> None:
     assert OPTIMIZE_TOML_EXAMPLE in METRIC_GUIDE
     assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
     assert constraints.editable_paths == ("src",)
+    assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
 
 
 def test_guide_quotes_the_parser_errors() -> None:

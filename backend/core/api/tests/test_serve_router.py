@@ -392,7 +392,7 @@ def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
         monkeypatch: Replaces the GitHub fetch.
     """
     client, _harness, state = repo_serve
-    legacy = b'[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n'
+    legacy = b'version = 1\n[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n'
 
     def legacy_fetch(_repository: str, commit: str, _token: str | None, workdir: Path) -> Any:
         """Pack a commit pinned while ``[proposer] illegal`` still took inline rules."""

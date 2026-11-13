@@ -77,7 +77,8 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
 def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
     """The message says which sandbox cannot enforce the key."""
     archive = _archive(
-        tmp_path, {CONSTRAINTS_FILE: b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'}
+        tmp_path,
+        {CONSTRAINTS_FILE: b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'},
     )
 
     [failure] = check_repository(archive, (), place="cloud")
@@ -90,7 +91,7 @@ def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
 def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     """A service that needs a secret the run does not have fails with the service and the secret name."""
     raw = (
-        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'version = 1\n[services.maps]\nurl = "https://maps.example.com"\n'
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}", X-Region = "${MAPS_REGION}" }\n'
     )
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
@@ -116,17 +117,17 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     ("raw", "key"),
     [
         (
-            b'[services.maps]\nurl = "https://api.example.com"\n'
+            b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n'
             b'[target.planner]\nentry = "agents/planner.py:plan"\nservices = ["maps"]\n',
             "[target.planner] services",
         ),
         (
-            b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
+            b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
             "[target.planner] network",
         ),
-        (b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
-        (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
-        (b'[run]\nentry = "a.py:f"\n[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -140,24 +141,52 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
 @pytest.mark.parametrize(
     ("raw", "key"),
     [
-        (b'[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
-        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
-        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
-        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
+        (b"version = 1\n[outcome]\ntarget = 0.9\n", "[outcome] target"),
+        (b"version = 1\n[outcome.require]\nlatency = 0.5\n", "[outcome.require]"),
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_an_outcome_setting_fails_because_no_run_reads_it(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
+    """No run stops at the target or checks a minimum yet, so a file that sets one stops here (SKY-690)."""
+    code = I18nKey.REPO_GATE_UNENFORCED_LOCAL if place == "local" else I18nKey.REPO_GATE_UNENFORCED_CLOUD
+
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    assert [(failure.key, failure.code) for failure in failures] == [(key, code)]
+
+
+@pytest.mark.parametrize(
+    "raw", [b"version = 1\n", b"version = 1\n[outcome]\n", b"version = 1\n[tool.notes]\nowner = 'me'\n"]
+)
+def test_a_file_without_outcome_settings_passes(tmp_path: Path, raw: bytes) -> None:
+    """An empty [outcome] or a [tool.<name>] table asks the run for nothing, so the gate lets it through."""
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="cloud") == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "key"),
+    [
+        (b'version = 1\n[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
+        (b'version = 1\n[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
+        (b'version = 1\n[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
         (
-            b'[services.maps]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
+            b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
             "[run] services",
         ),
-        (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
         (
-            b'[services.grader]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["grader"]\n',
+            b'version = 1\n[services.grader]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["grader"]\n',
             "[metric] services",
         ),
-        (b"[run]\nentry = 'a.py:f'\n[metric]\nservices = []\n", "[metric] services"),
-        (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
-        (b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
-        (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
-        (b"[proposer]\nservices = []\n", "[proposer] services"),
+        (b"version = 1\n[run]\nentry = 'a.py:f'\n[metric]\nservices = []\n", "[metric] services"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
+        (b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
+        (
+            b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n',
+            "[proposer] services",
+        ),
+        (b"version = 1\n[proposer]\nservices = []\n", "[proposer] services"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -171,7 +200,7 @@ def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: str) -> None:
     """The proposer's box reaches its MCP servers and services through the relay (SKY-610, SKY-612)."""
-    raw = b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
+    raw = b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
@@ -182,7 +211,7 @@ def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: s
 def test_a_run_entry_that_calls_its_services_through_the_relay_passes(tmp_path: Path, place: str) -> None:
     """A ``[run]`` entry with a timeout and services, each secret on its own host, starts the run (SKY-635)."""
     raw = (
-        b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\n'
+        b'version = 1\n[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\n'
         b'headers = { X-Goog-Api-Key = "${GOOGLE_MAPS_API_KEY}" }\n'
         b'[services.llm]\nurl = "https://api.cerebras.ai/v1"\n'
         b'headers = { Authorization = "Bearer ${CEREBRAS_API_KEY}" }\n'
@@ -203,9 +232,9 @@ def test_a_run_entry_that_calls_its_services_through_the_relay_passes(tmp_path: 
 @pytest.mark.parametrize(
     "raw",
     [
-        b'[target.planner]\nentry = "agents/planner.py:plan"\n',
-        b'[target.planner]\nentry = ["node", "planner.js"]\ntimeout = 30\nvcpus = 4\nillegal = "rules/run.md"\n',
-        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = []\n',
+        b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\n',
+        b'version = 1\n[target.planner]\nentry = ["node", "planner.js"]\ntimeout = 30\nvcpus = 4\nillegal = "rules/run.md"\n',
+        b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = []\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -219,7 +248,7 @@ def test_target_stages_pass_in_every_place(tmp_path: Path, raw: bytes, place: st
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_target_mcp_file_passes_in_every_place(tmp_path: Path, place: str) -> None:
     """Each stage reaches the servers of its own MCP file through its stage box's relay (SKY-611)."""
-    raw = b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n'
+    raw = b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
@@ -228,7 +257,7 @@ def test_a_target_mcp_file_passes_in_every_place(tmp_path: Path, place: str) -> 
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
+    raw = b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -246,7 +275,9 @@ def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
 
 def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> None:
     """The worker's error lists every reason and keeps the first one's code for a client that shows one message."""
-    raw = b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n[metric]\nreference = "eval/reference.json"\n'
+    raw = (
+        b'version = 1\n[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n[metric]\nreference = "eval/reference.json"\n'
+    )
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place="local")
 
     error = RepoGateError(failures)
@@ -261,7 +292,7 @@ def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> N
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_proposer_network_list_passes_the_gate(tmp_path: Path, place: str) -> None:
     """The broker grants the listed hosts to the proposer's box, so the gate lets the run start (SKY-384)."""
-    raw = b'[proposer]\nnetwork = ["docs.python.org"]\n'
+    raw = b'version = 1\n[proposer]\nnetwork = ["docs.python.org"]\n'
 
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
@@ -269,7 +300,7 @@ def test_a_proposer_network_list_passes_the_gate(tmp_path: Path, place: str) -> 
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_an_empty_proposer_network_passes_the_gate(tmp_path: Path, place: str) -> None:
     """``network = []`` keeps the proposer on the relay only, which every place enforces (SKY-384)."""
-    raw = b"[proposer]\nnetwork = []\n"
+    raw = b"version = 1\n[proposer]\nnetwork = []\n"
 
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
@@ -284,7 +315,7 @@ def _mcp_archive(tmp_path: Path, server: str) -> Path:
     Returns:
         The archive.
     """
-    raw = b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n'
+    raw = b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n'
     mcp = b'{"mcpServers": {"grader": ' + server.encode() + b"}}"
     return _archive(tmp_path, {CONSTRAINTS_FILE: raw, "eval/.mcp.json": mcp})
 
@@ -320,7 +351,7 @@ def test_the_missing_mcp_secret_message_names_the_server_the_file_and_the_fix() 
 
 
 _MAPS = (
-    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 
@@ -422,10 +453,10 @@ def test_local_mode_is_the_local_place() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        b'[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
-        b"[run]\nentry = 'a.py:f'\n[metric]\nfiles = []\n",
-        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = "eval/exploits"\n',
-        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = ".optimize/exploits"\n',
+        b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        b"version = 1\n[run]\nentry = 'a.py:f'\n[metric]\nfiles = []\n",
+        b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nexploits = "eval/exploits"\n',
+        b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nexploits = ".optimize/exploits"\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -582,6 +613,7 @@ def test_a_missing_hidden_path_names_its_setting(tmp_path: Path) -> None:
 
 
 _LABELLED_TOML = b"""
+version = 1
 [run]
 entry = "src/app.py:main"
 
@@ -658,7 +690,7 @@ def test_a_staged_leak_carries_the_label_from_hidden_path_labels(tmp_path: Path)
 def test_only_the_exact_case_of_a_visible_role_path_stays_visible(visible: str, hidden: tuple[str, ...]) -> None:
     """A ``[run] mcp`` in another case does not exempt the ``[metric] mcp`` file, so it stays hidden (SKY-446)."""
     constraints = parse_constraints(
-        f'[run]\nentry = "src/app.py:main"\nmcp = "{visible}"\n\n[metric]\nmcp = ".mcp.json"\n'.encode()
+        f'version = 1\n[run]\nentry = "src/app.py:main"\nmcp = "{visible}"\n\n[metric]\nmcp = ".mcp.json"\n'.encode()
     )
 
     assert hidden_repo_paths(constraints) == hidden
@@ -670,7 +702,7 @@ def test_a_case_variant_of_a_visible_role_path_is_hidden_on_a_disk_that_ignores_
     """On macOS, ``.MCP.json`` opens the hidden ``.mcp.json``, so the gate reports it under ``[metric] mcp``."""
     monkeypatch.setattr(repo_gate, "case_insensitive", lambda directory: True)
     constraints = parse_constraints(
-        b'[run]\nentry = "src/app.py:main"\nmcp = ".MCP.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+        b'version = 1\n[run]\nentry = "src/app.py:main"\nmcp = ".MCP.json"\n\n[metric]\nmcp = ".mcp.json"\n'
     )
     files = {".MCP.json": b"{}", "src/app.py": b"x\n"}
     original = _archive(tmp_path, files)
@@ -819,7 +851,7 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
         b'{"mcpServers": {"maps": {"url": "https://mapstools.googleapis.com/mcp",'
         b' "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}}}}'
     )
-    files = {CONSTRAINTS_FILE: b'[proposer]\nmcp = "agent/.mcp.json"\n', "agent/.mcp.json": proposer}
+    files = {CONSTRAINTS_FILE: b'version = 1\n[proposer]\nmcp = "agent/.mcp.json"\n', "agent/.mcp.json": proposer}
 
     [failure] = _host_failures(_archive(tmp_path, files), None)
 
@@ -830,10 +862,10 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     "raw",
     [
-        b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n',
-        b'[run]\nentry = "a.py:f"\nvcpus = 4\n',
-        b'[run]\nentry = "a.py:f"\n[metric]\nnetwork = ["judge.example.com"]\n',
-        b"[run]\nentry = 'a.py:f'\n[metric]\nvcpus = 2\n",
+        b'version = 1\n[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n',
+        b'version = 1\n[run]\nentry = "a.py:f"\nvcpus = 4\n',
+        b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nnetwork = ["judge.example.com"]\n',
+        b"version = 1\n[run]\nentry = 'a.py:f'\n[metric]\nvcpus = 2\n",
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])

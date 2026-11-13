@@ -172,6 +172,7 @@ def _stage_with(
 
 
 _CONSTRAINTS = """
+version = 1
 instructions = "docs/intent.md"
 
 [paths]
@@ -330,8 +331,8 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
 @pytest.mark.parametrize(
     ("files", "message"),
     [
-        ({"optimize.toml": '[paths]\neditable = ["tests"]\n'}, "outside the approved editable paths"),
-        ({"optimize.toml": '[services]\ngeocoder = ["search"]\n'}, "cannot grant services"),
+        ({"optimize.toml": 'version = 1\n[paths]\neditable = ["tests"]\n'}, "outside the approved editable paths"),
+        ({"optimize.toml": 'version = 1\n[services]\ngeocoder = ["search"]\n'}, "cannot grant services"),
     ],
 )
 def test_staging_refuses_a_file_that_asks_for_more(
@@ -617,7 +618,7 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
     payload = _payload("c" * 40)
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
     payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
-    toml = '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    toml = 'version = 1\n[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
 
     _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
 
@@ -630,7 +631,7 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
 def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
     """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55)."""
     files = {
-        "optimize.toml": '[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
     }
 
@@ -645,7 +646,7 @@ def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeyp
     """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
     files = {
         "optimize.toml": (
-            '[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
+            'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
             '[target.planner]\nentry = "a.py:f"\nmcp = "agents/planner.mcp.json"\n'
         ),
         ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
@@ -685,7 +686,7 @@ def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
     """The scorer box unpacks a tree whose every MCP file points at the runner's relay (E49, E53)."""
     files = {
         "optimize.toml": (
-            '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
+            'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
             '[metric]\nmcp = "tools/metric.mcp.json"\n'
         ),
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
@@ -1016,7 +1017,7 @@ def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None
 def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """The proposer's .mcp.json lists only the [proposer] servers at relay urls: no real url, header or key (SKY-610)."""
     files = {
-        "optimize.toml": '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        "optimize.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         "agent.mcp.json": (
             '{"mcpServers": {"web": {"url": "https://web.example.com/mcp",'
             ' "headers": {"Authorization": "Bearer ${API_KEY}"}}}}'
@@ -1049,7 +1050,7 @@ def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: 
 def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both trees get the same rewrite, so the protected check passes and the rewrite never enters a patch."""
     files = {
-        "optimize.toml": '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
+        "optimize.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
         "tools/run.mcp.json": '{"mcpServers": {"docs": {"url": "https://docs.example.com/mcp"}}}',
         "a.py": "def f(x):\n    return x\n",
@@ -2096,7 +2097,7 @@ def _names(archive: Path) -> set[str]:
 
 
 _METRIC_TREE = {
-    "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
     "src/app.py": "x = 1\n",
     "eval/scorer.py": "def score(): ...\n",
     "eval/data.csv": "1\n",
@@ -2653,7 +2654,8 @@ def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: 
 
 
 _EVERY_HIDDEN_KEY = {
-    "optimize.toml": """instructions = "docs/intent.md"
+    "optimize.toml": """version = 1
+instructions = "docs/intent.md"
 
 [paths]
 editable = ["src"]
@@ -2736,7 +2738,7 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) 
         _tree(
             tmp_path,
             {
-                "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
+                "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
                 '\n\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
@@ -2753,7 +2755,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
         _tree(
             tmp_path,
             {
-                "optimize.toml": '[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
+                "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
                 '\n\n[run]\nentry = "a.py:f"\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
@@ -2768,10 +2770,13 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
     ("toml", "inside"),
     [
         (
-            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             "eval/labels.json",
         ),
-        ('[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n', ".optimize/exploits/cheat.py"),
+        (
+            'version = 1\n[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
+            ".optimize/exploits/cheat.py",
+        ),
     ],
     ids=["metric-folder", "exploits-folder"],
 )
@@ -2796,14 +2801,17 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     ("toml", "message"),
     [
         (
-            '[paths]\neditable = ["src", "eval"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[paths]\neditable = ["src", "eval"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"'eval' is editable, but only the scorer reads it",
         ),
         (
-            '[proposer]\nillegal = "eval/rules.md"\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[proposer]\nillegal = "eval/rules.md"\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
         ),
-        ('[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n', r"\[run\] entry names 'eval/run\.py'"),
+        (
+            'version = 1\n[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n',
+            r"\[run\] entry names 'eval/run\.py'",
+        ),
     ],
     ids=["editable", "rule-file", "run-entry"],
 )
@@ -2828,37 +2836,37 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
     ("toml", "links", "linked"),
     [
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
             {"scoring": (tarfile.SYMTYPE, "real")},
             "scoring",
             id="inside",
         ),
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
             {"scoring": (tarfile.SYMTYPE, "/etc")},
             "scoring",
             id="outside-absolute",
         ),
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
             {"scoring": (tarfile.SYMTYPE, "../../x")},
             "scoring",
             id="outside-relative",
         ),
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/score.py"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/score.py"]\n',
             {"scoring": (tarfile.SYMTYPE, "real")},
             "scoring/score.py",
             id="below-a-linked-folder",
         ),
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             {"eval/data": (tarfile.SYMTYPE, "../real")},
             "eval",
             id="link-inside-folder",
         ),
         pytest.param(
-            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             {"eval/copy.py": (tarfile.LNKTYPE, "real/score.py")},
             "eval",
             id="hard-link-out",
@@ -2882,7 +2890,7 @@ def test_staging_refuses_a_hidden_path_with_a_link(
 def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
     files = {
-        "optimize.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/score.py": "def metric(case, output):\n    return 1.0\n",
         "src/app.py": "x = 1\n",
     }
@@ -3018,7 +3026,7 @@ def _local_scorer(files: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> tup
 
 
 _RUN_TREE = {
-    "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n',
+    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n',
     "src/app.py": _SEEING_CANDIDATE,
 }
 
