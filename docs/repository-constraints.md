@@ -114,8 +114,7 @@ setting. Every run opens a pull request, as before. Skynet does not merge it
 by itself.
 
 The search stops when its score reaches `target`. A file without `target`
-has no stop score. Runs cannot check `[outcome.require]` yet, so the setup
-check refuses a file that sets it.
+has no stop score.
 
 ## Cases: `[data] cases`
 
@@ -375,8 +374,6 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A service or MCP server that breaks the secret rules below.
-- An `[outcome.require]` table. Runs cannot check it yet. An empty
-  `[outcome]`, or one with only `target`, passes.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
   A `tool` value or a `tool.<name>` value that is not a table.

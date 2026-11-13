@@ -2213,10 +2213,8 @@ def test_the_target_is_not_reached_below_it(
 def test_a_search_that_stops_on_its_score_can_end_with_the_target_not_reached(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The search reports 1.0 and stops at 0.9; the held-out score is lower, so the target is not reached."""
-    response = _outcome_run(
-        monkeypatch, tmp_path, {"target": 0.9, "require": {}}, budget={"max_scorer_runs": 12, "stop_at_score": 0.9}
-    )
+    """The search reports 1.0 and stops at the target 0.9; the held-out score is lower, so the target is not reached."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": 0.9, "require": {}})
 
     assert response.details["optimizer_best_score"] == 1.0
     assert response.best_score is not None
