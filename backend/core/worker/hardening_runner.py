@@ -414,6 +414,9 @@ class RepoHardeningRunner(HardeningRunner):
         self.open_scorer = open_scorer
         self.fixes: list[str] = list(workspace.applied_fixes)
         self._scorers: dict[tuple[str, ...], RepoScorer] = {}
+        # A box that failed to open is not opened again: a new box would reuse
+        # its operation key, so its paid setup would run under the old hold.
+        self._score_failures: dict[tuple[str, ...], Exception] = {}
         self._routes: dict[str, dict[str, str]] = {}
         self._managed_key = managed_key
         self._pi_binary = pi_binary
@@ -771,8 +774,14 @@ class RepoHardeningRunner(HardeningRunner):
 
         Returns:
             The metric score, or NaN when ``fix_diff`` does not apply.
+
+        Raises:
+            Exception: The box's first open failure, again on each later call
+                with the same fixes.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
+        if fixes in self._score_failures:
+            raise self._score_failures[fixes]
         scorer = self._scorers.get(fixes)
         if scorer is None:
             try:
@@ -786,7 +795,11 @@ class RepoHardeningRunner(HardeningRunner):
                 # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
                 return float("nan")
-            scorer = self.open_scorer(archive, fixes)
+            try:
+                scorer = self.open_scorer(archive, fixes)
+            except Exception as exc:
+                self._score_failures[fixes] = exc
+                raise
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 

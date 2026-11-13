@@ -29,7 +29,7 @@ from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
-from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, _measure, new_job
 from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
 from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
@@ -1799,6 +1799,51 @@ def test_a_session_box_that_failed_to_open_is_not_opened_again(tmp_path: Path, m
     runs = [c for e in result.sessions[0].transcript for c in e.get("toolCalls") or [] if c["tool"] == "run_metric"]
     assert [c["status"] for c in runs] == ["error", "error"]
     assert len(result.candidates) == 1
+
+
+def test_a_runner_box_that_failed_to_open_is_not_opened_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The card scores of a round's claims open the base box once, even when it fails (SKY-682).
+
+    A second box would reuse the failed box's operation key, so its paid setup would run under the old hold.
+    """
+    runner, _opened, _closed = _session_runner(tmp_path, lambda *args: _reply("no json"), monkeypatch)
+    opens: list[tuple[str, ...]] = []
+
+    def broken_open(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Fail like a box whose paid setup failed.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        opens.append(fixes)
+        raise RuntimeError("setup broke")
+
+    runner.open_scorer = broken_open
+    claims = [
+        HardeningExploit(
+            id=f"e{i}",
+            kind="case",
+            label="exploit",
+            confidence=0.9,
+            reason="r",
+            unsure=False,
+            patch_diff=f"+{i}",
+            why_md="w",
+        )
+        for i in range(2)
+    ]
+    try:
+        scores = [_measure(runner, None)] + [_measure(runner, claim) for claim in claims]
+    finally:
+        runner.close()
+
+    assert scores == [None, None, None]
+    assert opens == [()]
 
 
 def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
