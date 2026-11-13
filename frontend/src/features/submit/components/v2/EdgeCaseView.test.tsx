@@ -103,10 +103,14 @@ void describe("EdgeCaseView", () => {
     assert.match(html, /<bdi dir="ltr"><\/bdi>/);
   });
 
-  void it("draws each Callout tone with its own role", () => {
-    assert.match(render([{ type: "Callout", tone: "info", text: "i" }]), /role="note"/);
-    assert.match(render([{ type: "Callout", tone: "warn", text: "w" }]), /role="status"/);
-    assert.match(render([{ type: "Callout", tone: "danger", text: "d" }]), /role="alert"/);
+  void it("draws every Callout tone as a note, never as a live region", () => {
+    for (const tone of ["info", "warn", "danger"]) {
+      const html = render([{ type: "Callout", tone, text: "a\nb" }]);
+      assert.match(html, new RegExp(`<div role="note" data-tone="${tone}"`), tone);
+      assert.doesNotMatch(html, /role="(alert|status)"|aria-live/, tone);
+      // The text keeps its line break, as a Text node does.
+      assert.match(html, /whitespace-pre-wrap[^>]*>a\nb<\/div>/, tone);
+    }
   });
 
   void it("draws a Chart frame with its label and point count", () => {

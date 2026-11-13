@@ -14,9 +14,7 @@ import {
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
-import { Info } from "@/shared/ui/icons";
-import { InlineErrorRow } from "@/shared/ui/inline-error-row";
-import { InlineWarningRow } from "@/shared/ui/inline-warning-row";
+import { Info, Warning, XCircle } from "@/shared/ui/icons";
 import {
   Table,
   TableBody,
@@ -162,16 +160,36 @@ function DataTable({ node }: { node: TableNode }) {
   );
 }
 
+// Same look as InlineErrorRow and InlineWarningRow, but role="note": fixed evidence is
+// not a live region, so a screen reader does not read it as an urgent alert.
+const CALLOUT_TONES = {
+  info: {
+    Icon: Info,
+    row: "border-border/60 bg-muted/30 text-foreground/85",
+    icon: "text-muted-foreground",
+  },
+  warn: {
+    Icon: Warning,
+    row: "border-[var(--warning-border)] bg-[var(--warning-dim)] text-foreground/80",
+    icon: "text-[var(--warning)]",
+  },
+  danger: {
+    Icon: XCircle,
+    row: "border-[var(--danger-border)] bg-[var(--danger-dim)] text-foreground/85",
+    icon: "text-[var(--danger)]",
+  },
+} as const;
+
 function Callout({ node }: { node: CalloutNode }) {
-  if (node.tone === "danger") return <InlineErrorRow message={node.text} className="text-sm" />;
-  if (node.tone === "warn") return <InlineWarningRow message={node.text} className="text-sm" />;
+  const tone = CALLOUT_TONES[node.tone];
   return (
     <div
       role="note"
-      className="flex items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-sm text-foreground/85"
+      data-tone={node.tone}
+      className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", tone.row)}
     >
-      <Info className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <div className="min-w-0 flex-1 break-words" dir="auto">
+      <tone.Icon className={cn("mt-0.5 size-3.5 shrink-0", tone.icon)} aria-hidden="true" />
+      <div className="min-w-0 flex-1 whitespace-pre-wrap break-words" dir="auto">
         {node.text}
       </div>
     </div>
