@@ -210,6 +210,11 @@ void describe("parseEdgeCase", () => {
     const huge = new Array(10_000_000);
     const cyclic: Record<string, unknown> = { type: "Steps" };
     cyclic.items = [cyclic];
+    const nanLength = new Proxy([text("a")[0]], {
+      get(target, prop, receiver) {
+        return prop === "length" ? Number.NaN : (Reflect.get(target, prop, receiver) as unknown);
+      },
+    });
     for (const value of [
       [getter],
       trap,
@@ -219,6 +224,8 @@ void describe("parseEdgeCase", () => {
       [{ type: "Chart", kind: "bar", points: huge }],
       [{ type: "Steps", items: huge }],
       [cyclic],
+      nanLength,
+      [{ type: "Steps", items: nanLength }],
     ]) {
       assert.doesNotThrow(() => parseEdgeCase(value));
       assert.equal(parseEdgeCase(value), null);

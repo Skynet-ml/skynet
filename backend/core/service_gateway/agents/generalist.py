@@ -76,6 +76,7 @@ from .answer_options import normalize_options
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
+from .feedback import FeedbackTarget, send_feedback_tool
 from .github_mcp import github_repo_tools
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
@@ -3440,6 +3441,8 @@ async def _drive_generalist_agent(
     approval_owner: str | None = None,
     steer_key: str | None = None,
     github_token: Callable[[], str | None] | None = None,
+    feedback_target: FeedbackTarget | None = None,
+    on_steer: Callable[[str], None] | None = None,
 ) -> str:
     """Open the MCP session, run the turn on Pi, and return the final assistant message.
 
@@ -3469,6 +3472,10 @@ async def _drive_generalist_agent(
             under; ``None`` leaves the turn unsteerable.
         github_token: Returns the caller's repository host token, or ``None``; the
             Metric screen's coding agent reads a repository run with it.
+        feedback_target: The stored chat the ``send_feedback`` tool reports
+            on; ``None`` (a chat that is not stored) leaves the tool out.
+        on_steer: Runs in a worker thread with each steered text before the
+            agent reads it; the router stores the steer message there.
 
     Returns:
         The full assistant reply text after the loop completes.
@@ -3522,6 +3529,19 @@ async def _drive_generalist_agent(
             )
             for tool in [*build_web_tools(), *build_docs_tools(), *github_tools, secret_request_tool()]
         ]
+        if feedback_target is not None:
+            dspy_tools.append(
+                _wrap_tool_with_approval(
+                    send_feedback_tool(feedback_target, agent=f"setup:{screen}" if screen else "generalist"),
+                    trust_mode=trust_mode,
+                    registry=registry,
+                    emit=emit,
+                    outer_loop=outer_loop,
+                    wizard_state=wizard_state,
+                    authoring_flag=authoring_flag,
+                    approval_owner=approval_owner,
+                )
+            )
         if screen is not None:
             dspy_tools += [
                 _wrap_tool_with_approval(
@@ -3571,6 +3591,7 @@ async def _drive_generalist_agent(
                 input_field="user_message",
                 emit=emit,
                 store=get_steer_store(),
+                on_taken=on_steer,
             )
             if steer_key and approval_owner
             else None
@@ -3611,6 +3632,8 @@ async def run_generalist_agent(
     approval_owner: str | None = None,
     steer_key: str | None = None,
     github_token: Callable[[], str | None] | None = None,
+    feedback_target: FeedbackTarget | None = None,
+    on_steer: Callable[[str], None] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
@@ -3664,6 +3687,10 @@ async def run_generalist_agent(
             turn runs; they reach the loop at its next step.
         github_token: Returns the caller's repository host token, or ``None``; the
             Metric screen's coding agent reads a repository run with it.
+        feedback_target: The stored chat the ``send_feedback`` tool reports
+            on, or ``None`` when the chat is not stored.
+        on_steer: Runs in a worker thread with each steered text before the
+            agent reads it, or ``None``.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -3717,6 +3744,8 @@ async def run_generalist_agent(
             approval_owner=approval_owner,
             steer_key=steer_key,
             github_token=github_token,
+            feedback_target=feedback_target,
+            on_steer=on_steer,
         )
     )
     try:

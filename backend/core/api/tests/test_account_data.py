@@ -38,6 +38,8 @@ from sqlalchemy.pool import StaticPool
 from ...billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ...config import app_env, settings
 from ...storage.models import (
+    AgentConversationModel,
+    AgentFeedbackReportModel,
     ApiTokenModel,
     Base,
     BillingCustomerModel,
@@ -229,6 +231,62 @@ def test_export_carries_the_saved_setup_draft_until_it_is_deleted(harness: Simpl
         session.get(SetupDraftModel, _EMAIL).deleted = True
         session.commit()
     assert harness.client.get("/account/export").json()["setup_draft"] is None
+
+
+def _seed_feedback_report(engine: Engine, username: str) -> None:
+    """Store one chat with one agent feedback report for ``username`` (SKY-580).
+
+    Args:
+        engine: The SQLite engine holding the full schema.
+        username: The chat owner.
+    """
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id=f"chat-{username}", username=username, title="t"))
+        session.add(
+            AgentFeedbackReportModel(
+                conversation_id=f"chat-{username}",
+                user_message_id=1,
+                username=username,
+                agent="generalist",
+                tool_name="validate_code",
+                user_quote="the score is wrong",
+                summary="Expected 1, got 0.",
+            )
+        )
+        session.commit()
+
+
+def test_export_carries_each_chat_feedback_reports(harness: SimpleNamespace) -> None:
+    """Each exported chat lists the agent's feedback reports about it, without internal keys."""
+    _seed_feedback_report(harness.engine, _EMAIL)
+    _seed_feedback_report(harness.engine, _OTHER)
+
+    [chat] = harness.client.get("/account/export").json()["agent_conversations"]
+
+    [report] = chat["feedback_reports"]
+    assert set(report) == {"tool_name", "user_quote", "summary", "created_at"}
+    assert (report["tool_name"], report["user_quote"], report["summary"]) == (
+        "validate_code",
+        "the score is wrong",
+        "Expected 1, got 0.",
+    )
+
+
+def test_delete_removes_and_counts_the_feedback_reports(harness: SimpleNamespace) -> None:
+    """Deletion removes the account's feedback reports, counts them, and keeps another account's."""
+    _seed_feedback_report(harness.engine, _OTHER)
+    with Session(harness.engine) as session:
+        baseline = delete_account(session, _EMAIL)
+        session.rollback()
+    _seed_feedback_report(harness.engine, _EMAIL)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted_rows"] == baseline.deleted_rows + 2
+    with Session(harness.engine) as session:
+        owners = session.scalars(select(AgentFeedbackReportModel.username)).all()
+    assert owners == [_OTHER]
 
 
 def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespace) -> None:

@@ -61,6 +61,7 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   update_user_preferences: "act",
   update_wizard_state: "act",
   remember_for_later: "act",
+  send_feedback: "act",
   continue_to_next_screen: "act",
   go_back_to_screen: "act",
   set_column_roles_datasets_column_roles_post: "act",

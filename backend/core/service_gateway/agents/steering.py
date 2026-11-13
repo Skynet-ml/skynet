@@ -454,6 +454,9 @@ class SteerInbox:
     emit: Callable[[dict[str, Any]], None]
     store: SteerStore
     max_chars: int | None = None
+    # Runs in a worker thread with the taken text before the agent reads it,
+    # so the caller can store the steer message first (SKY-580 feedback keys).
+    on_taken: Callable[[str], None] | None = None
 
 
 async def open_steer_inbox(

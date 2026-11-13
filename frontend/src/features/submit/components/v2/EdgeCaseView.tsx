@@ -14,9 +14,7 @@ import {
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
-import { Info } from "@/shared/ui/icons";
-import { InlineErrorRow } from "@/shared/ui/inline-error-row";
-import { InlineWarningRow } from "@/shared/ui/inline-warning-row";
+import { Info, Warning, XCircle } from "@/shared/ui/icons";
 import {
   Table,
   TableBody,
@@ -28,6 +26,7 @@ import {
 import {
   parseEdgeCase,
   type CalloutNode,
+  type Cell,
   type ChartNode,
   type EdgeCaseNode,
   type ScoreCompareNode,
@@ -40,18 +39,25 @@ const WHY_FILE = "why.md";
 
 const FIGURE_CLASS = "overflow-hidden rounded-lg border border-border/60 bg-muted/30";
 const CAPTION_CLASS =
-  "border-b border-border/50 px-3 py-1.5 text-start font-mono text-xs text-muted-foreground";
+  "border-b border-border/50 px-3 py-1.5 text-start font-mono text-xs text-muted-foreground break-words";
+
+/** Format model numbers for the active locale; 15 digits never round 0.9999999 to 1. */
+export function numberFormat(): Intl.NumberFormat {
+  return new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 15 });
+}
 
 /**
  * A unified diff, read-only, with added and removed lines tinted. The harden
  * page's fix step uses it too.
  */
-export function DiffBlock({ diff, label }: { diff: string; label: string }) {
+export function DiffBlock({ diff, label }: { diff: string; label?: string }) {
   return (
     <figure className={FIGURE_CLASS}>
-      <figcaption className={CAPTION_CLASS}>
-        <bdi dir="ltr">{label}</bdi>
-      </figcaption>
+      {label && (
+        <figcaption className={CAPTION_CLASS}>
+          <bdi dir="ltr">{label}</bdi>
+        </figcaption>
+      )}
       <pre dir="ltr" className="max-h-72 overflow-auto py-2 text-start font-mono text-xs leading-5">
         {diff.split("\n").map((line, i) => (
           <div
@@ -72,7 +78,7 @@ export function DiffBlock({ diff, label }: { diff: string; label: string }) {
 }
 
 function ScoreCompare({ node }: { node: ScoreCompareNode }) {
-  const format = new Intl.NumberFormat(getActiveIntlLocale(), { maximumSignificantDigits: 6 });
+  const format = numberFormat();
   const scores = [
     {
       key: "exploit",
@@ -90,12 +96,12 @@ function ScoreCompare({ node }: { node: ScoreCompareNode }) {
   return (
     <dl className="grid grid-cols-2 gap-3">
       {scores.map((s) => (
-        <div key={s.key} className="rounded-lg border border-border/60 bg-card px-3 py-2">
-          <dt className="text-xs text-muted-foreground" dir="auto">
+        <div key={s.key} className="min-w-0 rounded-lg border border-border/60 bg-card px-3 py-2">
+          <dt className="text-xs break-words text-muted-foreground" dir="auto">
             {s.label}
           </dt>
-          <dd dir="ltr" className={cn("text-start font-mono text-xl font-semibold", s.tone)}>
-            {format.format(s.value)}
+          <dd className={cn("text-start font-mono text-xl font-semibold break-all", s.tone)}>
+            <bdi dir="ltr">{format.format(s.value)}</bdi>
           </dd>
         </div>
       ))}
@@ -115,7 +121,7 @@ function IOPair({ input, expected, got }: { input: string; expected: string; got
         <figure key={key} className={FIGURE_CLASS}>
           <figcaption className={CAPTION_CLASS}>{msg(`submit.v2.edge_case.io.${key}`)}</figcaption>
           <pre
-            dir="ltr"
+            dir="auto"
             className="max-h-48 overflow-auto px-3 py-2 text-start font-mono text-xs whitespace-pre-wrap break-words"
           >
             {text}
@@ -126,14 +132,37 @@ function IOPair({ input, expected, got }: { input: string; expected: string; got
   );
 }
 
+function TableValue({ value, format }: { value: Cell; format: Intl.NumberFormat }) {
+  if (typeof value === "string") return <bdi dir="auto">{value}</bdi>;
+  if (typeof value === "number") return <bdi dir="ltr">{format.format(value)}</bdi>;
+  if (typeof value === "boolean") {
+    return (
+      <bdi>{msg(value ? "submit.v2.edge_case.bool.true" : "submit.v2.edge_case.bool.false")}</bdi>
+    );
+  }
+  return null;
+}
+
+function ChartValue({ value, format }: { value: string | number; format: Intl.NumberFormat }) {
+  return typeof value === "number" ? (
+    <bdi dir="ltr">{format.format(value)}</bdi>
+  ) : (
+    <bdi dir="auto">{value}</bdi>
+  );
+}
+
+// The shared cells cut text to one line; model text can be long or multi-line, so it wraps.
+const WRAP_CLASS = "whitespace-pre-wrap break-words text-clip";
+
 function DataTable({ node }: { node: TableNode }) {
+  const format = numberFormat();
   return (
     <div className="rounded-lg border border-border/60">
       <Table>
         <TableHeader>
           <TableRow>
             {node.columns.map((column, i) => (
-              <TableHead key={i}>
+              <TableHead key={i} className={WRAP_CLASS}>
                 <bdi dir="auto">{column}</bdi>
               </TableHead>
             ))}
@@ -143,12 +172,8 @@ function DataTable({ node }: { node: TableNode }) {
           {node.rows.map((row, r) => (
             <TableRow key={r}>
               {row.map((value, c) => (
-                <TableCell key={c}>
-                  {typeof value === "string" ? (
-                    <bdi dir="auto">{value}</bdi>
-                  ) : (
-                    <bdi dir="ltr">{String(value ?? "")}</bdi>
-                  )}
+                <TableCell key={c} className={WRAP_CLASS}>
+                  <TableValue value={value} format={format} />
                 </TableCell>
               ))}
             </TableRow>
@@ -159,30 +184,89 @@ function DataTable({ node }: { node: TableNode }) {
   );
 }
 
+// Same look as InlineErrorRow and InlineWarningRow, but role="note": fixed evidence is
+// not a live region, so a screen reader does not read it as an urgent alert.
+const CALLOUT_TONES = {
+  info: {
+    Icon: Info,
+    row: "border-border/60 bg-muted/30 text-foreground/85",
+    icon: "text-muted-foreground",
+  },
+  warn: {
+    Icon: Warning,
+    row: "border-[var(--warning-border)] bg-[var(--warning-dim)] text-foreground/80",
+    icon: "text-[var(--warning)]",
+  },
+  danger: {
+    Icon: XCircle,
+    row: "border-[var(--danger-border)] bg-[var(--danger-dim)] text-foreground/85",
+    icon: "text-[var(--danger)]",
+  },
+} as const;
+
 function Callout({ node }: { node: CalloutNode }) {
-  if (node.tone === "danger") return <InlineErrorRow message={node.text} className="text-sm" />;
-  if (node.tone === "warn") return <InlineWarningRow message={node.text} className="text-sm" />;
+  const tone = CALLOUT_TONES[node.tone];
   return (
     <div
       role="note"
-      className="flex items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-sm text-foreground/85"
+      data-tone={node.tone}
+      className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", tone.row)}
     >
-      <Info className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <div className="min-w-0 flex-1 break-words" dir="auto">
+      <tone.Icon className={cn("mt-0.5 size-3.5 shrink-0", tone.icon)} aria-hidden="true" />
+      <div className="min-w-0 flex-1 whitespace-pre-wrap break-words" dir="auto">
         {node.text}
       </div>
     </div>
   );
 }
 
+/**
+ * Build the recharts rows for a chart.
+ *
+ * A line over numeric x values gets a numeric axis, so the gaps between points
+ * stay true. Every other chart uses category labels; a numeric x is formatted
+ * for the locale there, as the y axis and the value table are.
+ *
+ * Args:
+ *   node: The checked Chart node.
+ *   format: The locale number format.
+ *
+ * Returns:
+ *   Whether x is numeric, the points in draw order, and the recharts rows.
+ */
+export function chartData(node: ChartNode, format: Intl.NumberFormat) {
+  const numericX = node.kind === "line" && node.points.every((p) => typeof p.x === "number");
+  const points = numericX
+    ? [...node.points].sort((a, b) => (a.x as number) - (b.x as number))
+    : node.points;
+  const data = numericX
+    ? points
+    : points.map((p) => ({ x: typeof p.x === "number" ? format.format(p.x) : p.x, y: p.y }));
+  return { numericX, points, data };
+}
+
 function Chart({ node }: { node: ChartNode }) {
-  const data = node.points.map((p) => ({ x: String(p.x), y: p.y }));
+  const format = numberFormat();
+  const { numericX, points, data } = chartData(node, format);
   const axis = {
     tickLine: false,
     axisLine: false,
     tick: { fontSize: 10 },
     className: "fill-muted-foreground",
   };
+  const tickFormatter = (value: unknown) =>
+    typeof value === "number" ? format.format(value) : String(value);
+  const xAxis = numericX ? (
+    <XAxis
+      dataKey="x"
+      type="number"
+      domain={["dataMin", "dataMax"]}
+      tickFormatter={tickFormatter}
+      {...axis}
+    />
+  ) : (
+    <XAxis dataKey="x" {...axis} />
+  );
   return (
     <figure className={FIGURE_CLASS}>
       {node.title && (
@@ -201,15 +285,15 @@ function Chart({ node }: { node: ChartNode }) {
           {node.kind === "bar" ? (
             <BarChart data={data} margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-              <XAxis dataKey="x" {...axis} />
-              <YAxis {...axis} />
+              {xAxis}
+              <YAxis tickFormatter={tickFormatter} {...axis} />
               <Bar dataKey="y" fill="var(--color-chart-4)" isAnimationActive={false} />
             </BarChart>
           ) : (
             <LineChart data={data} margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-              <XAxis dataKey="x" {...axis} />
-              <YAxis {...axis} />
+              {xAxis}
+              <YAxis tickFormatter={tickFormatter} {...axis} />
               <Line
                 type="monotone"
                 dataKey="y"
@@ -222,6 +306,21 @@ function Chart({ node }: { node: ChartNode }) {
           )}
         </ResponsiveContainer>
       </div>
+      {/* role="img" hides the drawing, so screen readers get the values here. */}
+      <table className="sr-only">
+        <tbody>
+          {points.map((p, i) => (
+            <tr key={i}>
+              <td>
+                <ChartValue value={p.x} format={format} />
+              </td>
+              <td>
+                <ChartValue value={p.y} format={format} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </figure>
   );
 }
@@ -231,7 +330,8 @@ function NodeView({ node }: { node: EdgeCaseNode }) {
     case "ScoreCompare":
       return <ScoreCompare node={node} />;
     case "Diff":
-      return <DiffBlock diff={node.diff} label={PATCH_FILE} />;
+      // No file name: a model-written diff is not the exploit's real patch.diff.
+      return <DiffBlock diff={node.diff} />;
     case "IOPair":
       return <IOPair input={node.input} expected={node.expected} got={node.got} />;
     case "Table":
@@ -248,10 +348,16 @@ function NodeView({ node }: { node: EdgeCaseNode }) {
       );
     case "Steps":
       return (
-        <ol className="list-decimal space-y-2 ps-5 text-sm">
+        <ol className="min-w-0 list-decimal space-y-2 ps-5 text-sm">
           {node.items.map((item, i) => (
             <li key={i}>
-              {typeof item === "string" ? <bdi dir="auto">{item}</bdi> : <NodeView node={item} />}
+              {typeof item === "string" ? (
+                <bdi dir="auto" className="whitespace-pre-wrap break-words">
+                  {item}
+                </bdi>
+              ) : (
+                <NodeView node={item} />
+              )}
             </li>
           ))}
         </ol>
