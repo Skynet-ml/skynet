@@ -259,7 +259,7 @@
   "submit.v2.harden.tree.session": "会话 {i}",
   "submit.v2.harden.node.thinking": "思考中",
   "submit.v2.harden.node.scoring": "评分中",
-  "submit.v2.harden.node.done": "已完成，等待评审",
+  "submit.v2.harden.node.done": "已完成，等待评判",
   "submit.v2.harden.node.found": "发现漏洞",
   "submit.v2.harden.node.clean": "无问题",
   "submit.v2.harden.node.failed": "失败",

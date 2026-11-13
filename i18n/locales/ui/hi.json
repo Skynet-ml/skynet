@@ -259,7 +259,7 @@
   "submit.v2.harden.tree.session": "सत्र {i}",
   "submit.v2.harden.node.thinking": "सोच रहा है",
   "submit.v2.harden.node.scoring": "स्कोर कर रहा है",
-  "submit.v2.harden.node.done": "पूरा हुआ, जज का इंतज़ार",
+  "submit.v2.harden.node.done": "पूरा हुआ, निर्णायक का इंतज़ार",
   "submit.v2.harden.node.found": "exploit मिला",
   "submit.v2.harden.node.clean": "साफ़",
   "submit.v2.harden.node.failed": "विफल",

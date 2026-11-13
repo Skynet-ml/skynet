@@ -259,7 +259,7 @@
   "submit.v2.harden.tree.session": "세션 {i}",
   "submit.v2.harden.node.thinking": "생각 중",
   "submit.v2.harden.node.scoring": "채점 중",
-  "submit.v2.harden.node.done": "완료, 심사 대기 중",
+  "submit.v2.harden.node.done": "완료, 판정 대기 중",
   "submit.v2.harden.node.found": "익스플로잇 발견",
   "submit.v2.harden.node.clean": "문제 없음",
   "submit.v2.harden.node.failed": "실패",
