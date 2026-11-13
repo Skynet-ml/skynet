@@ -1,0 +1,176 @@
+/*
+ * node --test cannot load .tsx, so this runs through jiti (HardenTree.render.test.ts
+ * spawns it inside `npm run test:unit`). To run it by hand from frontend/:
+ * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { setClientLocale } from "@/shared/lib/runtime-locale";
+import type { HardeningExploit, HardeningJob, HardeningNoise, HardeningSession } from "@/shared/types/hardening";
+import type { AgentToolCall } from "@/shared/ui/agent/types";
+
+// The classic JSX transform the test loader applies reads a global React.
+(globalThis as { React?: typeof React }).React = React;
+const { HardenTree, LEAD_NODE, bestScore, needsReview, nodeStatus, reviewOrder, treeRounds } = await import(
+  "./HardenTree"
+);
+
+// The tree takes its translator as a prop, so the test sees each key and its params.
+const t = (key: string, params?: Record<string, string | number>) =>
+  params ? `${key}(${Object.values(params).join("|")})` : key;
+
+function call(tool: string, status: AgentToolCall["status"], score?: number): AgentToolCall {
+  return {
+    id: `${tool}-${status}`,
+    tool,
+    reason: "",
+    status,
+    startedAt: 0,
+    endedAt: null,
+    payload: score === undefined ? undefined : { score },
+  };
+}
+
+function session(index: number, status: HardeningSession["status"], calls: AgentToolCall[] = []): HardeningSession {
+  return {
+    index,
+    brief: `Brief ${index}`,
+    status,
+    transcript: [{ role: "assistant", content: "", toolCalls: calls, model: null }],
+    error: null,
+  };
+}
+
+function exploit(over: Partial<HardeningExploit> = {}): HardeningExploit {
+  return {
+    id: "e1",
+    kind: "case",
+    label: "exploit",
+    confidence: 0.9,
+    reason: "",
+    unsure: false,
+    patch_diff: "",
+    why_md: "",
+    user_verdict: null,
+    session: 1,
+    ...over,
+  };
+}
+
+function job(over: Partial<HardeningJob> = {}): HardeningJob {
+  return {
+    id: "job-1",
+    status: "running",
+    round: 0,
+    rounds: 3,
+    round_cap_usd: 1,
+    reserved_usd: 3,
+    spent_usd: 0,
+    place: "hosted",
+    attacker_model: "attacker-model",
+    judge_model: "judge-model",
+    view: "black_box",
+    preflight_failures: [],
+    rounds_detail: [],
+    suite_count: 0,
+    fixed_count: 0,
+    error: null,
+    parallel_sessions: 2,
+    ...over,
+  } as HardeningJob;
+}
+
+void describe("treeRounds", () => {
+  void it("adds the live sessions as a new round while the attack runs", () => {
+    const rounds = treeRounds(job({ live_sessions: [session(1, "running"), session(2, "running")] }));
+    assert.equal(rounds.length, 1);
+    assert.equal(rounds[0]!.index, 1);
+    assert.equal(rounds[0]!.live, true);
+    assert.deepEqual(rounds[0]!.briefs, ["Brief 1", "Brief 2"]);
+  });
+
+  void it("drops the kept live sessions once the round judges, or the job stops", () => {
+    const detail = [{ index: 1, status: "running", exploits: [], fix: null, sessions: [session(1, "done")] }];
+    const live = [session(1, "done")];
+    const judging = treeRounds(job({ round: 1, rounds_detail: detail as never, live_sessions: live }));
+    assert.deepEqual(judging.map((r) => r.live), [false]);
+    const stopped = treeRounds(job({ status: "clean_stop", live_sessions: live }));
+    assert.equal(stopped.length, 0);
+  });
+});
+
+void describe("node helpers", () => {
+  void it("reads the session status from its tool calls and claims", () => {
+    assert.equal(nodeStatus(session(1, "running"), []), "thinking");
+    assert.equal(nodeStatus(session(1, "running", [call("run_metric", "running")]), []), "scoring");
+    assert.equal(nodeStatus(session(1, "done"), [exploit()]), "found");
+    assert.equal(nodeStatus(session(1, "done"), []), "clean");
+    assert.equal(nodeStatus(session(1, "failed"), [exploit()]), "failed");
+  });
+
+  void it("takes the best score from the claims and the finished metric runs", () => {
+    const s = session(1, "running", [call("run_metric", "done", 0.4), call("run_metric", "running", 0.99)]);
+    assert.equal(bestScore(s, [exploit({ exploit_score: 0.7 })]), 0.7);
+    assert.equal(bestScore(s, []), 0.4);
+    assert.equal(bestScore(session(1, "running"), []), null);
+  });
+
+  void it("asks for a review of open exploits and unsure claims, unsure first", () => {
+    assert.equal(needsReview(exploit()), true);
+    assert.equal(needsReview(exploit({ label: "valid" })), false);
+    assert.equal(needsReview(exploit({ label: "valid", unsure: true })), true);
+    assert.equal(needsReview(exploit({ user_verdict: "confirmed" })), false);
+    const order = reviewOrder([
+      exploit({ id: "valid", label: "valid" }),
+      exploit({ id: "exploit" }),
+      exploit({ id: "unsure", unsure: true }),
+    ]);
+    assert.deepEqual(order.map((e) => e.id), ["unsure", "exploit", "valid"]);
+  });
+});
+
+void describe("HardenTree", () => {
+  function render(noise: HardeningNoise | null = null) {
+    setClientLocale("en");
+    const round = {
+      index: 1,
+      sessions: [
+        session(1, "done", [call("run_metric", "done", 0.9)]),
+        session(2, "running", [call("read_score", "running")]),
+      ],
+      exploits: [exploit({ exploit_score: 0.9, base_score: 0.5 })],
+      briefs: ["Brief 1", "Brief 2"],
+      live: false,
+    };
+    return renderToStaticMarkup(
+      <HardenTree round={round} job={job()} selected={1} noise={noise} onOpen={() => {}} t={t} />,
+    );
+  }
+
+  void it("draws the lead and each session with its status, score and review badge", () => {
+    const html = render();
+    assert.match(html, /role="tree"/);
+    assert.equal(html.match(/data-node="/g)?.length, 3);
+    assert.match(html, new RegExp(`data-node="${LEAD_NODE}" tabindex="-1"`));
+    assert.match(html, /data-node="1" tabindex="0"[^>]*aria-current="true"/);
+    assert.match(html, /submit\.v2\.harden\.tree\.lead_desc\(2\)/);
+    assert.match(html, /data-status="found"/);
+    assert.match(html, /data-status="scoring"/);
+    assert.equal(html.match(/submit\.v2\.harden\.node\.needs_review/g)?.length, 1);
+    assert.match(html, /data-beats="true"/);
+    assert.match(html, /submit\.v2\.harden\.node\.vs_base\(0\.5\)/);
+    assert.match(html, /motion-safe:animate-pulse/);
+    assert.match(html, /attacker-model/);
+    assert.doesNotMatch(html, /noise\.title/);
+  });
+
+  void it("adds the noise node with the skip reason or the repeat scores", () => {
+    const skipped = render({ skipped: true, reason: "deterministic", scores: [], spread: null });
+    assert.match(skipped, /submit\.v2\.harden\.noise\.skipped\(deterministic\)/);
+    const scored = render({ skipped: false, reason: "", scores: [0.5, 0.75], spread: 0.25 });
+    assert.match(scored, /submit\.v2\.harden\.noise\.scores\(0\.5, 0\.75\|0\.25\)/);
+  });
+});

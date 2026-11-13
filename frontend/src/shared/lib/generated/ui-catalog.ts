@@ -3522,6 +3522,9 @@ export type MessageKey =
   | "submit.v2.harden.defaults"
   | "submit.v2.harden.desc"
   | "submit.v2.harden.done"
+  | "submit.v2.harden.drawer.back"
+  | "submit.v2.harden.drawer.close"
+  | "submit.v2.harden.drawer.to_review"
   | "submit.v2.harden.error.byok_missing"
   | "submit.v2.harden.error.byok_not_served"
   | "submit.v2.harden.error.no_managed_models"
@@ -3555,11 +3558,26 @@ export type MessageKey =
   | "submit.v2.harden.failed"
   | "submit.v2.harden.fix.approve"
   | "submit.v2.harden.fix.blocked"
+  | "submit.v2.harden.fix.cancel"
   | "submit.v2.harden.fix.desc"
+  | "submit.v2.harden.fix.not_applied"
+  | "submit.v2.harden.fix.note_label"
+  | "submit.v2.harden.fix.redrafting"
   | "submit.v2.harden.fix.reject"
+  | "submit.v2.harden.fix.send_note"
   | "submit.v2.harden.fix.title"
   | "submit.v2.harden.judge"
   | "submit.v2.harden.no_scorer"
+  | "submit.v2.harden.node.clean"
+  | "submit.v2.harden.node.failed"
+  | "submit.v2.harden.node.found"
+  | "submit.v2.harden.node.needs_review"
+  | "submit.v2.harden.node.scoring"
+  | "submit.v2.harden.node.thinking"
+  | "submit.v2.harden.node.vs_base"
+  | "submit.v2.harden.noise.scores"
+  | "submit.v2.harden.noise.skipped"
+  | "submit.v2.harden.noise.title"
   | "submit.v2.harden.preflight"
   | "submit.v2.harden.preflight_failed"
   | "submit.v2.harden.rejected"
@@ -3567,9 +3585,12 @@ export type MessageKey =
   | "submit.v2.harden.review.hint"
   | "submit.v2.harden.review.title"
   | "submit.v2.harden.round"
+  | "submit.v2.harden.round_tab"
   | "submit.v2.harden.rounds"
   | "submit.v2.harden.running"
   | "submit.v2.harden.skip"
+  | "submit.v2.harden.spend"
+  | "submit.v2.harden.spend_label"
   | "submit.v2.harden.spent_so_far"
   | "submit.v2.harden.stale"
   | "submit.v2.harden.stale_title"
@@ -3578,7 +3599,12 @@ export type MessageKey =
   | "submit.v2.harden.step.fix"
   | "submit.v2.harden.step.judge"
   | "submit.v2.harden.step.review"
+  | "submit.v2.harden.stop"
   | "submit.v2.harden.title"
+  | "submit.v2.harden.tree.label"
+  | "submit.v2.harden.tree.lead"
+  | "submit.v2.harden.tree.lead_desc"
+  | "submit.v2.harden.tree.session"
   | "submit.v2.harden.view"
   | "submit.v2.harden.view.black_box"
   | "submit.v2.harden.view.white_box"
@@ -7883,6 +7909,9 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.v2.harden.defaults": "{rounds} סבבים, {cap} לסבב",
   "submit.v2.harden.desc": "אופציונלי. מודל תוקף את המדד שלכם ומנסה להשיג ציון גבוה בלי לפתור את המשימה. אתם מאשרים כל פרצה אמיתית וכל תיקון.",
   "submit.v2.harden.done": "המדד שרד {n} תקיפות. {m} פרצות תוקנו, חבילה של {s} מקרים.",
+  "submit.v2.harden.drawer.back": "חזרה",
+  "submit.v2.harden.drawer.close": "סגירה",
+  "submit.v2.harden.drawer.to_review": "{n, plural, one {כרטיס אחד לבדיקה} other {# כרטיסים לבדיקה}}",
   "submit.v2.harden.error.byok_missing": "המדד שלכם משתמש במפתח שלכם, אבל לא שמור מפתח תקין. שמרו את המפתח שוב בהגדרות ואז נסו שוב.",
   "submit.v2.harden.error.byok_not_served": "המדד שלכם משתמש במפתח שלכם, אבל כרגע אין לנו אפשרות להשתמש בו. נסו שוב מאוחר יותר.",
   "submit.v2.harden.error.no_managed_models": "המודלים המנוהלים לא זמינים כרגע, ולכן ההקשחה לא יכולה להתחיל. נסו שוב מאוחר יותר.",
@@ -7916,11 +7945,26 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.v2.harden.failed": "הסבב נכשל",
   "submit.v2.harden.fix.approve": "אישור התיקון",
   "submit.v2.harden.fix.blocked": "אי אפשר לאשר את התיקון כל עוד בדיקה נכשלת או רצה.",
+  "submit.v2.harden.fix.cancel": "ביטול",
   "submit.v2.harden.fix.desc": "הסוכן שינה את metric.py כדי לסגור את הפרצות שאישרתם.",
+  "submit.v2.harden.fix.not_applied": "התיקון לא הוחל על metric.py בעורך. בדקו את metric.py לפני ההרצה.",
+  "submit.v2.harden.fix.note_label": "מה לא בסדר?",
+  "submit.v2.harden.fix.redrafting": "הסוכן מנסח מחדש את התיקון לפי ההערה שלכם.",
   "submit.v2.harden.fix.reject": "דחייה",
+  "submit.v2.harden.fix.send_note": "שליחה לסוכן",
   "submit.v2.harden.fix.title": "אישור התיקון",
   "submit.v2.harden.judge": "מודל שופט",
   "submit.v2.harden.no_scorer": "כתבו קודם את metric.py. ההקשחה מנקדת כל מתקפה עם המדד של הריצה.",
+  "submit.v2.harden.node.clean": "נקי",
+  "submit.v2.harden.node.failed": "נכשל",
+  "submit.v2.harden.node.found": "נמצאה פרצה",
+  "submit.v2.harden.node.needs_review": "ממתין לבדיקה",
+  "submit.v2.harden.node.scoring": "מנקד",
+  "submit.v2.harden.node.thinking": "חושב",
+  "submit.v2.harden.node.vs_base": "מול בסיס {base}",
+  "submit.v2.harden.noise.scores": "בדיקת רעש: ציונים חוזרים {scores}, פיזור {spread}",
+  "submit.v2.harden.noise.skipped": "בדיקת הרעש דולגה: {reason}",
+  "submit.v2.harden.noise.title": "בדיקת רעש",
   "submit.v2.harden.preflight": "בודקים את ההגדרות לפני הסבב הראשון. שום ארגז חול לא מתחיל עד שהבדיקה עוברת.",
   "submit.v2.harden.preflight_failed": "בדיקת ההגדרות נכשלה, ולכן ההקשחה לא התחילה.",
   "submit.v2.harden.rejected": "דחיתם את התיקון. ההקשחה נעצרה, ו־metric.py נשאר כמו שהיה.",
@@ -7928,9 +7972,12 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.v2.harden.review.hint": "הלולאה מושהית ולא צורכת זמן ארגז חול. מקשי J ו־K עוברים בין הכרטיסים.",
   "submit.v2.harden.review.title": "בדקו את הפרצות",
   "submit.v2.harden.round": "סבב {k} מתוך {n}",
+  "submit.v2.harden.round_tab": "סבב {k}",
   "submit.v2.harden.rounds": "סבבים",
   "submit.v2.harden.running": "התוקף עובד. אפשר לצאת. נודיע לכם כשנדרשת הבדיקה שלכם.",
   "submit.v2.harden.skip": "דילוג",
+  "submit.v2.harden.spend": "{spent} מתוך {reserved} שמורים",
+  "submit.v2.harden.spend_label": "ההוצאה מול הסכום השמור",
   "submit.v2.harden.spent_so_far": "הוצאה עד עכשיו: {spent}",
   "submit.v2.harden.stale": "metric.py השתנה אחרי שהעבודה התחילה. נסו שוב כדי להריץ את החבילה על הקוד החדש.",
   "submit.v2.harden.stale_title": "metric.py השתנה",
@@ -7939,7 +7986,12 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.v2.harden.step.fix": "תיקון",
   "submit.v2.harden.step.judge": "שיפוט",
   "submit.v2.harden.step.review": "הבדיקה שלכם",
+  "submit.v2.harden.stop": "עצירת ההקשחה",
   "submit.v2.harden.title": "הקשחת המדד",
+  "submit.v2.harden.tree.label": "סשנים של התוקף",
+  "submit.v2.harden.tree.lead": "הסוכן המוביל",
+  "submit.v2.harden.tree.lead_desc": "{k, plural, one {מנחה סשן תקיפה אחד} other {מנחה # סשנים של תקיפה}}",
+  "submit.v2.harden.tree.session": "סשן {i}",
   "submit.v2.harden.view": "תצוגה",
   "submit.v2.harden.view.black_box": "קופסה שחורה",
   "submit.v2.harden.view.white_box": "קופסה לבנה",
@@ -21009,6 +21061,9 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.v2.harden.defaults": "{rounds} rounds, {cap} per round",
   "submit.v2.harden.desc": "Optional. A model attacks your metric and tries to get a high score without solving the task. You confirm each real exploit and approve each fix.",
   "submit.v2.harden.done": "Metric survived {n} attacks. {m} exploits fixed, suite of {s} cases.",
+  "submit.v2.harden.drawer.back": "Back",
+  "submit.v2.harden.drawer.close": "Close",
+  "submit.v2.harden.drawer.to_review": "{n, plural, one {1 card to review} other {# cards to review}}",
   "submit.v2.harden.error.byok_missing": "Your metric uses your own key, but no working key is saved. Save the key again in Settings, then retry.",
   "submit.v2.harden.error.byok_not_served": "Your metric uses your own key, but we cannot use that key right now. Try again later.",
   "submit.v2.harden.error.no_managed_models": "Managed models are not available right now, so hardening cannot start. Try again later.",
@@ -21042,11 +21097,26 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.v2.harden.failed": "The round failed",
   "submit.v2.harden.fix.approve": "Approve fix",
   "submit.v2.harden.fix.blocked": "Approve fix stays off while a check fails or runs.",
+  "submit.v2.harden.fix.cancel": "Cancel",
   "submit.v2.harden.fix.desc": "The agent changed metric.py to close the confirmed exploits.",
+  "submit.v2.harden.fix.not_applied": "The fix did not apply to metric.py in the editor. Check metric.py before you run.",
+  "submit.v2.harden.fix.note_label": "What is wrong?",
+  "submit.v2.harden.fix.redrafting": "The agent is redrafting the fix from your note.",
   "submit.v2.harden.fix.reject": "Reject",
+  "submit.v2.harden.fix.send_note": "Send to the agent",
   "submit.v2.harden.fix.title": "Approve the fix",
   "submit.v2.harden.judge": "Judge model",
   "submit.v2.harden.no_scorer": "Write metric.py first. Hardening scores each attack with the run's metric.",
+  "submit.v2.harden.node.clean": "Clean",
+  "submit.v2.harden.node.failed": "Failed",
+  "submit.v2.harden.node.found": "Found an exploit",
+  "submit.v2.harden.node.needs_review": "Needs review",
+  "submit.v2.harden.node.scoring": "Scoring",
+  "submit.v2.harden.node.thinking": "Thinking",
+  "submit.v2.harden.node.vs_base": "vs base {base}",
+  "submit.v2.harden.noise.scores": "Noise check: repeat scores {scores}, spread {spread}",
+  "submit.v2.harden.noise.skipped": "Noise check skipped: {reason}",
+  "submit.v2.harden.noise.title": "Noise check",
   "submit.v2.harden.preflight": "Checking the setup before the first round. No sandbox starts until it passes.",
   "submit.v2.harden.preflight_failed": "The setup check failed, so hardening did not start.",
   "submit.v2.harden.rejected": "You rejected the fix. Hardening stopped, and metric.py stays as it was.",
@@ -21054,9 +21124,12 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.v2.harden.review.hint": "The loop is paused and uses no sandbox time. Press J and K to move between cards.",
   "submit.v2.harden.review.title": "Review the exploits",
   "submit.v2.harden.round": "Round {k} of {n}",
+  "submit.v2.harden.round_tab": "Round {k}",
   "submit.v2.harden.rounds": "Rounds",
   "submit.v2.harden.running": "The attacker is at work. You can leave. We notify you when your review is needed.",
   "submit.v2.harden.skip": "Skip",
+  "submit.v2.harden.spend": "{spent} of {reserved} reserved",
+  "submit.v2.harden.spend_label": "Spend against the reserve",
   "submit.v2.harden.spent_so_far": "Spent so far: {spent}",
   "submit.v2.harden.stale": "metric.py changed after this job started. Retry to replay the suite on the new code.",
   "submit.v2.harden.stale_title": "metric.py changed",
@@ -21065,7 +21138,12 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.v2.harden.step.fix": "Fix",
   "submit.v2.harden.step.judge": "Judge",
   "submit.v2.harden.step.review": "Your review",
+  "submit.v2.harden.stop": "Stop hardening",
   "submit.v2.harden.title": "Harden metric",
+  "submit.v2.harden.tree.label": "Attacker sessions",
+  "submit.v2.harden.tree.lead": "Lead agent",
+  "submit.v2.harden.tree.lead_desc": "{k, plural, one {Briefs 1 attacker session} other {Briefs # attacker sessions}}",
+  "submit.v2.harden.tree.session": "Session {i}",
   "submit.v2.harden.view": "View",
   "submit.v2.harden.view.black_box": "Black-box",
   "submit.v2.harden.view.white_box": "White-box",

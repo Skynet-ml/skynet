@@ -86,6 +86,10 @@ test("the wizard reaches the return screen on it or past it", () => {
   assert.equal(reachedReturnScreen("budget", "metric"), true);
   assert.equal(reachedReturnScreen("budget", "brief"), false);
   assert.equal(reachedReturnScreen("budget", null), false);
+  // Hardening sits between the code and the check (SKY-684).
+  assert.equal(reachedReturnScreen("harden", "metric"), false);
+  assert.equal(reachedReturnScreen("harden", "check"), true);
+  assert.equal(reachedReturnScreen("metric", "harden"), true);
 });
 
 test("a back result jumps to the named screen with its request", () => {

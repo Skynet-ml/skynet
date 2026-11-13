@@ -9,6 +9,7 @@ import {
   getLatestHardeningJob,
   retryHardeningJob,
   setHardeningExploitVerdict,
+  stopHardeningJob,
 } from "@/shared/lib/api";
 import { subscriptionAgentModel, type LocalStatus } from "@/features/local-runtime";
 import { msg, type MessageKey } from "@/shared/lib/messages";
@@ -16,7 +17,7 @@ import type { BlackboxScorer, BlackboxTarget, CatalogModel, ModelConfig } from "
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
 import { hardeningScorer } from "../lib/repo-run";
-import { repoIssue, type RepoDraft } from "../lib/wizard-v2";
+import { METRIC_FILE, repoIssue, type RepoDraft } from "../lib/wizard-v2";
 import { useWizardV2 } from "./use-unified-wizard";
 
 const POLL_MS = 4000;
@@ -95,8 +96,96 @@ export interface HardeningState {
   hasScorer: boolean;
   start: (settings: HardeningSettings) => Promise<void>;
   verdict: (exploitId: string, confirmed: boolean) => Promise<void>;
-  decideFix: (approve: boolean) => Promise<void>;
+  /** Approve puts the fix in metric.py; a reject with a note asks for a new draft. */
+  decideFix: (approve: boolean, note?: string) => Promise<void>;
+  /** End a job that waits for the user as a clean stop. */
+  stop: () => Promise<void>;
   retry: () => Promise<void>;
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/;
+
+interface FixHunk {
+  start: number;
+  old: string[];
+  next: string[];
+}
+
+/** The metric.py hunks of a fix diff; null when it has none. */
+function fixHunks(diff: string): FixHunk[] | null {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  while (lines.length && lines.at(-1) === "") lines.pop();
+  const hunks: FixHunk[] = [];
+  let take = true;
+  let hunk: FixHunk | null = null;
+  for (const [i, line] of lines.entries()) {
+    if (line.startsWith("diff --git ") || (line.startsWith("--- ") && lines[i + 1]?.startsWith("+++ "))) {
+      hunk = null;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const path = line.slice(4).replace(/\t.*$/, "").trim();
+      take = path === METRIC_FILE || path.endsWith(`/${METRIC_FILE}`);
+      hunk = null;
+      continue;
+    }
+    const header = HUNK_HEADER.exec(line);
+    if (header) {
+      hunk = { start: Number(header[1]), old: [], next: [] };
+      if (take) hunks.push(hunk);
+      continue;
+    }
+    if (!hunk) continue;
+    const tag = line[0];
+    const body = line.slice(1);
+    // A model often drops the space in front of a blank context line.
+    if (tag === " " || line === "") {
+      hunk.old.push(body);
+      hunk.next.push(body);
+    } else if (tag === "-") hunk.old.push(body);
+    else if (tag === "+") hunk.next.push(body);
+    else if (tag !== "\\") hunk = null;
+  }
+  return hunks.length ? hunks : null;
+}
+
+function blockAt(lines: string[], block: string[], at: number): boolean {
+  return at >= 0 && at + block.length <= lines.length && block.every((line, i) => lines[at + i] === line);
+}
+
+/**
+ * Apply the approved fix to the editor's metric.py. A model writes the diff,
+ * so its line numbers may be off: each hunk goes where its old lines are, at
+ * the stated line first, then at the first match after the hunk before it.
+ *
+ * Args:
+ *   code: metric.py as the editor holds it.
+ *   diff: The fix as a unified diff; only its metric.py hunks count.
+ *
+ * Returns:
+ *   The fixed code, or null when the diff has no metric.py hunk or a hunk does not match the code.
+ */
+export function applyMetricFix(code: string, diff: string): string | null {
+  const hunks = fixHunks(diff);
+  if (!hunks) return null;
+  const lines = code.split("\n");
+  let cursor = 0;
+  for (const hunk of hunks) {
+    let at = -1;
+    if (!hunk.old.length) {
+      at = Math.min(Math.max(hunk.start, cursor), lines.length);
+    } else if (hunk.start - 1 >= cursor && blockAt(lines, hunk.old, hunk.start - 1)) {
+      at = hunk.start - 1;
+    } else {
+      for (let i = cursor; i + hunk.old.length <= lines.length && at < 0; i++) {
+        if (blockAt(lines, hunk.old, i)) at = i;
+      }
+      if (at < 0) return null;
+    }
+    lines.splice(at, hunk.old.length, ...hunk.next);
+    cursor = at + hunk.next.length;
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -178,9 +267,10 @@ export function useHardening(active: boolean): HardeningState {
   const [loaded, setLoaded] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const draft = React.useRef<string | null>(null);
-  const { state, ensureBudget } = useWizardV2();
+  const { state, ensureBudget, patchWorkspace } = useWizardV2();
   const repo = state.task.repo;
   const { workspace, optimizer } = state;
+  const metricCode = workspace.metricCode;
   const scorer = React.useMemo(() => hardeningScorer({ workspace, optimizer }), [workspace, optimizer]);
 
   React.useEffect(() => {
@@ -222,23 +312,25 @@ export function useHardening(active: boolean): HardeningState {
     };
   }, [active, jobId, polled]);
 
-  const act = React.useCallback(async (call: () => Promise<HardeningJob>) => {
+  const act = React.useCallback(async (call: () => Promise<HardeningJob>): Promise<boolean> => {
     setBusy(true);
     try {
       setJob(await call());
+      return true;
     } catch (err) {
       const text = hardeningErrorText(err);
       if (text !== null) toast.error(text);
+      return false;
     } finally {
       setBusy(false);
     }
   }, []);
 
   const start = React.useCallback(
-    (settings: HardeningSettings) => {
+    async (settings: HardeningSettings) => {
       draft.current ??= draftId();
       const id = draft.current;
-      return act(() =>
+      await act(() =>
         requestHardeningJob(settings, id, repo, scorer, ensureBudget, async (body) => {
           try {
             return await createHardeningJob(body);
@@ -254,18 +346,47 @@ export function useHardening(active: boolean): HardeningState {
     [act, ensureBudget, repo, scorer],
   );
   const verdict = React.useCallback(
-    (exploitId: string, confirmed: boolean) =>
-      jobId ? act(() => setHardeningExploitVerdict(jobId, exploitId, confirmed)) : Promise.resolve(),
+    async (exploitId: string, confirmed: boolean) => {
+      if (jobId) await act(() => setHardeningExploitVerdict(jobId, exploitId, confirmed));
+    },
     [act, jobId],
   );
+  const fixDiff = job?.rounds_detail.at(-1)?.fix?.diff ?? "";
   const decideFix = React.useCallback(
-    (approve: boolean) => (jobId ? act(() => decideHardeningFix(jobId, approve)) : Promise.resolve()),
+    async (approve: boolean, note?: string) => {
+      if (!jobId) return;
+      const decided = await act(() => decideHardeningFix(jobId, approve, note));
+      if (!decided || !approve) return;
+      // The server scores the later rounds with the fix; the editor gets it
+      // here, so the run starts from the hardened metric (SKY-450).
+      const fixed = applyMetricFix(metricCode, fixDiff);
+      if (fixed === null) toast.error(msg("submit.v2.harden.fix.not_applied"));
+      else if (fixed !== metricCode) patchWorkspace({ metricCode: fixed });
+    },
+    [act, fixDiff, jobId, metricCode, patchWorkspace],
+  );
+  const stop = React.useCallback(
+    async () => {
+      if (jobId) await act(() => stopHardeningJob(jobId));
+    },
     [act, jobId],
   );
   const retry = React.useCallback(
-    () => (jobId ? act(() => retryHardeningJob(jobId)) : Promise.resolve()),
+    async () => {
+      if (jobId) await act(() => retryHardeningJob(jobId));
+    },
     [act, jobId],
   );
 
-  return { job, loading: active && !loaded, busy, hasScorer: scorer !== null, start, verdict, decideFix, retry };
+  return {
+    job,
+    loading: active && !loaded,
+    busy,
+    hasScorer: scorer !== null,
+    start,
+    verdict,
+    decideFix,
+    stop,
+    retry,
+  };
 }

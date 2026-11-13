@@ -153,7 +153,7 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
 }
 
 /**
- * The wizard's screens in order: the backend's ``_SCREEN_ORDER``, plus ``schedule``.
+ * The wizard's screens in order: the backend's ``_SCREEN_ORDER``, plus ``harden`` and ``schedule``.
  */
 const SCREEN_ORDER: readonly string[] = [
   "brief",
@@ -164,6 +164,7 @@ const SCREEN_ORDER: readonly string[] = [
   "models",
   "budget",
   "metric",
+  "harden",
   "check",
   "schedule",
   "overview",

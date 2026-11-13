@@ -51,8 +51,12 @@ if (!process.env.JITI_ALIAS) {
     load: (url, context, next) =>
       url.endsWith(".css") ? { format: "module", source: "", shortCircuit: true } : next(url, context),
   });
-  const { hardeningErrorText, hardeningTarget, requestHardeningJob, useHardening } = await import("./use-hardening");
+  const { applyMetricFix, hardeningErrorText, hardeningTarget, requestHardeningJob, useHardening } = await import(
+    "./use-hardening"
+  );
   const { renderToStaticMarkup } = await import("react-dom/server");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = await import("jsdom");
   const { emptyRepoDraft } = await import("../lib/wizard-v2");
   const { msg } = await import("@/shared/lib/messages");
   const { buildActiveCatalog } = await import("@/shared/lib/messages.server");
@@ -501,6 +505,135 @@ if (!process.env.JITI_ALIAS) {
       const { sent, budgets } = await startWith({ ...emptyRepoDraft(), repository: "not a repo" });
       assert.equal(budgets, 0);
       assert.equal(sent.filter((r) => r.method === "POST").length, 0);
+    });
+  });
+
+  const metric = "def score(repo_path, case=None):\n    value = run(repo_path)\n\n    return value\n";
+  const fixDiff = [
+    "diff --git a/metric.py b/metric.py",
+    "--- a/metric.py",
+    "+++ b/metric.py",
+    "@@ -2,3 +2,4 @@ def score(repo_path, case=None):",
+    "     value = run(repo_path)",
+    "",
+    "+    value = min(value, 1.0)",
+    "     return value",
+  ].join("\n");
+
+  void describe("applyMetricFix", () => {
+    void it("applies the metric.py hunk, with a blank context line the model wrote without its space", () => {
+      assert.equal(
+        applyMetricFix(metric, fixDiff),
+        "def score(repo_path, case=None):\n    value = run(repo_path)\n\n    value = min(value, 1.0)\n    return value\n",
+      );
+    });
+
+    void it("finds a hunk whose line number is off", () => {
+      const shifted = fixDiff.replace("@@ -2,3 +2,4 @@", "@@ -9,3 +9,4 @@");
+      assert.equal(applyMetricFix(metric, shifted), applyMetricFix(metric, fixDiff));
+    });
+
+    void it("returns null for a diff with no metric.py hunk, or one that does not match", () => {
+      assert.equal(applyMetricFix(metric, fixDiff.replaceAll("metric.py", "run.py")), null);
+      assert.equal(applyMetricFix(metric, ""), null);
+      assert.equal(applyMetricFix("def score():\n    return 0\n", fixDiff), null);
+    });
+  });
+
+  // The hook in a live React root: a fix decision and a stop reach the API,
+  // and an approved fix reaches the editor's metric.py.
+  void describe("useHardening fix and stop", () => {
+    type Sent = { url: string; method?: string; body: Record<string, unknown> };
+    const job = {
+      id: "job-7",
+      status: "waiting_fix",
+      round: 1,
+      rounds: 3,
+      rounds_detail: [
+        {
+          index: 1,
+          status: "waiting_fix",
+          exploits: [],
+          fix: { diff: fixDiff, checks: {}, user_decision: null },
+        },
+      ],
+    };
+
+    async function withHook(
+      reply: (sent: Sent) => unknown,
+      run: (h: ReturnType<typeof useHardening>) => Promise<void>,
+    ): Promise<{ sent: Sent[]; patches: unknown[] }> {
+      const dom = new JSDOM("<div id='root'></div>", { url: "https://app.test" });
+      Object.assign(globalThis, {
+        window: dom.window,
+        document: dom.window.document,
+        sessionStorage: dom.window.sessionStorage,
+        IS_REACT_ACT_ENVIRONMENT: true,
+      });
+      const sent: Sent[] = [];
+      const patches: unknown[] = [];
+      (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard = {
+        state: {
+          task: { repo: null },
+          workspace: { metricCode: metric, metricModel: null, metricTimeoutSeconds: 60 },
+          optimizer: { choice: "gepa", taskModel: null, reflectionModel: null, extraReflectionModels: [] },
+        },
+        ensureBudget: async () => ({ id: "budget-1" }),
+        patchWorkspace: (patch: unknown) => patches.push(patch),
+      };
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string, init?: RequestInit) => {
+        const one = { url: String(url), method: init?.method, body: JSON.parse(String(init?.body ?? "{}")) };
+        sent.push(one);
+        return new Response(JSON.stringify(reply(one)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+      let current: ReturnType<typeof useHardening> | null = null;
+      const Probe = () => {
+        current = useHardening(true);
+        return null;
+      };
+      const root = createRoot(document.getElementById("root")!);
+      try {
+        await React.act(async () => root.render(React.createElement(Probe)));
+        assert.equal(current!.job?.id, "job-7");
+        await React.act(async () => run(current!));
+      } finally {
+        await React.act(async () => root.unmount());
+        globalThis.fetch = realFetch;
+      }
+      return { sent: sent.filter((r) => r.method === "POST"), patches };
+    }
+
+    void it("sends a reject with the user's note, and keeps metric.py", async () => {
+      const { sent, patches } = await withHook(
+        (r) => (r.method === "POST" ? { ...job, status: "running" } : job),
+        (h) => h.decideFix(false, "It blocks valid answers."),
+      );
+      assert.equal(sent.length, 1);
+      assert.match(sent[0]!.url, /\/hardening\/jobs\/job-7\/fix$/);
+      assert.deepEqual(sent[0]!.body, { approve: false, note: "It blocks valid answers." });
+      assert.deepEqual(patches, []);
+    });
+
+    void it("puts an approved fix in the editor's metric.py", async () => {
+      const { sent, patches } = await withHook(
+        (r) => (r.method === "POST" ? { ...job, status: "running" } : job),
+        (h) => h.decideFix(true),
+      );
+      assert.deepEqual(sent[0]!.body, { approve: true });
+      assert.deepEqual(patches, [{ metricCode: applyMetricFix(metric, fixDiff) }]);
+    });
+
+    void it("stops the job with the stop endpoint", async () => {
+      const { sent } = await withHook(
+        (r) => (r.method === "POST" ? { ...job, status: "clean_stop" } : job),
+        (h) => h.stop(),
+      );
+      assert.equal(sent.length, 1);
+      assert.match(sent[0]!.url, /\/hardening\/jobs\/job-7\/stop$/);
     });
   });
 }

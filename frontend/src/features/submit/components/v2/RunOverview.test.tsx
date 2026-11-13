@@ -207,6 +207,16 @@ void describe("RunOverview hardening line", () => {
       assert.doesNotMatch(render(state, hardeningJob(status)), /hardening_survived/);
     }
   });
+
+  void it("shows the noise check after the job ended well", () => {
+    const state = initialWizardV2State("expert");
+    assert.doesNotMatch(render(state, hardeningJob("done")), /harden\.noise/);
+    const skipped = { skipped: true, reason: "deterministic", scores: [], spread: null };
+    assert.match(render(state, { ...hardeningJob("done"), noise: skipped }), /submit\.v2\.harden\.noise\.skipped/);
+    const ran = { skipped: false, reason: "", scores: [0.5, 0.6], spread: 0.1 };
+    assert.match(render(state, { ...hardeningJob("clean_stop"), noise: ran }), /submit\.v2\.harden\.noise\.scores/);
+    assert.doesNotMatch(render(state, { ...hardeningJob("running"), noise: ran }), /harden\.noise/);
+  });
 });
 
 const { hardeningSurvived } = await import("@/shared/types/hardening");

@@ -1721,11 +1721,18 @@ export function setHardeningExploitVerdict(jobId: string, exploitId: string, con
   );
 }
 
-/** Approve or reject the drafted metric fix; a rejected fix stops the loop. */
-export function decideHardeningFix(jobId: string, approve: boolean) {
+/** Approve or reject the drafted metric fix; a reject with a note asks for a new draft, one without stops the loop. */
+export function decideHardeningFix(jobId: string, approve: boolean, note?: string) {
   return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/fix`, {
     method: "POST",
-    body: JSON.stringify({ approve }),
+    body: JSON.stringify(note === undefined ? { approve } : { approve, note }),
+  });
+}
+
+/** End a job that waits for a review or a fix decision as a clean stop. */
+export function stopHardeningJob(jobId: string) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/stop`, {
+    method: "POST",
   });
 }
 
