@@ -1311,15 +1311,6 @@ class Settings(BaseSettings):
             "Dictation runs on the platform's transcription key and is not billed to user balances. 0 disables the cap."
         ),
     )
-    rate_limit_transcription_partials_per_hour: int = Field(
-        default=1300,
-        ge=0,
-        description=(
-            "Per-account cap on live dictation previews (partial transcriptions) per hour, enforced across "
-            "replicas via Redis. Kept apart from the clip cap so previews never use it up. One preview every "
-            "3 s is 1200 an hour of nonstop dictation; the cap leaves a small margin. 0 disables the cap."
-        ),
-    )
     rate_limit_attachments_per_hour: int = Field(
         default=300,
         ge=0,

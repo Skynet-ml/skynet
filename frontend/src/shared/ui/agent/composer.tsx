@@ -42,7 +42,6 @@ import {
 } from "./slash-commands";
 import type { AgentMessage } from "./types";
 import { DictationWave } from "./dictation-wave";
-import { liveWords } from "./dictation-level";
 import { formatRecSeconds, useDictation } from "./use-dictation";
 import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
 
@@ -199,51 +198,6 @@ function SlashTokenLayer({
       {/* A trailing newline in a textarea opens a line; the extra space keeps it here too. */}
       {text.endsWith("\n") ? " " : null}
     </div>
-  );
-}
-
-/**
- * The words heard so far in a dictation take. The tail stays in view and the
- * start fades out when the line is full. New words fade in; the last word stays
- * muted because a live update can end inside a word, and only the final
- * transcript fixes it. Screen readers skip it: the final transcript lands in
- * the message box.
- */
-function LiveWords({ text, settled }: { text: string; settled: boolean }) {
-  if (!text) return null;
-  const words = liveWords(text);
-  return (
-    // The words follow their own script, not the UI's, so the newest word stays in view.
-    // `:dir(rtl)` reads this span's resolved direction; Tailwind's `rtl:` would follow the page's.
-    <span
-      aria-hidden
-      dir="auto"
-      className={cn(
-        "flex min-w-0 max-w-[70%] shrink justify-end overflow-hidden whitespace-nowrap",
-        // 32 characters is a rough guess at one full line; shorter takes skip the fade.
-        text.length > 32 &&
-          "[mask-image:linear-gradient(to_right,transparent,black_1.5rem)] [&:dir(rtl)]:[mask-image:linear-gradient(to_left,transparent,black_1.5rem)]",
-      )}
-    >
-      <span
-        className={cn(
-          "transition-colors duration-300",
-          settled ? "text-muted-foreground" : "text-foreground",
-        )}
-      >
-        {words.map(({ piece, tail }, i) => (
-          <span
-            key={i}
-            className={cn(
-              "motion-safe:animate-in motion-safe:fade-in motion-safe:duration-500",
-              tail && !settled && "text-muted-foreground",
-            )}
-          >
-            {piece}
-          </span>
-        ))}
-      </span>
-    </span>
   );
 }
 
@@ -922,11 +876,9 @@ export function Composer({
                       className="size-3.5 shrink-0 animate-spin text-muted-foreground"
                     />
                   )}
-                  <LiveWords text={dictation.live} settled={dictation.state.kind === "busy"} />
                   <DictationWave
                     stream={dictation.stream}
                     processing={dictation.state.kind === "busy"}
-                    onLevel={dictation.hearLevel}
                     className={cn(
                       "min-w-16 flex-1 transition-colors duration-300 motion-reduce:transition-none",
                       dictation.state.kind === "busy" ? "text-muted-foreground" : "text-foreground",

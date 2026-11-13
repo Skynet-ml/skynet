@@ -4,18 +4,17 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/utils";
 
-import { HEAR_FLOOR, WAVE_STEP_MS, frameLevel, pushBar, slotX } from "./dictation-level";
+import { frameLevel } from "./dictation-level";
 
-const BAR = 2;
-const GAP = 2;
-const MIN_BAR = 2;
-// The sweep that shows the take is with the transcriber, in ms per pass.
-const SWEEP_MS = 1400;
-// The newest bars take the accent color and a soft glow, so the live edge reads
-// as the voice right now.
-const ACCENT_BARS = 4;
-// With reduced motion the strip shows one level in place, so it changes slowly.
-const REDUCED_STEP_MS = 250;
+// How fast the drawn level follows the mic level, per frame.
+const SMOOTHING = 0.25;
+// How far the wave moves along the line each frame.
+const PHASE_STEP = 0.06;
+// One point every 2 CSS pixels keeps the curve smooth at a low cost.
+const POINT_STEP = 2;
+const ALPHA = 0.7;
+// While the transcriber works, the line stays flat and dims to this part of ALPHA.
+const PROCESSING_DIM = 0.35;
 
 type AudioContextCtor = typeof AudioContext;
 
@@ -30,34 +29,24 @@ function audioContextCtor(): AudioContextCtor | null {
 }
 
 /**
- * A live waveform of the dictation take, drawn on a canvas so the mic level
- * never re-renders the composer. While `stream` is live, new bars enter at
- * the inline end and older ones move toward the start; the newest bars glow in
- * the accent color, and empty slots show as a faint baseline. When `processing`
- * is set, the take freezes and a soft highlight sweeps across it while the
- * transcriber works.
+ * A live wave of the dictation take, drawn on a canvas so the mic level never
+ * re-renders the composer. While `stream` is live, one thin line in the text
+ * color moves with the smoothed mic level. Its envelope is flat at both ends.
+ * When `processing` is set, the line stays flat and dims while the transcriber
+ * works.
  */
 export function DictationWave({
   stream,
   processing = false,
-  onLevel,
   className,
 }: {
-  /** The mic stream to listen to; null keeps the bars as they are. */
+  /** The mic stream to listen to; null keeps the line flat. */
   stream: MediaStream | null;
   /** True while the take is with the transcriber. */
   processing?: boolean;
-  /** Receives the level of each mic frame read, from 0 (silence) to 1. */
-  onLevel?: (level: number) => void;
   className?: string;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  // A ref, so a new callback does not restart the audio graph.
-  const onLevelRef = React.useRef(onLevel);
-  React.useEffect(() => {
-    onLevelRef.current = onLevel;
-  }, [onLevel]);
-  const barsRef = React.useRef<number[]>([]);
 
   React.useEffect(() => {
     const canvas = canvasRef.current;
@@ -68,7 +57,7 @@ export function DictationWave({
     let analyser: AnalyserNode | null = null;
     let audio: AudioContext | null = null;
     const Ctor = audioContextCtor();
-    if (stream && Ctor) {
+    if (stream && !processing && Ctor) {
       try {
         audio = new Ctor();
         // WebKit can create the context suspended, and a suspended analyser reads silence.
@@ -85,80 +74,40 @@ export function DictationWave({
     let width = 0;
     let height = 0;
     let rtl = false;
-    let ink = "";
-    let accent = "";
-    let peak = 0;
-    let lastStep = performance.now();
-    let lastColors = -Infinity;
+    let smooth = 0;
+    let phase = 0;
     let raf = 0;
     const style = getComputedStyle(canvas);
-    // The strip fades its text color when the take goes to the transcriber, so
-    // the colors are read again on each step, not only once at the start.
-    const readColors = (now: number) => {
-      lastColors = now;
-      ink = style.color;
-      accent = style.getPropertyValue("--primary").trim() || ink;
-    };
-    const draw = (now: number) => {
-      if (now - lastColors >= WAVE_STEP_MS) readColors(now);
-      const slots = Math.max(1, Math.floor((width + GAP) / (BAR + GAP)));
+    const draw = () => {
+      let level = 0;
       if (analyser) {
         analyser.getByteTimeDomainData(frame);
-        const level = frameLevel(frame);
-        // A context that does not run reads flat silence, so its level is not reported.
-        if (audio?.state === "running") onLevelRef.current?.(frameLevel(frame, HEAR_FLOOR));
-        peak = Math.max(peak, level);
-        if (now - lastStep >= (reduced ? REDUCED_STEP_MS : WAVE_STEP_MS)) {
-          barsRef.current = reduced
-            ? new Array<number>(slots).fill(peak)
-            : pushBar(barsRef.current, peak, slots);
-          peak = 0;
-          lastStep = now;
-        }
+        level = frameLevel(frame);
       }
-      const bars = barsRef.current.slice(-slots);
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = ink;
+      smooth += (level - smooth) * SMOOTHING;
+      if (!reduced) phase += PHASE_STEP;
       const mid = height / 2;
-      const empty = slots - bars.length;
-      const sweep = processing && !reduced ? (now % SWEEP_MS) / SWEEP_MS : -1;
-      for (let i = 0; i < slots; i++) {
-        // The newest bar sits at the inline end.
-        const x = slotX(i, width, BAR, GAP, rtl);
-        const bar = i - empty;
-        if (bar < 0) {
-          ctx.fillStyle = ink;
-          ctx.shadowBlur = 0;
-          ctx.globalAlpha = 0.18;
-          ctx.fillRect(x, mid - 0.5, BAR, 1);
-          continue;
-        }
-        const h = Math.max(MIN_BAR, (bars[bar] ?? 0) * (height - 2));
-        let alpha = 0.85;
-        const live = !processing && bars.length - bar <= ACCENT_BARS;
-        ctx.fillStyle = live ? accent : ink;
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = live ? 6 : 0;
-        if (processing) {
-          alpha = 0.3;
-          if (sweep >= 0) {
-            const at = i / slots;
-            const d = Math.abs(at - sweep);
-            alpha += 0.55 * Math.max(0, 1 - d * 6);
-          }
-        } else if (live) {
-          alpha = 1;
-        }
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        ctx.roundRect?.(x, mid - h / 2, BAR, h, BAR / 2);
-        if (!ctx.roundRect) ctx.rect(x, mid - h / 2, BAR, h);
-        ctx.fill();
+      const amp = processing ? 0 : smooth * (height / 2 - 2);
+      ctx.clearRect(0, 0, width, height);
+      // The strip fades its text color when the take goes to the transcriber,
+      // so the color is read on each frame.
+      ctx.strokeStyle = style.color;
+      ctx.globalAlpha = ALPHA * (processing ? PROCESSING_DIM : 1);
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      for (let x = 0; x <= width; x += POINT_STEP) {
+        const envelope = Math.sin((Math.PI * x) / width);
+        const y =
+          mid + Math.sin(x / 11 + phase * 3) * Math.sin(x / 37 - phase) * amp * envelope;
+        // In RTL the wave moves from the inline start, as it does in LTR.
+        const px = rtl ? width - x : x;
+        if (x === 0) ctx.moveTo(px, y);
+        else ctx.lineTo(px, y);
       }
+      ctx.stroke();
       ctx.globalAlpha = 1;
-      ctx.shadowBlur = 0;
-      const animate = analyser || (processing && !reduced);
-      raf = animate ? requestAnimationFrame(draw) : 0;
+      raf = analyser ? requestAnimationFrame(draw) : 0;
     };
     const size = () => {
       const rect = canvas.getBoundingClientRect();
@@ -166,19 +115,24 @@ export function DictationWave({
       width = rect.width;
       height = rect.height;
       rtl = style.direction === "rtl";
-      readColors(performance.now());
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // Setting the canvas size clears it. A frozen take has no loop to paint it again.
-      if (raf === 0) draw(performance.now());
+      // Setting the canvas size clears it. A flat line has no loop to paint it again.
+      if (raf === 0) draw();
     };
     size();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(size);
     observer?.observe(canvas);
+    // The flat line has no loop, so it paints again when the color fade ends.
+    const repaint = () => {
+      if (raf === 0) draw();
+    };
+    canvas.addEventListener("transitionend", repaint);
 
     return () => {
       cancelAnimationFrame(raf);
+      canvas.removeEventListener("transitionend", repaint);
       observer?.disconnect();
       void audio?.close().catch(() => undefined);
     };

@@ -3351,23 +3351,19 @@ export async function extractAttachmentText(file: File): Promise<string> {
 export interface TranscriptionResult {
   text: string;
   provider: string;
-  /** True when the backend counted the call as a live preview; an older backend omits it. */
-  partial?: boolean;
 }
 
-/** Transcribe one recorded clip; ``language`` is a soft BCP-47 locale hint.
- *  ``partial`` marks a live preview of the clip so far, which the backend
- *  counts against its own hourly cap; ``signal`` aborts the request. */
+/** Transcribe one recorded clip; ``language`` is a soft BCP-47 locale hint;
+ *  ``signal`` aborts the request. */
 export async function transcribeAudio(
   audio: Blob,
   filename: string,
   language?: string,
-  options?: { partial?: boolean; signal?: AbortSignal },
+  options?: { signal?: AbortSignal },
 ): Promise<TranscriptionResult> {
   const form = new FormData();
   form.append("audio", audio, filename);
   if (language) form.append("language", language);
-  if (options?.partial) form.append("partial", "true");
   return request<TranscriptionResult>("/transcribe", {
     method: "POST",
     body: form,

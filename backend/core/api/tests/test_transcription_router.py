@@ -2,11 +2,10 @@
 
 Mounts the router with the auth dependency overridden and the OpenRouter leg
 monkeypatched — no network. Covers the unconfigured 503, the size-cap 413,
-the happy path and the provider-failure 502. The hourly clip cap, the
-separate hourly partial cap and the monthly dictation budget run against an
-in-memory Redis double. Free platform dictation and the caller's own
-OpenRouter key run against an in-memory SQLite engine. The OpenRouter
-request/response contract runs against an ``httpx.MockTransport``.
+the happy path, the provider-failure 502, and the hourly clip cap and monthly
+dictation budget against an in-memory Redis double. Free platform dictation and
+the caller's own OpenRouter key run against an in-memory SQLite engine. The
+OpenRouter request/response contract runs against an ``httpx.MockTransport``.
 """
 
 from __future__ import annotations
@@ -91,35 +90,13 @@ def test_oversized_clip_rejected_413(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.json()["code"] == "transcription.too_large"
 
 
-def test_oversized_partial_rejected_413(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A live partial over its smaller cap is rejected, while the same clip passes as final."""
-    monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
-    monkeypatch.setattr(transcription, "_MAX_PARTIAL_BYTES", 4)
-    monkeypatch.setattr(transcription, "_MAX_PARTIAL_MB", 0.000004)
-
-    async def _fake_openrouter(_client, _audio, _filename, _key, _partial=False) -> tuple[str, float]:
-        """Return a fixed transcript for the final clip."""
-        return "ok", 0.0
-
-    monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
-    client = _client()
-    partial = client.post(
-        "/transcribe",
-        files={"audio": ("take.webm", b"12345", "audio/webm")},
-        data={"partial": "true"},
-    )
-    assert partial.status_code == 413
-    assert partial.json()["code"] == "transcription.too_large"
-    assert _post_audio(client, payload=b"12345").status_code == 200
-
-
 def test_openrouter_leg_returns_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a transcription key set, the leg serves the transcript."""
     monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
 
     seen: dict[str, str] = {}
 
-    async def _fake_openrouter(_client, _audio, _filename, key, _partial=False) -> tuple[str, float]:
+    async def _fake_openrouter(_client, _audio, _filename, key) -> tuple[str, float]:
         """Record the key and return a Hebrew transcript."""
         seen["key"] = key
         return "מהיר מאוד", 0.0001
@@ -127,7 +104,7 @@ def test_openrouter_leg_returns_transcript(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
     resp = _post_audio(_client())
     assert resp.status_code == 200
-    assert resp.json() == {"text": "מהיר מאוד", "provider": "openrouter", "partial": False}
+    assert resp.json() == {"text": "מהיר מאוד", "provider": "openrouter"}
     assert seen == {"key": "sk-or-test"}
 
 
@@ -135,7 +112,7 @@ def test_provider_failure_returns_502(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failing OpenRouter call answers a typed 502."""
     monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
 
-    async def _boom(_client, _audio, _filename, _key, _partial=False) -> tuple[str, float]:
+    async def _boom(_client, _audio, _filename, _key) -> tuple[str, float]:
         """Fail like an upstream error."""
         raise RuntimeError("openrouter transcribe: 500")
 
@@ -159,7 +136,7 @@ def _count_openrouter_calls(monkeypatch: pytest.MonkeyPatch, cost: float = 0.000
     """Stub the OpenRouter leg and return a list that grows by one per call."""
     calls: list[int] = []
 
-    async def _fake_openrouter(_client, _audio, _filename, _key, _partial=False) -> tuple[str, float]:
+    async def _fake_openrouter(_client, _audio, _filename, _key) -> tuple[str, float]:
         """Count each call and return a fixed transcript."""
         calls.append(1)
         return "hi", cost
@@ -168,24 +145,21 @@ def _count_openrouter_calls(monkeypatch: pytest.MonkeyPatch, cost: float = 0.000
     return calls
 
 
-def test_router_passes_partial_to_the_openrouter_leg(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A live preview reaches the leg as partial, so it uses the smaller cost floor."""
+def test_router_reuses_one_http_client_across_clips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each clip goes out on the same client, so the OpenRouter connection stays open."""
     monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
-    seen: list[bool] = []
+    seen: list[httpx.AsyncClient] = []
 
-    async def _fake_openrouter(_client, _audio, _filename, _key, partial=False) -> tuple[str, float]:
-        """Record whether the call was a partial."""
-        seen.append(partial)
+    async def _fake_openrouter(client, _audio, _filename, _key) -> tuple[str, float]:
+        """Record the client the route passed in."""
+        seen.append(client)
         return "hi", 0.0
 
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
     client = _client()
-    preview = client.post("/transcribe", files={"audio": ("take.webm", b"12", "audio/webm")}, data={"partial": "true"})
-    final = _post_audio(client)
-    assert final.status_code == 200
-    assert seen == [True, False]
-    # The composer stops previews when this mark is missing (an older backend).
-    assert [preview.json()["partial"], final.json()["partial"]] == [True, False]
+    assert [_post_audio(client).status_code for _ in range(2)] == [200, 200]
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
 
 
 def test_clip_cost_uses_reported_cost_then_falls_back_to_seconds() -> None:
@@ -195,9 +169,6 @@ def test_clip_cost_uses_reported_cost_then_falls_back_to_seconds() -> None:
     assert transcription._clip_cost({"seconds": 3.0}) == pytest.approx(10 / 3600 * 0.04)
     assert transcription._clip_cost({}) == pytest.approx(10 / 3600 * 0.04)
     assert transcription._clip_cost({"seconds": 90.0}) == pytest.approx(90 / 3600 * 0.04)
-    assert transcription._clip_cost({}, partial=True) == pytest.approx(3 / 3600 * 0.04)
-    assert transcription._clip_cost({"seconds": 4.0}, partial=True) == pytest.approx(4 / 3600 * 0.04)
-    assert transcription._clip_cost({"cost": 0.0001}, partial=True) == pytest.approx(0.0001)
 
 
 async def _call_openrouter(handler: Any) -> tuple[str, float]:
@@ -272,55 +243,6 @@ def test_hourly_clip_cap_answers_429(monkeypatch: pytest.MonkeyPatch, redis_doub
     assert len(calls) == 2
 
 
-def _post_partial(client: TestClient) -> httpx.Response:
-    """POST a small multipart clip to /transcribe as a live partial."""
-    return client.post(
-        "/transcribe",
-        files={"audio": ("take.webm", b"RIFFxxxx", "audio/webm")},
-        data={"language": "he-IL", "partial": "true"},
-    )
-
-
-def test_partial_uses_partial_cap_not_clip_cap(
-    monkeypatch: pytest.MonkeyPatch, redis_double: fakeredis.FakeStrictRedis
-) -> None:
-    """Partials count against their own hourly cap and leave the clip cap untouched."""
-    monkeypatch.setattr(settings, "rate_limit_transcriptions_per_hour", 1)
-    monkeypatch.setattr(settings, "rate_limit_transcription_partials_per_hour", 3)
-    calls = _count_openrouter_calls(monkeypatch)
-    client = _client()
-    assert [_post_partial(client).status_code for _ in range(4)] == [200, 200, 200, 429]
-    assert [_post_audio(client).status_code for _ in range(2)] == [200, 429]
-    assert len(calls) == 4
-
-
-def test_clip_does_not_use_partial_cap(
-    monkeypatch: pytest.MonkeyPatch, redis_double: fakeredis.FakeStrictRedis
-) -> None:
-    """A normal clip still counts against the clip cap only, so partials stay open."""
-    monkeypatch.setattr(settings, "rate_limit_transcriptions_per_hour", 2)
-    monkeypatch.setattr(settings, "rate_limit_transcription_partials_per_hour", 1)
-    calls = _count_openrouter_calls(monkeypatch)
-    client = _client()
-    assert [_post_audio(client).status_code for _ in range(2)] == [200, 200]
-    assert [_post_partial(client).status_code for _ in range(2)] == [200, 429]
-    assert len(calls) == 3
-
-
-def test_partial_records_platform_spend(
-    monkeypatch: pytest.MonkeyPatch, redis_double: fakeredis.FakeStrictRedis
-) -> None:
-    """A platform-paid partial counts its cost against the monthly budget like a clip."""
-    monkeypatch.setattr(settings, "transcription_monthly_budget_usd", 0.001)
-    calls = _count_openrouter_calls(monkeypatch, cost=0.002)
-    client = _client()
-    assert _post_partial(client).status_code == 200
-    resp = _post_partial(client)
-    assert resp.status_code == 503
-    assert resp.json()["code"] == "transcription.budget_exhausted"
-    assert len(calls) == 1
-
-
 class _BillingStore:
     """Job-store stand-in exposing an engine."""
 
@@ -355,7 +277,7 @@ def _seen_keys(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Stub the OpenRouter leg and return the list of API keys it was called with."""
     keys: list[str] = []
 
-    async def _fake_openrouter(_client, _audio, _filename, key, _partial=False) -> tuple[str, float]:
+    async def _fake_openrouter(_client, _audio, _filename, key) -> tuple[str, float]:
         """Record the key and return a fixed transcript."""
         keys.append(key)
         return "hi", 0.0001

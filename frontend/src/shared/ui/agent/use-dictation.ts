@@ -5,14 +5,6 @@ import * as React from "react";
 import { ApiError, transcribeAudio } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 
-import {
-  UNIT_HEAD_BYTES,
-  audioStarts,
-  canShowLiveWords,
-  joinHeard,
-  partialDue,
-} from "./dictation-level";
-
 /** The composer's voice state: recording live, transcribing the take, or
  *  showing a short-lived failure before returning to idle. */
 export type DictationState =
@@ -24,15 +16,6 @@ export type DictationState =
 const ERR_DISMISS_MS = 4500;
 // A reason that "try again" won't fix needs long enough to be read.
 const REASON_DISMISS_MS = 6000;
-// Live updates that fail this many times in a row stop for the rest of the take.
-const MAX_LIVE_FAILURES = 3;
-// The wave reads a level each frame (16 to 33 ms). A longer gap means it stopped
-// reading (a hidden tab or a stall), so the level is stale. A false "sound" only
-// sends one more update, so the limit stays short.
-const FRESH_LEVEL_MS = 200;
-// A chunk holds no audio from before the previous chunk arrived, apart from
-// the encoder's delay.
-const ENCODER_MARGIN_MS = 1000;
 
 /** The backend's own reason when retrying can't help (no key, not eligible,
  *  over a cap, too large); null for a transient failure. */
@@ -63,14 +46,11 @@ export function useDictation({
   const [seconds, setSeconds] = React.useState(0);
   // The live mic stream, so the composer can draw its level while recording.
   const [stream, setStream] = React.useState<MediaStream | null>(null);
-  // Words heard so far, from the live updates; replaced by the final transcript.
-  const [live, setLive] = React.useState("");
   // True while the browser asks for the mic, so a second click cannot start a second take.
   const [starting, setStarting] = React.useState(false);
   const startingRef = React.useRef(false);
   // Teardown moves this on, so a take whose mic prompt resolves late knows it is stale.
   const takeRef = React.useRef(0);
-  const partialRef = React.useRef<AbortController | null>(null);
   const finalRef = React.useRef<AbortController | null>(null);
   const recorderRef = React.useRef<MediaRecorder | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
@@ -81,8 +61,6 @@ export function useDictation({
   // start() is declared first, so its stop handler reaches these through refs.
   const settleRef = React.useRef<() => void>(() => {});
   const sendTakeRef = React.useRef<(take: number) => void>(() => {});
-  // When the waveform last read the mic level, and when that level last held sound.
-  const soundRef = React.useRef({ read: 0, loud: 0 });
   const onTextRef = React.useRef(onText);
   React.useEffect(() => {
     onTextRef.current = onText;
@@ -91,12 +69,9 @@ export function useDictation({
   const teardown = React.useCallback(() => {
     takeRef.current += 1;
     window.clearInterval(tickRef.current);
-    partialRef.current?.abort();
-    partialRef.current = null;
     // The user left this take, so drop its reply. The server still runs and pays for it.
     finalRef.current?.abort();
     finalRef.current = null;
-    setLive("");
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.ondataavailable = null;
@@ -171,23 +146,10 @@ export function useDictation({
     }
     recorderRef.current = recorder;
     chunksRef.current = [];
-    // When each chunk arrived, by the byte offset where it ends. A unit's audio
-    // starts no earlier than the arrival of the chunk before the one with its
-    // first byte, whatever the unit's length (Chrome's WebM clusters may span
-    // seconds) and however late the recorder hands a chunk over.
-    const t0 = Date.now();
-    const arrivals: Array<{ end: number; at: number }> = [];
-    let recorded = 0;
     recorder.ondataavailable = (ev) => {
-      if (!ev.data || ev.data.size <= 0) return;
-      chunksRef.current.push(ev.data);
-      recorded += ev.data.size;
-      arrivals.push({ end: recorded, at: Date.now() });
+      if (ev.data && ev.data.size > 0) chunksRef.current.push(ev.data);
     };
-    const audioFrom = (offset: number) => {
-      const i = arrivals.findIndex((chunk) => chunk.end > offset);
-      return i <= 0 ? t0 : arrivals[i - 1]!.at;
-    };
+    const t0 = Date.now();
     // The browser stops the recorder by itself when the mic goes away (unplugged,
     // permission revoked). Send what was recorded, as Finish does; finish()
     // replaces this handler for a stop the user asks for.
@@ -197,118 +159,11 @@ export function useDictation({
       settleRef.current();
       sendTakeRef.current(take);
     };
-    // The take start counts as a read, so a first read that comes late (a slow
-    // audio start) marks the gap as sound, as a hidden tab does.
-    soundRef.current = { read: Date.now(), loud: 0 };
     setSeconds(0);
-    setLive("");
-    let lastSent = 0;
-    // The bytes that a live update already turned into words (always a unit
-    // start, or 0), and those words in order.
-    let heardBytes = 0;
-    const heard: string[] = [];
-    // The header ends where the first unit starts (0 until then). The last unit
-    // found may still grow. The scan reads only the bytes after `scanned`.
-    let headerEnd = 0;
-    let lastStart = 0;
-    const unitStarts: number[] = [];
-    let scanned = 0;
-    // A reason that retrying cannot fix (no key, budget spent) ends live updates.
-    // A browser that cannot show live words sends none.
-    let livePaused = !canShowLiveWords();
-    // A provider outage would fail every update, so a run of failures ends them too.
-    let failures = 0;
-    // Whisper cannot resume a clip, so each live update sends the file header and
-    // only the whole audio units since the last one that worked. The last unit
-    // may still grow, so it waits for the next update. The words join in order.
-    const sendPartial = async (elapsed: number) => {
-      lastSent = elapsed;
-      const ctrl = new AbortController();
-      partialRef.current = ctrl;
-      const mp4 = mimeRef.current.startsWith("audio/mp4");
-      const take = new Blob(chunksRef.current);
-      // The last scan may have stopped inside a unit's head, so it reads that part again.
-      const from = Math.max(0, scanned - UNIT_HEAD_BYTES);
-      const bytes = new Uint8Array(
-        await take
-          .slice(from)
-          .arrayBuffer()
-          .catch(() => new ArrayBuffer(0)),
-      );
-      if (bytes.length) {
-        for (const at of audioStarts(bytes, mp4, from)) {
-          if (at <= lastStart) continue;
-          if (!headerEnd) headerEnd = at;
-          unitStarts.push(at);
-          lastStart = at;
-        }
-        scanned = from + bytes.length;
-      }
-      const end = lastStart;
-      if (livePaused || ctrl.signal.aborted || end <= Math.max(heardBytes, headerEnd)) {
-        if (partialRef.current === ctrl) partialRef.current = null;
-        return;
-      }
-      // Whisper makes up words ("Thank you.") for a clip of silence. When the
-      // wave reads the mic and heard no sound in these units, they count as
-      // heard with no words. With no fresh level, every update goes out.
-      const sentAt = Date.now();
-      const sound = soundRef.current;
-      const first = Math.max(heardBytes, headerEnd);
-      // An MP4 fragment's moof lists all its samples, so the browser writes it
-      // after the fragment's audio ends. The unit before it starts no later
-      // than this unit's audio does.
-      const unitAt = mp4 ? (unitStarts.findLast((at) => at < first) ?? 0) : first;
-      const unitFrom = audioFrom(unitAt) - ENCODER_MARGIN_MS;
-      if (sentAt - sound.read < FRESH_LEVEL_MS && sound.loud < unitFrom) {
-        heardBytes = end;
-        if (partialRef.current === ctrl) partialRef.current = null;
-        return;
-      }
-      const parts =
-        heardBytes === 0
-          ? [take.slice(0, end)]
-          : [take.slice(0, headerEnd), take.slice(heardBytes, end)];
-      const blob = new Blob(parts, { type: mimeRef.current });
-      const filename = mp4 ? "take.m4a" : "take.webm";
-      transcribeAudio(blob, filename, language, { partial: true, signal: ctrl.signal })
-        .then(({ text, partial }) => {
-          failures = 0;
-          // An older backend counts each preview against the clip cap, which the
-          // final call needs, so the take sends no more previews.
-          if (partial !== true) livePaused = true;
-          if (ctrl.signal.aborted || recorderRef.current !== recorder) return;
-          heardBytes = end;
-          const words = (text ?? "").trim();
-          if (words) heard.push(words);
-          setLive(joinHeard(heard));
-        })
-        .catch((err: unknown) => {
-          // A long hidden tab slows the tick to about once a minute, so the units
-          // can outgrow the live cap. They count as heard; the final clip holds them.
-          if (err instanceof ApiError && err.code === "transcription.too_large") {
-            if (recorderRef.current === recorder) heardBytes = end;
-            return;
-          }
-          if (blockedReason(err)) livePaused = true;
-          if (!ctrl.signal.aborted && ++failures >= MAX_LIVE_FAILURES) livePaused = true;
-        })
-        .finally(() => {
-          if (partialRef.current === ctrl) partialRef.current = null;
-        });
-    };
-    tickRef.current = window.setInterval(() => {
-      const elapsed = Date.now() - t0;
-      setSeconds(Math.round(elapsed / 1000));
-      if (
-        !livePaused &&
-        !partialRef.current &&
-        chunksRef.current.length &&
-        partialDue(elapsed, lastSent)
-      ) {
-        void sendPartial(elapsed);
-      }
-    }, 500);
+    tickRef.current = window.setInterval(
+      () => setSeconds(Math.round((Date.now() - t0) / 1000)),
+      500,
+    );
     setState({ kind: "rec" });
     try {
       recorder.start(1000);
@@ -318,7 +173,7 @@ export function useDictation({
     } catch {
       fail(msg("agent.composer.mic_unavailable"));
     }
-  }, [fail, language]);
+  }, [fail]);
 
   const cancel = React.useCallback(() => {
     teardown();
@@ -351,7 +206,6 @@ export function useDictation({
           // retryable failure instead of appending nothing.
           if (!clean) throw new Error("empty transcript");
           setState({ kind: "idle" });
-          setLive("");
           onTextRef.current(clean);
         } catch (err) {
           if (take !== takeRef.current) return;
@@ -366,12 +220,9 @@ export function useDictation({
     [fail, language],
   );
 
-  // Stop the live updates and show the take as busy until its transcript returns.
+  // Stop the timer and show the take as busy until its transcript returns.
   const settle = React.useCallback(() => {
     window.clearInterval(tickRef.current);
-    // The final request replaces any live update still on its way.
-    partialRef.current?.abort();
-    partialRef.current = null;
     // The waveform freezes on the take as soon as the user stops talking.
     setStream(null);
     setState({ kind: "busy" });
@@ -390,16 +241,6 @@ export function useDictation({
     recorder.stop();
   }, [sendTake, settle]);
 
-  // The waveform reports each mic level it reads, so a silent stretch sends no live update.
-  const hearLevel = React.useCallback((level: number) => {
-    const now = Date.now();
-    // After a gap in the reads (a hidden tab), the take may hold unheard speech.
-    if (soundRef.current.read && now - soundRef.current.read >= FRESH_LEVEL_MS)
-      soundRef.current.loud = now;
-    soundRef.current.read = now;
-    if (level > 0) soundRef.current.loud = now;
-  }, []);
-
   // A recording left running when the host unmounts would hold the mic open.
   React.useEffect(
     () => () => {
@@ -409,7 +250,7 @@ export function useDictation({
     [teardown],
   );
 
-  return { state, starting, seconds, stream, live, start, cancel, finish, hearLevel };
+  return { state, starting, seconds, stream, start, cancel, finish };
 }
 
 /** mm:ss for the live recording timer. */
