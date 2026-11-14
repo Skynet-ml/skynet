@@ -38,9 +38,11 @@ from ...storage.tests.test_remote_jobstore import SQLiteJobStore
 from .. import repo_judge
 from ..auth import AuthenticatedUser
 from ..errors import DomainError
+from ..routers.optimizations import lifecycle
 from ..routers.optimizations.lifecycle import cancel_optimization
 
 USER = "alice@example.com"
+ADMIN = AuthenticatedUser(username="admin1", role="admin", groups=())
 BASE = "a" * 40
 GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
 CONTRACT_PATCH = (
@@ -1933,6 +1935,117 @@ def test_an_open_that_stops_after_it_creates_the_row_answers_pending_and_resumes
     assert (budget.job_id, budget.state) == (session_id, "attached")
     assert repo_judge.open_session_ids(store.engine, USER, "d1") == [session_id]
     assert _call(store, session_id)["status"] == "scored"
+
+
+def _stuck_open(job_store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Leave the row of an open that stopped after it created the row: ``pending`` with no payload.
+
+    Args:
+        job_store: The store.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        The session id.
+    """
+    real = job_store.update_job_if_status
+
+    def fail(*args: Any, **kwargs: Any) -> bool:
+        """Fail the opening write once, then write as the store does.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's fields.
+
+        Returns:
+            Whether the write stored the row.
+
+        Raises:
+            _WriteError: On the first write.
+        """
+        monkeypatch.setattr(job_store, "update_job_if_status", real)
+        raise _WriteError
+
+    monkeypatch.setattr(job_store, "update_job_if_status", fail)
+    with pytest.raises(_WriteError):
+        _open(job_store)
+    session_id = job_store.find_job_by_idempotency_key(USER, repo_judge.judge_key("d1", "e" * 16))
+    job = job_store.get_job(session_id)
+    assert (job["status"], job["payload"], job["execution_budget_id"]) == ("pending", None, None)
+    return session_id
+
+
+def test_an_admin_cancel_with_a_row_read_before_the_open_closes_the_budget(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End the session and close its budget when an admin read the pending row before a resume finished the open."""
+    _fake_open_gates(monkeypatch)
+    session_id = _stuck_open(store, monkeypatch)
+    real_read = lifecycle.require_role_at_least
+    resumed: list[str] = []
+
+    def read_then_resume(*args: Any, **kwargs: Any) -> Any:
+        """Read the row as the admin cancel does, then let the owner's resume finish the open.
+
+        Args:
+            *args: The read's arguments.
+            **kwargs: The read's options.
+
+        Returns:
+            The admin's copy of the row and the role.
+        """
+        found = real_read(*args, **kwargs)
+        assert found[0]["payload"] is None
+        resumed.append(_resume(store, session_id))
+        return found
+
+    monkeypatch.setattr(lifecycle, "require_role_at_least", read_then_resume)
+    assert cancel_optimization(store, session_id, ADMIN, None).status == "cancelled"
+    assert resumed == [session_id]
+    job = store.get_job(session_id)
+    assert job["status"] == "cancelled"
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state, budget.blocked_reason) == (session_id, "closed", "judge_ended")
+    assert repo_judge.open_session_ids(store.engine, USER, "d1") == []
+    answer = _call(store, session_id)
+    assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
+    assert boxes["paid"] == []
+
+
+def test_an_admin_cancel_of_a_stuck_opening_row_ends_it_and_a_resume_does_not_reopen_it(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End a pending judge row with no payload on an admin cancel, and keep it ended after a same-argument resume."""
+    _fake_open_gates(monkeypatch)
+    session_id = _stuck_open(store, monkeypatch)
+    assert repo_judge.is_session(store, session_id)
+    assert cancel_optimization(store, session_id, ADMIN, None).status == "cancelled"
+    assert store.get_job(session_id)["status"] == "cancelled"
+    assert _resume(store, session_id) == session_id
+    job = store.get_job(session_id)
+    assert job["status"] == "cancelled"
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state, budget.blocked_reason) == (session_id, "closed", "judge_ended")
+    assert repo_judge.open_session_ids(store.engine, USER, "d1") == []
+    answer = _call(store, session_id)
+    assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
+    assert boxes["paid"] == []
+
+
+@pytest.mark.parametrize("key", ["submit-key", None])
+def test_an_admin_cancel_of_a_pending_normal_row_with_no_payload_cancels_it(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch, key: str | None
+) -> None:
+    """Cancel a normal pending row with no payload on the normal path, as before the judge check."""
+    store.create_job("normal-run", username=USER, idempotency_key=key)
+    assert not repo_judge.is_session(store, "normal-run")
+    assert not repo_judge.is_session(store, "no-such-run")
+    ends: list[Any] = []
+    monkeypatch.setattr(lifecycle.repo_judge, "end_session", lambda *args, **kwargs: ends.append(args))
+    assert cancel_optimization(store, "normal-run", ADMIN, None).status == "cancelled"
+    assert store.get_job("normal-run")["status"] == "cancelled"
+    assert ends == []
 
 
 def test_a_resume_of_a_running_opening_row_finishes_the_open(

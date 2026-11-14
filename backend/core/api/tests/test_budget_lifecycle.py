@@ -131,3 +131,45 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     assert ends == []
     assert store.get_job("judge-session")["status"] == "running"
     assert store.get_job("normal-run")["status"] == "cancelled"
+
+
+def test_bulk_cancel_skips_a_pending_judge_row_with_no_payload_and_cancels_a_normal_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip a judge row that an open left pending with no payload, and still cancel a normal pending row."""
+    store = _BaseFakeJobStore()
+    store.seed_job("judge-opening", status="pending", username="alice", payload=None)
+    store.seed_job("normal-pending", status="pending", username="alice", payload=None)
+    store.engine = object()
+    keys = []
+
+    def is_session(job_store: object, session_id: str) -> bool:
+        """Stand for the stored-key read: only ``judge-opening`` has a judge key.
+
+        Args:
+            job_store: The store.
+            session_id: The row.
+
+        Returns:
+            Whether the row is a judge session.
+        """
+        keys.append(session_id)
+        return session_id == "judge-opening"
+
+    monkeypatch.setattr(lifecycle.repo_judge, "is_session", is_session)
+    monkeypatch.setattr(lifecycle.repo_judge, "end_session", lambda *args, **kwargs: pytest.fail("no end"))
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+    response = TestClient(app).post(
+        "/optimizations/bulk-cancel", json={"optimization_ids": ["judge-opening", "normal-pending"]}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["cancelled"] == ["normal-pending"]
+    assert body["skipped"] == [
+        {"optimization_id": "judge-opening", "reason": "judge_session: call stop_run with this id to end it"}
+    ]
+    assert keys == ["judge-opening", "normal-pending"]
+    assert store.get_job("judge-opening")["status"] == "pending"
+    assert store.get_job("normal-pending")["status"] == "cancelled"

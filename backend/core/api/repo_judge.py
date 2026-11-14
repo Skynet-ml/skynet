@@ -202,6 +202,25 @@ def is_opening(job: dict[str, Any]) -> bool:
     return bool(((job.get("payload") or {}).get("judge") or {}).get("opening"))
 
 
+def is_session(job_store: Any, session_id: str) -> bool:
+    """Tell whether a row is a judge session by its stored key.
+
+    A row from an open that stopped before its opening write has no payload,
+    so only its idempotency key shows that it is a judge session.
+
+    Args:
+        job_store: Store whose engine holds the run rows.
+        session_id: The row's id.
+
+    Returns:
+        True when the row's key starts with ``JUDGE_KEY_PREFIX``; False for a
+        row with no key or an unknown id.
+    """
+    with Session(job_store.engine) as session:
+        key = session.scalar(select(JobModel.idempotency_key).where(JobModel.optimization_id == session_id))
+    return bool(key) and key.startswith(JUDGE_KEY_PREFIX)
+
+
 def _as_utc(value: datetime) -> datetime:
     """Read a stored time as UTC, since SQLite returns it without a zone.
 
