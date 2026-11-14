@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import re
@@ -59,7 +60,7 @@ from core.service_gateway.optimization.blackbox.sandbox import (
     LocalSubprocessSession,
     SandboxSpec,
 )
-from core.service_gateway.optimization.blackbox.service import legacy_case_splits
+from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
 from core.worker import repo_staging, scoped_relay
@@ -3169,3 +3170,630 @@ def test_without_cases_the_entry_runs_once_with_no_input(monkeypatch: pytest.Mon
         staged.close_scorers()
         staged.cleanup()
     assert json.loads(result["feedback"]) == {"case": None, "output": {"value": None, "sees_cases": False}}
+
+
+_RECORD_METRIC = "def score(prediction, case):\n    return 1.0\n"
+_PINNED_IMAGE = "registry.example/skynet-sandbox@sha256:" + "a" * 64
+
+
+def _framed(path: str, data: bytes) -> bytes:
+    """Frame one part of the metric hash the way the docs say.
+
+    Args:
+        path: The part's path.
+        data: The part's bytes.
+
+    Returns:
+        ``<path>\\0<length>\\0<SHA-256 hex of the bytes>``.
+    """
+    return path.encode() + b"\0" + str(len(data)).encode() + b"\0" + hashlib.sha256(data).hexdigest().encode()
+
+
+def _guest_details(cases: list[Any], seed: int | None, **extra: Any) -> dict[str, Any]:
+    """Build the ``details`` a current guest writes: the split positions plus ``extra``.
+
+    Args:
+        cases: The cases the guest received.
+        seed: The run's seed.
+        **extra: More ``details`` keys, such as ``outcome``.
+
+    Returns:
+        The details.
+    """
+    return {CASE_SPLIT_KEY: case_split_positions(cases, legacy_case_splits(cases, seed), seed), **extra}
+
+
+def _record_payload(**extra: Any) -> dict[str, Any]:
+    """Build the fixture payload with a python entry metric.
+
+    Args:
+        **extra: Payload keys to add.
+
+    Returns:
+        The payload.
+    """
+    return {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": _RECORD_METRIC}, "seed": 7, **extra}
+
+
+def _ruled_cases_tree(*, target: bool = False, minimums: bool = False) -> dict[str, str]:
+    """Build the cases tree whose ``optimize.toml`` sets a target, a ``recall`` minimum, both or neither.
+
+    Args:
+        target: Whether the file sets ``[outcome] target = 0.9``.
+        minimums: Whether the file sets ``[outcome.require] recall = 0.8``.
+
+    Returns:
+        The tree.
+    """
+    rules = ("\n[outcome]\ntarget = 0.9\n" if target else "") + (
+        "\n[outcome.require]\nrecall = 0.8\n" if minimums else ""
+    )
+    return {**_CASES_TREE, "optimize.toml": _CASES_TREE["optimize.toml"] + rules}
+
+
+def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with a cases file gets the file's hashes, the guest's split and the verdict keys (SKY-694)."""
+    tree = _ruled_cases_tree(target=True)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        outcome = {"target": 0.9, "target_reached": True}
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    metric = hashlib.sha256(
+        _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): ...\n")
+    )
+    assert record["contract_sha256"] == hashlib.sha256(tree["optimize.toml"].encode()).hexdigest()
+    assert record["metric_sha256"] == metric.hexdigest()
+    assert record["metric_home"] == "repository"
+    assert record["cases_sha256"] == hashlib.sha256(_CASES_JSONL.encode()).hexdigest()
+    assert record["cases_source"] == "file"
+    assert record["seed"] == 7
+    assert record["image"] == _PINNED_IMAGE
+    assert (record["target_reached"], record["contract_met"]) == (True, True)
+    assert "minimums_passed" not in record
+    assert "failed_minimums" not in record
+    split = record["split"]
+    assert split["rule"] == "pairs"
+    assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(20))
+    text = json.dumps(record)
+    for secret_or_content in ("secret-value", "place 0", '"expected"', "return 1.0", "def score"):
+        assert secret_or_content not in text
+
+
+def test_a_draft_metric_file_makes_the_judge_the_metric_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft that replaces a [metric] file is held by Skynet, not by the pinned commit."""
+    payload = _record_payload()
+    payload["target"]["repo"]["draft_files"] = {"eval/scorer.py": "def score(): return 2\n"}
+    _, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
+    staged.cleanup()
+
+    assert staged.record_facts["metric_home"] == "judge"
+    metric = _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): return 2\n")
+    assert staged.record_facts["metric_sha256"] == hashlib.sha256(metric).hexdigest()
+
+
+def _big_metric_archive(tmp_path: Path, body: bytes) -> Path:
+    """Pack a tree with one ``[metric] files`` member, a duplicate of it and a cases file.
+
+    Args:
+        tmp_path: Folder for the archive.
+        body: The bytes of the later ``eval/data.bin`` member.
+
+    Returns:
+        The ``tree.tgz`` path.
+    """
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name, data in (("eval/data.bin", b"old"), ("eval/data.bin", body), ("cases.jsonl", b"{}\n")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            packed.addfile(info, io.BytesIO(data))
+    return archive
+
+
+def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) -> None:
+    """A member over one hash chunk gets the documented hash; the later of two same-path members counts."""
+    body = bytes(range(256)) * ((repo_staging._HASH_CHUNK * 2 + 4096) // 256 + 1)
+    archive = _big_metric_archive(tmp_path, body)
+
+    facts = repo_staging._record_facts(
+        archive,
+        contract_sha256="0" * 64,
+        metric_files=("eval",),
+        metric_code=_RECORD_METRIC,
+        drafts={},
+        cases_file="cases.jsonl",
+        cases=None,
+    )
+
+    code = _RECORD_METRIC.encode()
+    parts = [
+        b"metric.py\0" + str(len(code)).encode() + b"\0" + hashlib.sha256(code).hexdigest().encode(),
+        b"eval/data.bin\0" + str(len(body)).encode() + b"\0" + hashlib.sha256(body).hexdigest().encode(),
+    ]
+    assert facts["metric_sha256"] == hashlib.sha256(b"".join(parts)).hexdigest()
+    assert facts["cases_sha256"] == hashlib.sha256(b"{}\n").hexdigest()
+
+
+def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every read of a member asks for at most one chunk, so a large file never sits in memory."""
+    archive = _big_metric_archive(tmp_path, b"x" * (repo_staging._HASH_CHUNK + 1))
+    sizes: list[int | None] = []
+    extract = tarfile.TarFile.extractfile
+
+    def bounded(self: tarfile.TarFile, member: Any) -> Any:
+        """Wrap the member's file object so every read is recorded.
+
+        Args:
+            self: The open archive.
+            member: The member to open.
+
+        Returns:
+            The wrapped file object.
+        """
+        handle = extract(self, member)
+        read = handle.read
+
+        def checked(size: int | None = -1) -> bytes:
+            """Record the requested size, then read.
+
+            Args:
+                size: The requested byte count.
+
+            Returns:
+                The bytes read.
+            """
+            sizes.append(size)
+            return read(size)
+
+        handle.read = checked
+        return handle
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", bounded)
+    repo_staging._record_facts(
+        archive,
+        contract_sha256="0" * 64,
+        metric_files=("eval",),
+        metric_code="",
+        drafts={},
+        cases_file="cases.jsonl",
+        cases=None,
+    )
+
+    assert sizes
+    assert all(isinstance(size, int) and 0 < size <= repo_staging._HASH_CHUNK for size in sizes)
+
+
+def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Request cases hash as sorted compact JSON; a file with no [metric] files has the judge as home."""
+    cases = [{"input": "é", "expected": 1}, {"input": "b", "expected": 2}]
+    staged_payload, staged = _stage_with(_FILES, monkeypatch, _record_payload(cases=cases))
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=None)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    assert record["cases_sha256"] == hashlib.sha256(canonical).hexdigest()
+    assert record["cases_source"] == "request"
+    assert record["metric_home"] == "judge"
+    assert record["metric_sha256"] == hashlib.sha256(_framed("metric.py", _RECORD_METRIC.encode())).hexdigest()
+    assert record["image"] is None
+    assert record["contract_met"] is True
+
+
+def test_a_run_with_no_cases_has_no_split_and_no_cases_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no cases the record says so: the split, the cases hash and its source are null."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert (record["split"], record["cases_sha256"], record["cases_source"]) == (None, None, None)
+
+
+def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guest image from before the record writes no positions, so the run gets no record and nothing fails."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details={"outcome": {"target": 0.9, "target_reached": True}})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {CASE_SPLIT_KEY: {"rule": "pairs", "search": 5, "validation": [], "held_out": []}},
+        {"outcome": ["target_reached"]},
+        {"outcome": "target_reached"},
+        {"outcome": {"target_reached": "yes"}},
+        {"outcome": {"target_reached": False, "target": "high"}},
+        {"outcome": {"minimums_passed": False, "failed_minimums": "latency"}},
+        {"outcome": {"minimums_passed": False, "failed_minimums": ["latency"]}},
+    ],
+)
+def test_a_malformed_guest_split_or_verdict_skips_the_record(
+    monkeypatch: pytest.MonkeyPatch, bad: dict[str, Any]
+) -> None:
+    """The guest writes ``details``, so a value of another shape skips the record and the run ends as usual."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details={**_guest_details(staged_payload["cases"], 7), **bad})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+@pytest.mark.parametrize("result", [_result(0.5, 0.8), _result(0.5, 0.8, details=None), {"best_score": 0.8}])
+def test_a_run_from_before_the_record_gets_none_and_does_not_fail(tmp_path: Path, result: dict[str, Any]) -> None:
+    """A tree staged with no record facts, or a result with no details, makes no record and no record block."""
+    repo_staging.add_run_record(result, _payload("c" * 40), _staged(tmp_path), image=_PINNED_IMAGE)
+
+    assert "record" not in (result.get("details") or {})
+    assert "Run record" not in repo_staging._description(_result(0.5, 0.8), _EDIT, "https://x/run")
+
+
+def _recorded(**verdict: Any) -> dict[str, Any]:
+    """Build a result whose details hold a record with the given verdict keys.
+
+    Args:
+        **verdict: ``target_reached``, ``minimums_passed``, ``failed_minimums`` and ``contract_met``.
+
+    Returns:
+        The result.
+    """
+    record = {
+        "contract_sha256": "1" * 64,
+        "metric_sha256": "2" * 64,
+        "metric_home": "repository",
+        "cases_sha256": "3" * 64,
+        "cases_source": "file",
+        "seed": 7,
+        "split": {"rule": "pairs", "seed": 7, "search": [2, 0], "validation": [1], "held_out": [3]},
+        "image": _PINNED_IMAGE,
+        **verdict,
+    }
+    return _result(0.5, 0.85, details={"outcome": {"target": 0.9}, "record": record})
+
+
+def test_the_pull_request_shows_the_record_for_a_run_that_met_the_contract() -> None:
+    """The block starts with the plain line, then every field with the full SHA-256 values."""
+    body = repo_staging._description(
+        _recorded(target_reached=True, minimums_passed=True, failed_minimums=[], contract_met=True),
+        _EDIT,
+        "https://x/run",
+    )
+
+    assert "This run met the contract.\n\nRun record:\n" in body
+    for digest in ("1" * 64, "2" * 64, "3" * 64):
+        assert f"`{digest}`" in body
+    assert "(metric home: repository)" in body
+    assert "- Seed: 7" in body
+    assert "- Split: `pairs`, seed 7: search [2, 0]; validation [1]; held_out [3]" in body
+    assert f"- Sandbox image: `{_PINNED_IMAGE}`" in body
+    assert body.index("Run record:") < body.index("Review the run:")
+
+
+@pytest.mark.parametrize(
+    ("verdict", "line"),
+    [
+        (
+            {"target_reached": False, "contract_met": False},
+            "This run did not meet the contract. The final score 0.85 did not reach the target 0.9.",
+        ),
+        (
+            {
+                "minimums_passed": False,
+                "failed_minimums": [
+                    {
+                        "name": "recall",
+                        "minimum": 0.8,
+                        "value": 0.5,
+                        "reason": "'recall' scored 0.5, below its minimum 0.8.",
+                    }
+                ],
+                "contract_met": False,
+            },
+            "This run did not meet the contract. 'recall' scored 0.5, below its minimum 0.8.",
+        ),
+        ({"contract_met": True}, "The optimize.toml file sets no target and no minimum."),
+    ],
+)
+def test_the_pull_request_line_names_the_failed_rule_or_no_rule(verdict: dict[str, Any], line: str) -> None:
+    """A failed target or minimum shows its numbers; a file with no rule says so in one line."""
+    body = repo_staging._description(_recorded(**verdict), _EDIT, "https://x/run")
+
+    assert f"{line}\n\nRun record:" in body
+
+
+def test_the_pull_request_counts_a_long_split_and_points_to_get_run() -> None:
+    """A long position list would flood the text, so the block gives each part's count."""
+    result = _recorded(contract_met=True)
+    result["details"]["record"]["split"] = {
+        "rule": "pairs",
+        "seed": 7,
+        "search": list(range(70)),
+        "validation": list(range(70, 85)),
+        "held_out": list(range(85, 100)),
+    }
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "seed 7: 70 search, 15 validation, 15 held_out cases (`get_run` lists the positions)" in body
+    assert "[0, 1" not in body
+
+
+_FORGED_RECORD = {"contract_sha256": "f" * 64, "target_reached": True, "contract_met": True}
+
+
+@pytest.mark.parametrize(
+    ("files", "split", "details"),
+    [
+        ({"src/app.py": "x = 1\n"}, False, {}),
+        (_CASES_TREE, False, {"outcome": {"target": 0.9, "target_reached": True}}),
+        (_CASES_TREE, True, {CASE_SPLIT_KEY: {"rule": "pairs", "search": 5, "validation": [], "held_out": []}}),
+        (_CASES_TREE, True, {"outcome": {"target": 10**400, "target_reached": False}}),
+    ],
+    ids=["no-optimize-toml", "older-guest-no-split", "refused-split", "huge-target"],
+)
+def test_a_record_the_guest_wrote_is_removed_when_the_worker_makes_none(
+    monkeypatch: pytest.MonkeyPatch, files: dict[str, str], split: bool, details: dict[str, Any]
+) -> None:
+    """Only the worker writes the record, so a guest copy never reaches ``get_run`` or the pull request."""
+    staged_payload, staged = _stage_with(files, monkeypatch, _record_payload())
+    try:
+        guest = _guest_details(staged_payload["cases"], 7) if split else {}
+        result = _result(0.5, 0.8, details={**guest, **details, "record": dict(_FORGED_RECORD)})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_a_record_the_guest_wrote_is_removed_when_staging_kept_no_record_facts(tmp_path: Path) -> None:
+    """A constrained tree from before the record keeps no facts, and the guest's record still goes."""
+    staged = dataclasses.replace(_staged(tmp_path), constrained=True)
+    result = _result(0.5, 0.8, details={"record": dict(_FORGED_RECORD)})
+
+    repo_staging.add_run_record(result, _payload("c" * 40), staged, image=_PINNED_IMAGE)
+
+    assert "record" not in result["details"]
+
+
+def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid run gets Skynet's own record, not the guest's fields."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        details = _guest_details(staged_payload["cases"], 7, record={"forged": True, **_FORGED_RECORD})
+        result = _result(0.5, 0.8, details=details)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert "forged" not in record
+    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+
+
+_HUGE = 10**400
+
+
+def _minimum(**entry: Any) -> dict[str, Any]:
+    """Build a failed-minimum verdict around one entry.
+
+    Args:
+        **entry: Keys that replace the valid entry's keys.
+
+    Returns:
+        The ``details["outcome"]`` value.
+    """
+    valid = {"name": "recall", "minimum": 0.8, "value": 0.5, "reason": "'recall' scored 0.5, below its minimum 0.8."}
+    return {"minimums_passed": False, "failed_minimums": [{**valid, **entry}]}
+
+
+@pytest.mark.parametrize(
+    ("split", "outcome"),
+    [
+        ({}, {"target": _HUGE, "target_reached": False}),
+        ({}, {"target": -_HUGE, "target_reached": True}),
+        ({}, {"target": True, "target_reached": False}),
+        ({}, {"target": "0.9", "target_reached": False}),
+        ({}, {"target": [[0.9]], "target_reached": False}),
+        ({}, {"target": None, "target_reached": False}),
+        ({}, {"target": float("inf"), "target_reached": False}),
+        ({}, {"target": 0.9, "target_reached": None}),
+        ({}, _minimum(minimum=_HUGE)),
+        ({}, _minimum(minimum=True)),
+        ({}, _minimum(minimum="0.8")),
+        ({}, _minimum(value=_HUGE)),
+        ({}, _minimum(value=False)),
+        ({}, _minimum(value=[0.5])),
+        ({}, _minimum(name=None)),
+        ({}, _minimum(reason=_HUGE)),
+        ({}, _minimum(reason=[["nested"]])),
+        ({}, _minimum(reason=None)),
+        ({}, {"minimums_passed": False, "failed_minimums": [None]}),
+        ({}, {"minimums_passed": False, "failed_minimums": [{}]}),
+        ({"search": [1.5]}, {}),
+        ({"search": [True]}, {}),
+        ({"validation": ["0"]}, {}),
+        ({"held_out": [[0]]}, {}),
+        ({"held_out": [None]}, {}),
+        ({"search": [_HUGE]}, {}),
+        ({"search": None}, {}),
+        ({"rule": _HUGE}, {}),
+        ({"rule": None}, {}),
+        ({"seed": _HUGE}, {}),
+        ({"seed": True}, {}),
+        ({"seed": "7"}, {}),
+    ],
+)
+def test_hostile_guest_values_never_break_the_pull_request_text(
+    monkeypatch: pytest.MonkeyPatch, split: dict[str, Any], outcome: dict[str, Any]
+) -> None:
+    """Any guest split or verdict either gives a record the block can write, or no record; nothing raises."""
+    # The file sets the rules the verdict names, so the shape guard, not the rule check, decides.
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        details = _guest_details(staged_payload["cases"], 7, outcome=outcome)
+        details[CASE_SPLIT_KEY].update(split)
+        result = _result(0.5, 0.8, details=details)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert ("Run record:" in body) == ("record" in result["details"])
+
+
+def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A target past the float range would raise in the ``g`` format, so the guard refuses it."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        outcome = {"target": _HUGE, "target_reached": False}
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"target": 1, "target_reached": False},
+        _minimum(value=None),
+        {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []},
+        {},
+    ],
+    ids=["integer-target", "missing-score", "met", "no-outcome"],
+)
+def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any]) -> None:
+    """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included."""
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "Run record:" in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+_MET_TARGET = {"target": 0.9, "target_reached": True}
+_PASSED = {"minimums_passed": True, "failed_minimums": []}
+
+
+@pytest.mark.parametrize(
+    ("target", "minimums", "outcome"),
+    [
+        (False, False, _MET_TARGET),
+        (False, False, _PASSED),
+        (False, False, {"failed_minimums": []}),
+        (True, False, {}),
+        (True, False, _PASSED),
+        (True, False, {**_MET_TARGET, **_PASSED}),
+        (False, True, {}),
+        (False, True, {"failed_minimums": []}),
+        (False, True, _MET_TARGET),
+        (True, True, _MET_TARGET),
+        (True, True, _PASSED),
+    ],
+    ids=[
+        "no-rule-target-key",
+        "no-rule-minimum-keys",
+        "no-rule-failed-list",
+        "target-rule-no-verdict",
+        "target-rule-minimum-keys",
+        "target-rule-extra-minimum-keys",
+        "minimum-rule-no-verdict",
+        "minimum-rule-no-passed-key",
+        "minimum-rule-target-key",
+        "both-rules-no-minimum-key",
+        "both-rules-no-target-key",
+    ],
+)
+def test_a_verdict_that_does_not_match_the_file_rules_gets_no_record(
+    monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any]
+) -> None:
+    """A guest can forge ``details["outcome"]``, so verdict keys the file's rules do not allow, or omit, give no record."""
+    tree = _ruled_cases_tree(target=target, minimums=minimums)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+@pytest.mark.parametrize(
+    ("target", "minimums", "outcome", "contract_met"),
+    [
+        (False, False, {}, True),
+        (True, False, {"target": 0.9, "target_reached": False}, False),
+        (False, True, _minimum(), False),
+        (True, True, {**_MET_TARGET, **_PASSED}, True),
+    ],
+    ids=["no-rule", "target-only", "minimums-only", "both"],
+)
+def test_a_verdict_that_matches_the_file_rules_gets_a_record(
+    monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any], contract_met: bool
+) -> None:
+    """Each rule set keeps the verdict keys Skynet writes for it, so a true verdict always gets its record."""
+    tree = _ruled_cases_tree(target=target, minimums=minimums)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert record["contract_met"] is contract_met
+    for key in ("target_reached", "minimums_passed", "failed_minimums"):
+        assert (key in record) == (key in outcome)
+
+
+@pytest.mark.parametrize(("outcome", "recorded"), [({}, True), (_MET_TARGET, False)], ids=["no-verdict", "verdict"])
+def test_a_snapshot_with_no_outcome_sets_no_rule(
+    monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any], recorded: bool
+) -> None:
+    """An older staged payload keeps no ``outcome`` in its snapshot, which means the file sets no rule."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        del staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["outcome"]
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert ("record" in result["details"]) is recorded

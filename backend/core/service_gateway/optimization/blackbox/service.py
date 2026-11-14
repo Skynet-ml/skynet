@@ -126,6 +126,9 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 _REPO_ENGINE_REASON = "This engine does not optimize a repository."
 
+# The ``details`` key of the case positions in each part of the run's split (SKY-694).
+CASE_SPLIT_KEY = "case_split"
+
 # Progress events per run are capped near this many so a 100k-run budget
 # does not flood the job log.
 _PROGRESS_EVENTS = 100
@@ -301,6 +304,31 @@ def legacy_case_splits(cases: list[Any], seed: int | None) -> CaseSplits:
         Train, validation and held-out test cases.
     """
     return split_cases(cases, "pairs" if len(cases) > 1 else "single", SplitFractions(), shuffle=True, seed=seed or 0)
+
+
+def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None) -> dict[str, Any]:
+    """Describe the split a run made by case positions, with no case content (SKY-694).
+
+    The splits hold the same case objects as ``cases``, so each one maps back
+    to its position by identity; nothing splits the cases a second time.
+
+    Args:
+        cases: The run's cases, in the order the run received them.
+        splits: The split :func:`legacy_case_splits` made of ``cases``.
+        seed: The job's seed; 0 when unset, as in the split.
+
+    Returns:
+        ``rule`` (``pairs`` or ``single``), ``seed``, and the positions of the
+        ``search`` (train), ``validation`` and ``held_out`` (test) cases.
+    """
+    position = {id(case): index for index, case in reversed(list(enumerate(cases)))}
+    return {
+        "rule": "pairs" if len(cases) > 1 else "single",
+        "seed": seed or 0,
+        "search": [position[id(case)] for case in splits.train],
+        "validation": [position[id(case)] for case in splits.val],
+        "held_out": [position[id(case)] for case in splits.test],
+    }
 
 
 def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
@@ -1057,19 +1085,30 @@ def run_blackbox_optimization(
         )
     else:
         base_scorer = build_scorer(payload.scorer, job_id=artifact_id, protected_route=evaluator_route)
-    return run_job(
-        job_spec_from_payload(payload),
-        base_scorer,
-        legacy_case_splits(list(payload.cases or []), payload.seed),
-        artifact_id=artifact_id,
-        started=started,
-        progress_callback=progress_callback,
-        gepa_log_dir_path=gepa_log_dir_path,
-        agent_run_sink=agent_run_sink,
-        target_route=target_route,
-        repo_snapshot=repo_snapshot,
-        repo_scorer=payload.target.kind == BLACKBOX_TARGET_REPO,
-    )
+    cases = list(payload.cases or [])
+    splits = legacy_case_splits(cases, payload.seed)
+    # The parent's run record (SKY-694) reads these positions; a run with no cases has no split.
+    case_split = {CASE_SPLIT_KEY: case_split_positions(cases, splits, payload.seed)} if cases else {}
+    try:
+        response = run_job(
+            job_spec_from_payload(payload),
+            base_scorer,
+            splits,
+            artifact_id=artifact_id,
+            started=started,
+            progress_callback=progress_callback,
+            gepa_log_dir_path=gepa_log_dir_path,
+            agent_run_sink=agent_run_sink,
+            target_route=target_route,
+            repo_snapshot=repo_snapshot,
+            repo_scorer=payload.target.kind == BLACKBOX_TARGET_REPO,
+        )
+    except BudgetReached as exc:
+        if isinstance(exc.result, BlackboxRunResponse):
+            exc.result.details.update(case_split)
+        raise
+    response.details.update(case_split)
+    return response
 
 
 def run_job(
@@ -1490,6 +1529,9 @@ def _run_job(
     ]
     optimizer_best_score = None if engine_pick_error is not None else result.best_score
     verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
+    # The engine metadata comes from the guest's result file; with no rule set, a guest
+    # ``outcome`` would otherwise survive the spread below and pass for Skynet's verdict.
+    result.metadata.pop("outcome", None)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,

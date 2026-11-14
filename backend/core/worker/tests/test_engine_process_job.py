@@ -1124,6 +1124,22 @@ def test_repository_run_hands_its_hardening_job_id_to_the_publish(
     assert publish.call_args.kwargs["username"] == "alice"
 
 
+def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """The run end adds the run record with the pinned image before the PR text is made (SKY-694)."""
+    order: list[str] = []
+    record = MagicMock(side_effect=lambda *args, **kwargs: order.append("record"))
+    publish = MagicMock(side_effect=lambda *args, **kwargs: order.append("publish"))
+
+    _gateway, _publish, staged = _run_repository_job(
+        worker, store, {}, patched={"add_run_record": record, "publish_improvement": publish}
+    )
+
+    assert order == ["record", "publish"]
+    assert record.call_args.args[0] is publish.call_args.args[0]
+    assert record.call_args.args[2] is staged
+    assert record.call_args.kwargs == {"image": None}
+
+
 _MAPS_TOML = (
     b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
