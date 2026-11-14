@@ -27,8 +27,9 @@ and the patch), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
 files), and ``[outcome]`` (the ``target`` score and, in ``[outcome.require]``,
-the minimum of each named score; the worker's gate refuses a run that sets
-them until a run reads them). ``version = 1`` is required. Each
+the minimum of each named score; the search stops at the target, and the
+run end judges the target and each minimum on the final score).
+``version = 1`` is required. Each
 ``[tool.<name>]`` table is accepted and skipped: Skynet reads nothing in it.
 ``[run]`` and ``[metric]`` also take the role keys mcp, network,
 services, illegal and vcpus: the candidate and the metric run in separate
@@ -307,7 +308,7 @@ class RepoConstraints:
     # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
     compose_file: str | None = None
     compose_services: tuple[ComposeService, ...] = ()
-    # [outcome]: the run stops at the target (SKY-691); the worker's gate still refuses minimums (SKY-692).
+    # [outcome]: the search stops at the target (SKY-691); the run end judges the target and each minimum (SKY-692).
     outcome_target: float | None = None
     outcome_minimums: Mapping[str, float] = field(default_factory=dict)
 
