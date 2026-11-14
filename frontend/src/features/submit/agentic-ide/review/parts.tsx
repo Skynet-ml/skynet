@@ -513,8 +513,13 @@ export function DiffView({
   const lines = React.useMemo(() => {
     const all = diffLines(file.before, file.after, ignoreSpace);
     // "Hide imports" drops changed import lines; unchanged ones stay as context.
-    return hideImports ? all.filter((l) => l.kind === "same" || !IMPORT_LINE.test(l.text)) : all;
-  }, [file, ignoreSpace, hideImports]);
+    // A changed import line with a comment stays, so its comment does not hide.
+    const commented = (l: DiffLine) =>
+      l.kind !== "del" && !!comments?.some((c) => c.path === file.path && c.line === l.newNo);
+    return hideImports
+      ? all.filter((l) => l.kind === "same" || !IMPORT_LINE.test(l.text) || commented(l))
+      : all;
+  }, [file, ignoreSpace, hideImports, comments]);
   const blocks = React.useMemo(() => diffBlocks(lines, context), [lines, context]);
   const marks = React.useMemo(
     () => (wordDiffs ? wordMarks(lines) : new Map<DiffLine, [number, number]>()),

@@ -237,6 +237,21 @@ void test("a fold with a comment in it stays open", async () => {
   await view.unmount();
 });
 
+void test("hide imports keeps a changed import line with a comment", async () => {
+  const file = { path: "a.py", before: "x = 1\n", after: "import os\nimport re\nx = 1\n" };
+  const comments = [{ id: "c1", path: "a.py", line: 2, text: "Why re" }];
+  const view = await mount(
+    <SessionProvider session={{ user: { name: "Test User" }, expires: "2099-01-01" }} refetchOnWindowFocus={false}>
+      <DiffView file={file} comments={comments} hideImports />
+    </SessionProvider>,
+  );
+  const text = view.container.textContent ?? "";
+  assert.ok(!text.includes("import os"));
+  assert.ok(text.includes("import re"));
+  assert.ok(text.includes("Why re"));
+  await view.unmount();
+});
+
 void test("a busy agent makes the editor read-only", async () => {
   const pane = await mount(<ReviewPane {...props({ readOnly: true })} />);
   await openInTab(pane.container, "src/a.py");

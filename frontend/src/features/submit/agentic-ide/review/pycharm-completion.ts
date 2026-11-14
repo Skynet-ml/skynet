@@ -182,7 +182,10 @@ const explicitInsert = ViewPlugin.fromClass(
       const insideWord = WORD_AFTER.exec(u.state.sliceDoc(pos, pos + 1))![0].length > 0;
       if (from === undefined || !startMatches.has(item) || insideWord) return;
       // Apply directly: acceptCompletion ignores the first 75 ms after the popup opens.
+      // A change before the timer fires moves the offsets, so the insert is skipped then.
+      const doc = u.state.doc;
       window.setTimeout(() => {
+        if (u.view.state.doc !== doc) return;
         (item.apply as Exclude<Completion["apply"], string | undefined>)(u.view, item, from, pos);
         closeCompletion(u.view);
       });

@@ -67,6 +67,8 @@ function useRepoReads(
       requested.current.paths.add(path);
       const settle = (result: RepoRead | null) =>
         setRead((prev) => {
+          // A late read from a repository the user left must not replace the current one.
+          if (requested.current.repo !== repo) return prev;
           const results = new Map(prev.repo === repo ? prev.results : []);
           results.set(path, result);
           return { repo, results };
