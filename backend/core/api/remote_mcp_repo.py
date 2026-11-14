@@ -1538,8 +1538,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         candidate_commit: Annotated[
             str | None,
             Field(
-                pattern=r"^[0-9a-f]{7,40}$",
-                description="A pushed commit that descends from the draft's base commit.",
+                pattern=r"^[0-9a-f]{40}$",
+                description="Full 40-character SHA of a pushed commit that descends from the draft's base commit.",
             ),
         ] = None,
         candidate_patch: Annotated[

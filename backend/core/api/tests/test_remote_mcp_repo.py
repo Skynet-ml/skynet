@@ -1018,7 +1018,7 @@ def test_judge_needs_confirmation_and_one_candidate(judge: Any) -> None:
     draft_id = _complete_draft(client)
     assert "confirm=true" in _error_text(_judge(client, draft_id, confirm=False))
     assert "exactly one" in _error_text(_judge(client, draft_id, candidate_patch=None))
-    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_commit="abc1234"))
+    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_commit="b" * 40))
     assert "runs:write" in _error_text(
         _call(
             client,
@@ -1040,12 +1040,21 @@ def test_judge_opens_one_session_and_scores_in_it(judge: Any) -> None:
     assert record["opens"][0]["key"].startswith(f"mcp-judge-{draft_id}-")
     assert record["opens"][0]["floor_cents"] == 192
     assert record["opens"][0]["draft_id"] == draft_id
-    _payload(_judge(client, draft_id, candidate_patch=None, candidate_commit="abc1234"))
+    _payload(_judge(client, draft_id, candidate_patch=None, candidate_commit="b" * 40))
     assert len(record["opens"]) == 1
     assert record["calls"][1] == (
         "session-1",
-        {"username": USER, "candidate_commit": "abc1234", "candidate_patch": None, "token": "gh"},
+        {"username": USER, "candidate_commit": "b" * 40, "candidate_patch": None, "token": "gh"},
     )
+
+
+def test_judge_refuses_a_short_commit_sha(judge: Any) -> None:
+    """Refuse an abbreviated commit SHA, which git cannot fetch, before any session or call."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    assert "candidate_commit" in _error_text(_judge(client, draft_id, candidate_patch=None, candidate_commit="abc1234"))
+    assert record["opens"] == []
+    assert record["calls"] == []
 
 
 def test_judge_refuses_a_limit_below_two_floors(judge: Any) -> None:

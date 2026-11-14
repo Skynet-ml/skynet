@@ -82,7 +82,7 @@ from ..service_gateway.optimization.blackbox.service import (
     legacy_case_splits,
 )
 from ..storage.models import ExecutionOperationModel, JobModel
-from ..storage.preflights import PreflightStore, WizardPreflightModel
+from ..storage.preflights import PreflightStore, WizardPreflightModel, preflight_document, verification_fingerprint
 from ..storage.usage import json_byte_size
 from ..worker.repo_staging import StagedRepository, add_run_record
 from .agent_engine import fill_proposer_host_cli
@@ -700,11 +700,16 @@ def judge_call(
     if budget.state != "attached":
         ended = end_session(job_store, job, ended_by="budget")
         return _ended_answer(session_id, ended.status)
+    # The headroom check counts a stored call's own spend, so its retry replays before that check can end the session.
+    stored = _stored_call(job_store.engine, budget.id, username, session_id, sha)
+    if stored is not None and stored.status in {"succeeded", "failed"}:
+        return _replay(preflight_document(stored), session_id, budget)
+    if stored is not None and stored.status == "pending" and isinstance(stored.result.get("judge_result"), dict):
+        if _unsettled_usage(job_store.engine, budget.id):
+            raise JudgePendingError("The call's usage settles. Call again with the same arguments.")
+        return _scored_answer(session_id, stored.result["judge_result"], budget)
     if not budget.uncapped:
-        final_cases, _held_out = _final_cases(list(payload.get("cases") or []), payload.get("seed"))
-        needed = needed_cents(
-            int(judge.get("floor_cents") or 0), _scored_results(job_store.engine, budget.id), max(len(final_cases), 1)
-        )
+        needed = _needed(job_store.engine, budget.id, payload)
         # The session ends while the budget still pays for the final score.
         if budget.total_cents - budget.setup_spent_cents - budget.run_spent_cents < needed:
             if _unsettled_usage(job_store.engine, budget.id):
@@ -782,6 +787,8 @@ def judge_call(
                     before_scoring=refuse,
                 ) as (protected, staged, _gateway):
                     chosen = _search_cases(list(protected.get("cases") or []), payload.get("seed"))
+                    # A `[data] cases` contract stores no cases, so only staging knows the final score's case count.
+                    final_count = len(_final_cases(list(protected.get("cases") or []), payload.get("seed"))[0])
                     final = _score(staged, patch, [case for _, case in chosen], label="candidate")
                 # No spend is stored: usage can settle after the call, so _scored_results reads it from the ledger.
                 result = {
@@ -803,6 +810,7 @@ def judge_call(
                         "checks": [{"key": "judge", "status": "succeeded"}],
                         "judge_result": result,
                         "_patch": patch,
+                        "_final_count": final_count,
                     },
                 )
             except UsagePendingError:
@@ -810,7 +818,11 @@ def judge_call(
                     identity,
                     claim_token=token_,
                     status="pending",
-                    result={"checks": [{"key": "judge", "status": "pending"}], "_retry_after_usage": True},
+                    result={
+                        "checks": [{"key": "judge", "status": "pending"}],
+                        "_retry_after_usage": True,
+                        "temporary_failures": int(claim.kept.get("temporary_failures") or 0),
+                    },
                 )
             except (BudgetReached, BudgetInsufficientError) as exc:
                 budget_ended = True
@@ -896,7 +908,8 @@ def _scored_results(engine: Any, budget_id: str) -> list[dict[str, Any]]:
         budget_id: The session's budget.
 
     Returns:
-        Each scored call's ``judge_result`` with ``spent_cents``.
+        Each scored call's ``judge_result`` with ``spent_cents`` and the
+        ``final_count`` its staging gave, or ``None`` for an older row.
     """
     rows = _rows(engine, budget_id, JUDGE_SCOPE, ("succeeded", "pending"))
     done = [row for row in rows if isinstance((row.result or {}).get("judge_result"), dict)]
@@ -913,8 +926,62 @@ def _scored_results(engine: Any, budget_id: str) -> list[dict[str, Any]]:
             for operation in operations
             if start <= _as_utc(operation.created_at) <= end
         )
-        results.append({**row.result["judge_result"], "spent_cents": float(cents_from_units(units))})
+        results.append(
+            {
+                **row.result["judge_result"],
+                "spent_cents": float(cents_from_units(units)),
+                "final_count": row.result.get("_final_count"),
+            }
+        )
     return results
+
+
+def _needed(engine: Any, budget_id: str, payload: dict[str, Any]) -> int:
+    """Return the headroom the next call needs, with the final case count that staging gave.
+
+    Args:
+        engine: Database that holds the evidence and the ledger.
+        budget_id: The session's budget.
+        payload: The session's payload.
+
+    Returns:
+        The cents that must remain unspent before the call starts.
+    """
+    calls = _scored_results(engine, budget_id)
+    count = next((call["final_count"] for call in calls if call["final_count"] is not None), None)
+    if count is None:
+        count = len(_final_cases(list(payload.get("cases") or []), payload.get("seed"))[0])
+    return needed_cents(int(payload["judge"].get("floor_cents") or 0), calls, max(count, 1))
+
+
+def _stored_call(engine: Any, budget_id: str, username: str, session_id: str, sha: str) -> Any | None:
+    """Read the session's evidence row of this candidate, as the claim finds it, and write nothing.
+
+    Args:
+        engine: Database that holds the evidence.
+        budget_id: The session's budget.
+        username: Account that owns the session.
+        session_id: The session.
+        sha: The candidate patch's SHA-256.
+
+    Returns:
+        The row, or ``None`` before a call of this candidate claimed.
+    """
+    with Session(engine) as session:
+        fingerprint = verification_fingerprint(
+            session,
+            username=username,
+            workflow=_BLACKBOX_WORKFLOW,
+            scope=JUDGE_SCOPE,
+            payload={"session": session_id, "patch_sha256": sha},
+        )
+        return session.scalars(
+            select(WizardPreflightModel).where(
+                WizardPreflightModel.budget_id == budget_id,
+                WizardPreflightModel.scope == JUDGE_SCOPE,
+                WizardPreflightModel.fingerprint == fingerprint,
+            )
+        ).one_or_none()
 
 
 def _unsettled_usage(engine: Any, budget_id: str) -> bool:
@@ -1185,6 +1252,9 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
     payload = job.get("payload") or {}
     budget = _budget(job_store, job)
     if budget is not None and budget.state != "attached":
+        if _live_calls(job_store.engine, budget.id):
+            # A live call can still score; ending now drops its version and lets it answer on an ended session.
+            raise DomainError("budget.pending", status=409)
         budget = _reopen(job_store, session_id, budget)
     if budget is None or budget.state != "attached":
         # Nothing can pay for a final score any more.

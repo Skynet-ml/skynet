@@ -381,7 +381,7 @@ class PreflightStore:
                     fingerprint=fingerprint,
                     status="pending",
                     attempt=0,
-                    result={},
+                    result=dict(carry or {}),
                     started_at=datetime.now(UTC),
                 )
                 session.add(row)

@@ -427,3 +427,45 @@ def test_a_judge_session_claims_on_its_attached_budget_and_replays_its_result(st
     replay = claim("session")
     assert replay.token is None
     assert replay.document["judge_result"] == {"score": 0.5}
+
+
+def test_a_new_row_that_waits_on_old_work_keeps_its_carry_defaults(store: PreflightStore) -> None:
+    """Store the carry defaults on a new row that waits on old-generation work, and none without carry (SKY-696).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    first = _claim(store, budget_id)
+    operation = _reserve(store, budget_id, first.generation)
+    store.budgets.mark_dispatched(operation.id, "alice", "provider-request")
+    _expire(store, first.document["id"])
+
+    def waiting(payload: dict[str, Any], carry: dict[str, Any] | None) -> dict[str, Any]:
+        """Claim new inputs while the old work is unresolved, and read the new row's stored result.
+
+        Args:
+            payload: Inputs that no row holds yet.
+            carry: The claim's carry defaults.
+
+        Returns:
+            The new row's stored result.
+        """
+        claim = store.claim(
+            username="alice",
+            budget_id=budget_id,
+            revision=1,
+            workflow="anything",
+            scope="execution",
+            payload=payload,
+            carry=carry,
+        )
+        assert claim.token is None
+        assert claim.document["status"] == "pending"
+        with Session(store.engine) as session:
+            return dict(session.get(WizardPreflightModel, claim.document["id"]).result)
+
+    kept = waiting({**PAYLOAD, "seed_candidate": "carried"}, {"ended_by": "stop_run", "temporary_failures": 0})
+    assert (kept["ended_by"], kept["temporary_failures"]) == ("stop_run", 0)
+    plain = waiting({**PAYLOAD, "seed_candidate": "plain"}, None)
+    assert set(plain) == {"_retry_after_usage", "pending_reason", "checks"}

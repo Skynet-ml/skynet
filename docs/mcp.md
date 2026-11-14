@@ -128,9 +128,9 @@ Finish the draft and call `repo_draft_review` first.
 
 - Send `draft_id`, `max_cost_cents` and `confirm=true`, after the user
   agrees to `max_cost_cents`.
-- Send exactly one candidate: `candidate_commit`, a pushed commit that
-  descends from the base commit, or `candidate_patch`, a `git diff`
-  against the base commit.
+- Send exactly one candidate: `candidate_commit`, the full 40-character
+  SHA of a pushed commit that descends from the base commit, or
+  `candidate_patch`, a `git diff` against the base commit.
 - `max_cost_cents` is the limit of the whole session. It must be at least
   two times the draft's minimum: one scored call and the final score. A
   lower limit gets `budget.below_minimum`, which names this minimum.
@@ -149,7 +149,8 @@ candidate runs in its own sandbox, and the metric runs in a separate
 sandbox. The answer gives the mean `score`, the `named_scores`, the
 `feedback` and the result of each search case. The answer never holds the
 metric code or a held-out case. A retry with the same candidate returns the
-stored score and does not pay again. An answer with `status: in_progress`
+stored score and does not pay again, also when the budget cannot pay for
+a new call. An answer with `status: in_progress`
 means: call again with the same arguments. Skynet answers `in_progress`
 while other calls of the session hold its budget, and after a temporary
 repository or sandbox failure. A retry after such a failure pays for its
@@ -167,7 +168,8 @@ session. While usage of an earlier call still settles, it answers
 fewer than five cases, nothing is held out, and the end scores the best
 version on every case. With no cases, it scores the version once.
 
-The end waits (`budget.pending`) while a call of the session still runs.
+The end waits (`budget.pending`) while a call of the session still runs,
+also when the budget is closed.
 After a temporary repository or sandbox failure of the final score, the end
 also answers `budget.pending`, and the session stays open. The next
 `stop_run` or call scores again. After three such failures, the session
