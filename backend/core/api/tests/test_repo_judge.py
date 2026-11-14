@@ -373,6 +373,33 @@ def test_a_candidate_commit_with_a_text_file_that_is_not_utf8_is_refused(
     assert refused.value.detail == _NOT_UTF8
 
 
+def test_a_candidate_commit_that_changes_a_crlf_file_gives_the_commits_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Score the same version for a commit as for its patch, CR bytes included (design case E4)."""
+    app = tmp_path / "app"
+    app.mkdir()
+    raw = ["-c", "core.autocrlf=false"]
+    _git(app, "init", "--quiet")
+    _git(app, "config", "uploadpack.allowAnySHA1InWant", "true")
+    (app / "a.txt").write_bytes(b"one\r\ntwo\r\n")
+    _git(app, *raw, "add", "--all")
+    _git(app, *raw, "commit", "--quiet", "-m", "base")
+    base = _git(app, "rev-parse", "HEAD")
+    (app / "a.txt").write_bytes(b"one\r\nTWO\r\n")
+    _git(app, *raw, "commit", "--quiet", "-am", "candidate")
+    head = _git(app, "rev-parse", "HEAD")
+    monkeypatch.setattr(repo_judge.repo_hosts, "git_kwargs", lambda provider: {"remote": f"file://{app}"})
+
+    patch = repo_judge._candidate_patch({"provider": "github", "repository": "acme/app"}, base, head, None, None)
+
+    assert "+TWO\r\n" in patch
+    _git(app, *raw, "checkout", "--quiet", base)
+    (tmp_path / "candidate.patch").write_bytes(patch.encode("utf-8"))
+    _git(app, *raw, "apply", "--binary", str(tmp_path / "candidate.patch"))
+    assert (app / "a.txt").read_bytes() == b"one\r\nTWO\r\n"
+
+
 def test_a_judge_call_with_a_commit_that_is_not_utf8_is_refused_before_the_claim(
     store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

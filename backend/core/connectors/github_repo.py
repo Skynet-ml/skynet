@@ -369,7 +369,7 @@ def commit_diff(
         provider: Repository host, see :data:`GIT_HOSTS`.
 
     Returns:
-        The output of ``git diff --binary base commit``.
+        The output of ``git diff --binary base commit``, with every byte kept.
 
     Raises:
         RepoFetchError: When a commit cannot be fetched, or ``commit`` does not
@@ -388,7 +388,27 @@ def commit_diff(
             _git(["merge-base", "--is-ancestor", base, commit], checkout, environment)
         except RepoFetchError:
             raise RepoFetchError(f"Commit {commit} does not descend from the pinned base {base}.") from None
-        return _git(["diff", "--binary", "--no-renames", base, commit], checkout, environment)
+        # Text mode would turn each CR into LF; the file keeps the commit's exact bytes.
+        # The pinned options stop server git config from changing the patch text.
+        patch = checkout / ".git" / "candidate.patch"
+        _git(
+            [
+                "diff",
+                "--binary",
+                "--no-renames",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                f"--output={patch}",
+                base,
+                commit,
+            ],
+            checkout,
+            environment,
+        )
+        return patch.read_bytes().decode("utf-8")
     finally:
         shutil.rmtree(checkout, ignore_errors=True)
 

@@ -141,6 +141,57 @@ def test_commit_diff_returns_the_change_from_the_base(tmp_path: Path) -> None:
     assert not (tmp_path / "work" / "diff").exists()
 
 
+def _apply_commit_diff(tmp_path: Path, base_bytes: bytes, commit_bytes: bytes) -> tuple[str, bytes]:
+    """Diff a commit that changes one file's exact bytes, then apply the diff at the base.
+
+    Args:
+        tmp_path: Test folder.
+        base_bytes: The file at the base.
+        commit_bytes: The file at the candidate commit.
+
+    Returns:
+        The diff, and the file's bytes after the diff is applied at the base.
+    """
+    app, _ = _repository(tmp_path / "app", {"README.md": "hi\n"})
+    raw = ["-c", "core.autocrlf=false"]
+    (app / "a.txt").write_bytes(base_bytes)
+    _git(app, *raw, "add", "a.txt")
+    _git(app, *raw, "commit", "--quiet", "-m", "base")
+    base = _git(app, "rev-parse", "HEAD")
+    (app / "a.txt").write_bytes(commit_bytes)
+    _git(app, *raw, "commit", "--quiet", "-am", "candidate")
+    candidate = _git(app, "rev-parse", "HEAD")
+
+    diff = commit_diff("acme/app", base, candidate, None, tmp_path / "work", remote=f"file://{app}")
+
+    _git(app, *raw, "checkout", "--quiet", base)
+    (tmp_path / "candidate.patch").write_bytes(diff.encode("utf-8"))
+    _git(app, *raw, "apply", "--binary", str(tmp_path / "candidate.patch"))
+    return diff, (app / "a.txt").read_bytes()
+
+
+def test_commit_diff_keeps_crlf_so_it_applies_at_the_base(tmp_path: Path) -> None:
+    """Keep each CRLF of a changed line, so the diff matches the CRLF file at the base."""
+    diff, applied = _apply_commit_diff(tmp_path, b"one\r\ntwo\r\nthree\r\n", b"one\r\nTWO\r\nthree\r\n")
+
+    assert "-two\r\n+TWO\r\n" in diff
+    assert applied == b"one\r\nTWO\r\nthree\r\n"
+
+
+def test_commit_diff_keeps_crlf_of_added_lines(tmp_path: Path) -> None:
+    """Give the commit's exact bytes when only added lines carry CR, where a lost CR would still apply."""
+    _, applied = _apply_commit_diff(tmp_path, b"one\ntwo\n", b"one\ntwo\r\nadded\r\n")
+
+    assert applied == b"one\ntwo\r\nadded\r\n"
+
+
+def test_commit_diff_keeps_a_lone_cr_inside_a_line(tmp_path: Path) -> None:
+    """Keep a CR inside a line, which text mode would turn into a line break."""
+    _, applied = _apply_commit_diff(tmp_path, b"a\rb\n", b"a\rB\n")
+
+    assert applied == b"a\rB\n"
+
+
 def test_commit_diff_refuses_a_commit_that_does_not_descend_from_the_base(tmp_path: Path) -> None:
     """Refuse a candidate on another line of history, because its diff would undo the base."""
     app, base = _repository(tmp_path / "app", {"src/app.py": "x = 1\n"})
