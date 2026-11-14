@@ -1642,34 +1642,52 @@ table {
   }
 }
 
-/* Live "Thinking" / "Working" label in the agent chat: a light sweep across the
-   text instead of raw reasoning streaming into view. */
+/* Live "Thinking" / "Working" label in the agent chat, timed as Codex's: a
+   muted label that a brighter band crosses in one stepped 1s sweep, first
+   after 600ms and then every 4s. The band parks off the text between sweeps. */
 .agent-shimmer-text {
-  color: var(--primary);
+  color: var(--muted-foreground);
 }
 @media (prefers-reduced-motion: no-preference) {
   .agent-shimmer-text {
     background: linear-gradient(
         90deg,
-        var(--primary) 0%,
-        var(--primary) 40%,
-        color-mix(in oklab, var(--primary) 35%, transparent) 50%,
-        var(--primary) 60%,
-        var(--primary) 100%
+        var(--muted-foreground) 0%,
+        var(--muted-foreground) 42%,
+        var(--foreground) 50%,
+        var(--muted-foreground) 58%,
+        var(--muted-foreground) 100%
       )
-      0 0 / 200% 100%;
+      0 0 / 300% 100% no-repeat;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    animation: agent-shimmer 1.8s linear infinite;
+    animation: agent-shimmer 4s 600ms infinite;
+  }
+  /* Right-to-left text sweeps the way it reads. */
+  .agent-shimmer-text:dir(rtl) {
+    animation-name: agent-shimmer-rtl;
   }
 }
-@keyframes agent-shimmer {
-  from {
+@keyframes agent-shimmer-rtl {
+  0% {
+    background-position: 0% 0;
+    animation-timing-function: steps(48, end);
+  }
+  25%,
+  100% {
     background-position: 100% 0;
   }
-  to {
-    background-position: -100% 0;
+}
+/* At 100% the band sits left of the text, at 0% right of it. */
+@keyframes agent-shimmer {
+  0% {
+    background-position: 100% 0;
+    animation-timing-function: steps(48, end);
+  }
+  25%,
+  100% {
+    background-position: 0% 0;
   }
 }
 
@@ -2388,3 +2406,94 @@ table {
     opacity: 1;
   }
 }
+
+/* The agentic IDE review pane and code editor. */
+/* Syntax colours for the code review views, from the app's --code-* tokens. */
+.ide-code .tok-keyword { color: var(--code-keyword); font-weight: 600; }
+.ide-code .tok-operator { color: var(--code-operator); }
+.ide-code .tok-number { color: var(--code-number); }
+.ide-code .tok-string { color: var(--code-string); }
+.ide-code .tok-comment { color: var(--code-comment); font-style: italic; }
+.ide-code .tok-typeName,
+.ide-code .tok-bool,
+.ide-code .tok-atom { color: var(--code-type); }
+.ide-code .tok-propertyName,
+.ide-code .tok-className { color: var(--code-accent); }
+.ide-code .tok-variableName { color: var(--code-text); }
+.ide-code .tok-punctuation { color: var(--code-punct); }
+.ide-code .tok-variableName.tok-definition { color: var(--code-function); }
+
+/* Light mode code sat on plain white and read as prose. A warm editor tint
+   marks it as code. Dark mode already reads as an editor, so it keeps its ground. */
+:root { --ide-code-bg: #f6f2ec; }
+.dark { --ide-code-bg: transparent; }
+.ide-code { font-variant-ligatures: none; tab-size: 4; background: var(--ide-code-bg); }
+.ide-code ::selection { background: color-mix(in oklab, var(--primary) 22%, transparent); }
+
+.ide-scroll { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent) transparent; }
+
+/* One authored moment: a file the agent just touched pulses once in the tree. */
+@keyframes ide-touch {
+  from { background-color: color-mix(in oklab, var(--primary) 16%, transparent); }
+  to { background-color: transparent; }
+}
+.ide-touched { animation: ide-touch 1.4s cubic-bezier(0.16, 1, 0.3, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .ide-touched { animation: none; }
+}
+
+@keyframes ide-line-in { from { opacity: 0; transform: translateY(2px); } }
+.ide-line { animation: ide-line-in 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+@media (prefers-reduced-motion: reduce) { .ide-line { animation: none; } }
+
+/* A review pane menu grows from its button on open and fades out fast on close. */
+@keyframes ide-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } }
+@keyframes ide-menu-out { to { opacity: 0; transform: scale(0.98); } }
+.ide-menu-pop[data-state="open"] { animation: ide-menu-in 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.ide-menu-pop[data-state="closed"] { animation: ide-menu-out 110ms ease-in forwards; }
+@media (prefers-reduced-motion: reduce) { .ide-menu-pop[data-state] { animation: none; } }
+
+/* A new comment box: its row opens, and the box fades and settles in. */
+@keyframes ide-comment-row { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
+@keyframes ide-comment-in { from { opacity: 0; transform: translateY(-6px) scale(0.985); } }
+.ide-comment-row { display: grid; animation: ide-comment-row 300ms cubic-bezier(0.22, 1, 0.36, 1); }
+.ide-comment-in { animation: ide-comment-in 260ms cubic-bezier(0.22, 1, 0.36, 1) 40ms both; transform-origin: top; }
+@media (prefers-reduced-motion: reduce) { .ide-comment-row, .ide-comment-in { animation: none; } }
+
+/* The completion popup, drawn like Skynet's floating cards: large round rows and round chips.
+   It takes the colors, font and size of Settings > Code (code-style.tsx): the Skynet themes keep
+   the card surface, and other themes set --ide-popup-bg. CodeMirror gives the list its own
+   monospace font, so the list inherits the popup's code font here. */
+.ide-editor .cm-tooltip.cm-tooltip-autocomplete {
+  font-family: var(--font-mono);
+  background: var(--ide-popup-bg, var(--card)); color: var(--code-text);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 16px; box-shadow: var(--shadow-float); overflow: hidden;
+}
+.ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul {
+  min-width: 260px; max-width: 560px; padding: 6px; font-family: inherit; font-size: inherit;
+}
+.ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  display: flex; align-items: center; gap: 0.65em; height: 2.4em; padding-block: 0; padding-inline: 8px 12px;
+  border-radius: 10px; color: var(--code-text);
+}
+.ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: color-mix(in srgb, var(--code-text) 8%, transparent); color: var(--code-text);
+}
+.ide-editor .cm-completionLabel { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.ide-editor .cm-completionMatchedText { text-decoration: none; color: var(--code-keyword); }
+.ide-editor .cm-completionDetail {
+  margin-inline-start: auto; padding-inline-start: 16px; font: 0.92em ui-sans-serif, system-ui, sans-serif;
+  color: var(--code-comment);
+}
+.ide-editor .pc-icon {
+  flex: none; display: inline-grid; place-items: center; inline-size: 2em; block-size: 2em;
+  font: 600 0.72em/1 ui-sans-serif, system-ui, sans-serif;
+}
+.ide-editor .pc-icon[data-kind] {
+  border-radius: 50%; color: var(--ide-popup-bg, var(--card)); background: var(--kind);
+}
+.ide-editor .pc-icon[data-kind="m"], .ide-editor .pc-icon[data-kind="f"] { --kind: var(--code-function); }
+.ide-editor .pc-icon[data-kind="c"] { --kind: var(--code-type); }
+.ide-editor .pc-icon[data-kind="v"] { --kind: var(--code-number); }
+.ide-editor .pc-icon[data-kind="p"] { --kind: var(--code-string); }

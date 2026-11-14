@@ -17,6 +17,8 @@ interface AgentThreadProps {
   /** The agent is writing a reply; the jump-to-latest button plays the reply loop. */
   streaming?: boolean;
   className?: string;
+  /** What floats over the thread, such as the user message rail; given the scroll box. */
+  overlay?: (scrollBox: HTMLDivElement | null) => React.ReactNode;
 }
 
 export function AgentThread({
@@ -26,8 +28,15 @@ export function AgentThread({
   isEmpty,
   streaming = false,
   className,
+  overlay,
 }: AgentThreadProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  // The overlay gets the scroll box as state, as render code must not read a ref.
+  const [scrollBox, setScrollBox] = React.useState<HTMLDivElement | null>(null);
+  const setScrollRef = React.useCallback((el: HTMLDivElement | null) => {
+    scrollRef.current = el;
+    setScrollBox(el);
+  }, []);
   // Follow the stream only while the user is at the bottom. Once they scroll
   // up to read history their position persists — new tokens and re-renders
   // must not yank them back down. Scrolling back to the bottom re-engages
@@ -80,13 +89,14 @@ export function AgentThread({
           embedded surfaces keep the default fall-through so a short thread is
           not a dead zone for page scrolling. */}
       <div
-        ref={scrollRef}
+        ref={setScrollRef}
         onScroll={handleScroll}
         className={cn("flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5", className)}
       >
         {isEmpty && emptyState}
         {children}
       </div>
+      {overlay?.(scrollBox)}
       {!atBottom && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
           <button

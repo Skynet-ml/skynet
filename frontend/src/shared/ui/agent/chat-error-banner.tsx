@@ -3,12 +3,19 @@
 import * as React from "react";
 import { XCircle } from "@/shared/ui/icons";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
+import { RetryCountdownButton } from "@/shared/ui/agent/retry-countdown-button";
 import { cn } from "@/shared/lib/utils";
 
 interface ChatErrorBannerProps {
   message: React.ReactNode;
   retryLabel?: string;
   onRetry?: () => void;
+  /**
+   * For a model capacity error: seconds until the chat retries by itself, as
+   * Codex counts down "Retry in 10s". Null shows a plain Retry button. Give the
+   * banner a new key for each failure, so the countdown starts again.
+   */
+  retryInSeconds?: number | null;
   /**
    * A compact action (e.g. "Add funds"), shown on its own row under the
    * message. The message then stays on one line.
@@ -25,6 +32,7 @@ export function ChatErrorBanner({
   message,
   retryLabel,
   onRetry,
+  retryInSeconds,
   action,
   className,
 }: ChatErrorBannerProps) {
@@ -51,7 +59,8 @@ export function ChatErrorBanner({
         >
           {message}
         </p>
-        {onRetry && retryLabel && (
+        {onRetry && retryInSeconds !== undefined && <RetryCountdownButton seconds={retryInSeconds} onRetry={onRetry} />}
+        {onRetry && retryLabel && retryInSeconds === undefined && (
           <RetryIconButton
             label={retryLabel}
             onClick={onRetry}

@@ -6,11 +6,11 @@ import { fileURLToPath } from "node:url";
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-// node --test only loads .ts, so the .tsx ChangesPane test runs in a jiti child.
-void it("ChangesPane client tests pass", () => {
+// node --test only loads .ts, so the .tsx ReviewPane test runs in a jiti child.
+void it("ReviewPane client tests pass", () => {
   const result = spawnSync(
     path.join(frontend, "node_modules/.bin/jiti"),
-    ["src/features/submit/agentic-ide/ChangesPane.client.test.tsx"],
+    ["src/features/submit/agentic-ide/ReviewPane.client.test.tsx"],
     {
       cwd: frontend,
       encoding: "utf8",

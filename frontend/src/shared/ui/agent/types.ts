@@ -1,3 +1,4 @@
+import type { MediaAttachment } from "./media-attachments";
 import type { ThinkingSegment } from "@/shared/lib/thinking-segments";
 
 export type AgentStatus = "idle" | "streaming" | "queued" | "done" | "error";
@@ -18,6 +19,13 @@ export interface AgentToolCall {
    * keeps counting. Set only for display, never stored.
    */
   working?: boolean;
+  /** The user stopped the turn while this call ran. */
+  stopped?: boolean;
+  /**
+   * A call outside the agent's permissions: it waits for the user, or the user
+   * ("declined") or the auto-review ("denied") said no, so it never ran.
+   */
+  approval?: "waiting" | "declined" | "denied";
 }
 
 export interface AgentMessage {
@@ -48,6 +56,10 @@ export interface AgentMessage {
   id?: number;
   /** US cents of summary calls that stored no compaction, counted on this message. */
   sideCents?: number;
+  /** Images, video and audio the user sent with the message. */
+  media?: readonly MediaAttachment[];
+  /** The user stopped this turn before it finished. */
+  stopped?: boolean;
 }
 
 /** One condensing of a chat's older messages into a summary, as the backend reported it. */

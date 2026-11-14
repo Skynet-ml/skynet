@@ -17,9 +17,9 @@ export interface ActivitySummary {
   failed: boolean;
 }
 
-// Codex names the steps that change things first ("Edited a file, read files,
-// ran commands"), so the line leads with what mattered most.
-const ORDER: readonly ActivityKind[] = ["edit", "act", "check", "search", "read", "run", "tool"];
+// Codex's fixed order: tool sources, file changes, exploration, commands,
+// then other tools ("Edited files, read files, ran commands").
+const ORDER: readonly ActivityKind[] = ["act", "edit", "search", "read", "check", "run", "tool"];
 
 /**
  * Summarize a burst of steps into the parts of its one-line summary.

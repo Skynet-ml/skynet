@@ -167,6 +167,10 @@ interface ActivityGroupProps {
    * rows open and shut.
    */
   autoOpen?: boolean;
+  /** What the running step does, shown in place of the summary while it runs, as Codex does. */
+  activeLabel?: string;
+  /** The summary line in place of the verb list, e.g. "Explored 2 files, 1 search". */
+  title?: string;
 }
 
 /**
@@ -181,18 +185,24 @@ export function ActivityGroup({
   live = false,
   stayOpen = false,
   autoOpen = true,
+  activeLabel,
+  title,
 }: ActivityGroupProps) {
   const [choice, setChoice] = React.useState<boolean | null>(null);
   const summary = summarizeActivity(steps);
+  const label = useHeld(
+    title ??
+      joinSummary(
+        summary.parts.map(({ kind, count }) => formatMsg(SUMMARY_KEYS[kind], { count })),
+        getActiveIntlLocale(),
+      ),
+    SUMMARY_HOLD_MS,
+  );
   if (steps.length <= 1 || !summary.lead) return <div className="flex flex-col">{children}</div>;
   const open = autoOpen
     ? activityGroupOpen(choice, { live, running: summary.running, stayOpen })
     : (choice ?? false);
   const LeadIcon = ACTIVITY_ICONS[summary.lead];
-  const label = joinSummary(
-    summary.parts.map(({ kind, count }) => formatMsg(SUMMARY_KEYS[kind], { count })),
-    getActiveIntlLocale(),
-  );
   return (
     <div className="flex flex-col">
       <button
@@ -206,7 +216,9 @@ export function ActivityGroup({
         ) : (
           <LeadIcon className="size-3.5 shrink-0" aria-hidden />
         )}
-        <span className={cn("truncate", summary.running && "agent-shimmer-text")}>{label}</span>
+        <span className={cn("truncate", summary.running && "agent-shimmer-text")}>
+          {(summary.running && activeLabel) || label}
+        </span>
         <CaretRight
           className={cn(
             "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
@@ -216,8 +228,64 @@ export function ActivityGroup({
         />
       </button>
       <Reveal open={open}>
-        <div className="flex flex-col">{children}</div>
+        <FadeScroll>{children}</FadeScroll>
       </Reveal>
+    </div>
+  );
+}
+
+// Codex keeps each summary text up at least this long, so a fast burst
+// doesn't flicker through "Read files" → "Read files, ran commands" → ….
+const SUMMARY_HOLD_MS = 1000;
+
+/** ``value``, but each shown value stays at least ``ms`` before the next replaces it. */
+function useHeld<T>(value: T, ms: number): T {
+  const [shown, setShown] = React.useState(value);
+  const since = React.useRef(0);
+  React.useEffect(() => {
+    if (!since.current) since.current = Date.now();
+    if (Object.is(value, shown)) return;
+    const id = setTimeout(
+      () => {
+        since.current = Date.now();
+        setShown(value);
+      },
+      Math.max(0, since.current + ms - Date.now()),
+    );
+    return () => clearTimeout(id);
+  }, [value, shown, ms]);
+  return shown;
+}
+
+const EDGE_FADE = "1.5rem";
+
+/**
+ * An open burst's rows, as in Codex: at most 224px tall, scrolling inside,
+ * with the edge that has more rows past it faded out.
+ */
+function FadeScroll({ children }: { children: React.ReactNode }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = React.useState({ top: false, bottom: false });
+  const measure = React.useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const top = el.scrollTop > 1;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight > 1;
+    setEdges((prev) => (prev.top === top && prev.bottom === bottom ? prev : { top, bottom }));
+  }, []);
+  React.useLayoutEffect(measure);
+  const mask =
+    edges.top || edges.bottom
+      ? `linear-gradient(to bottom, ${edges.top ? "transparent" : "#000"}, #000 ${edges.top ? EDGE_FADE : "0px"}, #000 calc(100% - ${edges.bottom ? EDGE_FADE : "0px"}), ${edges.bottom ? "transparent" : "#000"})`
+      : undefined;
+  return (
+    <div
+      ref={ref}
+      onScroll={measure}
+      style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+      className="flex max-h-56 flex-col gap-1 overflow-y-auto ps-2"
+    >
+      {children}
     </div>
   );
 }

@@ -2,12 +2,18 @@
 
 import * as React from "react";
 
+import { CaretRight } from "@/shared/ui/icons";
+
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
 
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
+
 import { ActivityGroup } from "./activity-steps";
+import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
 import {
   blockWorkMs,
@@ -56,6 +62,10 @@ interface TurnActivityProps {
   renderStep: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /** What kind of step a call is, for the burst's summary line. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
+  /** The line a running call shows on its folded burst. */
+  stepLabel?: (call: AgentToolCall) => string;
+  /** The user stopped the turn, so the header says so, as Codex does. */
+  stopped?: boolean;
   /** Backend-measured turn duration; the history's own span wins when longer. */
   durationMs?: number | null;
   /** The turn's start, when the caller knows it better than the steps do. */
@@ -64,12 +74,12 @@ interface TurnActivityProps {
   earlier?: readonly EarlierTurn[];
 }
 
-// Mirrors Codex's local turn: a "Working for 14s" line over what the agent
-// said and the tools it ran, then a single shimmering line at the bottom
-// naming what it is thinking about, which gives way to a running tool or to
-// the answer. Reasoning itself never shows as rows. Once done, the line reads
-// "Worked for 39s". The history always stays open, with no fold of its own;
-// only each burst of steps folds into its summary line.
+// Mirrors Codex's local turn: a "Working" line ("Working for 14s" after the
+// first second) over what the agent said and the tools it ran, then a single
+// shimmering line at the bottom naming what it is thinking about, which gives
+// way to a running tool or to the answer. Reasoning itself never shows as
+// rows. Once the answer starts, the history folds behind one "Worked for 39s"
+// row with a chevron and a full-width rule; cards and failed steps stay out.
 export function TurnActivity({
   thinking,
   steps,
@@ -78,6 +88,8 @@ export function TurnActivity({
   plan,
   renderStep,
   stepKind,
+  stepLabel,
+  stopped = false,
   durationMs,
   startedAt = null,
   earlier = [],
@@ -111,6 +123,33 @@ export function TurnActivity({
   const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
+  // Codex folds the history once the final answer starts; a click overrides.
+  const [openChoice, setOpenChoice] = React.useState<boolean | null>(null);
+  const foldable = !isLive || answering;
+  const historyOpen = !foldable || (openChoice ?? false);
+
+  const runningLabel = (group: Step[]) => {
+    const live = group.find(({ call }) => call.status === "running")?.call;
+    return live && stepLabel?.(live);
+  };
+
+  const renderBurst = (group: Step[]) => {
+    const kinds = group.map(({ call }) => stepKind?.(call) ?? "tool");
+    const explore = kinds.every(isExplore);
+    return (
+      <ActivityGroup
+        key={`steps-${group[0]?.call.id}`}
+        autoOpen={false}
+        activeLabel={explore ? msg("shared.agent.exploring") : runningLabel(group)}
+        title={explore ? exploredTitle(kinds) : undefined}
+        steps={group.map(({ call }, i) => ({ kind: kinds[i] ?? "tool", status: call.status }))}
+      >
+        {group.map(({ call, isRetry }) => (
+          <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
+        ))}
+      </ActivityGroup>
+    );
+  };
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
@@ -118,18 +157,7 @@ export function TurnActivity({
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
       </div>
     ) : piece.kind === "steps" ? (
-      <ActivityGroup
-        key={`steps-${piece.steps[0]?.call.id}`}
-        autoOpen={false}
-        steps={piece.steps.map(({ call }) => ({
-          kind: stepKind?.(call) ?? "tool",
-          status: call.status,
-        }))}
-      >
-        {piece.steps.map(({ call, isRetry }) => (
-          <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
-        ))}
-      </ActivityGroup>
+      splitExploration(piece.steps, (step) => isExplore(stepKind?.(step.call) ?? "tool")).map(renderBurst)
     ) : null;
 
   const renderPlan = (text: string | undefined, key: string) =>
@@ -142,6 +170,20 @@ export function TurnActivity({
       />
     ) : null;
   const planLine = renderPlan(plan, "plan");
+
+  // What a folded history still shows: cards wait on the user, and a failed
+  // step must not hide behind a fold.
+  const renderKept = (piece: (typeof pieces)[number]) =>
+    piece.kind === "card"
+      ? renderPiece(piece)
+      : piece.kind === "steps"
+        ? piece.steps
+            .filter(({ call }) => call.status === "error")
+            .map(({ call, isRetry }) => (
+              <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
+            ))
+        : null;
+  const keptNodes = [...earlierPieces.flat(), ...pieces].map(renderKept);
 
   const earlierNodes = earlier.map((turn, i) => (
     <React.Fragment key={`earlier-${i}`}>
@@ -163,25 +205,73 @@ export function TurnActivity({
     { thinking, steps, durationMs, start: isLive ? (start ?? mountedAt) : start },
     isLive ? nowTs : null,
   );
-  const label = isLive
-    ? formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) })
-    : formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) });
+  const label = !isLive
+    ? formatMsg(stopped ? "shared.agent.stopped_after" : "shared.agent.worked_for", { duration: formatSpan(workedMs) })
+    : workedMs < 1000
+      ? msg("shared.agent.working")
+      : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });
+
+  // Codex ends the turn's row with the actions its auto-review blocked.
+  const denied = allSteps.filter(({ call }) => call.approval === "denied").length;
 
   if (!hasHistory) {
-    return start === null ? null : <Header label={label} />;
+    return start === null ? null : <Header label={label} denied={denied} />;
   }
+
+  const history = (
+    <div className="flex flex-col pt-1.5">
+      {earlierNodes}
+      {planLine}
+      {pieces.map(renderPiece)}
+    </div>
+  );
 
   return (
     <div className="flex flex-col">
-      <Header label={label} />
-      <div className="flex flex-col pt-1.5">
-        {earlierNodes}
-        {planLine}
-        {pieces.map(renderPiece)}
-      </div>
+      {foldable ? (
+        <>
+          <Header label={label} denied={denied} open={historyOpen} onToggle={() => setOpenChoice(!historyOpen)} />
+          <Reveal open={historyOpen}>{history}</Reveal>
+          {!historyOpen && <div className="flex flex-col empty:hidden">{keptNodes}</div>}
+        </>
+      ) : (
+        <>
+          <Header label={label} denied={denied} />
+          {history}
+        </>
+      )}
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
   );
+}
+
+/** Codex's exploration: reading and searching, which fold together into one "Exploring" unit. */
+function isExplore(kind: ActivityKind): boolean {
+  return kind === "read" || kind === "search";
+}
+
+/** Split a burst into runs, so each run of exploration steps folds on its own, as in Codex. */
+export function splitExploration<T>(steps: readonly T[], explore: (step: T) => boolean): T[][] {
+  const runs: T[][] = [];
+  for (const step of steps) {
+    const last = runs.at(-1);
+    if (last && explore(last[0] as T) === explore(step)) last.push(step);
+    else runs.push([step]);
+  }
+  return runs;
+}
+
+/** "Explored 2 files, 1 search", from the kinds of an exploration run. */
+function exploredTitle(kinds: readonly ActivityKind[]): string {
+  const files = kinds.filter((k) => k === "read").length;
+  const searches = kinds.length - files;
+  const parts = [
+    files ? formatMsg("shared.agent.explored_files", { count: files }) : "",
+    searches ? formatMsg("shared.agent.explored_searches", { count: searches }) : "",
+  ].filter(Boolean);
+  return formatMsg("shared.agent.explored", {
+    items: new Intl.ListFormat(getActiveIntlLocale(), { style: "short", type: "unit" }).format(parts),
+  });
 }
 
 // Most wizard tools answer in tens of ms; swapping the "Thinking" line out
@@ -215,25 +305,83 @@ function ThinkingLine({ label }: { label: string }) {
   );
 }
 
-function Header({ label }: { label: string }) {
+/**
+ * The turn's "Worked for" row; with ``onToggle`` it folds the history, as in Codex.
+ * ``denied`` counts the actions the auto-review blocked, shown at the row's end.
+ */
+function Header({
+  label,
+  denied = 0,
+  open,
+  onToggle,
+}: {
+  label: string;
+  denied?: number;
+  open?: boolean;
+  onToggle?: () => void;
+}) {
+  const rule = "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted-foreground";
+  const deniedNote = denied > 0 && (
+    <TooltipProvider delayDuration={250}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            tabIndex={0}
+            className="ms-auto shrink-0 rounded-sm tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {formatMsg("shared.agent.denied_actions", { count: denied })}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-64 text-center">
+          {msg("shared.agent.denied_actions_tooltip")}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
   return (
-    <div className="flex w-full items-center border-b border-border/60 pb-2 text-[0.8125rem] text-muted-foreground">
-      <span className="truncate">{label}</span>
+    <div className="flex w-full min-w-0 items-center gap-2 border-b border-border/60 pb-2">
+      {onToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className={cn(rule, "w-auto cursor-pointer text-start transition-colors hover:text-foreground")}
+        >
+          <span className="truncate">{label}</span>
+          <CaretRight
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+              open ? "rotate-90" : "rtl:-scale-x-100",
+            )}
+            aria-hidden
+          />
+        </button>
+      ) : (
+        <span className={cn(rule, "w-auto")}>
+          <span className="truncate">{label}</span>
+        </span>
+      )}
+      {deniedNote && <span className="ms-auto flex text-[0.8125rem] text-muted-foreground">{deniedNote}</span>}
     </div>
   );
 }
 
-/** A duration as "8s" or "1m 5s", in the active locale. */
+/** A duration as Codex writes it: "0s", "42s", "1m 5s", "1h 2m 3s", in the active locale. */
 export function formatSpan(ms: number): string {
-  const total = Math.max(1, Math.round(ms / 1000));
-  const unit = (value: number, u: "minute" | "second") =>
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const unit = (value: number, u: "hour" | "minute" | "second") =>
     new Intl.NumberFormat(getActiveIntlLocale(), {
       style: "unit",
       unit: u,
       unitDisplay: "narrow",
     }).format(value);
-  const mins = Math.floor(total / 60);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
   const secs = total % 60;
-  if (!mins) return unit(secs, "second");
-  return secs ? `${unit(mins, "minute")} ${unit(secs, "second")}` : unit(mins, "minute");
+  const parts = [
+    hours ? unit(hours, "hour") : "",
+    mins ? unit(mins, "minute") : "",
+    secs ? unit(secs, "second") : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" ") : unit(0, "second");
 }

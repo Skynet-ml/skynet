@@ -109,3 +109,78 @@ export function minuteClockNow(): number {
   if (!clockTimer && Date.now() - clockNow >= MINUTE) clockNow = Date.now();
   return clockNow;
 }
+
+/** One message's place in the separator rule: who sent it, and when. */
+export interface SeparatorStamp {
+  role: "user" | "agent";
+  at?: number;
+}
+
+/**
+ * Which turns open with a time separator, and at which time. A turn gets one
+ * when its first user message is more than an hour old, or after a reply
+ * when the next user message comes more than an hour later, or the next
+ * reply more than ten minutes later. This is the rule Codex uses.
+ */
+export function separatorTimes(
+  turns: ReadonlyArray<readonly SeparatorStamp[]>,
+  now: number,
+): Array<number | null> {
+  let previous: SeparatorStamp | null = null;
+  let seenUser = false;
+  return turns.map((stamps) => {
+    let at: number | null = null;
+    for (const stamp of stamps) {
+      if (at === null && stamp.at != null && Number.isFinite(stamp.at)) {
+        const firstUser = stamp.role === "user" && !seenUser;
+        const gap = stamp.role === "user" ? HOUR : 10 * MINUTE;
+        if (
+          (firstUser && now - stamp.at > HOUR) ||
+          (previous?.role === "agent" && previous.at != null && stamp.at - previous.at > gap)
+        ) {
+          at = stamp.at;
+        }
+      }
+      seenUser = seenUser || stamp.role === "user";
+      previous = stamp;
+    }
+    return at;
+  });
+}
+
+/** Whole calendar days from `ms` to `now`, in local time. */
+function calendarDays(ms: number, now: number): number {
+  const a = new Date(ms);
+  const b = new Date(now);
+  return Math.round(
+    (Date.UTC(b.getFullYear(), b.getMonth(), b.getDate()) -
+      Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())) /
+      DAY,
+  );
+}
+
+/**
+ * The parts of a time separator: "Today" or "Yesterday", the weekday within a
+ * week, the short date within a year, then the date with its year. `older`
+ * is true from a week on, where the label reads "{date} at {time}".
+ */
+export function separatorParts(
+  ms: number,
+  now: number,
+  locale: string,
+): { date: string; time: string; older: boolean } {
+  const days = Math.max(calendarDays(ms, now), 0);
+  let date: string;
+  if (days <= 1) {
+    date = relativeFormat(locale, "auto").format(-days, "day");
+    date = date.charAt(0).toLocaleUpperCase(locale) + date.slice(1);
+  } else if (days <= 7) {
+    date = dateFormat(locale, { weekday: "long" }).format(ms);
+  } else if (days <= 365) {
+    date = dateFormat(locale, { weekday: "short", month: "short", day: "numeric" }).format(ms);
+  } else {
+    date = dateFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(ms);
+  }
+  const time = dateFormat(locale, { hour: "numeric", minute: "2-digit" }).format(ms);
+  return { date, time, older: days > 7 };
+}

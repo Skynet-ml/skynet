@@ -9,7 +9,9 @@ import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { AgentBubble } from "./agent-bubble";
 import { compactionSlots, placeSlots, type SlotPlace } from "./compaction-slots";
 import { MessageActions } from "./message-actions";
+import { minuteClockNow, separatorTimes, subscribeMinuteClock } from "./message-time";
 import { pairMessages, type Pair as TranscriptPair } from "./transcript-pairs";
+import { TimestampSeparator } from "./timestamp-separator";
 import { TtftIndicator } from "./ttft-indicator";
 import { UserBubble, UserBubbleEditor } from "./user-bubble";
 import type { AgentMessage, AgentThinking, AgentToolCall, ChatCompaction } from "./types";
@@ -30,6 +32,7 @@ interface ChatTranscriptProps {
   renderToolCall?: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   isStepCall?: (call: AgentToolCall) => boolean;
   stepKind?: (call: AgentToolCall) => ActivityKind;
+  stepLabel?: (call: AgentToolCall) => string;
   toolCallsBeforeContent?: boolean;
   onRunCode?: (code: string, language: string) => void;
   /** Which links in agent answers stay links; the rest render as plain text. */
@@ -44,6 +47,8 @@ interface ChatTranscriptProps {
   renderCompaction?: (entry: ChatCompaction) => React.ReactNode;
   /** The live row of a compaction that the streaming turn runs before its answer. */
   compacting?: React.ReactNode;
+  /** A line drawn before a turn's user message, such as a model change; given the message's index. */
+  renderBeforeUser?: (userIndex: number) => React.ReactNode;
 }
 
 // Owns the "messages → user/agent pairs → bubbles + edit-and-resend wiring"
@@ -58,6 +63,7 @@ export function ChatTranscript({
   renderToolCall,
   isStepCall,
   stepKind,
+  stepLabel,
   toolCallsBeforeContent,
   onRunCode,
   allowLink,
@@ -67,6 +73,7 @@ export function ChatTranscript({
   onFork,
   renderCompaction,
   compacting,
+  renderBeforeUser,
 }: ChatTranscriptProps) {
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
   const [editDraft, setEditDraft] = React.useState("");
@@ -86,6 +93,18 @@ export function ChatTranscript({
       ),
     [pairs, messages],
   );
+
+  const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, minuteClockNow);
+  const separators = React.useMemo(() => {
+    const times = separatorTimes(
+      pairs.map((pair) => [
+        ...(pair.user ? [{ role: "user" as const, at: pair.user.msg.createdAt }] : []),
+        ...(pair.agent ? [{ role: "agent" as const, at: pair.agent.createdAt }] : []),
+      ]),
+      now,
+    );
+    return new Map(pairs.map((pair, i) => [pair.key, times[i] ?? null]));
+  }, [pairs, now]);
 
   const latestAgentKey = React.useMemo(() => {
     for (let i = pairs.length - 1; i >= 0; i--) {
@@ -176,9 +195,12 @@ export function ChatTranscript({
           <React.Fragment key={slot.anchor}>{renderCompaction(slot.entry)}</React.Fragment>
         ));
 
+    const separatorAt = separators.get(pair.key) ?? null;
     return (
       <>
+        {separatorAt !== null && <TimestampSeparator at={separatorAt} now={now} />}
         {rows("before")}
+        {pair.user && renderBeforeUser?.(pair.user.index)}
         {pair.user &&
           (isEditing ? (
             <UserBubbleEditor
@@ -192,6 +214,7 @@ export function ChatTranscript({
             <UserBubble
               content={pair.user.msg.content}
               createdAt={pair.user.msg.createdAt}
+              media={pair.user.msg.media}
               editable={!streaming}
               onEdit={() => pair.user && startEdit(pair.user.index, pair.user.msg.content)}
               onFork={onFork && (() => pair.user && onFork(pair.user.index))}
@@ -212,6 +235,7 @@ export function ChatTranscript({
                 renderToolCall={renderToolCall}
                 isStepCall={isStepCall}
                 stepKind={stepKind}
+                stepLabel={stepLabel}
                 toolCallsBeforeContent={toolCallsBeforeContent}
                 onRunCode={onRunCode}
                 allowLink={allowLink}
@@ -254,6 +278,7 @@ export function ChatTranscript({
       {visiblePairs.map((pair) => (
         <motion.div
           key={pair.key}
+          data-user-message={pair.user?.index}
           initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
@@ -265,7 +290,7 @@ export function ChatTranscript({
     </AnimatePresence>
   ) : (
     visiblePairs.map((pair) => (
-      <div key={pair.key} className="space-y-3">
+      <div key={pair.key} data-user-message={pair.user?.index} className="space-y-3">
         {renderPairBody(pair)}
       </div>
     ))

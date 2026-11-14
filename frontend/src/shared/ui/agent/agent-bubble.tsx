@@ -40,6 +40,8 @@ interface AgentBubbleProps {
   isStepCall?: (call: AgentToolCall) => boolean;
   /** What kind of step a call is, for the summary line over the turn's steps. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
+  /** The line a running call shows on its folded burst, e.g. "Running pytest". */
+  stepLabel?: (call: AgentToolCall) => string;
   onRunCode?: (code: string, language: string) => void;
   /** Which links in the answer stay links; the rest render as plain text. */
   allowLink?: (href: string) => boolean;
@@ -86,6 +88,7 @@ export function AgentBubble({
   renderToolCall,
   isStepCall,
   stepKind,
+  stepLabel,
   onRunCode,
   allowLink,
   toolCallsBeforeContent = false,
@@ -150,10 +153,11 @@ export function AgentBubble({
       answer: m.content.trim() ? renderAnswer(m.content) : null,
       durationMs: m.stats?.durationMs,
     }));
-    if (!turnStreaming && !hasText && !hasActivity && !plan && !earlierTurns.length) return null;
+    const hasTurn = turnStreaming || hasActivity || Boolean(plan) || earlierTurns.length > 0;
+    if (!hasTurn && !hasText && !afterContent) return null;
     return (
       <div className={cn("flex w-full min-w-0 flex-col gap-3", className)}>
-        <TurnActivity
+        {(hasTurn || hasText) && <TurnActivity
           thinking={allThinking}
           steps={visibleToolCalls.map((v) => ({
             ...v,
@@ -164,10 +168,12 @@ export function AgentBubble({
           plan={plan}
           renderStep={renderToolCall}
           stepKind={stepKind}
+          stepLabel={stepLabel}
+          stopped={msg.stopped}
           durationMs={msg.stats?.durationMs}
           startedAt={turnStart(allThinking, [])}
           earlier={earlierTurns}
-        />
+        />}
         {answer}
         {afterContent}
       </div>

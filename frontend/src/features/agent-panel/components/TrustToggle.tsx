@@ -71,7 +71,7 @@ export function TrustToggle({ mode, onCycle, className, plain }: TrustToggleProp
             <span className="font-medium leading-none">{label}</span>
           </button>
         </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-64 text-start leading-relaxed">
+        <TooltipContent side="top" className="w-max max-w-[min(20rem,var(--radix-tooltip-content-available-width))] px-2 py-1.5 text-start text-wrap font-normal">
           <ul className="space-y-1">
             {MODE_ORDER.map((m) => {
               const ModeIcon = ICONS[m];
@@ -85,11 +85,8 @@ export function TrustToggle({ mode, onCycle, className, plain }: TrustToggleProp
                   )}
                 >
                   <ModeIcon className="size-3 shrink-0 mt-[2px]" aria-hidden="true" />
-                  <span>
-                    <span className={active ? "font-semibold" : "font-medium"}>
-                      {TRUST_MODE_LABEL[m]()}
-                    </span>
-                    <span className="opacity-80"> — {TRUST_MODE_DESCRIPTION[m]()}</span>
+                  <span className={active ? "font-semibold" : undefined}>
+                    {TRUST_MODE_DESCRIPTION[m]()}
                   </span>
                 </li>
               );

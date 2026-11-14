@@ -8,6 +8,8 @@ import {
   formatMessageDate,
   minuteClockNow,
   parseMessageTime,
+  separatorParts,
+  separatorTimes,
   subscribeMinuteClock,
 } from "./message-time.ts";
 
@@ -114,4 +116,37 @@ test("every message time shares one minute timer", () => {
   } finally {
     Object.assign(globalThis, { setInterval: real.set, clearInterval: real.clear });
   }
+});
+
+const HOUR = 60 * MIN;
+
+test("opens an old chat with a time separator, and a fresh one without", () => {
+  assert.deepEqual(separatorTimes([[{ role: "user", at: now - 2 * HOUR }]], now), [now - 2 * HOUR]);
+  assert.deepEqual(separatorTimes([[{ role: "user", at: now - 5 * MIN }]], now), [null]);
+});
+
+test("adds a separator after an hour's pause before the user, or ten minutes before a reply", () => {
+  const t0 = now - 30 * MIN;
+  const turns = [
+    [{ role: "user" as const, at: t0 }, { role: "agent" as const, at: t0 + MIN }],
+    [{ role: "user" as const, at: t0 + 20 * MIN }, { role: "agent" as const, at: t0 + 21 * MIN }],
+  ];
+  assert.deepEqual(separatorTimes(turns, now), [null, null]);
+  const later = [turns[0]!, [{ role: "user" as const, at: t0 + MIN + HOUR + 1 }]];
+  assert.deepEqual(separatorTimes(later, now + 2 * HOUR), [t0, t0 + MIN + HOUR + 1]);
+  const replyLater = [[{ role: "agent" as const, at: t0 }], [{ role: "agent" as const, at: t0 + 11 * MIN }]];
+  assert.deepEqual(separatorTimes(replyLater, now), [null, t0 + 11 * MIN]);
+});
+
+test("names the day: today, a weekday, a short date, then a date with its year", () => {
+  const clean = (s: string) => s.replace(/[\u202f\u00a0]/g, " ");
+  const p = (ms: number) => {
+    const r = separatorParts(ms, now, "en-US");
+    return [r.date, clean(r.time), r.older];
+  };
+  assert.deepEqual(p(at(2026, 10, 12, 9, 5)), ["Today", "9:05 AM", false]);
+  assert.deepEqual(p(at(2026, 10, 11, 9, 5)), ["Yesterday", "9:05 AM", false]);
+  assert.deepEqual(p(at(2026, 10, 9, 9, 5)), ["Monday", "9:05 AM", false]);
+  assert.deepEqual(p(at(2026, 9, 1, 9, 5)), ["Thu, Oct 1", "9:05 AM", true]);
+  assert.deepEqual(p(at(2025, 9, 1, 9, 5)), ["Oct 1, 2025", "9:05 AM", true]);
 });

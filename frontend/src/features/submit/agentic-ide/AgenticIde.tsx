@@ -10,8 +10,10 @@ import { GitDiff } from "@/shared/ui/icons";
 import type { RepoSource } from "../ide/repo-files";
 import { repoBaseText } from "../lib/repo-run";
 import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
-import { ChangesPane } from "./ChangesPane";
 import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
+import type { RepoFile } from "./review/lib";
+import type { PaneComment } from "./review/parts";
+import { ReviewPane, type RepoHostLink } from "./review/review-pane";
 
 const OPTIMIZE_TOML = "optimize.toml";
 // The entry files are new in the draft; the repository never holds them.
@@ -21,29 +23,46 @@ const TABS_BELOW_PX = 1024;
 const CHAT_MIN = 0.25;
 const CHAT_MAX = 0.75;
 
+type RepoRead = { text: string } | { issue: "binary" | "too_large" | "missing" };
+const NO_READS: ReadonlyMap<string, RepoRead | null> = new Map();
+const NO_FILES: readonly string[] = [];
+
+// The pane needs a stable id per comment; the shared list holds plain objects,
+// and an edit replaces its object, so the edited comment gets a new id.
+const commentIds = new WeakMap<object, string>();
+let lastCommentId = 0;
+
+/** Give a comment object its stable pane id, made on first use. */
+function commentId(comment: object): string {
+  let id = commentIds.get(comment);
+  if (!id) {
+    id = `c${++lastCommentId}`;
+    commentIds.set(comment, id);
+  }
+  return id;
+}
+
 /**
- * Read each file's text in the repository, the base the draft changes.
+ * Read files from the repository, each once.
  *
  * Args:
  *   repo: The run's repository, or null.
  *   paths: The files to read.
  *
  * Returns:
- *   Each read file's text ("" when the repository has none); a path still
- *   loading has no entry. A failed or unreadable optimize.toml read maps to
- *   undefined: the repository may have the file, so the Metric screen must
- *   not hold on it (SKY-693).
+ *   Each read file's text or issue; a path still loading has no entry. A
+ *   failed read maps to null, and the next change to the paths reads it again.
  */
-function useRepoBase(
+function useRepoReads(
   repo: RepoSource | null,
   paths: readonly string[],
-): ReadonlyMap<string, string | undefined> {
+): ReadonlyMap<string, RepoRead | null> {
   const [read, setRead] = React.useState<{
     repo: RepoSource | null;
-    texts: ReadonlyMap<string, string | undefined>;
+    results: ReadonlyMap<string, RepoRead | null>;
   }>({
     repo,
-    texts: new Map(),
+    results: new Map(),
   });
   const requested = React.useRef<{ repo: RepoSource | null; paths: Set<string> }>({
     repo,
@@ -57,29 +76,50 @@ function useRepoBase(
     for (const path of key ? key.split("\n") : []) {
       if (DRAFT_ONLY.has(path) || requested.current.paths.has(path)) continue;
       requested.current.paths.add(path);
-      const settle = (text: string | undefined) =>
+      const settle = (result: RepoRead | null) =>
         setRead((prev) => {
-          const texts = new Map(prev.repo === repo ? prev.texts : []);
-          texts.set(path, text);
-          return { repo, texts };
+          const results = new Map(prev.repo === repo ? prev.results : []);
+          results.set(path, result);
+          return { repo, results };
         });
-      repo.read(path).then(
-        (result) => settle(repoBaseText(path, result)),
-        () => {
-          // A later change to the draft's paths reads the file again; the
-          // effect does not run on a render alone, so a failing read cannot loop.
-          requested.current.paths.delete(path);
-          settle(repoBaseText(path, null));
-        },
-      );
+      repo.read(path).then(settle, () => {
+        // A later change to the draft's paths reads the file again; the
+        // effect does not run on a render alone, so a failing read cannot loop.
+        requested.current.paths.delete(path);
+        settle(null);
+      });
     }
   }, [repo, key]);
 
-  return React.useMemo(() => {
-    const texts = new Map(read.repo === repo ? read.texts : []);
-    for (const path of paths) if (DRAFT_ONLY.has(path) || !repo) texts.set(path, "");
-    return texts;
-  }, [read, repo, paths]);
+  return read.repo === repo ? read.results : NO_READS;
+}
+
+/**
+ * List the repository's files once its tree arrives.
+ *
+ * Args:
+ *   repo: The run's repository, or null.
+ *
+ * Returns:
+ *   The file paths, sorted; none while the tree loads or when it fails.
+ */
+function useRepoTree(repo: RepoSource | null): readonly string[] {
+  const [tree, setTree] = React.useState<{ repo: RepoSource | null; files: readonly string[] }>({
+    repo,
+    files: [],
+  });
+  React.useEffect(() => {
+    if (!repo) return;
+    let live = true;
+    repo.tree.then(
+      (index) => live && setTree({ repo, files: [...index.files].sort() }),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [repo]);
+  return tree.repo === repo ? tree.files : NO_FILES;
 }
 
 function useWidth(): [(el: HTMLElement | null) => void, number] {
@@ -108,6 +148,7 @@ export function AgenticIde({
   repo,
   busy,
   onWrite,
+  host,
 }: {
   /** The setup agent's chat, docked here. */
   chat: React.ReactNode;
@@ -118,6 +159,8 @@ export function AgenticIde({
   busy: boolean;
   /** Write a draft file, or drop it with null. */
   onWrite: (path: string, text: string | null) => void;
+  /** The repository's page on its host, or null when the run has none. */
+  host?: RepoHostLink | null;
 }) {
   const agent = useWizardStateOptional();
   const setViewChanges = agent?.setViewChanges;
@@ -147,7 +190,23 @@ export function AgenticIde({
       repo && !draftPaths.includes(OPTIMIZE_TOML) ? [...draftPaths, OPTIMIZE_TOML] : draftPaths,
     [repo, draftPaths],
   );
-  const base = useRepoBase(repo, basePaths);
+  // A file of the tree that the draft does not hold is read when its tab opens.
+  const [opened, setOpened] = React.useState<ReadonlySet<string>>(() => new Set());
+  const readPaths = React.useMemo(
+    () => [...basePaths, ...[...opened].filter((path) => !(path in texts))],
+    [basePaths, opened, texts],
+  );
+  const reads = useRepoReads(repo, readPaths);
+  const treePaths = useRepoTree(repo);
+  // The base the draft changes: "" for a file the repository cannot give as text.
+  // A failed or unreadable optimize.toml read maps to undefined: the repository
+  // may have the file, so the Metric screen must not hold on it (SKY-693).
+  const base = React.useMemo(() => {
+    const known = new Map<string, string | undefined>();
+    for (const [path, result] of reads) known.set(path, repoBaseText(path, result));
+    for (const path of basePaths) if (DRAFT_ONLY.has(path) || !repo) known.set(path, "");
+    return known;
+  }, [reads, basePaths, repo]);
   // The chat's "Edited N files" card diffs a file the draft
   // did not hold yet (the repository's optimize.toml) against this base.
   // A read with no known text has no entry, so the Metric screen does not hold on it.
@@ -171,10 +230,20 @@ export function AgenticIde({
     draftPaths.map((path) => ({ path, before: base.get(path) ?? "", after: texts[path] ?? "" })),
   );
   if (allFiles !== fileCache) setFileCache(allFiles);
-  const loading = React.useMemo(
-    () => new Set(draftPaths.filter((path) => !base.has(path))),
-    [draftPaths, base],
-  );
+  // A draft file whose base is still loading shows no diff yet, not a whole new file.
+  const paneFiles = React.useMemo<RepoFile[]>(() => {
+    const draft = allFiles.map((f) => (base.has(f.path) ? f : { ...f, loading: true }));
+    const rest = treePaths
+      .filter((path) => !(path in texts))
+      .map((path): RepoFile => {
+        const result = reads.get(path);
+        if (result === undefined) return { path, before: "", after: "", loading: true };
+        if (result === null) return { path, before: "", after: "", issue: "missing" };
+        if ("issue" in result) return { path, before: "", after: "", issue: result.issue };
+        return { path, before: result.text, after: result.text };
+      });
+    return [...draft, ...rest];
+  }, [allFiles, base, treePaths, texts, reads]);
   const anyChange = allFiles.some((f) => base.has(f.path) && isChanged(f));
 
   // The pane opens by itself once, on the first change; after that the user decides.
@@ -256,32 +325,76 @@ export function AgenticIde({
   React.useEffect(() => () => setDraftFiles?.(null), [setDraftFiles]);
 
   // Stable, so the pane's lines do not redraw on every render of the IDE.
+  // A user's edit that empties a new file keeps the empty file; only an undo removes it.
   const editFile = React.useCallback(
-    (file: DraftFile, text: string) => {
+    (path: string, text: string) => {
       if (busy) return;
-      onWrite(file.path, text);
+      onWrite(path, text);
     },
     [busy, onWrite],
+  );
+  const openFile = React.useCallback(
+    (path: string) => setOpened((prev) => (prev.has(path) ? prev : new Set(prev).add(path))),
+    [],
+  );
+
+  const comments = React.useMemo<PaneComment[]>(
+    () =>
+      (lineComments ?? []).map((c) => {
+        return { id: commentId(c), path: c.path, line: c.line, text: c.text };
+      }),
+    [lineComments],
+  );
+  const byId = React.useCallback(
+    (id: string) => (lineComments ?? []).find((c) => commentId(c) === id),
+    [lineComments],
   );
   const comment = React.useMemo(
     () =>
       addLineComment
-        ? (path: string, line: number, text: string) => addLineComment({ path, line, text })
+        ? (c: Omit<PaneComment, "id">) =>
+            addLineComment({ path: c.path, line: c.line, text: c.text })
         : undefined,
     [addLineComment],
   );
+  const removeComment = React.useMemo(
+    () =>
+      removeLineComment
+        ? (id: string) => {
+            const c = byId(id);
+            if (c) removeLineComment(c);
+          }
+        : undefined,
+    [removeLineComment, byId],
+  );
+  // The shared list has no update: an edit replaces the comment.
+  const editComment = React.useMemo(
+    () =>
+      removeLineComment && addLineComment
+        ? (id: string, text: string) => {
+            const c = byId(id);
+            if (!c) return;
+            removeLineComment(c);
+            addLineComment({ ...c, text });
+          }
+        : undefined,
+    [removeLineComment, addLineComment, byId],
+  );
+  const hidePane = React.useCallback(() => (tabs ? setTab("chat") : setPaneOpen(false)), [tabs]);
 
   const pane = (
-    <ChangesPane
-      files={allFiles}
-      loading={loading}
-      focus={focus}
-      locked={busy}
-      // A user's edit that empties a new file keeps the empty file; only an undo removes it.
-      onEditFile={editFile}
-      comments={agent?.lineComments ?? []}
-      onDeleteComment={agent?.removeLineComment}
+    <ReviewPane
+      files={paneFiles}
+      request={focus}
+      readOnly={busy}
+      onEdit={editFile}
+      onOpenFile={openFile}
+      comments={comments}
       onComment={comment}
+      onRemoveComment={removeComment}
+      onEditComment={editComment}
+      onHide={hidePane}
+      host={host}
     />
   );
 
