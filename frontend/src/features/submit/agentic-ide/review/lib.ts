@@ -16,7 +16,7 @@ export interface RepoFile {
   issue?: "binary" | "too_large" | "missing" | "unreadable";
 }
 
-export type FileStatus = "added" | "modified" | "deleted" | "unchanged";
+export type FileStatus = "added" | "modified" | "unchanged";
 
 /** How the draft changed a file. A final newline alone is no change. */
 export function statusOf(file: RepoFile): FileStatus {
@@ -25,9 +25,8 @@ export function statusOf(file: RepoFile): FileStatus {
   if (before === after) return "unchanged";
   // A file still loading has an empty `before` that is not real, so it must not read as added.
   if (file.loading) return "modified";
-  if (before === "") return "added";
-  if (after === "") return "deleted";
-  return "modified";
+  // The draft cannot delete a file: an emptied one stays as an empty file, so it reads as modified.
+  return before === "" ? "added" : "modified";
 }
 
 export interface DiffLine {
@@ -46,6 +45,12 @@ function split(text: string): string[] {
   return lines;
 }
 
+// The tree, the totals, the open diff and the editor's change marks all read
+// the same diffs on each render and keystroke, so recent results stay. Keyed
+// by the new text first: many new files share the empty old text. SKY-628.
+const DIFF_CACHE_SIZE = 200;
+const diffCache = new Map<string, Map<string, DiffLine[]>>();
+
 /**
  * Diff two texts line by line, with line numbers on both sides.
  *
@@ -56,8 +61,28 @@ function split(text: string): string[] {
  *
  * Returns:
  *   Every line in order. Big files fall back to "all out, all in" through `lineDiff`'s cap.
+ *   The same array for the same texts while it is cached, so callers must not change it.
  */
 export function diffLines(before: string, after: string, ignoreSpace = false): DiffLine[] {
+  const inner = `${ignoreSpace ? "w" : "-"}${before}`;
+  const byAfter = diffCache.get(after);
+  const hit = byAfter?.get(inner);
+  if (byAfter) {
+    // Move the entry to the end, so the oldest unused one leaves first.
+    diffCache.delete(after);
+    diffCache.set(after, byAfter);
+  }
+  if (hit) return hit;
+  const out = computeDiff(before, after, ignoreSpace);
+  const entry = byAfter ?? new Map<string, DiffLine[]>();
+  if (entry.size >= 4) entry.delete(entry.keys().next().value!);
+  entry.set(inner, out);
+  diffCache.set(after, entry);
+  while (diffCache.size > DIFF_CACHE_SIZE) diffCache.delete(diffCache.keys().next().value!);
+  return out;
+}
+
+function computeDiff(before: string, after: string, ignoreSpace: boolean): DiffLine[] {
   const a = split(before);
   const b = split(after);
   // The "." mark keeps an empty line from reading as an empty text.

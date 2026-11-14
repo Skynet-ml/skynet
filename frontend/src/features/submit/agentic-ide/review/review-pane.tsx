@@ -36,7 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/primitives/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { commandKey, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
 
 import { CodeAppearanceStyle } from "./code-style";
@@ -238,11 +238,10 @@ function SourceLabel({ sum }: { sum: { added: number; removed: number } }) {
 const STATUS_TEXT: Record<FileStatus, string> = {
   added: "text-[var(--success)]",
   modified: "text-[var(--warning)]",
-  deleted: "text-[var(--danger)] line-through decoration-1",
   unchanged: "text-foreground/85",
 };
 
-/** Codex's square status badge: a dot for a change, a plus for a new file, a bar for a deleted one. */
+/** Codex's square status badge: a dot for a change, a plus for a new file. */
 function StatusBadge({ status }: { status: FileStatus }) {
   if (status === "unchanged") return null;
   return (
@@ -254,8 +253,12 @@ function StatusBadge({ status }: { status: FileStatus }) {
       )}
     >
       {status === "modified" && <span className="size-1.5 rounded-full bg-current" />}
-      {status !== "modified" && <span className="h-[1.5px] w-2 bg-current" />}
-      {status === "added" && <span className="absolute h-2 w-[1.5px] bg-current" />}
+      {status === "added" && (
+        <>
+          <span className="h-[1.5px] w-2 bg-current" />
+          <span className="absolute h-2 w-[1.5px] bg-current" />
+        </>
+      )}
     </span>
   );
 }
@@ -283,6 +286,7 @@ function Section({
         {/* Codex marks a group with unreviewed changes by a dot, not a count. */}
         {marker && (
           <span
+            role="img"
             className="ms-auto me-1 size-1.5 rounded-full bg-primary"
             aria-label={msg("submit.agentic_ide.review.unreviewed")}
           />
@@ -434,6 +438,7 @@ export function ReviewPane({
   const [ignoreSpace, setIgnoreSpace] = React.useState(false);
   const [hideImports, setHideImports] = React.useState(false);
 
+  const root = React.useRef<HTMLDivElement>(null);
   const scroller = React.useRef<HTMLDivElement>(null);
   const sections = React.useRef(new Map<string, HTMLElement>());
   const [width, setWidth] = React.useState(0);
@@ -463,8 +468,9 @@ export function ReviewPane({
     }
     setActive(path);
   };
+  const newTabs = React.useRef(0);
   const newTab = () => {
-    const key = `new:${Date.now()}`;
+    const key = `new:${++newTabs.current}`;
     setTabs((t) => [...t, key]);
     setActive(key);
   };
@@ -495,6 +501,11 @@ export function ReviewPane({
     if (active === "changes") setActive(tabs[0]!);
   };
   const closeTab = (tab: string) => keepTabs(tabs.filter((t) => t !== tab));
+  // A tab whose file left the draft (a deleted new file, a reverted change) closes.
+  const liveTabs = tabs.filter((t) => isNewTab(t) || byPath.has(t));
+  React.useEffect(() => {
+    if (liveTabs.length !== tabs.length) keepTabs(liveTabs);
+  });
   const showDiff = (path: string) => {
     setActive("changes");
     setCurrent(path);
@@ -526,7 +537,13 @@ export function ReviewPane({
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
+      // Text fields outside the pane (the composer) keep the keys.
+      const t = e.target;
+      const typing =
+        t instanceof HTMLElement &&
+        (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA") &&
+        !root.current?.contains(t);
+      if (!typing && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
         e.preventDefault();
         setShowList((s) => !s);
       }
@@ -582,7 +599,7 @@ export function ReviewPane({
           ? msg("submit.agentic_ide.review.hide_files")
           : msg("submit.agentic_ide.review.show_files")
       }
-      keys="⌘⇧E"
+      keys={`${commandKey()}⇧E`}
       pressed={showList}
       onClick={() => setShowList((s) => !s)}
     >
@@ -731,12 +748,12 @@ export function ReviewPane({
     );
   };
 
-  const shownChanges = large
-    ? changed.filter((f) => f.path === (current ?? changed[0]!.path))
-    : changed;
+  // In large mode the shown file is the current one while it still changes, else the first.
+  const largePath = changed.some((f) => f.path === current) ? current : changed[0]?.path;
+  const shownChanges = large ? changed.filter((f) => f.path === largePath) : changed;
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col bg-card">
+    <div ref={root} className="flex h-full min-w-0 flex-1 flex-col bg-card">
       <CodeAppearanceStyle />
       {/* Tabs: Changes first, then each opened file. */}
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 bg-[var(--surface-2)] px-1.5">
@@ -991,7 +1008,7 @@ export function ReviewPane({
             <LargeDiffBanner
               index={Math.max(
                 0,
-                changed.findIndex((f) => f.path === (current ?? changed[0]!.path)),
+                changed.findIndex((f) => f.path === largePath),
               )}
               count={changed.length}
               onStep={(i) => showDiff(changed[i]!.path)}
@@ -1034,10 +1051,7 @@ export function ReviewPane({
                       <FileGlyph path={f.path} />
                       {/* Full path when the header has room, the file name alone when narrow, as in Codex. */}
                       <span
-                        className={cn(
-                          "min-w-0 truncate text-[13px]",
-                          statusOf(f) === "deleted" && "line-through decoration-1",
-                        )}
+                        className="min-w-0 truncate text-[13px]"
                         dir="ltr"
                       >
                         {dirName(f.path) && (
@@ -1267,7 +1281,7 @@ function NewTabPage({ showList, onShowList }: { showList: boolean; onShowList: (
         >
           <FilesIcon className="size-3.5 text-muted-foreground" />
           {msg("submit.agentic_ide.review.show_files")}
-          <kbd className="font-sans text-[11px] text-muted-foreground">{"⌘⇧E"}</kbd>
+          <kbd className="font-sans text-[11px] text-muted-foreground">{`${commandKey()}⇧E`}</kbd>
         </button>
       )}
     </div>

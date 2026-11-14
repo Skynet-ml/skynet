@@ -10,7 +10,6 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
 
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 
 import { ActivityGroup } from "./activity-steps";
 import { Reveal } from "./reveal";
@@ -62,8 +61,6 @@ interface TurnActivityProps {
   renderStep: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /** What kind of step a call is, for the burst's summary line. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
-  /** The user stopped the turn, so the header says so, as Codex does. */
-  stopped?: boolean;
   /** Backend-measured turn duration; the history's own span wins when longer. */
   durationMs?: number | null;
   /** The turn's start, when the caller knows it better than the steps do. */
@@ -86,7 +83,6 @@ export function TurnActivity({
   plan,
   renderStep,
   stepKind,
-  stopped = false,
   durationMs,
   startedAt = null,
   earlier = [],
@@ -207,23 +203,19 @@ export function TurnActivity({
     isLive ? nowTs : null,
   );
   const label = !isLive
-    ? formatMsg(stopped ? "shared.agent.stopped_after" : "shared.agent.worked_for", { duration: formatSpan(workedMs) })
+    ? formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) })
     : workedMs < 1000
       ? msg("shared.agent.working")
       : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });
 
-  // Codex ends the turn's row with the actions its auto-review blocked.
-  const denied = allSteps.filter(({ call }) => call.approval === "denied").length;
-
   if (!hasHistory) {
-    return start === null ? null : <Header label={label} denied={denied} />;
+    return start === null ? null : <Header label={label} />;
   }
 
   return (
     <div className="flex flex-col">
       <Header
         label={label}
-        denied={denied}
         open={foldable ? historyOpen : undefined}
         onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
       />
@@ -299,37 +291,17 @@ function ThinkingLine({ label }: { label: string }) {
 
 /**
  * The turn's "Worked for" row; with ``onToggle`` it folds the history, as in Codex.
- * ``denied`` counts the actions the auto-review blocked, shown at the row's end.
  */
 function Header({
   label,
-  denied = 0,
   open,
   onToggle,
 }: {
   label: string;
-  denied?: number;
   open?: boolean;
   onToggle?: () => void;
 }) {
   const rule = "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted-foreground";
-  const deniedNote = denied > 0 && (
-    <TooltipProvider delayDuration={250}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            tabIndex={0}
-            className="ms-auto shrink-0 rounded-sm tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {formatMsg("shared.agent.denied_actions", { count: denied })}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-64 text-center">
-          {msg("shared.agent.denied_actions_tooltip")}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
   return (
     <div className="flex w-full min-w-0 items-center gap-2 border-b border-border/60 pb-2">
       {onToggle ? (
@@ -353,7 +325,6 @@ function Header({
           <span className="truncate">{label}</span>
         </span>
       )}
-      {deniedNote && <span className="ms-auto flex text-[0.8125rem] text-muted-foreground">{deniedNote}</span>}
     </div>
   );
 }

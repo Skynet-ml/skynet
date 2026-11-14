@@ -339,10 +339,10 @@ export function AgenticIde({
       }),
     [lineComments],
   );
-  const byId = React.useCallback(
-    (id: string) => (lineComments ?? []).find((c) => lineCommentId(c) === id),
-    [lineComments],
-  );
+  const byId = React.useMemo(() => {
+    const map = new Map((lineComments ?? []).map((c) => [lineCommentId(c), c]));
+    return (id: string) => map.get(id);
+  }, [lineComments]);
   const comment = React.useMemo(
     () =>
       addLineComment

@@ -37,8 +37,6 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
   const { reasoning, startedAt, endedAt, streaming, summary } = thinking;
   const isThinking = streaming && !endedAt && Boolean(startedAt);
   const [open, setOpen] = React.useState(false);
-  // Codex shows no live clock on "Thinking", so nothing ticks here.
-  const [nowTs] = React.useState(() => Date.now());
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const stickToBottomRef = React.useRef(true);
   const reduce = useReducedMotion();
@@ -66,15 +64,15 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
 
   if (!reasoning && !isThinking) return null;
 
-  const elapsedMs = startedAt ? (endedAt ?? nowTs) - startedAt : 0;
-  const thought = thoughtSeconds(startedAt, endedAt ?? nowTs);
+  // Codex shows no live clock on "Thinking". Without an end time the span is unknown, so it reads "briefly".
+  const thought = endedAt ? thoughtSeconds(startedAt, endedAt) : null;
   const showSummary = Boolean(summary) && !isThinking;
   const { heading, detail } = splitSummary(summary ?? "");
   const label = isThinking
     ? msg("shared.agent.thinking")
-    : thought === null
+    : thought === null || thought < 1
       ? msg("shared.agent.thought_briefly")
-      : formatMsg("shared.agent.thought_for", { duration: formatSpan(elapsedMs) });
+      : formatMsg("shared.agent.thought_for", { duration: formatSpan(thought * 1000) });
 
   return (
     <div className={cn(!compact && "px-4 py-2")}>

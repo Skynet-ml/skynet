@@ -606,9 +606,15 @@ let cache: CodeAppearance | null = null;
 /** Read the stored settings, falling back to the defaults for missing or bad values. */
 function read(): CodeAppearance {
   if (cache) return cache;
-  let next = DEFAULTS;
+  const next = { ...DEFAULTS };
   try {
-    next = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const raw: unknown = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    const v = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    if (typeof v.light === "string") next.light = v.light;
+    if (typeof v.dark === "string") next.dark = v.dark;
+    if (typeof v.font === "string") next.font = v.font;
+    if (typeof v.size === "number" && Number.isFinite(v.size) && v.size >= 0) next.size = v.size;
+    if (v.markers === "color" || v.markers === "signs") next.markers = v.markers;
   } catch {
     // Bad JSON: keep the defaults.
   }

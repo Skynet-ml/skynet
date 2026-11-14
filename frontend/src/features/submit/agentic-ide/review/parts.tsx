@@ -5,7 +5,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { useSession } from "next-auth/react";
 import { CaretDown, Check, CircleNotch, PencilSimple, Plus, Trash, X } from "@/shared/ui/icons";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { commandKey, TooltipButton } from "@/shared/ui/tooltip-button";
 import { useLinkedAccount } from "@/shared/hooks/use-linked-account";
 
 import { FOLDER_ICON, FOLDER_OPEN_ICON, fileIcon, type FileIcon } from "@/shared/ui/file-icons";
@@ -48,12 +48,10 @@ function FolderGlyph({ open }: { open: boolean }) {
 const STATUS_TONE: Record<Exclude<FileStatus, "unchanged">, string> = {
   added: "text-[var(--success)]",
   modified: "text-[var(--warning)]",
-  deleted: "text-[var(--danger)]",
 };
 const STATUS_LETTER: Record<Exclude<FileStatus, "unchanged">, string> = {
   added: "A",
   modified: "M",
-  deleted: "D",
 };
 
 /** The status's name, for a tooltip. */
@@ -177,25 +175,20 @@ export function FileTree({
   root,
   selected,
   onSelect,
-  changedOnly = false,
   dense = false,
   touched,
 }: {
   root: TreeNode;
   selected: string | null;
   onSelect: (path: string) => void;
-  changedOnly?: boolean;
   dense?: boolean;
   touched?: ReadonlySet<string>;
 }) {
   const changedDirs = React.useMemo(() => changedFolders(root), [root]);
-  const isChanged = (node: TreeNode) =>
-    node.file ? statusOf(node.file) !== "unchanged" : changedDirs.has(node.path);
   // A folder with a change starts open and any other starts shut; a click flips it.
   const [flipped, setFlipped] = React.useState<Set<string>>(() => new Set());
   const level = (node: TreeNode, depth: number): React.ReactNode =>
     (node.children ?? []).map((child) => {
-      if (changedOnly && !isChanged(child)) return null;
       if (child.children) {
         const changed = changedDirs.has(child.path);
         const open = changed !== flipped.has(child.path);
@@ -259,7 +252,6 @@ export function FileTree({
           <span
             className={cn(
               "truncate",
-              status === "deleted" && "text-[var(--danger)] line-through decoration-1",
               status === "added" && "text-[var(--success)]",
               status !== "unchanged" && "font-medium",
             )}
@@ -534,8 +526,25 @@ export function DiffView({
     return `${ref.side}:${ref.no}`;
   };
   // Comments live on the draft's lines only: a removed line has no place to stay.
+  const draftText = React.useRef("");
   const addFor = (line?: DiffLine) =>
-    line && line.kind !== "del" && onComment ? () => setDrafting(idOf(line)) : undefined;
+    line && line.kind !== "del" && onComment
+      ? () => {
+          draftText.current = line.text;
+          setDrafting(idOf(line));
+        }
+      : undefined;
+  // A new text moves line numbers: unfolded gaps reset, and an open box closes unless its line stays.
+  const shownText = React.useRef(file.after);
+  React.useEffect(() => {
+    if (shownText.current === file.after) return;
+    shownText.current = file.after;
+    setShown(new Map());
+    setDrafting((d) =>
+      d && lines.some((l) => l.kind !== "del" && idOf(l) === d && l.text === draftText.current) ? d : null,
+    );
+    // Only a new text resets; `lines` is read for the check, not watched.
+  }, [file.after]);
   const notes = (line?: DiffLine, layout?: "split") => {
     if (!line) return null;
     const ref = lineRef(line);
@@ -730,7 +739,8 @@ function CommentDraft({
 }) {
   const [text, setText] = React.useState(initial);
   const editing = initial !== "";
-  const save = () => text.trim() && onSave(text.trim());
+  const canSave = !!text.trim() && text.trim() !== initial;
+  const save = () => canSave && onSave(text.trim());
   const saveLabel = msg(
     editing ? "submit.agentic_ide.review.save_comment" : "submit.agentic_ide.review.add_comment",
   );
@@ -777,13 +787,13 @@ function CommentDraft({
             </TooltipButton>
             <TooltipButton
               delayDuration={250}
-              tooltip={<KeyHint label={saveLabel} keys="⌘↵" />}
+              tooltip={<KeyHint label={saveLabel} keys={`${commandKey()}↵`} />}
             >
               <button
                 type="button"
                 aria-label={saveLabel}
                 onClick={save}
-                disabled={!text.trim() || text.trim() === initial}
+                disabled={!canSave}
                 className="flex h-7 items-center justify-center rounded-md bg-primary-fill text-primary-foreground transition-[opacity,filter] hover:brightness-110 disabled:opacity-35"
               >
                 <Check className="size-3.5" />

@@ -17,8 +17,8 @@ export interface ActivitySummary {
   failed: boolean;
 }
 
-// Codex's fixed order: tool sources, file changes, exploration, commands,
-// then other tools ("Edited files, read files, ran commands").
+// Codex's fixed order: account actions, file changes, exploration, checks and
+// commands, then other tools ("Edited files, read files, ran commands").
 const ORDER: readonly ActivityKind[] = ["act", "edit", "search", "read", "check", "run", "tool"];
 
 /**

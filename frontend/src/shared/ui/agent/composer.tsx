@@ -355,6 +355,12 @@ export function Composer({
   const dropDepth = React.useRef(0);
   const dragsFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
   const canDrop = !inline && attachments && !disabled && !locked;
+  // A composer that locks mid-drag drops the highlight; no drop event comes to clear it.
+  React.useEffect(() => {
+    if (canDrop) return;
+    dropDepth.current = 0;
+    setDropping(false);
+  }, [canDrop]);
 
   const attachFiles = async (picked: File[]) => {
     const {
@@ -665,15 +671,16 @@ export function Composer({
             e.dataTransfer.dropEffect = "copy";
           }}
           onDragLeave={() => {
-            if (!dropping) return;
-            dropDepth.current = Math.max(0, dropDepth.current - 1);
+            // The depth, not the state: a leave can come before the enter's render.
+            if (!dropDepth.current) return;
+            dropDepth.current -= 1;
             if (!dropDepth.current) setDropping(false);
           }}
           onDrop={(e) => {
-            if (!canDrop || !dragsFiles(e)) return;
-            e.preventDefault();
             dropDepth.current = 0;
             setDropping(false);
+            if (!canDrop || !dragsFiles(e)) return;
+            e.preventDefault();
             // A dropped folder is not a file to read, so it is skipped.
             const files = Array.from(e.dataTransfer.items)
               .filter((item) => item.kind === "file" && !item.webkitGetAsEntry?.()?.isDirectory)
