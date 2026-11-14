@@ -6,10 +6,9 @@ import { languages } from "@codemirror/language-data";
 import { indentWithTab } from "@codemirror/commands";
 import { highlightSelectionMatches } from "@codemirror/search";
 import { Prec, StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, keymap, type DecorationSet } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 
 import { CODE_HIGHLIGHT_SPECS } from "@/shared/ui/code-highlight-style";
-import { cn } from "@/shared/lib/utils";
 
 import { pycharmCompletion } from "./pycharm-completion";
 import { diffLines } from "./lib";
@@ -132,7 +131,7 @@ export type ChangeNavHandle = { step: (dir: 1 | -1) => void };
  * The first line of each change, 1-based. A change that only removes lines
  * anchors on the line after the gap, where its struck-through ghost shows.
  */
-export function changeAnchors(base: string, doc: string): number[] {
+function changeAnchors(base: string, doc: string): number[] {
   if (base === "") return doc ? [1] : [];
   const anchors: number[] = [];
   let inChange = false;
@@ -176,8 +175,9 @@ function useLanguage(path: string): Extension[] {
       cancelled = true;
     };
   }, [path]);
-  if (path.endsWith(".py")) return [python()];
-  return support ? [support] : [];
+  const isPython = path.endsWith(".py");
+  // A stable array: a new one makes CodeMirror reconfigure the whole editor.
+  return React.useMemo(() => (isPython ? [python()] : support ? [support] : []), [isPython, support]);
 }
 
 const editing: Extension[] = [
@@ -186,6 +186,21 @@ const editing: Extension[] = [
   // lang-python supplies locals, builtins and keywords, and stays quiet in strings and comments.
   ...pycharmCompletion,
 ];
+
+// Module-level, so CodeMirror sees the same setup on every render.
+const SETUP = {
+  lineNumbers: true,
+  foldGutter: false,
+  bracketMatching: true,
+  completionKeymap: true,
+  highlightActiveLine: true,
+  highlightSelectionMatches: false,
+  indentOnInput: true,
+  tabSize: 4,
+};
+const FULL_HEIGHT = { height: "100%" };
+const EDIT_SETUP = { ...SETUP, autocompletion: true };
+const READ_SETUP = { ...SETUP, autocompletion: false };
 
 /**
  * The file as an editable document. With `review`, the last turn's changes
@@ -198,7 +213,6 @@ export function CodeEditor({
   onChange,
   readOnly = false,
   review,
-  autoHeight = false,
   onNav,
   navRef,
 }: {
@@ -208,7 +222,6 @@ export function CodeEditor({
   onChange: (text: string) => void;
   readOnly?: boolean;
   review: boolean;
-  autoHeight?: boolean;
   /** Reports the cursor's place among the changes while `review` is on. */
   onNav?: (nav: ChangeNav) => void;
   navRef?: React.Ref<ChangeNavHandle>;
@@ -237,40 +250,39 @@ export function CodeEditor({
   React.useEffect(() => {
     if (review && view.current) onNav?.(navOf(view.current.state, base));
   }, [review, base]);
+  // The callbacks read the latest props through a ref, so their identity stays fixed.
+  const latest = React.useRef({ review, base, onNav });
+  React.useLayoutEffect(() => {
+    latest.current = { review, base, onNav };
+  });
+  const onCreateEditor = React.useCallback((v: EditorView) => {
+    view.current = v;
+    const { review, base, onNav } = latest.current;
+    if (review) onNav?.(navOf(v.state, base));
+  }, []);
+  const onUpdate = React.useCallback((u: ViewUpdate) => {
+    const { review, base, onNav } = latest.current;
+    if (review && (u.docChanged || u.selectionSet)) onNav?.(navOf(u.state, base));
+  }, []);
   const lang = useLanguage(path);
   const extensions = React.useMemo(
     () => [theme, highlight, ...lang, ...(readOnly ? [] : editing), ...(review ? [lastTurnDiff(base)] : [])],
     [lang, review, base, readOnly],
   );
   return (
-    <div className={cn("ide-editor min-w-0", autoHeight ? "" : "h-full")} dir="ltr">
+    <div className="ide-editor h-full min-w-0" dir="ltr">
       <CodeMirror
         value={value}
         onChange={onChange}
         readOnly={readOnly}
         editable={!readOnly}
         extensions={extensions}
-        onCreateEditor={(v) => {
-          view.current = v;
-          if (review) onNav?.(navOf(v.state, base));
-        }}
-        onUpdate={(u) => {
-          if (review && (u.docChanged || u.selectionSet)) onNav?.(navOf(u.state, base));
-        }}
+        onCreateEditor={onCreateEditor}
+        onUpdate={onUpdate}
         theme="none"
-        height={autoHeight ? "auto" : "100%"}
-        style={autoHeight ? undefined : { height: "100%" }}
-        basicSetup={{
-          lineNumbers: true,
-          foldGutter: false,
-          bracketMatching: true,
-          autocompletion: !readOnly,
-          completionKeymap: true,
-          highlightActiveLine: true,
-          highlightSelectionMatches: false,
-          indentOnInput: true,
-          tabSize: 4,
-        }}
+        height="100%"
+        style={FULL_HEIGHT}
+        basicSetup={readOnly ? READ_SETUP : EDIT_SETUP}
       />
     </div>
   );

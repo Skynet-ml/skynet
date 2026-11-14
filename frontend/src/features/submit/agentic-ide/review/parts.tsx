@@ -134,7 +134,7 @@ function changedFolders(root: TreeNode): Set<string> {
 }
 
 /** Smooth height reveal: rows animate from 0fr to 1fr; folded content leaves the tab order. */
-export function Reveal({
+function Reveal({
   open,
   children,
   className,
@@ -175,13 +175,11 @@ export function FileTree({
   root,
   selected,
   onSelect,
-  dense = false,
   touched,
 }: {
   root: TreeNode;
   selected: string | null;
   onSelect: (path: string) => void;
-  dense?: boolean;
   touched?: ReadonlySet<string>;
 }) {
   const changedDirs = React.useMemo(() => changedFolders(root), [root]);
@@ -207,7 +205,7 @@ export function FileTree({
               }
               className={cn(
                 "flex w-full items-center gap-1.5 rounded-md pe-2 text-start text-[13px] text-foreground/80 transition-colors hover:bg-accent/70",
-                dense ? "h-6" : "h-7",
+                "h-6",
               )}
               aria-expanded={open}
             >
@@ -243,7 +241,7 @@ export function FileTree({
           aria-current={active ? "true" : undefined}
           className={cn(
             "group flex w-full items-center gap-1.5 rounded-md pe-2 text-start text-[13px] transition-colors duration-150",
-            dense ? "h-6" : "h-7",
+            "h-6",
             active ? "bg-accent text-foreground" : "text-foreground/85 hover:bg-accent/60",
             touched?.has(child.path) && "ide-touched",
           )}
@@ -260,7 +258,6 @@ export function FileTree({
             {child.name}
           </span>
           <span className="ms-auto flex items-center gap-2">
-            {status !== "unchanged" && !dense && <FileCounts file={child.file} />}
             <StatusLetter status={status} />
           </span>
         </button>
@@ -668,7 +665,7 @@ export function DiffView({
 const COMMENT_BOX = "sticky start-0 ms-12 my-1.5 w-[min(36rem,calc(100%-3rem-12px))] font-sans";
 
 /** The comment author: the signed-in account's name and picture. */
-export function useCommentAuthor(): { name: string; image: string | null } {
+function useCommentAuthor(): { name: string; image: string | null } {
   const session = useSession().data?.user;
   // The Mac app's session user is a local placeholder, so its name comes from the linked account, as in the account menu.
   const linked = useLinkedAccount();
@@ -680,7 +677,7 @@ export function useCommentAuthor(): { name: string; image: string | null } {
 }
 
 /** The author's picture, or the first letter of the name when there is none. */
-export function AuthorAvatar({ className }: { className?: string }) {
+function AuthorAvatar({ className }: { className?: string }) {
   const { name, image } = useCommentAuthor();
   return image ? (
     // Avatars come from any OAuth host, so a plain <img> skips next/image host config, as the account menu does.

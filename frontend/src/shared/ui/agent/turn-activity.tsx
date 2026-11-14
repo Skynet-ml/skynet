@@ -235,7 +235,7 @@ function isExplore(kind: ActivityKind): boolean {
 }
 
 /** Split a burst into runs, so each run of exploration steps folds on its own, as in Codex. */
-export function splitExploration<T>(steps: readonly T[], explore: (step: T) => boolean): T[][] {
+function splitExploration<T>(steps: readonly T[], explore: (step: T) => boolean): T[][] {
   const runs: T[][] = [];
   for (const step of steps) {
     const last = runs.at(-1);

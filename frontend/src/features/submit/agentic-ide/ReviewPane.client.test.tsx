@@ -71,6 +71,8 @@ const { createRoot } = await import("react-dom/client");
 const { EditorView } = await import("@codemirror/view");
 const { ReviewPane } = await import("./review/review-pane");
 const { AgenticIde } = await import("./AgenticIde");
+const { diffLines, statusOf } = await import("./review/lib");
+const { lineCommentId } = await import("@/shared/ui/agent/line-comments");
 const { WizardStateProvider, useWizardStateOptional } = await import("@/features/agent-panel");
 const { SessionProvider } = await import("next-auth/react");
 
@@ -222,6 +224,16 @@ void test("a comment on a line can be added and deleted", async () => {
     [{ path: "a.py", line: 2, text: "Rename y" }],
   );
   assert.ok(ide.container.textContent?.includes("Rename y"), "the comment shows under its line");
+  const id = lineCommentId(state!.lineComments[0]!);
+
+  await click(byLabel(ide.container, "Edit comment")[0]!);
+  await typeInto(ide.container.querySelector("textarea")!, "Rename y to total");
+  await click(byLabel(ide.container, "Save")[0]!);
+  assert.deepEqual(
+    state!.lineComments.map((c) => ({ id: lineCommentId(c), text: c.text })),
+    [{ id, text: "Rename y to total" }],
+    "an edit keeps the comment's id",
+  );
 
   await click(byLabel(ide.container, "Delete comment")[0]!);
   assert.deepEqual(state!.lineComments, []);
@@ -247,5 +259,55 @@ void test("a focus request opens that file", async () => {
   )!;
   assert.equal(tab.getAttribute("title"), "README.md");
   assert.deepEqual(opened, ["README.md"]);
+  await pane.unmount();
+});
+
+void test("a file's status reads the draft against the repository", () => {
+  assert.equal(statusOf({ path: "a", before: "", after: "x\n" }), "added");
+  assert.equal(statusOf({ path: "a", before: "x\n", after: "y\n" }), "modified");
+  assert.equal(statusOf({ path: "a", before: "x", after: "x\n" }), "unchanged", "a final newline is no change");
+  assert.equal(statusOf({ path: "a", before: "x\n", after: "" }), "modified", "an emptied file is not deleted");
+  assert.equal(statusOf({ path: "a", before: "", after: "x\n", loading: true }), "modified");
+});
+
+void test("the same two texts give the same cached diff", () => {
+  const first = diffLines("a\nb\n", "a\nc\n");
+  assert.equal(diffLines("a\nb\n", "a\nc\n"), first);
+  assert.notEqual(diffLines("a\nb\n", "a\nc\n", true), first, "ignoring space is its own entry");
+  assert.deepEqual(
+    first.map((l) => l.kind),
+    ["same", "del", "add"],
+  );
+});
+
+void test("a large diff shows one file at a time", async () => {
+  const many: RepoFile[] = Array.from({ length: 130 }, (_, i) => ({
+    path: `f${String(i).padStart(3, "0")}.py`,
+    before: "",
+    after: `n = ${i}\n`,
+  }));
+  const pane = await mount(<ReviewPane {...props({ files: many })} />);
+  assert.ok(pane.container.textContent?.includes("Large diff. Showing one file at a time."));
+  const shown = () => [...pane.container.querySelectorAll("header[title]")].map((h) => h.getAttribute("title"));
+  assert.deepEqual(shown(), ["f000.py"]);
+  await click(byLabel(pane.container, "Next file")[0]!);
+  assert.deepEqual(shown(), ["f001.py"]);
+  await pane.unmount();
+});
+
+void test("Next and Previous change step through a file's changes and wrap", async () => {
+  const file: RepoFile = { path: "s.py", before: "a\nb\nc\nd\ne\n", after: "A\nb\nc\nd\nE\n" };
+  const pane = await mount(<ReviewPane {...props({ files: [file] })} />);
+  await openInTab(pane.container, "s.py");
+  const view = editorView(pane.container);
+  const line = () => view.state.doc.lineAt(view.state.selection.main.head).number;
+  const step = (label: string) => click(byLabel(pane.container, label)[0]!);
+  assert.equal(line(), 1);
+  await step("Next change");
+  assert.equal(line(), 5);
+  await step("Next change");
+  assert.equal(line(), 1, "past the last change, Next wraps to the first");
+  await step("Previous change");
+  assert.equal(line(), 5);
   await pane.unmount();
 });

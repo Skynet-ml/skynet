@@ -112,14 +112,19 @@ type Props = {
   host?: RepoHostLink | null;
 };
 
-export const iconButton =
+const iconButton =
   "flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground";
 
-/** An icon button with a tooltip, which can show a shortcut. */
-export function ToolButton({
+/**
+ * An icon button with a tooltip, which can show a shortcut. `pressed` is a
+ * toggle with a fixed label; `active` only marks a button whose label already
+ * says its state.
+ */
+function ToolButton({
   label,
   keys,
   pressed,
+  active,
   disabled,
   onClick,
   children,
@@ -127,6 +132,7 @@ export function ToolButton({
   label: string;
   keys?: string;
   pressed?: boolean;
+  active?: boolean;
   disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
@@ -149,7 +155,7 @@ export function ToolButton({
         onClick={onClick}
         className={cn(
           iconButton,
-          pressed && "bg-accent text-foreground",
+          (pressed || active) && "bg-accent text-foreground",
           "disabled:pointer-events-none disabled:opacity-40",
         )}
       >
@@ -600,7 +606,7 @@ export function ReviewPane({
           : msg("submit.agentic_ide.review.show_files")
       }
       keys={`${commandKey()}⇧E`}
-      pressed={showList}
+      active={showList}
       onClick={() => setShowList((s) => !s)}
     >
       <span className="relative">
@@ -857,7 +863,7 @@ export function ReviewPane({
                       ? msg("submit.agentic_ide.review.show_changes")
                       : msg("submit.agentic_ide.review.hide_changes")
                   }
-                  pressed={!hideChanges.has(tabFile.path)}
+                  active={!hideChanges.has(tabFile.path)}
                   onClick={() =>
                     setHideChanges((prev) => {
                       const next = new Set(prev);
@@ -1185,7 +1191,6 @@ export function ReviewPane({
                     selected={tabFile?.path ?? null}
                     onSelect={(path) => openTab(path, true)}
                     touched={touched}
-                    dense
                   />
                 </Section>
               </div>
@@ -1224,7 +1229,12 @@ function Tab({
       title={hint}
       onClick={onSelect}
       onDoubleClick={onPin}
-      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onSelect()}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        // Space would scroll the page.
+        e.preventDefault();
+        onSelect();
+      }}
       onAuxClick={(e) => e.button === 1 && onClose?.()}
       className={cn(
         "group/tab flex h-7 shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-md ps-2.5 text-[12.5px] transition-colors duration-150",
@@ -1246,6 +1256,8 @@ function Tab({
             e.stopPropagation();
             onClose();
           }}
+          // Enter or Space here closes the tab; it must not also select it.
+          onKeyDown={(e) => e.stopPropagation()}
           className={cn(
             "ms-auto flex size-5 items-center justify-center rounded text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/tab:opacity-100",
             selected ? "opacity-100" : "opacity-0",
