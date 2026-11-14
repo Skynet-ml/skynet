@@ -895,6 +895,24 @@ def test_recover_orphaned_jobs_resumes_running_job_with_checkpoint(
     assert store.get_gepa_checkpoint("r1") is not None
 
 
+def test_recover_orphaned_jobs_skips_a_judge_session(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweeper leaves an open judge session running, because no worker holds it (SKY-696).
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest fixture used to bind the sandbox profile.
+    """
+    store.create_job("judge")
+    store.update_job("judge", status="running")
+    _fund_checkpoint(store, "judge", monkeypatch)
+    payload = store.get_job("judge")["payload"]
+    store.update_job("judge", payload={**payload, "judge": {"version": 1, "draft_id": "d"}})
+    assert store.recover_orphaned_jobs() == 0
+    job = store.get_job("judge")
+    assert job["status"] == "running"
+    assert job["attempts"] == 0
+
+
 @pytest.mark.parametrize("status", ["running", "validating"])
 def test_recover_orphaned_jobs_resumes_worker_restart_without_an_attempt(
     store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch, status: str
