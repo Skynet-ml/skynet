@@ -95,7 +95,43 @@ export interface GeneralistAgentHandlers {
   /** The turn's final `stats`, sent after `done` when later model calls changed its cost. */
   onTurnStats?: (stats: unknown) => void;
   onError: (message: string, code?: string) => void;
+  /** The stream could not connect and tries again; null once it connects or gives up. */
+  onReconnect?: (progress: ReconnectProgress | null) => void;
   signal?: AbortSignal;
+}
+
+/** Which reconnect the stream is on, as "attempt of maxAttempts". */
+export interface ReconnectProgress {
+  attempt: number;
+  maxAttempts: number;
+}
+
+/** Reconnects after the first connection fails, before the turn shows an error. */
+export const MAX_RECONNECTS = 5;
+// The request never reached the turn: no connection, or a gateway with no
+// server behind it. A resend then cannot run the turn twice. A 504 can hide a
+// turn that runs, so it is not here.
+const RECONNECT_STATUSES = new Set([502, 503]);
+
+/** The wait before reconnect `attempt` (1-based): 0.5 s, then twice as long each time. */
+export function reconnectDelayMs(attempt: number): number {
+  return 500 * 2 ** (attempt - 1);
+}
+
+/** Resolve after `ms`, or early with false when `signal` aborts. */
+function waitUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false);
+    const id = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(id);
+      resolve(false);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** What `/compact` sends: the chat window to condense and what to focus on. */
@@ -137,20 +173,40 @@ async function streamAgentRoute(
   source: ApiSource,
 ): Promise<void> {
   let res: Response;
-  try {
-    res = await fetchWithAuthRetry(agentUrl(path, source), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify(req),
-      signal: handlers.signal,
-    });
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.features.agent.panel.lib.stream.literal.1"));
-    return;
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) {
+      handlers.onReconnect?.({ attempt, maxAttempts: MAX_RECONNECTS });
+      if (!(await waitUnlessAborted(reconnectDelayMs(attempt), handlers.signal))) {
+        handlers.onReconnect?.(null);
+        return;
+      }
+    }
+    const last = attempt === MAX_RECONNECTS;
+    try {
+      res = await fetchWithAuthRetry(agentUrl(path, source), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(req),
+        signal: handlers.signal,
+      });
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") {
+        if (attempt > 0) handlers.onReconnect?.(null);
+        return;
+      }
+      if (!last) continue;
+      handlers.onReconnect?.(null);
+      handlers.onError(msg("auto.features.agent.panel.lib.stream.literal.1"));
+      return;
+    }
+    if (!RECONNECT_STATUSES.has(res.status) || last) {
+      if (attempt > 0) handlers.onReconnect?.(null);
+      break;
+    }
+    await res.body?.cancel().catch(() => {});
   }
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");

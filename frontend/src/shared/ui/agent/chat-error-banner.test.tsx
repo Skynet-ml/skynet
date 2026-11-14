@@ -41,4 +41,20 @@ void describe("ChatErrorBanner", () => {
     assert.doesNotMatch(p, /\btruncate\b/);
     assert.doesNotMatch(p, /title=/);
   });
+
+  void it("shows the countdown for a capacity error, not the plain retry button", () => {
+    const html = renderToStaticMarkup(
+      <ChatErrorBanner message="Busy" retryLabel="Retry" onRetry={() => {}} retryInSeconds={30} />,
+    );
+    assert.match(html, /tabular-nums/);
+    assert.doesNotMatch(html, /aria-label="Retry"/);
+  });
+
+  void it("shows the plain retry button when no automatic retry is left", () => {
+    const html = renderToStaticMarkup(
+      <ChatErrorBanner message="Busy" retryLabel="Retry" onRetry={() => {}} retryInSeconds={null} />,
+    );
+    assert.doesNotMatch(html, /tabular-nums/);
+    assert.match(html, /Retry/);
+  });
 });

@@ -28,10 +28,16 @@ import {
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
+import { CAPACITY_ERROR_CODE } from "@/shared/ui/agent/capacity-retry";
 import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
-import { confirmGeneralistApproval, streamCompaction, streamGeneralistAgent } from "../lib/stream";
+import {
+  confirmGeneralistApproval,
+  streamCompaction,
+  streamGeneralistAgent,
+  type ReconnectProgress,
+} from "../lib/stream";
 import {
   chatWindow,
   compactionAnchor,
@@ -72,6 +78,10 @@ export interface GeneralistAgentState {
   error: string | null;
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
+  /** Capacity errors in a row, this one included; a reply that ends with ``done`` resets it. */
+  capacityFailures: number;
+  /** The stream's reconnect attempt while it cannot connect, else null. */
+  reconnect: ReconnectProgress | null;
   pendingApproval: PendingApprovalPayload | null;
   conversationId: string | null;
   /** LiteLLM id of the composer menu's chosen model; null runs the default. */
@@ -190,6 +200,8 @@ interface SessionView {
   error: string | null;
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
+  capacityFailures: number;
+  reconnect: ReconnectProgress | null;
   pendingApproval: PendingApprovalPayload | null;
   compacting: ChatCompacting | null;
 }
@@ -243,6 +255,8 @@ function blankSession(key: string): SessionView {
     messages: [],
     error: null,
     errorCode: null,
+    capacityFailures: 0,
+    reconnect: null,
     pendingApproval: null,
     compacting: null,
   };
@@ -666,6 +680,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
           },
           {
             signal: controller.signal,
+            onReconnect: (progress) => {
+              if (settled) return;
+              patchSession(key, { reconnect: progress });
+            },
             onCompactionStart: ({ reason, summarizedTurns }) => {
               if (ended()) return;
               patchSession(key, {
@@ -850,6 +868,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               patchSession(key, {
                 status: "done",
                 statusLabel: "",
+                capacityFailures: 0,
               });
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
               patchMessages(key, (prev) => {
@@ -915,8 +934,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                     ? msg("agent.error.context_too_long")
                     : code === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                       ? msg("agent.error.insufficient_funds")
-                      : message),
+                      : code === CAPACITY_ERROR_CODE
+                        ? msg("agent.error.capacity")
+                        : message),
                 errorCode: code ?? null,
+                capacityFailures:
+                  code === CAPACITY_ERROR_CODE
+                    ? (sessionsRef.current.get(key)?.capacityFailures ?? 0) + 1
+                    : 0,
+                reconnect: null,
                 // The stream that would act on the decision is gone.
                 pendingApproval: null,
                 compacting: null,
@@ -1557,6 +1583,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     messages: active.messages,
     error: active.error,
     errorCode: active.errorCode,
+    capacityFailures: active.capacityFailures,
+    reconnect: active.reconnect,
     pendingApproval: active.pendingApproval,
     conversationId: active.conversationId,
     model,

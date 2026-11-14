@@ -3667,6 +3667,67 @@ async def _drive_generalist_agent(
         return reply_text
 
 
+# SKY-705: the chat retries these by itself after a countdown. 529 is
+# Anthropic's "overloaded" status.
+_CAPACITY_STATUS_CODES = frozenset({429, 503, 529})
+_CAPACITY_ERROR_TYPES = frozenset({"RateLimitError", "ServiceUnavailableError"})
+# A 429 for a spent quota or an unpaid bill does not clear with time, so a
+# retry only spends the user's wait.
+_QUOTA_PATTERNS = ("insufficient_quota", "exceeded your current quota", "billing", "credit balance")
+
+
+def _is_capacity_error(exc: BaseException) -> bool:
+    """Tell whether a turn failed because the model provider had no capacity.
+
+    Walks exception groups and ``__cause__``/``__context__`` links, as the
+    provider error often sits below the Pi bridge or a task group.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        True for a rate limit, an overload or a provider 503, and False for
+        a spent quota.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    found = False
+    while stack:
+        leaf = stack.pop()
+        if id(leaf) in seen:
+            continue
+        seen.add(id(leaf))
+        text = str(leaf).lower()
+        if any(pattern in text for pattern in _QUOTA_PATTERNS):
+            return False
+        if (
+            type(leaf).__name__ in _CAPACITY_ERROR_TYPES
+            or getattr(leaf, "status_code", None) in _CAPACITY_STATUS_CODES
+            or "overloaded" in text
+        ):
+            found = True
+        if isinstance(leaf, BaseExceptionGroup):
+            stack.extend(leaf.exceptions)
+        stack.extend(linked for linked in (leaf.__cause__, leaf.__context__) if linked is not None)
+    return found
+
+
+def _turn_error_payload(exc: BaseException) -> dict[str, str]:
+    """Build the ``error`` event data for a failed turn.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        The agent error payload. A capacity failure without another code gets
+        ``code="capacity"``, so the chat counts down and retries.
+    """
+    payload = _agent_error_payload(exc)
+    if "code" not in payload and _is_capacity_error(exc):
+        payload["code"] = "capacity"
+    return payload
+
+
 def build_turn_lm(model_config: ModelConfig | None) -> Any:
     """Build the metered LM that a chat turn runs on.
 
@@ -3857,7 +3918,7 @@ async def run_generalist_agent(
         yield {"event": "error", "data": {"error": str(exc)}}
     except Exception as exc:
         logger.exception("generalist agent failed")
-        yield {"event": "error", "data": _agent_error_payload(exc)}
+        yield {"event": "error", "data": _turn_error_payload(exc)}
     finally:
         # A closed stream arrives as GeneratorExit, a cancelled request as
         # CancelledError; either way the loop must not outlive the stream.

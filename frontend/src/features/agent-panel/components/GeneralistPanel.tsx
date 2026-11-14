@@ -36,6 +36,8 @@ import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip
 
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { CAPACITY_ERROR_CODE, capacityRetryDelay } from "@/shared/ui/agent/capacity-retry";
+import { ReconnectingNotice } from "@/shared/ui/agent/reconnecting-notice";
 import { ModelChangedNotice } from "@/shared/ui/agent/chat-notices";
 import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
@@ -1813,9 +1815,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                         onResolve={agent.confirmApproval}
                       />
                     )}
+                    {agent.reconnect && (
+                      <ReconnectingNotice
+                        attempt={agent.reconnect.attempt}
+                        maxAttempts={agent.reconnect.maxAttempts}
+                      />
+                    )}
                     {agent.error && (
                       <ChatErrorBanner
+                        // A new key for each capacity failure starts its countdown again.
+                        key={agent.capacityFailures}
                         message={agent.error}
+                        retryInSeconds={
+                          agent.errorCode === CAPACITY_ERROR_CODE
+                            ? capacityRetryDelay(agent.capacityFailures - 1)
+                            : undefined
+                        }
                         retryLabel={msg(
                           "auto.features.agent.panel.components.generalistpanel.error_retry",
                         )}
