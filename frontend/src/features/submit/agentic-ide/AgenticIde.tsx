@@ -193,7 +193,7 @@ export function AgenticIde({
   // A file of the tree that the draft does not hold is read when its tab opens.
   const [opened, setOpened] = React.useState<ReadonlySet<string>>(() => new Set());
   const readPaths = React.useMemo(
-    () => [...basePaths, ...[...opened].filter((path) => !(path in texts))],
+    () => [...basePaths, ...[...opened].filter((path) => !Object.hasOwn(texts, path))],
     [basePaths, opened, texts],
   );
   const { reads, retry } = useRepoReads(repo, readPaths);
@@ -235,11 +235,13 @@ export function AgenticIde({
     const draft = allFiles.map((f): RepoFile => {
       if (!base.has(f.path)) return { ...f, loading: true };
       // Only an empty base needs the flag; other files keep their object, so their rows do not redraw.
+      // A binary or too-large file also exists: only a missing one is new.
       const result = reads.get(f.path);
-      return f.before === "" && result && "text" in result ? { ...f, existed: true } : f;
+      const exists = !!result && !("issue" in result && result.issue === "missing");
+      return f.before === "" && exists ? { ...f, existed: true } : f;
     });
     const rest = treePaths
-      .filter((path) => !(path in texts))
+      .filter((path) => !Object.hasOwn(texts, path))
       .map((path): RepoFile => {
         const result = reads.get(path);
         if (result === undefined) return { path, before: "", after: "", loading: true };

@@ -551,3 +551,24 @@ void test("a click on the tab of an unread file reads it again", async () => {
   assert.equal(editorView(ide.container).state.doc.toString(), "y = 2\n");
   await ide.unmount();
 });
+
+void test("a repository file named like an object key still lists and reads", async () => {
+  const asked: string[] = [];
+  const repo = {
+    folder: "repo",
+    tree: Promise.resolve({ children: new Map(), files: new Set(["toString"]) }),
+    read: (path: string) => {
+      asked.push(path);
+      return Promise.resolve(path === "toString" ? { text: "k = 1\n" } : { issue: "missing" as const });
+    },
+  };
+  const ide = await mount(
+    <AgenticIde chat={<div />} texts={{ "a.py": "x = 1\n" }} repo={repo} busy={false} onWrite={noop} />,
+  );
+  await flush();
+  await click(treeRow(ide.container, "toString")!);
+  await flush();
+  assert.ok(asked.includes("toString"));
+  assert.equal(editorView(ide.container).state.doc.toString(), "k = 1\n");
+  await ide.unmount();
+});

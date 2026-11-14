@@ -192,7 +192,8 @@ const SETUP = {
   lineNumbers: true,
   foldGutter: false,
   bracketMatching: true,
-  completionKeymap: true,
+  // pycharmCompletion adds the completion keymap itself, ahead of its own keys.
+  completionKeymap: false,
   highlightActiveLine: true,
   highlightSelectionMatches: false,
   indentOnInput: true,
