@@ -127,10 +127,14 @@ metric code. It has these keys:
 
 - `contract_sha256`: the SHA-256 of the `optimize.toml` bytes the run read,
   after the draft files apply.
-- `metric_sha256`: one SHA-256 over the entry code and then each file under
-  the `[metric] files` paths, in sorted path order. Each part is
-  `<path in UTF-8>\0<byte length in decimal>\0<bytes>`. The entry code has
-  the path `metric.py`.
+- `metric_sha256`: one SHA-256 over framed parts. The first part is the
+  entry code, with the path `metric.py`. Then comes one part for each file
+  under the `[metric] files` paths, in sorted path order. Each part is
+  `<path in UTF-8>\0<byte length in decimal>\0<SHA-256 of the bytes>`. The
+  SHA-256 is 64 lowercase hex characters, as `sha256sum` prints it. When
+  the staged tree lists a path twice, the later entry counts, as extraction
+  writes it last. For an entry code and one file, this gives the hash:
+  `{ printf 'metric.py\0%s\0%s' "$code_len" "$code_hex"; printf 'eval/scorer.py\0%s\0%s' "$len" "$hex"; } | sha256sum`.
 - `metric_home`: `repository` when the file sets `[metric] files` and every
   one comes from the pinned commit. `judge` when the file sets no
   `[metric] files`, or a draft file replaces or adds one.

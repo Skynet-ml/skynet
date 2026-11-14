@@ -3146,9 +3146,9 @@ def _framed(path: str, data: bytes) -> bytes:
         data: The part's bytes.
 
     Returns:
-        ``<path>\\0<length>\\0<bytes>``.
+        ``<path>\\0<length>\\0<SHA-256 hex of the bytes>``.
     """
-    return path.encode() + b"\0" + str(len(data)).encode() + b"\0" + data
+    return path.encode() + b"\0" + str(len(data)).encode() + b"\0" + hashlib.sha256(data).hexdigest().encode()
 
 
 def _guest_details(cases: list[Any], seed: int | None, **extra: Any) -> dict[str, Any]:
@@ -3222,6 +3222,98 @@ def test_a_draft_metric_file_makes_the_judge_the_metric_home(monkeypatch: pytest
     assert staged.record_facts["metric_sha256"] == hashlib.sha256(metric).hexdigest()
 
 
+def _big_metric_archive(tmp_path: Path, body: bytes) -> Path:
+    """Pack a tree with one ``[metric] files`` member, a duplicate of it and a cases file.
+
+    Args:
+        tmp_path: Folder for the archive.
+        body: The bytes of the later ``eval/data.bin`` member.
+
+    Returns:
+        The ``tree.tgz`` path.
+    """
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name, data in (("eval/data.bin", b"old"), ("eval/data.bin", body), ("cases.jsonl", b"{}\n")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            packed.addfile(info, io.BytesIO(data))
+    return archive
+
+
+def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) -> None:
+    """A member over one hash chunk gets the documented hash; the later of two same-path members counts."""
+    body = bytes(range(256)) * ((repo_staging._HASH_CHUNK * 2 + 4096) // 256 + 1)
+    archive = _big_metric_archive(tmp_path, body)
+
+    facts = repo_staging._record_facts(
+        archive,
+        contract_sha256="0" * 64,
+        metric_files=("eval",),
+        metric_code=_RECORD_METRIC,
+        drafts={},
+        cases_file="cases.jsonl",
+        cases=None,
+    )
+
+    code = _RECORD_METRIC.encode()
+    parts = [
+        b"metric.py\0" + str(len(code)).encode() + b"\0" + hashlib.sha256(code).hexdigest().encode(),
+        b"eval/data.bin\0" + str(len(body)).encode() + b"\0" + hashlib.sha256(body).hexdigest().encode(),
+    ]
+    assert facts["metric_sha256"] == hashlib.sha256(b"".join(parts)).hexdigest()
+    assert facts["cases_sha256"] == hashlib.sha256(b"{}\n").hexdigest()
+
+
+def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every read of a member asks for at most one chunk, so a large file never sits in memory."""
+    archive = _big_metric_archive(tmp_path, b"x" * (repo_staging._HASH_CHUNK + 1))
+    sizes: list[int | None] = []
+    extract = tarfile.TarFile.extractfile
+
+    def bounded(self: tarfile.TarFile, member: Any) -> Any:
+        """Wrap the member's file object so every read is recorded.
+
+        Args:
+            self: The open archive.
+            member: The member to open.
+
+        Returns:
+            The wrapped file object.
+        """
+        handle = extract(self, member)
+        read = handle.read
+
+        def checked(size: int | None = -1) -> bytes:
+            """Record the requested size, then read.
+
+            Args:
+                size: The requested byte count.
+
+            Returns:
+                The bytes read.
+            """
+            sizes.append(size)
+            return read(size)
+
+        handle.read = checked
+        return handle
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", bounded)
+    repo_staging._record_facts(
+        archive,
+        contract_sha256="0" * 64,
+        metric_files=("eval",),
+        metric_code="",
+        drafts={},
+        cases_file="cases.jsonl",
+        cases=None,
+    )
+
+    assert sizes
+    assert all(isinstance(size, int) and 0 < size <= repo_staging._HASH_CHUNK for size in sizes)
+
+
 def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_judge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3267,6 +3359,33 @@ def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pyte
         staged.cleanup()
 
     assert "record" not in result["details"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {CASE_SPLIT_KEY: {"rule": "pairs", "search": 5, "validation": [], "held_out": []}},
+        {"outcome": ["target_reached"]},
+        {"outcome": "target_reached"},
+        {"outcome": {"target_reached": "yes"}},
+        {"outcome": {"target_reached": False, "target": "high"}},
+        {"outcome": {"minimums_passed": False, "failed_minimums": "latency"}},
+        {"outcome": {"minimums_passed": False, "failed_minimums": ["latency"]}},
+    ],
+)
+def test_a_malformed_guest_split_or_verdict_skips_the_record(
+    monkeypatch: pytest.MonkeyPatch, bad: dict[str, Any]
+) -> None:
+    """The guest writes ``details``, so a value of another shape skips the record and the run ends as usual."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details={**_guest_details(staged_payload["cases"], 7), **bad})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
 
 
 @pytest.mark.parametrize("result", [_result(0.5, 0.8), _result(0.5, 0.8, details=None), {"best_score": 0.8}])

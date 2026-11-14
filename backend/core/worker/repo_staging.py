@@ -1161,17 +1161,42 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     return best if optimized > baseline else None
 
 
-def _framed(path: str, data: bytes) -> bytes:
-    """Frame one file for the metric hash as ``<path>\\0<byte length>\\0<bytes>``.
+# The record hashes stream each member in parts of this size, so a large
+# metric file never sits in the worker's memory (SKY-694).
+_HASH_CHUNK = 1 << 20
+
+
+def _framed(path: str, size: int, digest: str) -> bytes:
+    """Frame one file for the metric hash as ``<path>\\0<byte length>\\0<SHA-256 hex>``.
+
+    The part holds the file's hex digest, not its bytes, so a person can
+    rebuild it from ``sha256sum`` output and the worker never holds a whole file.
 
     Args:
         path: Repository-relative path, encoded as UTF-8.
-        data: The file's bytes.
+        size: The file's byte length.
+        digest: The SHA-256 of the file's bytes, as 64 lowercase hex characters.
 
     Returns:
         The framed part.
     """
-    return path.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data
+    return path.encode("utf-8") + b"\0" + str(size).encode("ascii") + b"\0" + digest.encode("ascii")
+
+
+def _stream_digest(handle: Any) -> tuple[int, str]:
+    """Hash one archive member in fixed-size parts.
+
+    Args:
+        handle: The member's file object from ``TarFile.extractfile``.
+
+    Returns:
+        The byte length and the SHA-256 hex digest of the member's bytes.
+    """
+    digest, size = hashlib.sha256(), 0
+    while chunk := handle.read(_HASH_CHUNK):
+        digest.update(chunk)
+        size += len(chunk)
+    return size, digest.hexdigest()
 
 
 def _record_facts(
@@ -1186,15 +1211,21 @@ def _record_facts(
 ) -> dict[str, Any]:
     """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
 
-    ``metric_sha256`` is one SHA-256 over the framed entry code (path
-    ``metric.py``, the UTF-8 bytes of ``metric_code``) and then each regular
-    file under the ``[metric] files`` paths, in sorted path order; see
-    :func:`_framed`. ``metric_home`` describes the ``[metric] files`` only: it
-    is ``repository`` when the file sets ``[metric] files`` and every one comes
-    from the pinned commit, and ``judge`` when there are none or a draft file
-    replaces or adds one. ``cases_sha256`` hashes the ``[data] cases`` file
-    bytes (``cases_source`` ``file``), or else the compact JSON of the
-    request's cases with sorted keys (``cases_source`` ``request``).
+    ``metric_sha256`` is one SHA-256 over framed parts: first the entry code
+    (path ``metric.py``, the UTF-8 bytes of ``metric_code``), then each
+    regular file under the ``[metric] files`` paths in sorted path order; see
+    :func:`_framed`. The entry code stays first, so a repository file named
+    ``metric.py`` cannot take its place. ``metric_home`` describes the
+    ``[metric] files`` only: it is ``repository`` when the file sets
+    ``[metric] files`` and every one comes from the pinned commit, and
+    ``judge`` when there are none or a draft file replaces or adds one.
+    ``cases_sha256`` hashes the ``[data] cases`` file bytes (``cases_source``
+    ``file``), or else the compact JSON of the request's cases with sorted
+    keys (``cases_source`` ``request``).
+
+    The archive is read once, as a stream, and each member is hashed in
+    parts, so memory stays constant for any file size. When a path appears
+    twice, the later member wins, as extraction writes it last.
 
     Args:
         archive: The staged tree, after the draft files apply.
@@ -1210,19 +1241,21 @@ def _record_facts(
         ``cases_sha256`` and ``cases_source``; the last two are ``None`` with no cases.
     """
     roots = tuple(metric_files) + ((cases_file,) if cases_file is not None else ())
-    files: dict[str, bytes] = {}
-    with tarfile.open(archive, "r:gz") as packed:
-        for member in packed.getmembers():
+    digests: dict[str, tuple[int, str]] = {}
+    # Stream mode refuses a backward seek, which in a gzip tar would decompress the archive again.
+    with tarfile.open(archive, "r|gz") as packed:
+        for member in packed:
             path = posixpath.normpath(member.name).lstrip("/")
             if member.isfile() and inside(path, roots):
-                handle = packed.extractfile(member)
-                files[path] = handle.read() if handle is not None else b""
-    metric = hashlib.sha256(_framed("metric.py", metric_code.encode("utf-8")))
-    for path in sorted(path for path in files if inside(path, metric_files)):
-        metric.update(_framed(path, files[path]))
+                digests[path] = _stream_digest(packed.extractfile(member))
+    code = metric_code.encode("utf-8")
+    metric = hashlib.sha256(_framed("metric.py", len(code), hashlib.sha256(code).hexdigest()))
+    for path in sorted(path for path in digests if inside(path, metric_files)):
+        metric.update(_framed(path, *digests[path]))
     from_commit = bool(metric_files) and not any(inside(path, metric_files) for path in drafts)
     if cases_file is not None:
-        cases_sha256, cases_source = hashlib.sha256(files.get(cases_file, b"")).hexdigest(), "file"
+        cases_sha256 = digests[cases_file][1] if cases_file in digests else hashlib.sha256(b"").hexdigest()
+        cases_source = "file"
     elif cases:
         canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         cases_sha256, cases_source = hashlib.sha256(canonical.encode("utf-8")).hexdigest(), "request"
@@ -1237,6 +1270,34 @@ def _record_facts(
     }
 
 
+def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
+    """Check the split and verdict shapes the record and its pull request block read.
+
+    The guest writes both into ``details``, so a value of another shape must
+    skip the record instead of failing a finished run.
+
+    Args:
+        split: ``details["case_split"]``, or ``None`` for a run with no cases.
+        outcome: ``details["outcome"]``, or an empty dict when it is absent.
+
+    Returns:
+        True when :func:`add_run_record` and :func:`_record_block` can read both.
+    """
+    if split is not None and not (
+        isinstance(split, dict)
+        and all(isinstance(split.get(name), list) for name in ("search", "validation", "held_out"))
+    ):
+        return False
+    if not isinstance(outcome, dict):
+        return False
+    if any(key in outcome and not isinstance(outcome[key], bool) for key in ("target_reached", "minimums_passed")):
+        return False
+    if outcome.get("target_reached") is False and not isinstance(outcome.get("target"), int | float):
+        return False
+    failed = outcome.get("failed_minimums", [])
+    return isinstance(failed, list) and all(isinstance(entry, dict) for entry in failed)
+
+
 def add_run_record(
     result: dict[str, Any], payload: dict[str, Any], staged: StagedRepository, *, image: str | None
 ) -> None:
@@ -1247,9 +1308,10 @@ def add_run_record(
     guest made, the pinned sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
     is true when no rule failed, also when the file sets no target and no
-    minimum. A run with no ``optimize.toml``, a result with no ``details``, or
-    a run with cases whose guest wrote no split positions (an older image)
-    gets no record. The record holds no secret, no case content and no metric code.
+    minimum. A run with no ``optimize.toml``, a result with no ``details``, a
+    run with cases whose guest wrote no split positions (an older image), or a
+    guest split or verdict of another shape gets no record. The record holds
+    no secret, no case content and no metric code.
 
     Args:
         result: The run's final result; changed in place.
@@ -1264,6 +1326,8 @@ def add_run_record(
     if payload.get("cases") and not isinstance(split, dict):
         return
     outcome = details.get("outcome") or {}
+    if not _guest_record_parts_ok(split, outcome):
+        return
     verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
     details["record"] = {
         **staged.record_facts,
