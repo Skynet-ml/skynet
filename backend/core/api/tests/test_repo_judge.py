@@ -3,13 +3,15 @@
 Each test uses a real job store, a real budget ledger and real setup
 evidence over in-memory SQLite. Only the staging of the repository and the
 scorer boxes are faked: ``judge_scorer`` yields a staged repository without
-a sandbox, and ``_score`` returns fixed scores. The fakes count each paid
-attempt, so the tests prove that a refused call opens no paid box and that a
-retry with the same arguments pays once.
+a sandbox, and ``_score`` returns fixed scores (the ``dispatched`` fixture
+runs the real ``_score`` over a fake staged scorer instead). The fakes count
+each paid attempt, so the tests prove that a refused call opens no paid box
+and that a retry with the same arguments pays once.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -28,7 +30,7 @@ from ...connectors.github_repo import RepoFetchError, RepoRateLimitError
 from ...exceptions import InfrastructureInterruptionError, ServiceError
 from ...models.blackbox import BlackboxNamedScore
 from ...service_gateway.optimization.blackbox.service import FinalRun
-from ...storage.models import BillingCustomerModel
+from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore
 from .. import repo_judge
@@ -44,6 +46,8 @@ OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\
 OUTSIDE_PATCH = "diff --git a/other/x.py b/other/x.py\n--- a/other/x.py\n+++ b/other/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 THIRD_PATCH = "diff --git a/src/c.py b/src/c.py\n--- a/src/c.py\n+++ b/src/c.py\n@@ -1 +1 @@\n-a\n+d\n"
 FOURTH_PATCH = "diff --git a/src/d.py b/src/d.py\n--- a/src/d.py\n+++ b/src/d.py\n@@ -1 +1 @@\n-a\n+e\n"
+# Kept before the boxes fixture replaces it, for the tests that score through the real score step.
+_REAL_SCORE = repo_judge._score
 
 
 class _Crash(BaseException):
@@ -1347,6 +1351,118 @@ def test_an_unexpected_error_names_only_its_type(
     assert "secret text" not in caplog.text
 
 
+class _Dispatching:
+    """A staged scorer whose guest endpoint raises the error the test set, else scores 0.5."""
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        """Keep the test's record.
+
+        Args:
+            record: The ``boxes`` record; ``dispatch_raise`` is the next error.
+        """
+        self.record = record
+
+    def dispatch(self, body: Any) -> Any:
+        """Answer one scoring request.
+
+        Args:
+            body: The guest's request.
+
+        Returns:
+            A 200 reply with a score.
+
+        Raises:
+            Exception: The error the test set in ``dispatch_raise``.
+        """
+        error, self.record["dispatch_raise"] = self.record.get("dispatch_raise"), None
+        if error is not None:
+            raise error
+        return SimpleNamespace(status=200, body=b'{"score": 0.5, "feedback": "ok"}')
+
+
+@pytest.fixture
+def dispatched(boxes: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Score through the real ``_score`` and ``_final_run``, with a staged scorer that can raise.
+
+    Args:
+        boxes: The counted fakes.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        The ``boxes`` record.
+    """
+
+    def score(_staged: Any, patch: str, cases: list[Any], *, label: str) -> FinalRun:
+        """Score with the real score step.
+
+        Args:
+            _staged: The fake staged repository.
+            patch: The version.
+            cases: The cases.
+            label: What the version is.
+
+        Returns:
+            The real score step's result.
+        """
+        return _REAL_SCORE(SimpleNamespace(scorers=[_Dispatching(boxes)]), patch, cases, label=label)
+
+    monkeypatch.setattr(repo_judge, "_score", score)
+    return boxes
+
+
+def _stored_text(job_store: SQLiteJobStore, session_id: str) -> str:
+    """Join the session's job record and every evidence row as text.
+
+    Args:
+        job_store: The store.
+        session_id: The session.
+
+    Returns:
+        The stored text.
+    """
+    budget_id = _budget_id(job_store, session_id)
+    rows = [*repo_judge._rows(job_store.engine, budget_id, repo_judge.JUDGE_SCOPE)]
+    rows += repo_judge._rows(job_store.engine, budget_id, repo_judge.FINAL_SCOPE)
+    return json.dumps([job_store.get_job(session_id), [row.result for row in rows]], default=str)
+
+
+def test_an_unexpected_error_of_the_score_step_names_only_its_type(
+    store: SQLiteJobStore, dispatched: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep the text of an unexpected scorer error out of every answer, store and log, through the real score step."""
+    caplog.set_level("ERROR", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(10))
+    dispatched["dispatch_raise"] = KeyError("secret text")
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert (failed.value.code, failed.value.detail) == ("judge.score_failed", "KeyError")
+    _call(store, session_id, OTHER_PATCH)
+    dispatched["dispatch_raise"] = KeyError("secret text")
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "failed"
+    assert store.get_job(session_id)["message"] == "The final score failed: KeyError"
+    assert caplog.text.count("failed with KeyError") == 2
+    assert "secret text" not in caplog.text
+    assert "secret text" not in _stored_text(store, session_id)
+
+
+def test_a_temporary_error_of_the_score_step_keeps_its_text(
+    store: SQLiteJobStore, dispatched: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep the wrapped text of a temporary scorer error at the limit, with no unexpected-error log."""
+    caplog.set_level("ERROR", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(10))
+    for _ in range(repo_judge._TEMPORARY_FAILURE_LIMIT - 1):
+        dispatched["dispatch_raise"] = RepoFetchError("Connect GitHub again.")
+        with pytest.raises(repo_judge.JudgePendingError):
+            _call(store, session_id)
+    dispatched["dispatch_raise"] = RepoFetchError("Connect GitHub again.")
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert failed.value.detail.startswith("scorer failed on the candidate: RepoFetchError:")
+    assert "scorer failed on the candidate: RepoFetchError: Connect GitHub again." in _stored_text(store, session_id)
+    assert "failed with" not in caplog.text
+
+
 def test_a_budget_conflict_of_the_final_score_waits_and_a_retry_finishes(store: SQLiteJobStore, boxes: Any) -> None:
     """Answer budget.pending and change no status when the final score meets a fenced generation."""
     session_id = _session(store, _cases(10))
@@ -1362,6 +1478,78 @@ def test_a_budget_conflict_of_the_final_score_waits_and_a_retry_finishes(store: 
     judge = store.get_job(session_id)["result"]["details"]["judge"]
     assert judge["held_out"] is True
     assert judge["ended_by"] == "stop_run"
+
+
+def _block(job_store: SQLiteJobStore, session_id: str) -> None:
+    """Block the session's budget, as a late settle with lost funding does.
+
+    Args:
+        job_store: The store.
+        session_id: The session.
+    """
+    with Session(job_store.engine) as session, session.begin():
+        session.execute(
+            update(ExecutionBudgetModel)
+            .where(ExecutionBudgetModel.id == _budget_id(job_store, session_id))
+            .values(state="blocked", blocked_reason="funding_lost")
+        )
+
+
+@pytest.mark.parametrize("second", ["call", "stop_run"])
+def test_a_second_request_during_a_live_end_on_a_blocked_budget_waits(
+    store: SQLiteJobStore, boxes: Any, second: str
+) -> None:
+    """Answer budget.pending to a second request while the end scores on a blocked budget, and keep the end's score."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    seen: dict[str, Any] = {}
+
+    def concurrent() -> None:
+        """Block the budget during the final score and send the second request."""
+        _block(store, session_id)
+        with pytest.raises(DomainError) as pending:
+            if second == "call":
+                _call(store, session_id, OTHER_PATCH)
+            else:
+                repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+        seen["code"] = pending.value.code
+        seen["status"] = store.get_job(session_id)["status"]
+
+    boxes["hook"] = concurrent
+    answer = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert seen == {"code": "budget.pending", "status": "running"}
+    job = store.get_job(session_id)
+    assert answer.status == job["status"] == "success"
+    assert job["result"]["details"]["judge"]["held_out"] is True
+
+
+def test_the_end_answer_matches_the_stored_status(store: SQLiteJobStore, boxes: Any) -> None:
+    """Answer the stored status, and store no result, when another writer ends the job during the final score."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+
+    def other_writer() -> None:
+        """Stop the job as another request would."""
+        store.update_job_if_status(session_id, ("running",), status="stopped", message="other writer")
+
+    boxes["hook"] = other_writer
+    answer = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    job = store.get_job(session_id)
+    assert answer.status == job["status"] == "stopped"
+    assert (job["message"], job.get("result")) == ("other writer", None)
+
+
+def test_a_crashed_end_on_a_blocked_budget_does_not_hold_the_session(store: SQLiteJobStore, boxes: Any) -> None:
+    """Stop a session on a blocked budget once the crashed end's lease expired."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    boxes["raise"] = _Crash("the worker stopped")
+    with pytest.raises(_Crash):
+        repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    _expire_the_end(store)
+    _block(store, session_id)
+    answer = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert answer.status == store.get_job(session_id)["status"] == "stopped"
 
 
 def test_open_session_ids_lists_only_open_sessions_of_the_draft(store: SQLiteJobStore) -> None:
