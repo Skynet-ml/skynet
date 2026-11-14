@@ -271,8 +271,13 @@ def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
 @pytest.mark.parametrize(
     ("text", "section", "key", "message"),
     [
-        ('[target.planner]\nentry = "a.py:f"\nvcpus = 3\n', "target.planner", "vcpus", "vcpus must be 1 or an even"),
-        ("[paths]\neditable = []\n", "paths", "editable", "editable is empty"),
+        (
+            'version = 1\n[target.planner]\nentry = "a.py:f"\nvcpus = 3\n',
+            "target.planner",
+            "vcpus",
+            "vcpus must be 1 or an even",
+        ),
+        ("version = 1\n[paths]\neditable = []\n", "paths", "editable", "editable is empty"),
         ("version = 2\n", None, "version", "version 2 is not supported"),
         ("[paths\n", None, None, "is not valid TOML"),
     ],

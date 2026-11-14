@@ -286,7 +286,7 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
 
 
 _MAPS_TOML = (
-    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 

@@ -72,6 +72,12 @@ timeout = 300
 [metric]
 services = ["judge"]
 
+[outcome]
+target = 0.9
+
+[outcome.require]
+pass_rate = 0.8
+
 [services.judge]
 url = "https://api.example.com/v1"
 headers = { Authorization = "Bearer ${JUDGE_KEY}" }
@@ -129,7 +135,8 @@ How to write the run's files:
 * ``optimize.toml`` is the whole file at the repository root. {APP_NAME} checks it with its parser, which
   stops at the first error and refuses any section or key it does not know ("... is not a supported
   setting"). Use only this schema. Every path is relative to the repository root.
-  - Top level, before any section: ``version = 1`` (the only version) and ``instructions = "<path>"``.
+  - Top level, before any section: ``version = 1`` (required, and the only version) and
+    ``instructions = "<path>"``. Put data that {APP_NAME} does not read only in a ``[tool.<name>]`` table.
   - ``[paths]``: ``editable`` and ``protected``, lists of paths. They can only narrow what the user approved,
     and an empty ``editable`` fails.
   - ``[setup]``: ``command``, one shell command as text.
@@ -148,6 +155,9 @@ How to write the run's files:
   - ``[sandbox]``: ``compose``, the path of a compose file whose services run beside the metric.
   - ``[services.<name>]``: ``url`` (https, required) and ``headers``, nothing else. One secret may go to one
     host only.
+  - ``[outcome]``: ``target`` (the score that is good enough, such as ``0.9``) and ``require``, an
+    ``[outcome.require]`` table that sets a name from the ``scores`` the metric returns to its minimum score.
+    A run cannot use ``[outcome]`` yet and stops when the file sets it, so leave it out of the file you write.
   The errors you must avoid most: "[run] entry is missing", "network entry ... must be a host name such as
   api.example.com, not a URL", "... is not a supported setting" and "url must be an https:// address". This
   file is valid. The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders:

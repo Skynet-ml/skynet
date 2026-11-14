@@ -482,7 +482,7 @@ def test_a_workspace_without_protected_paths_skips_the_check(
 
 
 _SCORING_TOML = (
-    '[paths]\neditable = ["src"]\n\n'
+    'version = 1\n[paths]\neditable = ["src"]\n\n'
     '[run]\nentry = "a.py:f"\n\n'
     '[metric]\nfiles = ["eval/scorer.py"]\nreference = "eval/reference.json"\n'
     'illegal = "docs/metric_rules.md"\nmcp = "eval/.mcp.json"\n\n'

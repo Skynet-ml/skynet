@@ -26,7 +26,11 @@ timeout; with no ``[run]``, nothing runs and the metric judges only the tree
 and the patch), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
-files). ``[run]`` and ``[metric]`` also take the role keys mcp, network,
+files), and ``[outcome]`` (the ``target`` score and, in ``[outcome.require]``,
+the minimum of each named score; the worker's gate refuses a run that sets
+them until a run reads them). ``version = 1`` is required. Each
+``[tool.<name>]`` table is accepted and skipped: Skynet reads nothing in it.
+``[run]`` and ``[metric]`` also take the role keys mcp, network,
 services, illegal and vcpus: the candidate and the metric run in separate
 boxes, so each role sizes and walls off its own box (SKY-398). Every
 role's mcp is the path of a standard ``.mcp.json`` file in the repository,
@@ -92,6 +96,7 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
     "sandbox": frozenset({"compose"}),
+    "outcome": frozenset({"target", "require"}),
 }
 # Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
 _ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
@@ -302,6 +307,9 @@ class RepoConstraints:
     # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
     compose_file: str | None = None
     compose_services: tuple[ComposeService, ...] = ()
+    # [outcome]: no run reads these yet, so the worker's gate refuses a file that sets them.
+    outcome_target: float | None = None
+    outcome_minimums: Mapping[str, float] = field(default_factory=dict)
 
     @property
     def rule_files(self) -> tuple[str, ...]:
@@ -802,6 +810,79 @@ def _run(section: Mapping[str, Any] | None) -> tuple[str | tuple[str, ...] | Non
     return _entry(section["entry"], "[run]"), _timeout(section, "[run]", "case")
 
 
+def _score_value(value: Any, setting: str, section: str, key: str) -> float:
+    """Check a score that the file sets, such as ``[outcome] target``.
+
+    Scores have no fixed range: the metric returns any finite number.
+
+    Args:
+        value: The value from the file.
+        setting: The setting as the file names it, used in errors.
+        section: The section name the error points to.
+        key: The key the error points to.
+
+    Returns:
+        The score as a float.
+
+    Raises:
+        ConstraintsError: When the value is not a finite number.
+    """
+    # bool is an int in Python, so ``target = true`` would otherwise read as 1.
+    number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else math.nan
+    try:
+        number = float(number)
+    except OverflowError:
+        # A TOML integer can have hundreds of digits, more than a float holds.
+        number = math.nan
+    if not math.isfinite(number):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} must be a finite number, such as 0.9.", section=section, key=key
+        )
+    return number
+
+
+def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]]:
+    """Read the ``[outcome]`` section: the run's target score and the minimum of each named score.
+
+    Args:
+        section: The parsed ``[outcome]`` table; empty when the file has none.
+
+    Returns:
+        The target, or ``None`` when the file sets none, and each minimum by score name.
+
+    Raises:
+        ConstraintsError: When the target or a minimum is not a finite number, or
+            ``require`` is not a bounded table of named scores.
+    """
+    target = _score_value(section["target"], "[outcome] target", "outcome", "target") if "target" in section else None
+    require = section.get("require", {})
+    if not isinstance(require, dict) or len(require) > _MAX_NAMES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [outcome.require] must be a table of at most {_MAX_NAMES} score names, each"
+            " set to its minimum score.",
+            section="outcome",
+            key="require",
+        )
+    minimums: dict[str, float] = {}
+    for name, value in require.items():
+        if not name:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [outcome.require] has an empty score name. Use the name the metric gives"
+                " the score.",
+                section="outcome.require",
+            )
+        # TOML reads an unquoted ``rouge.l = 0.5`` as the table ``rouge = {l = 0.5}``.
+        if isinstance(value, dict):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [outcome.require] {name} is a table. Quote a score name that has a dot,"
+                f' such as "{name}.{next(iter(value), "l")}" = 0.9.',
+                section="outcome.require",
+                key=name,
+            )
+        minimums[name] = _score_value(value, f"[outcome.require] {name}", "outcome.require", name)
+    return target, minimums
+
+
 def _service(section: Any, name: str) -> ServiceSpec:
     """Read one ``[services.<name>]`` declaration.
 
@@ -1274,7 +1355,7 @@ def _refuse_hidden_visible_files(
             )
 
 
-def parse_constraints(raw: bytes) -> RepoConstraints:
+def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
     Unknown sections and keys fail rather than being ignored, so a rule the
@@ -1282,6 +1363,9 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
 
     Args:
         raw: The file's contents.
+        require_version: Whether a file with no ``version`` fails. ``False``
+            reads it as version 1, for a run that started before the key
+            was required (SKY-690); a wrong ``version`` fails either way.
 
     Returns:
         The validated proposal.
@@ -1296,11 +1380,26 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         document = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is not valid TOML: {error}") from error
+    if "version" not in document and require_version:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: version is missing. Put version = 1 at the top of the file, before any section.",
+            key="version",
+        )
     version = document.pop("version", 1)
-    if version != 1:
+    # ``true == 1`` and ``1.0 == 1`` in Python, so the type is checked too.
+    if type(version) is not int or version != 1:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: version {version!r} is not supported; use version = 1.", key="version"
         )
+    # [tool.<name>] is the one place for data that Skynet does not read, so only its shape is checked.
+    tools = document.pop("tool", {})
+    if not isinstance(tools, dict):
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: tool must be a [tool.<name>] table.", key="tool")
+    for name, table in tools.items():
+        if not isinstance(table, dict):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: tool.{name} must be a [tool.{name}] table.", section="tool", key=name
+            )
     instructions = document.pop("instructions", None)
     # The older forms held the text in the toml (E48); name the move instead of "not supported".
     if isinstance(instructions, dict):
@@ -1367,6 +1466,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     cases_file = _cases_file(document.get("data"))
     sandbox = document.get("sandbox", {})
     compose_file = _one_file(sandbox["compose"], "[sandbox] compose") if "compose" in sandbox else None
+    outcome_target, outcome_minimums = _outcome(document.get("outcome", {}))
     rule_files = [("instructions", instructions_file)]
     rule_files += [
         (label, role["illegal_file"])
@@ -1418,14 +1518,17 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         metric=metric,
         cases_file=cases_file,
         compose_file=compose_file,
+        outcome_target=outcome_target,
+        outcome_minimums=outcome_minimums,
     )
 
 
-def read_constraints(archive: Path) -> RepoConstraints | None:
+def read_constraints(archive: Path, *, require_version: bool = True) -> RepoConstraints | None:
     """Read the constraints file at the root of a packed snapshot.
 
     Args:
         archive: Packed tree from :func:`fetch_snapshot`.
+        require_version: Passed to :func:`parse_constraints`.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
@@ -1443,7 +1546,7 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
     raw = read_constraints_file(archive)
     if raw is None:
         return None
-    constraints = _load_mcp_files(parse_constraints(raw), archive)
+    constraints = _load_mcp_files(parse_constraints(raw, require_version=require_version), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
     return _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
 
