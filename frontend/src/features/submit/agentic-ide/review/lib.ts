@@ -13,7 +13,7 @@ export interface RepoFile {
   /** The repository text is still on its way, so no diff is known yet. */
   loading?: boolean;
   /** The repository could not give this file as text. */
-  issue?: "binary" | "too_large" | "missing";
+  issue?: "binary" | "too_large" | "missing" | "unreadable";
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "unchanged";
@@ -148,16 +148,21 @@ export interface TreeNode {
 
 export function buildTree(files: RepoFile[]): TreeNode {
   const root: TreeNode = { name: "", path: "", children: [] };
+  // A lookup per folder, so a large repository does not scan each folder's list.
+  const byName = new Map<TreeNode, Map<string, TreeNode>>();
   for (const file of files) {
     const parts = file.path.split("/");
     let node = root;
     parts.forEach((part, n) => {
       const path = parts.slice(0, n + 1).join("/");
       const leaf = n === parts.length - 1;
-      let child = node.children!.find((c) => c.name === part);
+      let names = byName.get(node);
+      if (!names) byName.set(node, (names = new Map()));
+      let child = names.get(part);
       if (!child) {
         child = leaf ? { name: part, path, file } : { name: part, path, children: [] };
         node.children!.push(child);
+        names.set(part, child);
       }
       node = child;
     });

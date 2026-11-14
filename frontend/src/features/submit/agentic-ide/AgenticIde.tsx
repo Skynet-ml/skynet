@@ -5,6 +5,7 @@ import * as React from "react";
 import { turnState, useWizardStateOptional, type DraftFiles } from "@/features/agent-panel";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
+import { lineCommentId } from "@/shared/ui/agent/line-comments";
 import { GitDiff } from "@/shared/ui/icons";
 
 import type { RepoSource } from "../ide/repo-files";
@@ -27,21 +28,6 @@ type RepoRead = { text: string } | { issue: "binary" | "too_large" | "missing" }
 const NO_READS: ReadonlyMap<string, RepoRead | null> = new Map();
 const NO_FILES: readonly string[] = [];
 
-// The pane needs a stable id per comment; the shared list holds plain objects,
-// and an edit replaces its object, so the edited comment gets a new id.
-const commentIds = new WeakMap<object, string>();
-let lastCommentId = 0;
-
-/** Give a comment object its stable pane id, made on first use. */
-function commentId(comment: object): string {
-  let id = commentIds.get(comment);
-  if (!id) {
-    id = `c${++lastCommentId}`;
-    commentIds.set(comment, id);
-  }
-  return id;
-}
-
 /**
  * Read files from the repository, each once.
  *
@@ -50,13 +36,14 @@ function commentId(comment: object): string {
  *   paths: The files to read.
  *
  * Returns:
- *   Each read file's text or issue; a path still loading has no entry. A
- *   failed read maps to null, and the next change to the paths reads it again.
+ *   reads: each read file's text or issue; a path still loading has no entry.
+ *     A failed read maps to null, and the next change to the paths reads it again.
+ *   retry: reads the failed paths again.
  */
 function useRepoReads(
   repo: RepoSource | null,
   paths: readonly string[],
-): ReadonlyMap<string, RepoRead | null> {
+): { reads: ReadonlyMap<string, RepoRead | null>; retry: () => void } {
   const [read, setRead] = React.useState<{
     repo: RepoSource | null;
     results: ReadonlyMap<string, RepoRead | null>;
@@ -69,6 +56,8 @@ function useRepoReads(
     paths: new Set(),
   });
   const key = paths.join("\n");
+  // A bump reads the failed paths again.
+  const [attempt, setAttempt] = React.useState(0);
 
   React.useEffect(() => {
     if (requested.current.repo !== repo) requested.current = { repo, paths: new Set() };
@@ -89,9 +78,10 @@ function useRepoReads(
         settle(null);
       });
     }
-  }, [repo, key]);
+  }, [repo, key, attempt]);
 
-  return read.repo === repo ? read.results : NO_READS;
+  const retry = React.useCallback(() => setAttempt((n) => n + 1), []);
+  return { reads: read.repo === repo ? read.results : NO_READS, retry };
 }
 
 /**
@@ -169,6 +159,7 @@ export function AgenticIde({
   const addLineComment = agent?.addLineComment;
   const moveLineComments = agent?.moveLineComments;
   const removeLineComment = agent?.removeLineComment;
+  const updateLineComment = agent?.updateLineComment;
   const lineComments = agent?.lineComments;
   const setChangesToggle = agent?.setChangesToggle;
 
@@ -196,7 +187,7 @@ export function AgenticIde({
     () => [...basePaths, ...[...opened].filter((path) => !(path in texts))],
     [basePaths, opened, texts],
   );
-  const reads = useRepoReads(repo, readPaths);
+  const { reads, retry } = useRepoReads(repo, readPaths);
   const treePaths = useRepoTree(repo);
   // The base the draft changes: "" for a file the repository cannot give as text.
   // A failed or unreadable optimize.toml read maps to undefined: the repository
@@ -238,7 +229,7 @@ export function AgenticIde({
       .map((path): RepoFile => {
         const result = reads.get(path);
         if (result === undefined) return { path, before: "", after: "", loading: true };
-        if (result === null) return { path, before: "", after: "", issue: "missing" };
+        if (result === null) return { path, before: "", after: "", issue: "unreadable" };
         if ("issue" in result) return { path, before: "", after: "", issue: result.issue };
         return { path, before: result.text, after: result.text };
       });
@@ -334,19 +325,22 @@ export function AgenticIde({
     [busy, onWrite],
   );
   const openFile = React.useCallback(
-    (path: string) => setOpened((prev) => (prev.has(path) ? prev : new Set(prev).add(path))),
-    [],
+    (path: string) => {
+      if (reads.get(path) === null) retry();
+      setOpened((prev) => (prev.has(path) ? prev : new Set(prev).add(path)));
+    },
+    [reads, retry],
   );
 
   const comments = React.useMemo<PaneComment[]>(
     () =>
       (lineComments ?? []).map((c) => {
-        return { id: commentId(c), path: c.path, line: c.line, text: c.text };
+        return { id: lineCommentId(c), path: c.path, line: c.line, text: c.text };
       }),
     [lineComments],
   );
   const byId = React.useCallback(
-    (id: string) => (lineComments ?? []).find((c) => commentId(c) === id),
+    (id: string) => (lineComments ?? []).find((c) => lineCommentId(c) === id),
     [lineComments],
   );
   const comment = React.useMemo(
@@ -367,18 +361,15 @@ export function AgenticIde({
         : undefined,
     [removeLineComment, byId],
   );
-  // The shared list has no update: an edit replaces the comment.
   const editComment = React.useMemo(
     () =>
-      removeLineComment && addLineComment
+      updateLineComment
         ? (id: string, text: string) => {
             const c = byId(id);
-            if (!c) return;
-            removeLineComment(c);
-            addLineComment({ ...c, text });
+            if (c) updateLineComment(c, text);
           }
         : undefined,
-    [removeLineComment, addLineComment, byId],
+    [updateLineComment, byId],
   );
   const hidePane = React.useCallback(() => (tabs ? setTab("chat") : setPaneOpen(false)), [tabs]);
 

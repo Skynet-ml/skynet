@@ -1,4 +1,3 @@
-import type { MediaAttachment } from "./media-attachments";
 import type { ThinkingSegment } from "@/shared/lib/thinking-segments";
 
 export type AgentStatus = "idle" | "streaming" | "queued" | "done" | "error";
@@ -56,8 +55,6 @@ export interface AgentMessage {
   id?: number;
   /** US cents of summary calls that stored no compaction, counted on this message. */
   sideCents?: number;
-  /** Images, video and audio the user sent with the message. */
-  media?: readonly MediaAttachment[];
   /** The user stopped this turn before it finished. */
   stopped?: boolean;
 }

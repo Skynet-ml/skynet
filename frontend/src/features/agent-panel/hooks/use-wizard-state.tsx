@@ -3,7 +3,7 @@
 import * as React from "react";
 
 import { storedOptimizerChoice, type DataMode } from "@/shared/types/unified-run";
-import type { LineComment } from "@/shared/ui/agent/line-comments";
+import { carryLineCommentId, type LineComment } from "@/shared/ui/agent/line-comments";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
 import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
@@ -105,6 +105,8 @@ interface WizardStateContextValue {
   lineComments: readonly LineComment[];
   addLineComment: (comment: LineComment) => void;
   removeLineComment: (comment: LineComment) => void;
+  /** Change a comment's text in place, so it keeps its place and its id. */
+  updateLineComment: (comment: LineComment, text: string) => void;
   /** Move a file's comments to new line numbers after a write moves its lines. */
   moveLineComments: (path: string, to: (line: number) => number) => void;
   clearLineComments: () => void;
@@ -192,11 +194,18 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const removeLineComment = React.useCallback((comment: LineComment) => {
     setLineComments((prev) => prev.filter((c) => c !== comment));
   }, []);
+  const updateLineComment = React.useCallback((comment: LineComment, text: string) => {
+    setLineComments((prev) =>
+      prev.map((c) => (c === comment ? carryLineCommentId(c, { ...c, text }) : c)),
+    );
+  }, []);
   const moveLineComments = React.useCallback((path: string, to: (line: number) => number) => {
     setLineComments((prev) =>
       prev.some((c) => c.path === path && to(c.line) !== c.line)
         ? prev.map((c) =>
-            c.path === path && to(c.line) !== c.line ? { ...c, line: to(c.line) } : c,
+            c.path === path && to(c.line) !== c.line
+              ? carryLineCommentId(c, { ...c, line: to(c.line) })
+              : c,
           )
         : prev,
     );
@@ -367,6 +376,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       lineComments,
       addLineComment,
       removeLineComment,
+      updateLineComment,
       moveLineComments,
       clearLineComments,
     }),
@@ -404,6 +414,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       lineComments,
       addLineComment,
       removeLineComment,
+      updateLineComment,
       moveLineComments,
       clearLineComments,
     ],

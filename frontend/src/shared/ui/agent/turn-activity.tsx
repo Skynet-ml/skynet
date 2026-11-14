@@ -62,8 +62,6 @@ interface TurnActivityProps {
   renderStep: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /** What kind of step a call is, for the burst's summary line. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
-  /** The line a running call shows on its folded burst. */
-  stepLabel?: (call: AgentToolCall) => string;
   /** The user stopped the turn, so the header says so, as Codex does. */
   stopped?: boolean;
   /** Backend-measured turn duration; the history's own span wins when longer. */
@@ -88,7 +86,6 @@ export function TurnActivity({
   plan,
   renderStep,
   stepKind,
-  stepLabel,
   stopped = false,
   durationMs,
   startedAt = null,
@@ -128,11 +125,6 @@ export function TurnActivity({
   const foldable = !isLive || answering;
   const historyOpen = !foldable || (openChoice ?? false);
 
-  const runningLabel = (group: Step[]) => {
-    const live = group.find(({ call }) => call.status === "running")?.call;
-    return live && stepLabel?.(live);
-  };
-
   const renderBurst = (group: Step[]) => {
     const kinds = group.map(({ call }) => stepKind?.(call) ?? "tool");
     const explore = kinds.every(isExplore);
@@ -140,7 +132,7 @@ export function TurnActivity({
       <ActivityGroup
         key={`steps-${group[0]?.call.id}`}
         autoOpen={false}
-        activeLabel={explore ? msg("shared.agent.exploring") : runningLabel(group)}
+        activeLabel={explore ? msg("shared.agent.exploring") : undefined}
         title={explore ? exploredTitle(kinds) : undefined}
         steps={group.map(({ call }, i) => ({ kind: kinds[i] ?? "tool", status: call.status }))}
       >
@@ -171,25 +163,34 @@ export function TurnActivity({
     ) : null;
   const planLine = renderPlan(plan, "plan");
 
-  // What a folded history still shows: cards wait on the user, and a failed
-  // step must not hide behind a fold.
-  const renderKept = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card"
-      ? renderPiece(piece)
-      : piece.kind === "steps"
-        ? piece.steps
+  // The fold hides only what sits between the cards. A card waits on the
+  // user, so it keeps one place in the tree and never remounts when the turn
+  // folds; a failed step must not hide behind a fold either.
+  const fold = (key: string, node: React.ReactNode) => (
+    <Reveal key={`fold-${key}`} open={historyOpen}>
+      {node}
+    </Reveal>
+  );
+  const renderFolded = (piece: (typeof pieces)[number]) =>
+    piece.kind === "card" ? (
+      renderPiece(piece)
+    ) : piece.kind === "steps" ? (
+      <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
+        {fold("steps", renderPiece(piece))}
+        {!historyOpen &&
+          piece.steps
             .filter(({ call }) => call.status === "error")
             .map(({ call, isRetry }) => (
               <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
-            ))
-        : null;
-  const keptNodes = [...earlierPieces.flat(), ...pieces].map(renderKept);
+            ))}
+      </React.Fragment>
+    ) : null;
 
   const earlierNodes = earlier.map((turn, i) => (
     <React.Fragment key={`earlier-${i}`}>
-      {renderPlan(turn.plan, `plan-${i}`)}
-      {(earlierPieces[i] ?? []).map(renderPiece)}
-      {turn.answer && <div className="py-1">{turn.answer}</div>}
+      {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
+      {(earlierPieces[i] ?? []).map(renderFolded)}
+      {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
     </React.Fragment>
   ));
 
@@ -218,28 +219,19 @@ export function TurnActivity({
     return start === null ? null : <Header label={label} denied={denied} />;
   }
 
-  const history = (
-    <div className="flex flex-col pt-1.5">
-      {earlierNodes}
-      {planLine}
-      {pieces.map(renderPiece)}
-    </div>
-  );
-
   return (
     <div className="flex flex-col">
-      {foldable ? (
-        <>
-          <Header label={label} denied={denied} open={historyOpen} onToggle={() => setOpenChoice(!historyOpen)} />
-          <Reveal open={historyOpen}>{history}</Reveal>
-          {!historyOpen && <div className="flex flex-col empty:hidden">{keptNodes}</div>}
-        </>
-      ) : (
-        <>
-          <Header label={label} denied={denied} />
-          {history}
-        </>
-      )}
+      <Header
+        label={label}
+        denied={denied}
+        open={foldable ? historyOpen : undefined}
+        onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
+      />
+      <div className="flex flex-col pt-1.5 empty:hidden">
+        {earlierNodes}
+        {plan && fold("plan", planLine)}
+        {pieces.map(renderFolded)}
+      </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
   );

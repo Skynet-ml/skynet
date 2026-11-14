@@ -11,7 +11,6 @@ import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
 import { cn } from "@/shared/lib/utils";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
-import { FileTypeIcon } from "@/shared/ui/file-tree";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
@@ -43,8 +42,6 @@ import {
 } from "./slash-commands";
 import type { AgentMessage } from "./types";
 import { DictationWave } from "./dictation-wave";
-import { insertMention, matchMentions, mentionAt } from "./file-mentions";
-import { mediaFromFile, mediaKind, MediaTiles, type MediaAttachment } from "./media-attachments";
 import { formatRecSeconds, useDictation } from "./use-dictation";
 import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
 
@@ -106,13 +103,6 @@ interface ComposerProps {
   chips?: React.ReactNode;
   /** The next message has content besides the draft, so an empty draft can still be sent. */
   sendsEmpty?: boolean;
-  /** Opts the composer into media: pasted, dropped or picked images, video and
-   *  audio become thumbnail tiles here instead of text. The host owns the list
-   *  and sends it with the message. */
-  media?: readonly MediaAttachment[];
-  onMediaChange?: (next: MediaAttachment[]) => void;
-  /** Repository file paths that "@" lists, as in Codex; a pick puts "@path " in the draft. */
-  mentions?: readonly string[];
 }
 
 /** One slash menu row, with the composer model menu's row metrics and highlight. */
@@ -170,11 +160,6 @@ function SlashRow({
  * command at its start marked as a token. The textarea keeps the caret, the
  * selection and the real text; this layer only paints.
  */
-// "@path" mentions paint as tokens too. The capture group keeps each mention
-// at an odd index of the split.
-const MENTION_TOKEN = /(?<=^|\s)(@[^\s@]+)/;
-const hasMention = (text: string) => MENTION_TOKEN.test(text);
-
 function SlashTokenLayer({
   text,
   length,
@@ -209,18 +194,7 @@ function SlashTokenLayer({
     >
       {/* Color only: a weight or padding change would move the glyphs off the caret. */}
       <span className="text-primary">{text.slice(0, length)}</span>
-      {text
-        .slice(length)
-        .split(MENTION_TOKEN)
-        .map((part, i) =>
-          i % 2 ? (
-            <span key={i} className="text-primary">
-              {part}
-            </span>
-          ) : (
-            part
-          ),
-        )}
+      {text.slice(length)}
       {/* A trailing newline in a textarea opens a line; the extra space keeps it here too. */}
       {text.endsWith("\n") ? " " : null}
     </div>
@@ -262,9 +236,6 @@ export function Composer({
   slash,
   chips,
   sendsEmpty = false,
-  media = [],
-  onMediaChange,
-  mentions,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -294,7 +265,7 @@ export function Composer({
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;
-  const canSend = hasDraft || sendsEmpty || media.length > 0;
+  const canSend = hasDraft || sendsEmpty;
   // An agent chat swaps Send for Stop while it answers and the box is empty,
   // so a touch screen, which has no Escape key, can still stop the answer.
   // Line comments alone do not count: a mid-turn send needs typed text.
@@ -348,15 +319,6 @@ export function Composer({
     !looksLikeMarkdown(draft.text)
       ? slashTokenLength(draft.text, slash.commands)
       : 0;
-  const painted =
-    tokenLength > 0 ||
-    (!picking &&
-      plainDraft &&
-      !disabled &&
-      !locked &&
-      !composing &&
-      !looksLikeMarkdown(draft.text) &&
-      hasMention(draft.text));
   const tokenLayerRef = React.useRef<HTMLDivElement>(null);
   const pickingCommand = picking
     ? slash?.commands.find((c) => c.name === picking && !c.hidden && c.options?.length)
@@ -376,32 +338,8 @@ export function Composer({
       : slashDismissed !== draft.text
         ? slashMenu(draft.text, slash.commands)
         : null;
-  // The caret decides which "@query" the file menu filters by.
-  const [caret, setCaret] = React.useState(0);
-  const [mentionIndex, setMentionIndex] = React.useState(0);
-  // Escape hides the file menu for this draft and caret; typing shows it again.
-  const [mentionDismissed, setMentionDismissed] = React.useState<string | null>(null);
-  const mentionListId = React.useId();
-  const mentionKey = `${caret}:${draft.text}`;
-  const mention =
-    mentions?.length &&
-    !menu &&
-    focused &&
-    !disabled &&
-    !locked &&
-    !dictating &&
-    mentionDismissed !== mentionKey
-      ? mentionAt(draft.text, caret)
-      : null;
-  const mentionItems = mention ? matchMentions(mentions!, mention.query) : [];
-  const mentionRow = Math.min(mentionIndex, Math.max(0, mentionItems.length - 1));
-  const listId = mention ? mentionListId : slashListId;
   const slashRow = menu ? Math.min(slashIndex, menu.items.length - 1) : 0;
-  const slashActiveId = menu?.items.length
-    ? `${slashListId}-${slashRow}`
-    : mentionItems.length
-      ? `${mentionListId}-${mentionRow}`
-      : undefined;
+  const slashActiveId = menu?.items.length ? `${slashListId}-${slashRow}` : undefined;
   // Arrow keys can move the highlight past the menu's scroll edge.
   React.useEffect(() => {
     if (slashActiveId) document.getElementById(slashActiveId)?.scrollIntoView({ block: "nearest" });
@@ -413,58 +351,12 @@ export function Composer({
   const maxLength = midTurn?.maxLength ?? 20_000;
   const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
   const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
-  // Paste, drop and the picker each add to the latest list, not to the render's copy.
-  const mediaRef = React.useRef(media);
-  React.useEffect(() => {
-    mediaRef.current = media;
-  }, [media]);
-  const setMedia = (next: MediaAttachment[]) => {
-    mediaRef.current = next;
-    onMediaChange?.(next);
-  };
-  const removeMedia = (id: string) => {
-    const at = mediaRef.current.findIndex((m) => m.id === id);
-    const gone = mediaRef.current[at];
-    if (!gone) return;
-    setMedia(mediaRef.current.filter((m) => m.id !== id));
-    // As in Codex, a removed attachment can come back from the toast. Its URL
-    // stays alive for that, and the host frees it with the rest.
-    toast(
-      ({ closeToast }) => (
-        <span className="flex items-center gap-3 text-sm">
-          <span className="min-w-0 flex-1 truncate" dir="auto">
-            {msg("agent.composer.media_removed", { name: gone.name })}
-          </span>
-          <button
-            type="button"
-            className="shrink-0 cursor-pointer font-medium text-primary hover:underline"
-            onClick={() => {
-              const list = [...mediaRef.current];
-              list.splice(Math.min(at, list.length), 0, gone);
-              setMedia(list);
-              closeToast();
-              toast.success(msg("agent.composer.media_restored"));
-            }}
-          >
-            {msg("agent.composer.undo")}
-          </button>
-        </span>
-      ),
-      { autoClose: 5000 },
-    );
-  };
   const [dropping, setDropping] = React.useState(false);
   const dropDepth = React.useRef(0);
   const dragsFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
   const canDrop = !inline && attachments && !disabled && !locked;
 
-  const attachFiles = async (all: File[]) => {
-    // Media goes to the tiles; every other file is read as text, as before.
-    const tiles = onMediaChange
-      ? all.flatMap((f) => (mediaKind(f) ? [mediaFromFile(f)!] : []))
-      : [];
-    const picked = onMediaChange ? all.filter((f) => !mediaKind(f)) : all;
-    if (tiles.length) setMedia([...mediaRef.current, ...tiles]);
+  const attachFiles = async (picked: File[]) => {
     const {
       claimed,
       extra,
@@ -576,22 +468,6 @@ export function Composer({
     refocus();
   };
 
-  const pickMention = (index: number) => {
-    const path = mentionItems[index];
-    if (!mention || !path) return;
-    const next = insertMention(draft.text, caret, mention.start, path);
-    onChange(joinPastes({ ...draft, text: next.text }));
-    setCaret(next.caret);
-    setMentionIndex(0);
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(next.caret, next.caret);
-      autoResizeTextarea(el);
-    });
-  };
-
   const sendMidTurn = (mode: "steer" | "queue") => {
     if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
     if (value.trim().length > maxLength) {
@@ -652,25 +528,6 @@ export function Composer({
       )
     )
       return;
-    if (mention) {
-      const step = stepSlashMenu(mentionRow, mentionItems.length, e.key);
-      if (step !== undefined) {
-        e.preventDefault();
-        setMentionIndex(step);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setMentionDismissed(mentionKey);
-        return;
-      }
-      if ((e.key === "Tab" || e.key === "Enter") && !e.shiftKey && mentionItems.length) {
-        e.preventDefault();
-        pickMention(mentionRow);
-        return;
-      }
-    }
     if (menu) {
       const step = stepSlashMenu(slashRow, menu.items.length, e.key);
       if (step !== undefined) {
@@ -817,7 +674,7 @@ export function Composer({
             e.preventDefault();
             dropDepth.current = 0;
             setDropping(false);
-            // Codex skips folders in a drop: an entry that is a directory is not a file to read.
+            // A dropped folder is not a file to read, so it is skipped.
             const files = Array.from(e.dataTransfer.items)
               .filter((item) => item.kind === "file" && !item.webkitGetAsEntry?.()?.isDirectory)
               .map((item) => item.getAsFile())
@@ -925,58 +782,10 @@ export function Composer({
               )}
             </div>
           )}
-          {mention && (
-            <div
-              id={mentionListId}
-              role="listbox"
-              aria-label={msg("agent.mention.menu")}
-              data-state="open"
-              onMouseDown={(e) => e.preventDefault()}
-              className={cn(
-                "bui-menu origin-bottom absolute inset-x-0 bottom-full z-20 mb-2",
-                "flex max-h-72 flex-col overflow-y-auto overscroll-contain rounded-xl border border-border/70 bg-popover p-1 shadow-[var(--shadow-float)]",
-              )}
-            >
-              {mentionItems.map((path, i) => {
-                const cut = path.lastIndexOf("/") + 1;
-                return (
-                  <SlashRow
-                    key={path}
-                    id={`${mentionListId}-${i}`}
-                    active={i === mentionRow}
-                    onPick={() => pickMention(i)}
-                    onHover={() => setMentionIndex(i)}
-                    icon={<FileTypeIcon name={path} className="size-4" />}
-                  >
-                    {/* A path reads left to right inside a row that follows the page direction. */}
-                    <span className="flex min-w-0 flex-1 items-baseline gap-2">
-                      <bdi dir="ltr" className="shrink-0 text-foreground">
-                        {path.slice(cut)}
-                      </bdi>
-                      {cut > 0 && (
-                        <bdi dir="ltr" className="min-w-0 truncate text-xs text-muted-foreground">
-                          {path.slice(0, cut - 1)}
-                        </bdi>
-                      )}
-                    </span>
-                  </SlashRow>
-                );
-              })}
-              {!mentionItems.length && (
-                <p aria-hidden className="px-2.5 py-1.5 text-xs text-muted-foreground">
-                  {msg("agent.mention.no_match")}
-                </p>
-              )}
-            </div>
-          )}
           {/* A listbox owns only options, and a region that mounts with its text
             is often not read, so this one stays mounted outside the menu. */}
           <p role="status" className="sr-only">
-            {menu && !menu.items.length
-              ? msg("agent.slash.no_option_match")
-              : mention && !mentionItems.length
-                ? msg("agent.mention.no_match")
-                : ""}
+            {menu && !menu.items.length ? msg("agent.slash.no_option_match") : ""}
           </p>
           {/* The voice strip mounts with its text, so its state is read from here. */}
           <p role="status" className="sr-only">
@@ -989,7 +798,6 @@ export function Composer({
                   : ""}
           </p>
           {chips && !inline && <div className="flex flex-wrap gap-2 px-3 pt-3">{chips}</div>}
-          {!inline && <MediaTiles media={media} onRemove={removeMedia} className="px-3 pt-3" />}
           {draft.pastes.length + draft.files.length > 0 && !inline && (
             <div className="flex flex-wrap gap-2 px-3 pt-3">
               {draft.files.map((file, i) => (
@@ -1022,7 +830,7 @@ export function Composer({
               className={inline ? "min-w-0 flex-1" : undefined}
               previewClassName={inline ? "px-3 py-2" : "px-4 py-[11px]"}
             >
-              {painted && (
+              {tokenLength > 0 && (
                 <SlashTokenLayer
                   text={draft.text}
                   length={tokenLength}
@@ -1043,15 +851,11 @@ export function Composer({
                 onChange={(e) => {
                   setSlashIndex(0);
                   setSlashDismissed(null);
-                  setMentionIndex(0);
-                  setMentionDismissed(null);
-                  setCaret(e.target.selectionStart);
                   onChange(joinPastes({ ...draft, text: e.target.value }));
                   autoResizeTextarea(e.target);
                 }}
                 onPaste={inline || !attachments ? undefined : handlePaste}
                 onKeyDown={handleKeyDown}
-                onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onFocus={() => setFocused(true)}
                 onBlur={() => {
                   setFocused(false);
@@ -1066,14 +870,14 @@ export function Composer({
                 rows={1}
                 placeholder={suggestion ? undefined : placeholder}
                 aria-describedby={suggestion ? suggestionHintId : undefined}
-                role={menu || mention ? "combobox" : undefined}
-                aria-autocomplete={menu || mention ? "list" : undefined}
-                aria-controls={menu || mention ? listId : undefined}
-                aria-expanded={menu || mention ? true : undefined}
+                role={menu ? "combobox" : undefined}
+                aria-autocomplete={menu ? "list" : undefined}
+                aria-controls={menu ? slashListId : undefined}
+                aria-expanded={menu ? true : undefined}
                 aria-activedescendant={slashActiveId}
                 className={cn(
                   "relative bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
-                  painted && "text-transparent caret-foreground",
+                  tokenLength > 0 && "text-transparent caret-foreground",
                   "max-h-[120px] outline-none ring-0 border-0 shadow-none",
                   "focus:outline-none focus-visible:outline-none focus-visible:ring-0",
                   "placeholder:text-muted-foreground/40",

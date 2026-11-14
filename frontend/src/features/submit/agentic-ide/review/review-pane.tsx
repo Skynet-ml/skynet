@@ -41,7 +41,15 @@ import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
 
 import { CodeAppearanceStyle } from "./code-style";
 import { CodeEditor, type ChangeNav, type ChangeNavHandle } from "./editor";
-import { baseName, buildTree, dirName, fuzzyScore, statusOf, type FileStatus, type RepoFile } from "./lib";
+import {
+  baseName,
+  buildTree,
+  dirName,
+  fuzzyScore,
+  statusOf,
+  type FileStatus,
+  type RepoFile,
+} from "./lib";
 import { MENU_ROW, MiniSwitch, PaneLabel, PaneMenuContent, PaneSeparator } from "./menu-look";
 import {
   Caret,
@@ -534,7 +542,7 @@ export function ReviewPane({
       else next.add(path);
       return next;
     });
-  const allCollapsed = changed.length > 0 && collapsed.size === changed.length;
+  const allCollapsed = changed.length > 0 && changed.every((f) => collapsed.has(f.path));
   const collapseAll = () =>
     setCollapsed(allCollapsed ? new Set() : new Set(changed.map((f) => f.path)));
   const collapseLabel = allCollapsed
@@ -546,22 +554,26 @@ export function ReviewPane({
   const tabFile = active === "changes" || newPage ? null : (byPath.get(active) ?? null);
   const plainFile = !!tabFile && statusOf(tabFile) === "unchanged";
   // The jump list holds every repository file; the name scores first, then the full path.
-  const jumpMatches = (
-    jumpQuery.trim()
-      ? files
-          .map((f) => ({
-            f,
-            score: fuzzyScore(jumpQuery, baseName(f.path)) || fuzzyScore(jumpQuery, f.path),
-          }))
-          .filter((m) => m.score > 0)
-          .sort((x, y) => y.score - x.score)
-          .map((m) => m.f)
-      : [...files].sort(
-          (x, y) =>
-            baseName(x.path).localeCompare(baseName(y.path)) ||
-            dirName(x.path).localeCompare(dirName(y.path)),
-        )
-  ).slice(0, JUMP_LIMIT);
+  // It sorts only while open: the files change on every keystroke in the editor.
+  const jumpMatches = React.useMemo(() => {
+    if (!jump) return [];
+    return (
+      jumpQuery.trim()
+        ? files
+            .map((f) => ({
+              f,
+              score: fuzzyScore(jumpQuery, baseName(f.path)) || fuzzyScore(jumpQuery, f.path),
+            }))
+            .filter((m) => m.score > 0)
+            .sort((x, y) => y.score - x.score)
+            .map((m) => m.f)
+        : [...files].sort(
+            (x, y) =>
+              baseName(x.path).localeCompare(baseName(y.path)) ||
+              dirName(x.path).localeCompare(dirName(y.path)),
+          )
+    ).slice(0, JUMP_LIMIT);
+  }, [jump, files, jumpQuery]);
 
   const listToggle = (
     <ToolButton

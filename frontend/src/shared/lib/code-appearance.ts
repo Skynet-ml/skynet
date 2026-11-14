@@ -619,7 +619,11 @@ function read(): CodeAppearance {
 /** Save a change and tell every subscribed view. */
 export function setCodeAppearance(patch: Partial<CodeAppearance>) {
   cache = { ...read(), ...patch };
-  localStorage.setItem(KEY, JSON.stringify(cache));
+  try {
+    localStorage.setItem(KEY, JSON.stringify(cache));
+  } catch {
+    // Storage is blocked or full: the change applies to this tab only.
+  }
   listeners.forEach((l) => l());
 }
 

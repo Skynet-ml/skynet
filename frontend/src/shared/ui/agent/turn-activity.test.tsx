@@ -198,9 +198,11 @@ void it("shows the history while the turn runs, and folds it when the turn ends"
   await rerender(false);
   const card = host.querySelector('[data-step="ask"]');
   assert.ok(card && shown(card), "the card still shows");
+  // A card holds the user's input, so folding the turn must not remount it.
+  assert.equal(card, liveCard, "the card keeps its node when the turn folds");
   assert.equal(turnRow(host).getAttribute("aria-expanded"), "false", "the finished turn folds");
   await openTurn(host);
-  assert.ok(host.querySelector('[data-step="ask"]'), "the opened history shows the card");
+  assert.equal(host.querySelector('[data-step="ask"]'), liveCard, "opening the history keeps the card's node");
   await unmount();
 });
 
