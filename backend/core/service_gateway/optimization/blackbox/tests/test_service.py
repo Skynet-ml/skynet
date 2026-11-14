@@ -2355,7 +2355,9 @@ def _constant_run(value: float, count: int) -> service_mod.FinalRun:
     return service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL)
 
 
-@pytest.mark.parametrize(("value", "count"), [(0.7, 3), (0.1, 6)])
+# Python 3.12 made float ``sum()`` compensated, so some means flip to above the
+# value (six 0.1 give 0.10000000000000002). These pairs fall below on both sums.
+@pytest.mark.parametrize(("value", "count"), [(0.7, 3), (0.83, 5)])
 def test_a_mean_equal_to_the_target_reaches_it_despite_float_rounding(value: float, count: int) -> None:
     """Equal case scores can average one rounding step below the number in the file; that still reaches it."""
     run = _constant_run(value, count)
