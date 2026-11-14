@@ -232,7 +232,12 @@ export function AgenticIde({
   if (allFiles !== fileCache) setFileCache(allFiles);
   // A draft file whose base is still loading shows no diff yet, not a whole new file.
   const paneFiles = React.useMemo<RepoFile[]>(() => {
-    const draft = allFiles.map((f) => (base.has(f.path) ? f : { ...f, loading: true }));
+    const draft = allFiles.map((f): RepoFile => {
+      if (!base.has(f.path)) return { ...f, loading: true };
+      // Only an empty base needs the flag; other files keep their object, so their rows do not redraw.
+      const result = reads.get(f.path);
+      return f.before === "" && result && "text" in result ? { ...f, existed: true } : f;
+    });
     const rest = treePaths
       .filter((path) => !(path in texts))
       .map((path): RepoFile => {

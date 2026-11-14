@@ -72,8 +72,8 @@ const { createRoot } = await import("react-dom/client");
 const { EditorView } = await import("@codemirror/view");
 const { ReviewPane } = await import("./review/review-pane");
 const { AgenticIde } = await import("./AgenticIde");
-const { DiffView } = await import("./review/parts");
-const { diffLines, statusOf } = await import("./review/lib");
+const { DiffView, FileTree } = await import("./review/parts");
+const { buildTree, diffLines, statusOf } = await import("./review/lib");
 const { lineCommentId } = await import("@/shared/ui/agent/line-comments");
 const { WizardStateProvider, useWizardStateOptional } = await import("@/features/agent-panel");
 const { SessionProvider } = await import("next-auth/react");
@@ -353,6 +353,25 @@ void test("a file's status reads the draft against the repository", () => {
     "an emptied file is not deleted",
   );
   assert.equal(statusOf({ path: "a", before: "", after: "x\n", loading: true }), "modified");
+  assert.equal(
+    statusOf({ path: "a", before: "", after: "x\n", existed: true }),
+    "modified",
+    "an existing empty file is not added",
+  );
+});
+
+void test("a folder the user opened stays open when a change lands in it", async () => {
+  const quiet = { path: "src/a.py", before: "x\n", after: "x\n" };
+  const view = await mount(<FileTree root={buildTree([quiet])} selected={null} onSelect={noop} />);
+  const folder = () => view.container.querySelector("button[aria-expanded]")!;
+  assert.equal(folder().getAttribute("aria-expanded"), "false");
+  await click(folder());
+  assert.equal(folder().getAttribute("aria-expanded"), "true");
+  await view.render(
+    <FileTree root={buildTree([{ ...quiet, after: "y\n" }])} selected={null} onSelect={noop} />,
+  );
+  assert.equal(folder().getAttribute("aria-expanded"), "true");
+  await view.unmount();
 });
 
 void test("the same two texts give the same cached diff", () => {

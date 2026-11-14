@@ -12,6 +12,8 @@ export interface RepoFile {
   after: string;
   /** The repository text is still on its way, so no diff is known yet. */
   loading?: boolean;
+  /** The repository holds this file, so an empty `before` is an empty file, not a new one. */
+  existed?: boolean;
   /** The repository could not give this file as text. */
   issue?: "binary" | "too_large" | "missing" | "unreadable";
 }
@@ -26,7 +28,7 @@ export function statusOf(file: RepoFile): FileStatus {
   // A file still loading has an empty `before` that is not real, so it must not read as added.
   if (file.loading) return "modified";
   // The draft cannot delete a file: an emptied one stays as an empty file, so it reads as modified.
-  return before === "" ? "added" : "modified";
+  return before === "" && !file.existed ? "added" : "modified";
 }
 
 export interface DiffLine {

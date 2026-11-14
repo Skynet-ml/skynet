@@ -183,26 +183,20 @@ export function FileTree({
   touched?: ReadonlySet<string>;
 }) {
   const changedDirs = React.useMemo(() => changedFolders(root), [root]);
-  // A folder with a change starts open and any other starts shut; a click flips it.
-  const [flipped, setFlipped] = React.useState<Set<string>>(() => new Set());
+  // A folder with a change starts open and any other starts shut. A click
+  // stores the folder's state, so a later change does not open or shut it.
+  const [chosen, setChosen] = React.useState<ReadonlyMap<string, boolean>>(() => new Map());
   const level = (node: TreeNode, depth: number): React.ReactNode =>
     (node.children ?? []).map((child) => {
       if (child.children) {
         const changed = changedDirs.has(child.path);
-        const open = changed !== flipped.has(child.path);
+        const open = chosen.get(child.path) ?? changed;
         return (
           <div key={child.path} className="flex flex-col gap-px">
             <button
               type="button"
               style={{ paddingInlineStart: 8 + depth * 14 }}
-              onClick={() =>
-                setFlipped((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(child.path)) next.delete(child.path);
-                  else next.add(child.path);
-                  return next;
-                })
-              }
+              onClick={() => setChosen((prev) => new Map(prev).set(child.path, !open))}
               className={cn(
                 "flex w-full items-center gap-1.5 rounded-md pe-2 text-start text-[13px] text-foreground/80 transition-colors hover:bg-accent/70",
                 "h-6",
