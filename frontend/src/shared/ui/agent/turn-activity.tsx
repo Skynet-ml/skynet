@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { motion, useReducedMotion } from "framer-motion";
 
 import { CaretRight } from "@/shared/ui/icons";
 
@@ -75,6 +76,9 @@ interface TurnActivityProps {
 // way to a running tool or to the answer. Reasoning itself never shows as
 // rows. Once the answer starts, the history folds behind one "Worked for 39s"
 // row with a chevron and a full-width rule; cards and failed steps stay out.
+// Matches the fold's close time in reveal.tsx.
+const FOLD_CLOSE_S = 0.14;
+
 export function TurnActivity({
   thinking,
   steps,
@@ -167,6 +171,7 @@ export function TurnActivity({
       {node}
     </Reveal>
   );
+  const reduceMotion = Boolean(useReducedMotion());
   const renderFolded = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
       renderPiece(piece)
@@ -177,7 +182,15 @@ export function TurnActivity({
           piece.steps
             .filter(({ call }) => call.status === "error")
             .map(({ call, isRetry }) => (
-              <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
+              // It shows once the fold's exit ends, so the step never shows twice.
+              <motion.div
+                key={call.id}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                transition={{ duration: 0, delay: reduceMotion ? 0 : FOLD_CLOSE_S }}
+              >
+                {renderStep(call, { isRetry })}
+              </motion.div>
             ))}
       </React.Fragment>
     ) : null;
@@ -329,9 +342,9 @@ function Header({
   );
 }
 
-/** A duration as Codex writes it: "0s", "42s", "1m 5s", "1h 2m 3s", in the active locale. */
+/** A duration as Codex writes it: "42s", "1m 5s", "1h 2m 3s", in the active locale. Never under 1s. */
 export function formatSpan(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
+  const total = Math.max(1, Math.floor(ms / 1000));
   const unit = (value: number, u: "hour" | "minute" | "second") =>
     new Intl.NumberFormat(getActiveIntlLocale(), {
       style: "unit",
@@ -346,5 +359,5 @@ export function formatSpan(ms: number): string {
     mins ? unit(mins, "minute") : "",
     secs ? unit(secs, "second") : "",
   ].filter(Boolean);
-  return parts.length ? parts.join(" ") : unit(0, "second");
+  return parts.join(" ");
 }

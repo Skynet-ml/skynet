@@ -420,7 +420,7 @@ export class CamelHumpMatcher {
 const natural = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 const naturalCompare = (a: string, b: string) => natural.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
 
-export type Ranked<T> = { item: T; startMatch: boolean; fragments: Fragment[] };
+type Ranked<T> = { item: T; startMatch: boolean; fragments: Fragment[] };
 
 /**
  * Filter and order the items as PyCharm's lookup does: start matches first, then by matching

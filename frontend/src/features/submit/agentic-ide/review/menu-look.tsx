@@ -10,9 +10,9 @@ import {
   DropdownMenuSeparator,
 } from "@/shared/ui/primitives/dropdown-menu";
 
-export const MENU_PANEL = "gap-0 rounded-lg p-1";
+const MENU_PANEL = "gap-0 rounded-lg p-1";
 export const MENU_ROW = "h-7 min-h-0 gap-2 rounded px-2 py-0 text-[12.5px] lg:min-h-0";
-export const MENU_SEP = "-mx-1 my-0.5 bg-border/70";
+const MENU_SEP = "-mx-1 my-0.5 bg-border/70";
 
 export function PaneMenuContent({
   className,

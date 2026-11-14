@@ -213,6 +213,7 @@ export function CodeEditor({
   onChange,
   readOnly = false,
   review,
+  wrap = false,
   onNav,
   navRef,
 }: {
@@ -222,6 +223,8 @@ export function CodeEditor({
   onChange: (text: string) => void;
   readOnly?: boolean;
   review: boolean;
+  /** Wraps long lines at the pane's edge. */
+  wrap?: boolean;
   /** Reports the cursor's place among the changes while `review` is on. */
   onNav?: (nav: ChangeNav) => void;
   navRef?: React.Ref<ChangeNavHandle>;
@@ -266,8 +269,15 @@ export function CodeEditor({
   }, []);
   const lang = useLanguage(path);
   const extensions = React.useMemo(
-    () => [theme, highlight, ...lang, ...(readOnly ? [] : editing), ...(review ? [lastTurnDiff(base)] : [])],
-    [lang, review, base, readOnly],
+    () => [
+      theme,
+      highlight,
+      ...lang,
+      ...(readOnly ? [] : editing),
+      ...(review ? [lastTurnDiff(base)] : []),
+      ...(wrap ? [EditorView.lineWrapping] : []),
+    ],
+    [lang, review, base, readOnly, wrap],
   );
   return (
     <div className="ide-editor h-full min-w-0" dir="ltr">

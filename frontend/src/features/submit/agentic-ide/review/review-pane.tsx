@@ -88,7 +88,7 @@ const isNewTab = (tab: string) => tab.startsWith("new:");
  * A request from the chat to show a file's diff; a new object shows it again.
  * `paths`, when given, are the files of one turn, marked in the tree.
  */
-export type PaneRequest = { path: string; paths?: readonly string[] };
+type PaneRequest = { path: string; paths?: readonly string[] };
 
 /** The repository's page on its host, for the Open on host button. */
 export type RepoHostLink = { provider: "github" | "gitlab" | "bitbucket"; url: string };
@@ -445,6 +445,10 @@ export function ReviewPane({
   const [hideImports, setHideImports] = React.useState(false);
 
   const root = React.useRef<HTMLDivElement>(null);
+  const tabIds = React.useId();
+  const panelId = `${tabIds}-panel`;
+  const tabId = (tab: string) =>
+    `${tabIds}-tab-${tab === "changes" ? "changes" : tabs.indexOf(tab)}`;
   const scroller = React.useRef<HTMLDivElement>(null);
   const sections = React.useRef(new Map<string, HTMLElement>());
   const [width, setWidth] = React.useState(0);
@@ -465,9 +469,12 @@ export function ReviewPane({
     if (tabs.includes(path)) {
       if (!asPreview && preview === path) setPreview(null);
     } else {
-      // A new preview replaces the old one; a New tab page becomes the file it opens.
-      const replace =
-        asPreview && preview && tabs.includes(preview) ? preview : isNewTab(active) ? active : null;
+      // A New tab page becomes the file it opens; otherwise a new preview replaces the old one.
+      const replace = isNewTab(active)
+        ? active
+        : asPreview && preview && tabs.includes(preview)
+          ? preview
+          : null;
       setTabs(replace ? tabs.map((t) => (t === replace ? path : t)) : [...tabs, path]);
       if (asPreview) setPreview(path);
       else if (replace === preview) setPreview(null);
@@ -748,6 +755,7 @@ export function ReviewPane({
           onEdit(f.path, text);
         }}
         review={statusOf(f) !== "unchanged" && !hideChanges.has(f.path)}
+        wrap={wrap}
         onNav={setNav}
         navRef={navRef}
       />
@@ -763,48 +771,51 @@ export function ReviewPane({
       <CodeAppearanceStyle />
       {/* Tabs: Changes first, then each opened file. */}
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 bg-[var(--surface-2)] px-1.5">
-        <div
-          className="ide-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
-          role="tablist"
-        >
-          {changesOpen && (
-            <Tab
-              selected={active === "changes"}
-              onSelect={() => setActive("changes")}
-              onClose={closeChanges}
-              icon={<GitDiff className="size-3.5" />}
-              label={msg("submit.agentic_ide.changes_tab")}
-            />
-          )}
-          <AnimatePresence initial={false}>
-            {tabs.map((tab) => (
-              <motion.div
-                key={tab}
-                initial={{ opacity: 0, width: 0 }}
-                animate={{ opacity: 1, width: "auto" }}
-                exit={{ opacity: 0, width: 0 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-                className="shrink-0 overflow-hidden"
-              >
-                <Tab
-                  selected={active === tab}
-                  onSelect={() => setActive(tab)}
-                  onPin={() => preview === tab && setPreview(null)}
-                  onClose={() => closeTab(tab)}
-                  icon={
-                    isNewTab(tab) ? (
-                      <Plus className="size-3.5" />
-                    ) : (
-                      <FileGlyph path={tab} className="size-3.5" />
-                    )
-                  }
-                  label={isNewTab(tab) ? msg("submit.agentic_ide.review.new_tab") : baseName(tab)}
-                  hint={isNewTab(tab) ? undefined : tab}
-                  italic={preview === tab}
-                />
-              </motion.div>
-            ))}
-          </AnimatePresence>
+        <div className="ide-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          <div className="flex shrink-0 items-center gap-1" role="tablist">
+            {changesOpen && (
+              <Tab
+                id={tabId("changes")}
+                panelId={panelId}
+                selected={active === "changes"}
+                onSelect={() => setActive("changes")}
+                onClose={closeChanges}
+                icon={<GitDiff className="size-3.5" />}
+                label={msg("submit.agentic_ide.changes_tab")}
+              />
+            )}
+            <AnimatePresence initial={false}>
+              {tabs.map((tab) => (
+                <motion.div
+                  key={tab}
+                  initial={{ opacity: 0, width: 0 }}
+                  animate={{ opacity: 1, width: "auto" }}
+                  exit={{ opacity: 0, width: 0 }}
+                  transition={{ duration: 0.15, ease: "easeOut" }}
+                  className="shrink-0 overflow-hidden"
+                >
+                  <Tab
+                    id={tabId(tab)}
+                    panelId={panelId}
+                    selected={active === tab}
+                    onSelect={() => setActive(tab)}
+                    onPin={() => preview === tab && setPreview(null)}
+                    onClose={() => closeTab(tab)}
+                    icon={
+                      isNewTab(tab) ? (
+                        <Plus className="size-3.5" />
+                      ) : (
+                        <FileGlyph path={tab} className="size-3.5" />
+                      )
+                    }
+                    label={isNewTab(tab) ? msg("submit.agentic_ide.review.new_tab") : baseName(tab)}
+                    hint={isNewTab(tab) ? undefined : tab}
+                    italic={preview === tab}
+                  />
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
           {/* Codex puts "+" right after the last tab, not at the end of the bar. */}
           <ToolButton label={msg("submit.agentic_ide.review.new_tab")} onClick={newTab}>
             <Plus className="size-4" />
@@ -888,13 +899,6 @@ export function ReviewPane({
                     keepOpen
                     onSelect={() => setWrap((w) => !w)}
                   />
-                  {statusOf(tabFile) !== "unchanged" && (
-                    <MenuRow
-                      icon={<ModeIcon />}
-                      label={modeLabel(nextMode)}
-                      onSelect={() => setDiffMode(nextMode)}
-                    />
-                  )}
                   {isMarkdown(tabFile.path) && (
                     <MenuRow
                       icon={<Eye />}
@@ -1020,7 +1024,13 @@ export function ReviewPane({
               onStep={(i) => showDiff(changed[i]!.path)}
             />
           )}
-          <div ref={scroller} className="ide-scroll relative min-h-0 min-w-0 flex-1 overflow-auto">
+          <div
+            ref={scroller}
+            id={panelId}
+            role="tabpanel"
+            aria-labelledby={tabId(active)}
+            className="ide-scroll relative min-h-0 min-w-0 flex-1 overflow-auto"
+          >
             {newPage ? (
               <NewTabPage showList={showList} onShowList={() => setShowList(true)} />
             ) : tabFile ? (
@@ -1054,23 +1064,31 @@ export function ReviewPane({
                         flash?.path === f.path && "ide-touched",
                       )}
                     >
-                      <FileGlyph path={f.path} />
-                      {/* Full path when the header has room, the file name alone when narrow, as in Codex. */}
-                      <span
-                        className="min-w-0 truncate text-[13px]"
-                        dir="ltr"
+                      {/* The header folds on any click; this button gives the keyboard the same fold. */}
+                      <button
+                        type="button"
+                        aria-expanded={!shut}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggle(f.path);
+                        }}
+                        className="flex min-w-0 items-center gap-2 rounded-sm focus-visible:outline-2 focus-visible:outline-ring"
                       >
-                        {dirName(f.path) && (
-                          <span className="hidden text-muted-foreground @xs/diff-header:inline">
-                            {dirName(f.path)}/
-                          </span>
-                        )}
-                        <span className="font-medium text-foreground">{baseName(f.path)}</span>
-                      </span>
-                      <Caret
-                        open={!shut}
-                        className="text-muted-foreground opacity-0 transition-[opacity,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/diff-header:opacity-100"
-                      />
+                        <FileGlyph path={f.path} />
+                        {/* Full path when the header has room, the file name alone when narrow, as in Codex. */}
+                        <span className="min-w-0 truncate text-[13px]" dir="ltr">
+                          {dirName(f.path) && (
+                            <span className="hidden text-muted-foreground @xs/diff-header:inline">
+                              {dirName(f.path)}/
+                            </span>
+                          )}
+                          <span className="font-medium text-foreground">{baseName(f.path)}</span>
+                        </span>
+                        <Caret
+                          open={!shut}
+                          className="text-muted-foreground opacity-0 transition-[opacity,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-focus-within/diff-header:opacity-100 group-hover/diff-header:opacity-100"
+                        />
+                      </button>
                       <FileCounts file={f} />
                       <span
                         className="ms-auto flex shrink-0 items-center gap-0.5"
@@ -1203,6 +1221,8 @@ export function ReviewPane({
 }
 
 function Tab({
+  id,
+  panelId,
   selected,
   onSelect,
   onPin,
@@ -1212,6 +1232,8 @@ function Tab({
   hint,
   italic = false,
 }: {
+  id: string;
+  panelId: string;
   selected: boolean;
   onSelect: () => void;
   onPin?: () => void;
@@ -1221,20 +1243,12 @@ function Tab({
   hint?: string;
   italic?: boolean;
 }) {
+  // The close button sits beside the tab, not inside it: a tab holds no other control.
   return (
     <div
-      role="tab"
-      aria-selected={selected}
-      tabIndex={0}
       title={hint}
       onClick={onSelect}
       onDoubleClick={onPin}
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        // Space would scroll the page.
-        e.preventDefault();
-        onSelect();
-      }}
       onAuxClick={(e) => e.button === 1 && onClose?.()}
       className={cn(
         "group/tab flex h-7 shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-md ps-2.5 text-[12.5px] transition-colors duration-150",
@@ -1244,10 +1258,25 @@ function Tab({
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
       )}
     >
-      {icon}
-      <span className={cn("max-w-40 truncate", italic && "italic")} dir="ltr">
-        {label}
-      </span>
+      <div
+        id={id}
+        role="tab"
+        aria-selected={selected}
+        aria-controls={panelId}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          // Space would scroll the page.
+          e.preventDefault();
+          onSelect();
+        }}
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-ring"
+      >
+        {icon}
+        <span className={cn("max-w-40 truncate", italic && "italic")} dir="ltr">
+          {label}
+        </span>
+      </div>
       {onClose && (
         <button
           type="button"
@@ -1256,8 +1285,6 @@ function Tab({
             e.stopPropagation();
             onClose();
           }}
-          // Enter or Space here closes the tab; it must not also select it.
-          onKeyDown={(e) => e.stopPropagation()}
           className={cn(
             "ms-auto flex size-5 items-center justify-center rounded text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/tab:opacity-100",
             selected ? "opacity-100" : "opacity-0",

@@ -62,6 +62,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
 // jsdom does not lay out or scroll; CodeMirror measures text through ranges.
 dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 dom.window.HTMLElement.prototype.scrollTo = () => {};
+dom.window.scrollTo = () => {};
 const noRects = () => Object.assign([], { item: () => null });
 const emptyRect = () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 });
 dom.window.Range.prototype.getClientRects = noRects as never;
@@ -257,7 +258,12 @@ void test("a focus request opens that file", async () => {
   const tab = [...pane.container.querySelectorAll('[role="tab"]')].find(
     (t) => t.getAttribute("aria-selected") === "true",
   )!;
-  assert.equal(tab.getAttribute("title"), "README.md");
+  assert.equal(tab.parentElement?.getAttribute("title"), "README.md");
+  // The tab names the panel, and the panel names the selected tab.
+  const panel = pane.container.querySelector('[role="tabpanel"]')!;
+  assert.equal(tab.getAttribute("aria-controls"), panel.id);
+  assert.equal(panel.getAttribute("aria-labelledby"), tab.id);
+  assert.equal(tab.querySelector("button"), null);
   assert.deepEqual(opened, ["README.md"]);
   await pane.unmount();
 });
@@ -265,8 +271,16 @@ void test("a focus request opens that file", async () => {
 void test("a file's status reads the draft against the repository", () => {
   assert.equal(statusOf({ path: "a", before: "", after: "x\n" }), "added");
   assert.equal(statusOf({ path: "a", before: "x\n", after: "y\n" }), "modified");
-  assert.equal(statusOf({ path: "a", before: "x", after: "x\n" }), "unchanged", "a final newline is no change");
-  assert.equal(statusOf({ path: "a", before: "x\n", after: "" }), "modified", "an emptied file is not deleted");
+  assert.equal(
+    statusOf({ path: "a", before: "x", after: "x\n" }),
+    "unchanged",
+    "a final newline is no change",
+  );
+  assert.equal(
+    statusOf({ path: "a", before: "x\n", after: "" }),
+    "modified",
+    "an emptied file is not deleted",
+  );
   assert.equal(statusOf({ path: "a", before: "", after: "x\n", loading: true }), "modified");
 });
 
@@ -288,7 +302,8 @@ void test("a large diff shows one file at a time", async () => {
   }));
   const pane = await mount(<ReviewPane {...props({ files: many })} />);
   assert.ok(pane.container.textContent?.includes("Large diff. Showing one file at a time."));
-  const shown = () => [...pane.container.querySelectorAll("header[title]")].map((h) => h.getAttribute("title"));
+  const shown = () =>
+    [...pane.container.querySelectorAll("header[title]")].map((h) => h.getAttribute("title"));
   assert.deepEqual(shown(), ["f000.py"]);
   await click(byLabel(pane.container, "Next file")[0]!);
   assert.deepEqual(shown(), ["f001.py"]);
@@ -310,4 +325,96 @@ void test("Next and Previous change step through a file's changes and wrap", asy
   await step("Previous change");
   assert.equal(line(), 5);
   await pane.unmount();
+});
+
+const selectedTab = (root: ParentNode) =>
+  [...root.querySelectorAll('[role="tab"]')].find(
+    (t) => t.getAttribute("aria-selected") === "true",
+  );
+// A tree row carries the file's name; only the file list's rows carry its path as a title.
+const treeRow = (root: ParentNode, name: string) =>
+  [...root.querySelectorAll<HTMLElement>("aside button[style]")].find(
+    (b) => b.textContent?.trim() === name,
+  );
+const flush = () =>
+  React.act(async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  });
+
+void test("a tree row opens its file in place of a New tab page", async () => {
+  const pane = await mount(<ReviewPane {...props()} />);
+  await click(byLabel(pane.container, "New tab").find((el) => el.tagName === "BUTTON")!);
+  assert.equal(selectedTab(pane.container)?.textContent, "New tab");
+  const tabCount = pane.container.querySelectorAll('[role="tab"]').length;
+
+  await click(treeRow(pane.container, "README.md")!);
+  // The replaced tab fades out first.
+  await React.act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+  assert.equal(selectedTab(pane.container)?.parentElement?.getAttribute("title"), "README.md");
+  assert.equal(pane.container.querySelectorAll('[role="tab"]').length, tabCount);
+  assert.equal(
+    [...pane.container.querySelectorAll('[role="tab"]')].some((t) => t.textContent === "New tab"),
+    false,
+  );
+  await pane.unmount();
+});
+
+void test("a diff header folds from its button, as the keyboard reaches it", async () => {
+  const pane = await mount(<ReviewPane {...props()} />);
+  const fold = () => header(pane.container, "src/a.py")!.querySelector("button[aria-expanded]")!;
+  assert.equal(fold().getAttribute("aria-expanded"), "true");
+  await click(fold());
+  assert.equal(fold().getAttribute("aria-expanded"), "false");
+  await click(fold());
+  assert.equal(fold().getAttribute("aria-expanded"), "true");
+  await pane.unmount();
+});
+
+void test("word wrap applies to the editor of a file tab", async () => {
+  const pane = await mount(<ReviewPane {...props()} />);
+  await openInTab(pane.container, "src/a.py");
+  assert.ok(pane.container.querySelector(".cm-content.cm-lineWrapping"), "lines wrap by default");
+  await pane.unmount();
+});
+
+void test("a failed read shows a notice, and opening the file again reads it again", async () => {
+  let attempt = 0;
+  let finish: (value: { text: string }) => void = noop;
+  const repo = {
+    folder: "repo",
+    tree: Promise.resolve({ children: new Map(), files: new Set(["src/x.py"]) }),
+    read: (path: string) => {
+      if (path !== "src/x.py") return Promise.resolve({ issue: "missing" as const });
+      attempt += 1;
+      if (attempt === 1) return Promise.reject(new Error("network"));
+      return new Promise<{ text: string }>((resolve) => (finish = resolve));
+    },
+  };
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={repo}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  await flush();
+  const row = () => treeRow(ide.container, "x.py")!;
+  await click(treeRow(ide.container, "src")!);
+  await click(row());
+  await flush();
+  assert.equal(attempt, 1);
+  assert.ok(ide.container.textContent?.includes("Skynet could not read this file"));
+
+  await click(row());
+  await flush();
+  assert.equal(attempt, 2);
+  assert.ok(ide.container.textContent?.includes("Loading the file"), "the retry shows as loading");
+  assert.equal(ide.container.textContent?.includes("Skynet could not read this file"), false);
+
+  await React.act(async () => finish({ text: "y = 2\n" }));
+  await flush();
+  assert.equal(editorView(ide.container).state.doc.toString(), "y = 2\n");
+  await ide.unmount();
 });

@@ -19,7 +19,7 @@ import {
 } from "./pycharm-match.ts";
 
 /** MatchedFragment: a name range and the number of typos inside it. */
-export type MatchedFragment = [from: number, to: number, errorCount: number];
+type MatchedFragment = [from: number, to: number, errorCount: number];
 
 const INT_MIN = -2147483648;
 const INT_MAX = 2147483647;

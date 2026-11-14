@@ -36,7 +36,7 @@ export interface DiffLine {
   newNo?: number;
 }
 
-export type DiffBlock = { kind: "lines"; lines: DiffLine[] } | { kind: "fold"; lines: DiffLine[] };
+type DiffBlock = { kind: "lines"; lines: DiffLine[] } | { kind: "fold"; lines: DiffLine[] };
 
 function split(text: string): string[] {
   if (text === "") return [];
@@ -135,7 +135,7 @@ export function stats(file: RepoFile): { added: number; removed: number } {
   return { added, removed };
 }
 
-export interface Token {
+interface Token {
   text: string;
   cls: string;
 }

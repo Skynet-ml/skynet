@@ -80,7 +80,14 @@ function useRepoReads(
     }
   }, [repo, key, attempt]);
 
-  const retry = React.useCallback(() => setAttempt((n) => n + 1), []);
+  const retry = React.useCallback(() => {
+    // The failed paths lose their null entry, so they show as loading again.
+    setRead((prev) => ({
+      repo: prev.repo,
+      results: new Map([...prev.results].filter(([, result]) => result !== null)),
+    }));
+    setAttempt((n) => n + 1);
+  }, []);
   return { reads: read.repo === repo ? read.results : NO_READS, retry };
 }
 
