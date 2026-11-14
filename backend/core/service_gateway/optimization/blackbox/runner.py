@@ -110,8 +110,9 @@ LLM_HELPER_NAME = "llm"
 # The gateway key rides in the environment so it never touches the box filesystem.
 ENV_API_KEY = "APP_API_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
-# The image's box PATH, with /app/.venv/bin first. sudo gives a root supervisor
-# a secure PATH without it, so the entry gets this one after the user switch.
+# The image's box PATH, with /app/.venv/bin first after the sudo guard folder.
+# sudo gives a root supervisor a secure PATH without the venv, so the entry
+# gets this one after the user switch.
 ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 # This file runs alone in the box, without ``core.config``; boxes started by an
 # older control plane still carry only the pre-rename spellings.

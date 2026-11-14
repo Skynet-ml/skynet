@@ -371,8 +371,9 @@ root. If the supervisor cannot set the flag, it does not start the entry, and
 the case fails. The box image ships `sudo` only for the parent's own root
 commands. The provider starts every other command under
 `setpriv --no-new-privs`, so the same rule applies to them.
-A root command never finds a program in a folder the box user can write,
-such as `/app/.venv/bin`: the image's `sudo` rule and the provider both set
+A root command finds programs only in root-owned folders, and no program
+file in them is writable by the box user. The box user can write
+`/app/.venv/bin`, so the image's `sudo` rule and the provider both set
 root's `PATH` to the system folders only. After the user switch, the
 supervisor gives the entry the image's box `PATH` (`APP_ENTRY_PATH`), so the
 entry still finds the `[setup]` packages.
@@ -401,6 +402,13 @@ Residual risk:
   the flag. So the block also depends on the box kernel refusing `ptrace`
   between unrelated processes of one user (Yama `ptrace_scope` 1 or higher).
   This is not verified yet.
+- Vercel's in-box agent starts `sudo` itself for a `sudo: true` command. If
+  it finds `sudo` by a `PATH` lookup, a `sudo` that the box user plants in
+  `/app/.venv/bin` would get root. The image puts a root-only guard folder,
+  `/usr/local/libexec/skynet-path-guard`, first on its `PATH` and in its
+  login shell `PATH`. That folder holds only a link to `/usr/bin/sudo`.
+  How the agent finds `sudo` is not verified on a real box. A real-box check
+  must confirm it before the sandbox image is pinned.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).

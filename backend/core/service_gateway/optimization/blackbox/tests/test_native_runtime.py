@@ -1178,13 +1178,30 @@ def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() 
     assert re.search(r"apt-get install[^\n]*\bsudo\b", step)
     assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in step
     assert f"'Defaults secure_path=\"{vercel.ROOT_PATH}\"'" in step
-    path = dockerfile.index('\nENV PATH="/app/.venv/bin:$PATH"\n')
+    guard = "/usr/local/libexec/skynet-path-guard"
+    assert f"install -d -o root -g root -m 0755 {guard}" in step
+    assert f"ln -s /usr/bin/sudo {guard}/sudo" in step
+    path = dockerfile.index(f'\nENV PATH="{guard}:/app/.venv/bin:$PATH"\n')
+    assert dockerfile.count("\nENV PATH=") == 1
     assert dockerfile.index('\nENV APP_ENTRY_PATH="$PATH"\n') > path
     assert f"ENV {runner.ENV_ENTRY_PATH}=" in dockerfile
+    assert f"'export PATH=\"{guard}:/app/.venv/bin:$PATH\"' > /etc/profile.d/skynet-runtime.sh" in dockerfile
     assert "chmod 0440 /etc/sudoers.d/sandbox" in step
     assert "visudo -cf /etc/sudoers.d/sandbox" in step
     assert "command -v setpriv" in step
     assert len(re.findall(r"apt-get install[^\n]*\bsudo\b", dockerfile)) == 1
+
+
+def test_dockerfile_closes_root_path_programs_to_the_box_user() -> None:
+    """Keep every program file the installs put in ``/usr/local/bin`` root-owned and mode 0755."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    assert (
+        "pip install --no-cache-dir uv \\\n        && chmod 0755 /usr/local/bin/uv /usr/local/bin/uvx \\" in dockerfile
+    )
+    assert "chmod 0755 /usr/local/bin/deno" in dockerfile
+    assert "chmod +x /usr/local/bin/deno" not in dockerfile
+    assert "tar --no-same-owner -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server" in dockerfile
+    assert "chmod 0755 /usr/local/bin/github-mcp-server" in dockerfile
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:

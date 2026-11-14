@@ -146,10 +146,10 @@ SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # setuid bit, so Codex and the [run] entry never reach root (SKY-389, SKY-398).
 # The absolute path keeps a planted `setpriv` earlier on PATH from skipping it.
 NO_NEW_PRIVS = ("/usr/bin/setpriv", "--no-new-privs")
-# A root command must never find a program in a folder the box user can write,
-# such as /app/.venv/bin. The box's sudo may pass the box PATH through, so
-# every root script sets this PATH first. Keep it equal to the image's
-# sudoers secure_path.
+# A root command must find programs only in root-owned folders, and no program
+# file in them may be writable by the box user. /app/.venv/bin is writable by
+# the box user. The box's sudo may pass the box PATH through, so every root
+# script sets this PATH first. Keep it equal to the image's sudoers secure_path.
 ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 OUTPUT_POLL = 0.5
 OUTPUT_POLL_WARN_AFTER = 3
