@@ -347,6 +347,51 @@ def fetch_snapshot(
     return RepoSnapshot(commit=commit, archive=archive, readonly_paths=readonly, size_bytes=size)
 
 
+def commit_diff(
+    repository: str,
+    base: str,
+    commit: str,
+    token: str | None,
+    workdir: Path,
+    *,
+    remote: str | None = None,
+    provider: str = "github",
+) -> str:
+    """Fetch ``base`` and ``commit`` and return the binary diff between them.
+
+    Args:
+        repository: ``owner/name``.
+        base: The pinned commit the diff starts from.
+        commit: A commit that descends from ``base``.
+        token: Host token; ``None`` for a public or local remote.
+        workdir: Empty parent-owned folder the fetch goes in.
+        remote: Clone URL override, used by tests with a local repository.
+        provider: Repository host, see :data:`GIT_HOSTS`.
+
+    Returns:
+        The output of ``git diff --binary base commit``.
+
+    Raises:
+        RepoFetchError: When a commit cannot be fetched, or ``commit`` does not
+            descend from ``base``.
+    """
+    origin, user = git_host(provider)
+    environment = git_auth_env(token, origin, user)
+    checkout = workdir / "diff"
+    checkout.mkdir(parents=True)
+    try:
+        _git(["init", "--quiet"], checkout, environment)
+        _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], checkout, environment)
+        _git(["fetch", "--quiet", "origin", base, commit], checkout, environment)
+        try:
+            _git(["merge-base", "--is-ancestor", base, commit], checkout, environment)
+        except RepoFetchError:
+            raise RepoFetchError(f"Commit {commit} does not descend from the pinned base {base}.") from None
+        return _git(["diff", "--binary", "--no-renames", base, commit], checkout, environment)
+    finally:
+        shutil.rmtree(checkout, ignore_errors=True)
+
+
 def patched_repo_zip(
     repository: str,
     commit: str,

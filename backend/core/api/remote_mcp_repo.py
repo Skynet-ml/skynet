@@ -8,7 +8,8 @@ checks the whole draft and prices its smallest spending limit.
 ``repo_draft_preflight`` runs the paid setup check of ``/wizard/preflight``
 under the run's own budget, so the submit reuses it. ``repo_draft_submit``
 starts the run. Both need ``confirm=true`` and a ``max_cost_cents`` the user
-agreed to (SKY-600).
+agreed to (SKY-600). ``repo_judge_score`` scores the client's own versions
+against the draft's contract under one budget (SKY-696).
 
 The submission goes through the same path as ``POST /blackbox/run``
 (:func:`core.api.routers.submissions.submit_repo_payload`), so the run gets
@@ -61,6 +62,17 @@ from .errors import DomainError
 from .mcp_oauth import SCOPE_READ, SCOPE_WRITE
 from .preflight_execution import WizardPreflightRequest
 from .remote_mcp import _domain_tool_error, _request_locale, _user
+from .repo_judge import (
+    ENDED_DETAIL,
+    MAX_PATCH_CHARS,
+    JudgeError,
+    JudgePendingError,
+    is_opening,
+    judge_call,
+    judge_key,
+    open_session,
+    open_session_ids,
+)
 from .routers.connectors import connector_secret
 from .routers.execution_budgets import budget_http_error
 from .routers.hardening import _load as _load_hardening_job
@@ -945,6 +957,106 @@ def submit_draft(
     return {**result.model_dump(mode="json"), "next_tool": "get_run"}
 
 
+def judge_draft(
+    spec: dict[str, Any],
+    draft_id: str,
+    max_cost_cents: int,
+    candidate_commit: str | None,
+    candidate_patch: str | None,
+    user: AuthenticatedUser,
+    *,
+    job_store: Any,
+    http_client: Callable[[], httpx.Client],
+) -> dict[str, Any]:
+    """Score one candidate against the draft's contract, in the judge session of these arguments.
+
+    The first call opens the session: one budget of ``max_cost_cents`` and
+    one run row. A later call with the same draft and limit scores in that
+    session, and a retry with the same candidate replays the stored score.
+
+    Args:
+        spec: The whole draft.
+        draft_id: The draft.
+        max_cost_cents: Spending limit of the whole session.
+        candidate_commit: A commit that descends from the pinned base, or ``None``.
+        candidate_patch: A ``git diff`` against the pinned base, or ``None``.
+        user: Account that pays.
+        job_store: Store that holds the session, its budget and its evidence.
+        http_client: Factory for the model catalog client.
+
+    Returns:
+        The scored answer, the ended answer, or ``status: in_progress``.
+
+    Raises:
+        ToolError: When the draft is not ready, the limit is too low, another
+            session of the draft is open, or the session ended.
+        JudgeError: When the candidate is refused or cannot be scored.
+        JudgePendingError: While another request holds the session.
+    """
+    key = judge_key(draft_id, json_fingerprint({"spec": spec, "max_cost_cents": max_cost_cents}))
+    session_id = job_store.find_job_by_idempotency_key(user.username, key)
+    job = job_store.get_job(session_id) if session_id else None
+    if job is not None and job.get("status") not in ("pending", "running"):
+        raise ToolError(json.dumps({"code": "judge.session_ended", "detail": ENDED_DETAIL, "session_id": session_id}))
+    if job is None and open_session_ids(job_store.engine, user.username, draft_id):
+        raise ToolError(
+            json.dumps(
+                {
+                    "code": "judge.limit_changed",
+                    "detail": "This draft has an open judge session with another draft or max_cost_cents. "
+                    "Send its arguments, or call stop_run with its session_id first.",
+                    "session_ids": open_session_ids(job_store.engine, user.username, draft_id),
+                }
+            )
+        )
+    provider = repo_hosts.provider_of(spec.get("repository") or {})
+    if provider == github.PROVIDER:
+        token = _github_token(job_store, user.username)
+    else:
+        token = _github_token(job_store, user.username, provider)
+    if job is None or is_opening(job):
+        request, key, budget_key = _ready_request(
+            spec, draft_id, max_cost_cents, None, key, user, job_store=job_store, http_client=http_client
+        )
+        floor = repo_floor_cents(spec, http_client)[0]
+        # One scored call and the end's final score each need the floor.
+        if max_cost_cents < 2 * floor:
+            raise ToolError(
+                json.dumps(
+                    {
+                        "code": "budget.below_minimum",
+                        "detail": f"A judge session needs max_cost_cents of at least {2 * floor} cents: "
+                        "one scored call and the final score.",
+                        "min_max_cost_cents": 2 * floor,
+                    }
+                )
+            )
+        session_id = open_session(
+            request,
+            key,
+            budget_key,
+            user,
+            job_store=job_store,
+            token=token,
+            floor_cents=floor,
+            draft_id=draft_id,
+            resume_id=session_id,
+        )
+    try:
+        return judge_call(
+            job_store,
+            session_id,
+            username=user.username,
+            candidate_commit=candidate_commit,
+            candidate_patch=candidate_patch,
+            token=token,
+        )
+    except JudgeError as error:
+        # A refused first call still opened the session; the client needs its id for stop_run.
+        error.session_id = session_id
+        raise
+
+
 def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, job_store: Any) -> None:
     """Add the repository draft tools to the remote MCP server.
 
@@ -987,6 +1099,18 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         user = _user(SCOPE_WRITE)
         with Session(job_store.engine) as session:
             row = _load_draft(session, draft_id, user.username, lock=True)
+            # A judge session pins the draft it scores against; a change would split its scores.
+            if open_session_ids(job_store.engine, user.username, draft_id):
+                raise ToolError(
+                    json.dumps(
+                        {
+                            "code": "judge.session_open",
+                            "detail": "A judge session of this draft is open. Call stop_run with its session_id "
+                            "before you change the draft.",
+                            "session_ids": open_session_ids(job_store.engine, user.username, draft_id),
+                        }
+                    )
+                )
             spec = dict(row.spec or {})
             if part is None:
                 spec.pop(step, None)
@@ -1400,3 +1524,84 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 hardening_job_id=hardening_job_id,
             )
         )
+
+    @mcp.tool(
+        name="repo_judge_score",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    )
+    def repo_judge_score(
+        draft_id: Annotated[str, Field(max_length=64)],
+        max_cost_cents: Annotated[
+            int, Field(ge=1, le=1_000_000, description="Spending limit of the whole judge session, in cents.")
+        ],
+        confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
+        candidate_commit: Annotated[
+            str | None,
+            Field(
+                pattern=r"^[0-9a-f]{7,40}$",
+                description="A pushed commit that descends from the draft's base commit.",
+            ),
+        ] = None,
+        candidate_patch: Annotated[
+            str | None,
+            Field(max_length=MAX_PATCH_CHARS, description="A git diff against the draft's base commit."),
+        ] = None,
+    ) -> dict[str, Any]:
+        """Score your own version of the repository against the draft's metric. It spends from max_cost_cents.
+
+        Send exactly one of candidate_commit and candidate_patch. The first
+        call opens a judge session with one budget of max_cost_cents; later
+        calls with the same draft_id and max_cost_cents score in it. Skynet
+        reads optimize.toml at the base commit and refuses a version that
+        changes it or a protected path. The answer has the score, the named
+        scores and the feedback on the search cases only. A retry with the
+        same arguments does not pay twice. Only the budget or stop_run with
+        session_id ends the session; the end scores the best version once on
+        the held-out cases. Call repo_draft_review first and show the user its
+        price. Send confirm=true only after the user agreed.
+        """
+        if not confirm:
+            raise ToolError(
+                "Show the user max_cost_cents and the balance from repo_draft_review. Send confirm=true after they agree."
+            )
+        if (candidate_commit is None) == (candidate_patch is None):
+            raise ToolError("Send exactly one of candidate_commit and candidate_patch.")
+        user = _user(SCOPE_WRITE)
+        with Session(job_store.engine) as session:
+            spec = dict(_load_draft(session, draft_id, user.username).spec or {})
+
+        def work() -> dict[str, Any]:
+            """Score the candidate and turn the judge's refusals into tool answers.
+
+            Returns:
+                The judge answer, or ``status: in_progress``.
+
+            Raises:
+                ToolError: When the judge refuses the call.
+            """
+            try:
+                return judge_draft(
+                    spec,
+                    draft_id,
+                    max_cost_cents,
+                    candidate_commit,
+                    candidate_patch,
+                    user,
+                    job_store=job_store,
+                    http_client=http_client,
+                )
+            except JudgeError as error:
+                answer = {"code": error.code, "detail": error.detail, "session_id": error.session_id}
+                raise ToolError(json.dumps(answer)) from error
+            except (JudgePendingError, DomainError) as error:
+                if isinstance(error, DomainError) and error.code != "budget.pending":
+                    raise
+                return {
+                    "status": "in_progress",
+                    "retry_after_seconds": _PENDING_RETRY_SECONDS,
+                    "detail": f"{error} Call repo_judge_score again with the same arguments."
+                    if isinstance(error, JudgePendingError)
+                    else "Other usage on this account must settle first. Call repo_judge_score again with the same arguments.",
+                }
+
+        return guarded(work)

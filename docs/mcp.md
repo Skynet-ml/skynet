@@ -120,6 +120,46 @@ After the submit, use `get_run`, `get_run_progress`, `list_runs` and
 after `since`, `next_since` for the next call, the best score and the
 candidate count.
 
+## Score your own versions with the judge
+
+`repo_judge_score` scores a version that the agent wrote itself. It uses
+the draft's repository, metric and contract, and Skynet runs no engine.
+Finish the draft and call `repo_draft_review` first.
+
+- Send `draft_id`, `max_cost_cents` and `confirm=true`, after the user
+  agrees to `max_cost_cents`.
+- Send exactly one candidate: `candidate_commit`, a pushed commit that
+  descends from the base commit, or `candidate_patch`, a `git diff`
+  against the base commit.
+- `max_cost_cents` is the limit of the whole session. It must be at least
+  two times the draft's minimum: one scored call and the final score.
+
+The first call opens a judge session. It creates one budget and one run,
+and the answer gives the `session_id`. Skynet pins the base commit on that
+call. Later calls with the same `draft_id` and `max_cost_cents` score in the
+same session. While a session is open, the draft steps refuse a change
+(`judge.session_open`), and a call with another limit is refused
+(`judge.limit_changed`).
+
+Each call reads `optimize.toml` at the base commit. Skynet refuses a
+candidate that changes `optimize.toml` or a protected path
+(`judge.candidate_refused`). The candidate runs in its own sandbox, and the
+metric runs in a separate sandbox. The answer gives the mean `score`, the
+`named_scores`, the `feedback` and the result of each search case. The
+answer never holds the metric code or a held-out case. A retry with the same
+candidate returns the stored score and does not pay again. An answer with
+`status: in_progress` means: call again with the same arguments.
+
+Only the budget or `stop_run` with the `session_id` ends a session. When
+the budget cannot pay for one more call and the final score, the next call
+ends the session. The end scores the best version once on the held-out
+cases. With fewer than five cases, nothing is held out, and the end scores
+the best version on every case. With no cases, it scores the version once.
+`get_run` gives the result: `details.judge` holds the call count, the
+`best_patch_sha256`, the search score and the held-out score, and
+`details.record` holds the run record with the final `score`. Skynet opens
+no pull request for the best version.
+
 ## Platform tools
 
 Each REST route that carries the `agent` OpenAPI tag is also a tool, with

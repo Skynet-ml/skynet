@@ -33,6 +33,7 @@ from ....models import (
 )
 from ....worker.budget_probe import STOP_REASON_BUDGET_PROJECTED
 from ....worker.checkpoint_compat import CheckpointCompatibilityError
+from ... import repo_judge
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import status_to_job_status
 from ...errors import DomainError
@@ -158,6 +159,9 @@ def cancel_optimization(
             params={"status": status.value},
         )
 
+    if "judge" in (job_data.get("payload") or {}):
+        # A judge session (SKY-696) has no worker: its end scores the best version once.
+        return repo_judge.end_session(job_store, job_data, ended_by="stop_run")
     _stop_budget_admission(job_store, job_data, "user_cancelled")
     if worker:
         worker.cancel_job(optimization_id)

@@ -72,6 +72,24 @@ def preflight_lifetime_seconds(payload: dict[str, Any]) -> float:
     return seconds
 
 
+def judge_lifetime_seconds(payload: dict[str, Any], case_count: int) -> float:
+    """Return the box lifetime one judge call (SKY-696) can need.
+
+    A judge call opens no guest. It runs the setup box, then one run box and
+    one metric box for each case, so the lifetime grows with the cases.
+
+    Args:
+        payload: The judge session's run payload.
+        case_count: How many cases the call scores; 0 scores the version once.
+
+    Returns:
+        The lifetime, in seconds, before the configured ceiling applies.
+    """
+    scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
+    boxes = max(case_count, 1) + 1
+    return _PREFLIGHT_OVERHEAD_SECONDS + boxes * (scorer.timeout_seconds + _SCORER_BOX_OVERHEAD_SECONDS)
+
+
 def _check(key: str, status: str, message: str | None = None, field: str | None = None) -> dict[str, Any]:
     """Build one scoped readiness result."""
     return {

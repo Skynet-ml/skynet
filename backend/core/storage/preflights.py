@@ -183,6 +183,7 @@ def preflight_document(row: WizardPreflightModel) -> dict[str, Any]:
         **({"scorer_result": row.result["scorer_result"]} if "scorer_result" in row.result else {}),
         **({"workflow_result": row.result["workflow_result"]} if "workflow_result" in row.result else {}),
         **({"interaction_result": row.result["interaction_result"]} if "interaction_result" in row.result else {}),
+        **({"judge_result": row.result["judge_result"]} if "judge_result" in row.result else {}),
         **({"terminal": row.result["terminal"]} if isinstance(row.result.get("terminal"), dict) else {}),
         **({"environment": row.result["environment"]} if isinstance(row.result.get("environment"), dict) else {}),
     }
@@ -290,6 +291,7 @@ class PreflightStore:
         payload: dict[str, Any],
         reuse_failed: bool = False,
         exclusive_scope: bool = False,
+        session_id: str | None = None,
     ) -> PreflightClaim:
         """Reuse matching success or atomically claim a new verification attempt.
 
@@ -302,6 +304,7 @@ class PreflightStore:
             payload: Canonical verification inputs.
             reuse_failed: Preserve an explicit debug request's failed result on transport replay.
             exclusive_scope: Bind a debug request's idempotency scope to exactly one input fingerprint.
+            session_id: Judge session (SKY-696) whose attached budget pays for the attempt.
 
         Returns:
             Public evidence, private owner token when claimed, and authoritative generation.
@@ -310,7 +313,9 @@ class PreflightStore:
             self.budgets.get(budget_id, username, session=session)
             budget = session.get(ExecutionBudgetModel, budget_id)
             assert budget is not None
-            if budget.revision != revision or budget.job_id is not None or budget.state != "open":
+            # A judge session pays each call from the budget attached to its own run row.
+            judged = session_id is not None and budget.job_id == session_id and budget.state == "attached"
+            if budget.revision != revision or not (judged or (budget.job_id is None and budget.state == "open")):
                 raise BudgetConflictError("The setup budget changed or is already attached to a run.")
             now = datetime.now(UTC)
             running = list(
@@ -402,7 +407,9 @@ class PreflightStore:
                 if self._after_settlement(row):
                     session.flush()
                     return PreflightClaim(preflight_document(row), None, budget.generation)
-                if reuse_failed and ("scorer_result" in row.result or "workflow_result" in row.result):
+                if reuse_failed and any(
+                    key in row.result for key in ("scorer_result", "workflow_result", "judge_error")
+                ):
                     row.status = "failed"
                     session.flush()
                     return PreflightClaim(preflight_document(row), None, budget.generation)

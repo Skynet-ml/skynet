@@ -380,3 +380,50 @@ def test_evaluation_pass_is_not_reused_after_the_limit_changes(store: PreflightS
 
     lowered = store.budgets.update_total(budget_id, "alice", 10, expected_revision=1)
     assert claim(lowered.revision).token is not None
+
+
+def test_a_judge_session_claims_on_its_attached_budget_and_replays_its_result(store: PreflightStore) -> None:
+    """A judge call claims under its session's attached budget, and a retry gets the stored score (SKY-696).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    attached = store.budgets.attach_to_job(budget_id, "alice", "session", expected_revision=1)
+
+    def claim(session_id: str | None) -> PreflightClaim:
+        """Claim one judge call under the attached budget.
+
+        Args:
+            session_id: Judge session the caller names.
+
+        Returns:
+            Current evidence and token, if admitted.
+        """
+        return store.claim(
+            username="alice",
+            budget_id=budget_id,
+            revision=attached.revision,
+            workflow="anything",
+            scope="judge",
+            payload={"draft": "d", "patch_sha256": "p", "seed": 1},
+            session_id=session_id,
+        )
+
+    with pytest.raises(BudgetConflictError):
+        claim(None)
+    with pytest.raises(BudgetConflictError):
+        claim("another-session")
+    first = claim("session")
+    assert first.token is not None
+    result = {
+        "checks": [{"key": "judge", "status": "succeeded"}],
+        "judge_result": {"score": 0.5},
+        "_patch": "private diff",
+    }
+    document = store.finish(first.document["id"], claim_token=first.token, status="succeeded", result=result)
+    assert document["judge_result"] == {"score": 0.5}
+    assert "_patch" not in document
+    replay = claim("session")
+    assert replay.token is None
+    assert replay.document["judge_result"] == {"score": 0.5}

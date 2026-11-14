@@ -17,6 +17,7 @@ from ..github_repo import (
     GITHUB_HOST,
     RepoFetchError,
     RepoRateLimitError,
+    commit_diff,
     commit_summary,
     fetch_snapshot,
     git_auth_env,
@@ -123,6 +124,34 @@ def test_patched_zip_refuses_a_patch_that_does_not_apply(tmp_path: Path) -> None
 
     with pytest.raises(RepoFetchError):
         patched_repo_zip("acme/app", pinned, patch, None, tmp_path / "work", remote=f"file://{app}")
+
+
+def test_commit_diff_returns_the_change_from_the_base(tmp_path: Path) -> None:
+    """Diff a later commit against the pinned base, so the judge scores the same change as a patch (SKY-696)."""
+    app, base = _repository(tmp_path / "app", {"src/app.py": "x = 1\n"})
+    (app / "src/app.py").write_text("x = 2\n")
+    _git(app, "commit", "--quiet", "-am", "candidate")
+    candidate = _git(app, "rev-parse", "HEAD")
+
+    diff = commit_diff("acme/app", base, candidate, None, tmp_path / "work", remote=f"file://{app}")
+
+    assert "-x = 1" in diff
+    assert "+x = 2" in diff
+    assert diff.startswith("diff --git a/src/app.py b/src/app.py")
+    assert not (tmp_path / "work" / "diff").exists()
+
+
+def test_commit_diff_refuses_a_commit_that_does_not_descend_from_the_base(tmp_path: Path) -> None:
+    """Refuse a candidate on another line of history, because its diff would undo the base."""
+    app, base = _repository(tmp_path / "app", {"src/app.py": "x = 1\n"})
+    _git(app, "checkout", "--quiet", "--orphan", "other")
+    (app / "src/app.py").write_text("y = 1\n")
+    _git(app, "add", "--all")
+    _git(app, "commit", "--quiet", "-m", "other")
+    stranger = _git(app, "rev-parse", "HEAD")
+
+    with pytest.raises(RepoFetchError, match="does not descend"):
+        commit_diff("acme/app", base, stranger, None, tmp_path / "work", remote=f"file://{app}")
 
 
 def test_list_commits_reads_the_branch_and_trims_titles(monkeypatch: pytest.MonkeyPatch) -> None:
