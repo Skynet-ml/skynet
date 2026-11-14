@@ -144,20 +144,25 @@ same session. While a session is open, the draft steps refuse a change
 
 Each call reads `optimize.toml` at the base commit. Skynet refuses a
 candidate that changes `optimize.toml` or a protected path
-(`judge.candidate_refused`), and the refusal names every broken rule. The
-candidate runs in its own sandbox, and the metric runs in a separate
-sandbox. The answer gives the mean `score`, the `named_scores`, the
-`feedback` and the result of each search case. The answer never holds the
-metric code or a held-out case. A retry with the same candidate returns the
-stored score and does not pay again, also when the budget cannot pay for
-a new call. An answer with `status: in_progress`
+(`judge.candidate_refused`), and the refusal names every broken rule. Skynet
+also refuses a `candidate_commit` that it cannot fetch or that does not
+descend from the base commit. It refuses a `candidate_commit` that changes a
+text file that is not UTF-8, and a candidate that is too long. These
+refusals also answer `judge.candidate_refused`, and Skynet does not store
+them. When a fetch fails because of a network error or a timeout, call again
+with the same arguments. The candidate runs in its own sandbox, and the
+metric runs in a separate sandbox. The answer gives the mean `score`, the
+`named_scores`, the `feedback` and the result of each search case. The
+answer never holds the metric code or a held-out case. A retry with the same
+candidate returns the stored score and does not pay again, also when the
+budget cannot pay for a new call. An answer with `status: in_progress`
 means: call again with the same arguments. Skynet answers `in_progress`
 while other calls of the session hold its budget, and after a temporary
-repository or sandbox failure. A retry after such a failure pays for its
-own work. After three temporary failures of the same candidate, the call
-answers `judge.score_failed`. Any other failure, for example a saved
-secret that the user deleted, answers `judge.score_failed` at once, and a
-retry returns the same error.
+repository or sandbox failure while the candidate is scored. A retry after
+such a failure pays for its own work. After three temporary failures of the
+same candidate, the call answers `judge.score_failed`. Any other failure,
+for example a saved secret that the user deleted, answers
+`judge.score_failed` at once, and a retry returns the same error.
 
 Only the budget or `stop_run` with the `session_id` ends a session. A bulk
 cancel skips a judge session. Before each call, the budget must still pay

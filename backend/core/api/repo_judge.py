@@ -381,7 +381,8 @@ def _candidate_patch(
         The patch.
 
     Raises:
-        JudgeError: When the commit cannot be fetched or the patch is too large.
+        JudgeError: When the commit cannot be fetched, changes a text file that
+            is not UTF-8, or the patch is too large.
     """
     if candidate_patch is not None:
         patch = candidate_patch
@@ -400,6 +401,10 @@ def _candidate_patch(
                 )
             except RepoFetchError as error:
                 raise JudgeError("judge.candidate_refused", str(error)[:_MESSAGE_CHARS]) from error
+            except UnicodeDecodeError:
+                raise JudgeError(
+                    "judge.candidate_refused", "The candidate changes a text file that is not UTF-8."
+                ) from None
     if len(patch) > MAX_PATCH_CHARS:
         raise JudgeError("judge.candidate_refused", f"The candidate patch is longer than {MAX_PATCH_CHARS} characters.")
     return patch

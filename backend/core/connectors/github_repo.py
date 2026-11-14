@@ -374,6 +374,7 @@ def commit_diff(
     Raises:
         RepoFetchError: When a commit cannot be fetched, or ``commit`` does not
             descend from ``base``.
+        UnicodeDecodeError: When the diff changes a text file that is not UTF-8.
     """
     origin, user = git_host(provider)
     environment = git_auth_env(token, origin, user)

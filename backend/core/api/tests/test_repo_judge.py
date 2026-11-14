@@ -12,10 +12,12 @@ and that a retry with the same arguments pays once.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -329,6 +331,70 @@ def test_a_candidate_that_changes_the_contract_is_refused_before_any_paid_box(
         _call(store, session_id, CONTRACT_PATCH)
     assert again.value.code == "judge.candidate_refused"
     assert len(boxes["staged"]) == 1
+
+
+_NOT_UTF8 = "The candidate changes a text file that is not UTF-8."
+
+
+def _git(cwd: Path, *arguments: str) -> str:
+    """Run git in a local fixture repository.
+
+    Args:
+        cwd: Repository root.
+        *arguments: Arguments after ``git``.
+
+    Returns:
+        Standard output, stripped.
+    """
+    command = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", *arguments]
+    return subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_a_candidate_commit_with_a_text_file_that_is_not_utf8_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a commit that changes a latin-1 text file, instead of a raw decode error."""
+    app = tmp_path / "app"
+    (app / "src").mkdir(parents=True)
+    _git(app, "init", "--quiet")
+    _git(app, "config", "uploadpack.allowAnySHA1InWant", "true")
+    (app / "src" / "app.py").write_text("x = 1\n")
+    _git(app, "add", "--all")
+    _git(app, "commit", "--quiet", "-m", "base")
+    base = _git(app, "rev-parse", "HEAD")
+    (app / "src" / "data.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+    _git(app, "add", "--all")
+    _git(app, "commit", "--quiet", "-m", "candidate")
+    head = _git(app, "rev-parse", "HEAD")
+    monkeypatch.setattr(repo_judge.repo_hosts, "git_kwargs", lambda provider: {"remote": f"file://{app}"})
+    with pytest.raises(repo_judge.JudgeError) as refused:
+        repo_judge._candidate_patch({"provider": "github", "repository": "acme/app"}, base, head, None, None)
+    assert refused.value.code == "judge.candidate_refused"
+    assert refused.value.detail == _NOT_UTF8
+
+
+def test_a_judge_call_with_a_commit_that_is_not_utf8_is_refused_before_the_claim(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the call with no claim row and no paid work, and keep the session open."""
+    session_id = _session(store, _cases(3))
+
+    def undecodable(*_args: Any, **_kwargs: Any) -> str:
+        """Fail as ``commit_diff`` fails on a latin-1 text file."""
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+
+    monkeypatch.setattr(repo_judge, "commit_diff", undecodable)
+    with pytest.raises(repo_judge.JudgeError) as refused:
+        repo_judge.judge_call(
+            store, session_id, username=USER, candidate_commit="b" * 40, candidate_patch=None, token=None
+        )
+    assert refused.value.code == "judge.candidate_refused"
+    assert refused.value.detail == _NOT_UTF8
+    assert _call_rows(store, session_id) == []
+    assert boxes["paid"] == []
+    assert boxes["staged"] == []
+    assert _spent(store, session_id) == 0
+    assert store.get_job(session_id)["status"] == "running"
 
 
 def test_a_metric_error_is_stored_and_replayed(store: SQLiteJobStore, boxes: Any) -> None:
