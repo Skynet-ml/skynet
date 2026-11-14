@@ -2444,6 +2444,9 @@ class RemoteDBJobStore:
                     (JobModel.lease_expires_at.is_(None)) | (JobModel.lease_expires_at < now),
                 )
                 .all()
+                # A judge session (SKY-696) runs on no worker and holds no lease, so
+                # a requeue would waive its budget; only its budget or stop_run ends it.
+                if not (isinstance(job.payload, dict) and "judge" in job.payload)
             ]
         finally:
             session.close()

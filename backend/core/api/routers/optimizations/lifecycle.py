@@ -33,6 +33,7 @@ from ....models import (
 )
 from ....worker.budget_probe import STOP_REASON_BUDGET_PROJECTED
 from ....worker.checkpoint_compat import CheckpointCompatibilityError
+from ... import repo_judge
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import status_to_job_status
 from ...errors import DomainError
@@ -98,6 +99,31 @@ def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> 
         )
 
 
+def _is_judge_session(job_store: Any, optimization_id: str, job: dict[str, Any]) -> bool:
+    """Tell whether a run row is a judge session (SKY-696).
+
+    A row with a payload shows it there. Only a ``pending`` row with no
+    payload costs one more read: an open that did not reach its opening
+    write leaves such a row, and only its stored key names the session.
+    A store with no database engine (test fakes) holds no judge sessions.
+
+    Args:
+        job_store: The active job store.
+        optimization_id: ID of the run.
+        job: The run's job record.
+
+    Returns:
+        True for a judge session row.
+    """
+    if "judge" in (job.get("payload") or {}):
+        return True
+    return (
+        repo_judge.is_opening(job)
+        and getattr(job_store, "engine", None) is not None
+        and repo_judge.is_session(job_store, optimization_id)
+    )
+
+
 def _require_new_budget_configuration(job: dict[str, Any]) -> None:
     """Require explicit funding authorization before creating a different paid run.
 
@@ -158,6 +184,9 @@ def cancel_optimization(
             params={"status": status.value},
         )
 
+    if _is_judge_session(job_store, optimization_id, job_data):
+        # A judge session (SKY-696) has no worker: its end scores the best version once.
+        return repo_judge.end_session(job_store, job_data, ended_by="stop_run")
     _stop_budget_admission(job_store, job_data, "user_cancelled")
     if worker:
         worker.cancel_job(optimization_id)
@@ -342,6 +371,15 @@ def register_lifecycle_routes(
             for optimization_id in cancellable:
                 try:
                     job = job_store.get_job(optimization_id)
+                    if _is_judge_session(job_store, optimization_id, job):
+                        # A judge session's end runs a paid final score (SKY-696), so only stop_run ends it.
+                        skipped.append(
+                            BulkCancelSkipped(
+                                optimization_id=optimization_id,
+                                reason="judge_session: call stop_run with this id to end it",
+                            )
+                        )
+                        continue
                     _stop_budget_admission(job_store, job, "user_cancelled")
                     if worker:
                         worker.cancel_job(optimization_id)

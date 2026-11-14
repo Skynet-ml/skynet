@@ -12,8 +12,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1475,10 +1477,42 @@ _CHAT_HARNESSES = [
 ]
 
 
+@pytest.fixture
+def harness_tmp() -> Iterator[Path]:
+    """Give one harness run its own temp folder, and stop the daemon that the run leaves there.
+
+    Yields:
+        The folder to pass to the harness as ``TMPDIR``.
+    """
+    # Prime Agent keeps its daemon sockets under the temp folder, and the daemon lives on after the
+    # run. A daemon left in the machine's shared temp folder makes every later Prime Agent start
+    # fail. The folder is directly under /tmp because a Unix socket path has a length limit, and
+    # the macOS default temp folder and pytest's tmp_path are too long for the daemon's sockets.
+    folder = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        yield folder
+    finally:
+        daemons = []
+        for owner in folder.glob("prime-agent-*/supervisor-owners/*/owner.json"):
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+                daemon = int(json.loads(owner.read_text())["pid"])
+                os.kill(daemon, signal.SIGTERM)
+                daemons.append(daemon)
+        # A daemon and its worker write into the folder while they stop, so the folder goes only
+        # after both. The daemon leads their process group, and signal 0 only probes the group.
+        deadline = time.monotonic() + 10
+        for daemon in daemons:
+            with contextlib.suppress(OSError):
+                while time.monotonic() < deadline:
+                    os.killpg(daemon, 0)
+                    time.sleep(0.05)
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 @pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
 @pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
 def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
-    tmp_path: Path, binary: str, launch: Any, tool: str, key: str, target: str
+    tmp_path: Path, harness_tmp: Path, binary: str, launch: Any, tool: str, key: str, target: str
 ) -> None:
     """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
     executable = shutil.which(binary)
@@ -1508,7 +1542,7 @@ def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
             model="fake-model",
             session_dir=tmp_path / "session",
             timeout_seconds=120,
-            extra_env={"PATH": path, "HOME": str(tmp_path / "home")},
+            extra_env={"PATH": path, "HOME": str(tmp_path / "home"), "TMPDIR": str(harness_tmp)},
             api_key="k",
         )
     finally:

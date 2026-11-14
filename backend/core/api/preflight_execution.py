@@ -6,6 +6,8 @@ import copy
 import json
 import logging
 import math
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
@@ -35,7 +37,7 @@ from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
 from ..models import BlackboxRunRequest
 from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE
 from ..service_gateway.optimization.blackbox.native_runtime import NATIVE_ENGINES
-from ..service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds
+from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
@@ -639,3 +641,119 @@ def _perform_preflight(
                 status = "failed"
                 result.setdefault("checks", []).append(_check("runtime", "failed", str(error)))
     return status, result
+
+
+@contextmanager
+def judge_scorer(
+    payload: dict[str, Any],
+    *,
+    username: str,
+    budget_id: str,
+    generation: int,
+    owner_id: str,
+    image: str | None,
+    engine: Any,
+    case_count: int,
+    before_scoring: Callable[[dict[str, Any], StagedRepository], None] | None = None,
+) -> Iterator[tuple[dict[str, Any], StagedRepository, ModelGateway]]:
+    """Stage a judge session's repository and bind its scorer in the parent (SKY-696).
+
+    The steps are those of a setup check and of the worker: the same
+    credentials, the same metered gateway and the same repository gate. No
+    guest opens. The repository scorer runs each version in its own run box
+    and scores it in a separate metric box.
+
+    Args:
+        payload: The session's stored run payload, credentials still protected.
+        username: Account that pays.
+        budget_id: The session's attached budget.
+        generation: The budget's current execution generation.
+        owner_id: Identity that names this attempt's paid operations.
+        image: The sandbox image pinned for the session, or ``None``.
+        engine: Database holding the ledger, the vaults and the connections.
+        case_count: How many cases the attempt scores, for the box lifetime.
+        before_scoring: Called after staging and before any paid box opens;
+            it raises to refuse the attempt.
+
+    Yields:
+        The protected payload, the staged repository and the gateway.
+
+    Raises:
+        RepoGateError: When the repository gate refuses the tree.
+    """
+    source = copy.deepcopy(payload)
+    alias_blackbox_metric_model(source)
+    source = resolve_execution_credentials(
+        source, username=username, binding_id=budget_id, vault=ProtectedCredentialVault(engine=engine)
+    )
+    source = prepare_protected_credentials(
+        source,
+        username=username,
+        vault=ProviderKeyVault(engine=engine),
+        default_token_source=str(source.get("token_source") or TOKEN_SOURCE_MANAGED),
+    )
+    uses_managed_models = payload_uses_token_source(
+        source,
+        TOKEN_SOURCE_MANAGED,
+        default_token_source=str(source.get("token_source") or TOKEN_SOURCE_MANAGED),
+    )
+    if settings.openrouter_api_key is None and uses_managed_models:
+        raise ValueError("Managed model routing is not configured.")
+    managed_key = settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
+    gateway = ModelGateway(
+        BudgetRuntime(
+            BudgetService(engine=engine),
+            username=username,
+            budget_id=budget_id,
+            generation=generation,
+            phase="run",
+            wait_timeout=SETUP_WAIT_SECONDS,
+        )
+    )
+    staged: StagedRepository | None = None
+    try:
+        bind_protected_sandbox(
+            gateway,
+            settings,
+            owner_id=owner_id,
+            image=image,
+            lifetime_seconds=math.ceil(judge_lifetime_seconds(source, case_count)),
+            parent_hosts=PACKAGE_REGISTRY_HOSTS,
+            provider=source.get("sandbox_provider"),
+        )
+        protected = gateway.protect_payload(
+            source,
+            managed_key=managed_key,
+            allow_private_tools=settings.discover_allow_private,
+            allow_batch=False,
+        )
+        # Staging empties the secret list, so read the gate's inputs first.
+        secret_bindings = dict((protected["target"].get("repo") or {}).get("secret_bindings") or {})
+        secret_allowed_hosts = repo_secret_allowed_hosts(protected)
+        protected, staged = stage_repository(
+            protected, username=username, binding_id=budget_id, engine=engine, require_constraints=True
+        )
+        gate_failures = check_repository(
+            staged.snapshot.archive,
+            staged.secrets,
+            place=sandbox_place(settings.local_mode),
+            bindings=secret_bindings,
+            allowed_hosts=secret_allowed_hosts,
+            require_version=staged.require_version,
+        )
+        if gate_failures:
+            raise RepoGateError(gate_failures)
+        if before_scoring is not None:
+            before_scoring(protected, staged)
+        infer_repo_setup(protected, staged, gateway)
+        bind_repo_scorer(protected, staged, gateway, owner_id=owner_id, managed_key=managed_key)
+        yield protected, staged, gateway
+    finally:
+        if staged is not None:
+            staged.close_scorers()
+            staged.cleanup()
+        try:
+            gateway.close()
+        except UsagePendingError:
+            # The caller's evidence finish sees the budget's pending operations.
+            logger.info("judge attempt %s left usage awaiting confirmation", owner_id)

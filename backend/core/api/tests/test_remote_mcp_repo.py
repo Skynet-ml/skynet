@@ -27,7 +27,7 @@ from ...config import settings
 from ...models.hardening import HardeningJobModel
 from ...service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE
 from ...service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_REQUIRED
-from ...storage.models import Base, McpRunDraftModel, UserModel
+from ...storage.models import Base, JobModel, McpRunDraftModel, UserModel
 from .. import remote_mcp_repo, submission_idempotency
 from ..errors import DomainError
 from ..remote_mcp import mount_remote_mcp
@@ -900,3 +900,239 @@ def test_scorer_with_four_required_arguments_names_the_output() -> None:
     """Refuse a fourth required argument and name the three the runner passes."""
     issues, _notes = remote_mcp_repo.scorer_issues("def score(p, c, o, x):\n  return 1.0, 'ok'\n", True)
     assert "(repo_path, case, output)" in issues[0]
+
+
+PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.fixture
+def judge(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Fake the judge session open and the judge call, and record what the tool sends them (SKY-696).
+
+    Args:
+        harness: The app fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        A ``(client, engine, record)`` tuple; ``record`` holds the opens, the calls and the next answer.
+    """
+    client, engine, _calls = harness
+    record: dict[str, Any] = {"opens": [], "calls": [], "answer": None}
+
+    def find(self: Any, username: str, key: str) -> str | None:
+        """Find the run row of an idempotency key.
+
+        Args:
+            self: The store.
+            username: The account.
+            key: The idempotency key.
+
+        Returns:
+            The run id, or None.
+        """
+        with Session(self.engine) as session:
+            return session.scalar(
+                select(JobModel.optimization_id).where(JobModel.username == username, JobModel.idempotency_key == key)
+            )
+
+    def get(self: Any, job_id: str) -> dict[str, Any] | None:
+        """Read a run row.
+
+        Args:
+            self: The store.
+            job_id: The run id.
+
+        Returns:
+            The status and payload, or None.
+        """
+        with Session(self.engine) as session:
+            row = session.get(JobModel, job_id)
+            return None if row is None else {"status": row.status, "payload": row.payload or {}}
+
+    def open_session(request: Any, key: str, budget_key: str, user: Any, **kwargs: Any) -> str:
+        """Add the session row as the real open does.
+
+        Args:
+            request: The run request.
+            key: The session key.
+            budget_key: The budget key.
+            user: The account.
+            **kwargs: The other open arguments.
+
+        Returns:
+            The session id.
+        """
+        record["opens"].append({"key": key, **kwargs})
+        session_id = kwargs.get("resume_id") or f"session-{len(record['opens'])}"
+        with Session(engine) as session:
+            session.add(
+                JobModel(
+                    optimization_id=session_id,
+                    username=user.username,
+                    status="running",
+                    idempotency_key=key,
+                    payload={"judge": {"version": 1}},
+                )
+            )
+            session.commit()
+        return session_id
+
+    def judge_call(job_store: Any, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Return the configured answer, or raise the configured error.
+
+        Args:
+            job_store: The store.
+            session_id: The session.
+            **kwargs: The candidate and the account.
+
+        Returns:
+            The configured answer.
+
+        Raises:
+            Exception: The error the test set in ``record["answer"]``.
+        """
+        record["calls"].append((session_id, kwargs))
+        if isinstance(record["answer"], Exception):
+            raise record["answer"]
+        return record["answer"] or {"status": "scored", "session_id": session_id, "score": 0.5}
+
+    monkeypatch.setattr(_Store, "find_job_by_idempotency_key", find, raising=False)
+    monkeypatch.setattr(_Store, "get_job", get, raising=False)
+    monkeypatch.setattr(remote_mcp_repo, "open_session", open_session)
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", judge_call)
+    return client, engine, record
+
+
+def _judge(client: TestClient, draft_id: str, **arguments: Any) -> Any:
+    """Call the judge tool with a patch, the write token and confirm=true."""
+    return _call(
+        client,
+        "repo_judge_score",
+        {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "candidate_patch": PATCH, **arguments},
+    )
+
+
+def test_judge_needs_confirmation_and_one_candidate(judge: Any) -> None:
+    """Refuse the call before the user agreed, or with no or two candidates, without a session."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    assert "confirm=true" in _error_text(_judge(client, draft_id, confirm=False))
+    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_patch=None))
+    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_commit="b" * 40))
+    assert "runs:write" in _error_text(
+        _call(
+            client,
+            "repo_judge_score",
+            {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "candidate_patch": PATCH},
+            token=READ_TOKEN,
+        )
+    )
+    assert record["opens"] == []
+    assert record["calls"] == []
+
+
+def test_judge_opens_one_session_and_scores_in_it(judge: Any) -> None:
+    """Open the session on the first call and reuse it for later calls with the same arguments."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    first = _payload(_judge(client, draft_id))
+    assert first == {"status": "scored", "session_id": "session-1", "score": 0.5}
+    assert record["opens"][0]["key"].startswith(f"mcp-judge-{draft_id}-")
+    assert record["opens"][0]["floor_cents"] == 192
+    assert record["opens"][0]["draft_id"] == draft_id
+    _payload(_judge(client, draft_id, candidate_patch=None, candidate_commit="b" * 40))
+    assert len(record["opens"]) == 1
+    assert record["calls"][1] == (
+        "session-1",
+        {"username": USER, "candidate_commit": "b" * 40, "candidate_patch": None, "token": "gh"},
+    )
+
+
+def test_judge_refuses_a_short_commit_sha(judge: Any) -> None:
+    """Refuse an abbreviated commit SHA, which git cannot fetch, before any session or call."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    assert "candidate_commit" in _error_text(_judge(client, draft_id, candidate_patch=None, candidate_commit="abc1234"))
+    assert record["opens"] == []
+    assert record["calls"] == []
+
+
+def test_judge_refuses_a_limit_below_two_floors(judge: Any) -> None:
+    """Refuse a limit that cannot pay for one call and the final score, before any session."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=300)))
+    assert (error["code"], error["min_max_cost_cents"]) == ("budget.below_minimum", 384)
+    assert record["opens"] == []
+
+
+def test_judge_names_the_session_minimum_for_a_limit_below_the_floor(judge: Any) -> None:
+    """Name the two-floor minimum in the first refusal, so the limit it names is enough."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=100)))
+    assert (error["code"], error["min_max_cost_cents"]) == ("budget.below_minimum", 384)
+    assert "384" in error["detail"]
+    assert record["opens"] == []
+
+
+def test_judge_refuses_an_incomplete_draft(judge: Any) -> None:
+    """Answer draft.not_ready before any session."""
+    client, _engine, record = judge
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    assert json.loads(_error_text(_judge(client, draft_id)))["code"] == "draft.not_ready"
+    assert record["opens"] == []
+
+
+def test_judge_refuses_another_limit_while_a_session_is_open(judge: Any) -> None:
+    """Name the open session when the client changes max_cost_cents."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=900)))
+    assert (error["code"], error["session_ids"]) == ("judge.limit_changed", ["session-1"])
+    assert len(record["opens"]) == 1
+
+
+def test_draft_steps_refuse_a_change_while_a_session_is_open(judge: Any) -> None:
+    """Keep the draft fixed while a judge session scores against it."""
+    client, engine, _record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    error = json.loads(_error_text(_call(client, "repo_draft_set_engine", {"draft_id": draft_id, "engine": "gepa"})))
+    assert (error["code"], error["session_ids"]) == ("judge.session_open", ["session-1"])
+    with Session(engine) as session:
+        session.get(JobModel, "session-1").status = "success"
+        session.commit()
+    assert _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")["saved"]
+
+
+def test_judge_after_the_end_names_the_session(judge: Any) -> None:
+    """Answer session_ended for the same arguments after the session ended."""
+    client, engine, record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    with Session(engine) as session:
+        session.get(JobModel, "session-1").status = "success"
+        session.commit()
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert (error["code"], error["session_id"]) == ("judge.session_ended", "session-1")
+    assert len(record["calls"]) == 1
+
+
+def test_judge_errors_carry_the_code_and_the_session(judge: Any) -> None:
+    """Map a refused candidate to its code and session, and a held session to in_progress."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    record["answer"] = remote_mcp_repo.JudgeError("judge.candidate_refused", "It changes optimize.toml.")
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert error == {
+        "code": "judge.candidate_refused",
+        "detail": "It changes optimize.toml.",
+        "session_id": "session-1",
+    }
+    record["answer"] = remote_mcp_repo.JudgePendingError("Another call scores this candidate.")
+    body = _payload(_judge(client, draft_id))
+    assert (body["status"], body["retry_after_seconds"]) == ("in_progress", 5)
+    record["answer"] = DomainError("budget.pending", status=409)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"

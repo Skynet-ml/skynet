@@ -72,6 +72,8 @@ _INSTRUCTIONS = (
     "every step saves part of the run and reports what to fix. "
     "repo_draft_review prices the run; repo_draft_preflight checks it and repo_draft_submit starts it, "
     "both after the user agrees to the price. "
+    "repo_judge_score scores your own version of a ready draft's repository on its metric, under one budget; "
+    "stop_run with its session_id ends the session and scores the best version on the held-out cases. "
     "check_run and start_run refuse DSPy program runs. "
     "Use list_runs and get_run to follow the account's runs until the status is terminal. "
     "get_run_progress returns a running run's new progress events and best score. stop_run ends a run early. "
