@@ -107,7 +107,7 @@ diskcache==5.6.3
     # via dspy
 distro==1.9.0
     # via openai
-dnspython==2.9.0
+dnspython==2.9.2
     # via email-validator
 docstring-parser==0.18.0
     # via cyclopts
