@@ -1529,6 +1529,9 @@ def _run_job(
     ]
     optimizer_best_score = None if engine_pick_error is not None else result.best_score
     verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
+    # The engine metadata comes from the guest's result file; with no rule set, a guest
+    # ``outcome`` would otherwise survive the spread below and pass for Skynet's verdict.
+    result.metadata.pop("outcome", None)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,

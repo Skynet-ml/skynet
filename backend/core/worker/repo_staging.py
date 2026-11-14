@@ -1347,9 +1347,13 @@ def add_run_record(
     is true when no rule failed, also when the file sets no target and no
     minimum. A run with no ``optimize.toml``, a result with no ``details``, a
     run with cases whose guest wrote no split positions (an older image), or a
-    guest split or verdict of another shape gets no record. A ``record`` the
-    guest wrote is removed on every path. The record holds no secret, no case
-    content and no metric code.
+    guest split or verdict of another shape gets no record. A verdict whose
+    keys do not match the file's own rules in the staged snapshot also gets
+    no record: ``target_reached`` exactly when the file sets a target, and
+    ``minimums_passed`` exactly when it sets minimums, with
+    ``failed_minimums`` only then. A snapshot with no ``outcome`` (an older
+    payload) sets no rule. A ``record`` the guest wrote is removed on every
+    path. The record holds no secret, no case content and no metric code.
 
     Args:
         result: The run's final result; changed in place.
@@ -1369,6 +1373,15 @@ def add_run_record(
         return
     outcome = details.get("outcome") or {}
     if not _guest_record_parts_ok(split, outcome):
+        return
+    # The verdict crosses the guest's result file, so its keys must match the file's own rules.
+    rules = (payload.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}
+    has_target, has_minimums = rules.get("target") is not None, bool(rules.get("require"))
+    if (
+        ("target_reached" in outcome) != has_target
+        or ("minimums_passed" in outcome) != has_minimums
+        or ("failed_minimums" in outcome and not has_minimums)
+    ):
         return
     verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
     details["record"] = {
