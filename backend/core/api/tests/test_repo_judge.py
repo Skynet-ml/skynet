@@ -1810,3 +1810,162 @@ def test_a_cancel_before_the_opening_write_keeps_the_session_ended_and_attaches_
     answer = _call(store, session_id)
     assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
     assert boxes["paid"] == []
+
+
+def test_a_stop_with_a_row_read_before_the_opens_last_write_closes_the_budget(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close the budget when the stop_run read the row before the open's last write named the budget."""
+    _fake_open_gates(monkeypatch)
+    owner = AuthenticatedUser(username=USER, role="user", groups=())
+    old: dict[str, Any] = {}
+    real_overview = store.set_payload_overview
+    real_get = store.get_job
+
+    def overview(session_id: str, data: dict[str, Any]) -> None:
+        """Write the overview, then keep the copy of the row that a stop_run could read at this point.
+
+        Args:
+            session_id: The session.
+            data: The overview.
+        """
+        real_overview(session_id, data)
+        old["job"] = real_get(session_id)
+
+    def get(session_id: str) -> dict[str, Any]:
+        """Give the old copy once, as the stop_run's own read, then the stored row.
+
+        Args:
+            session_id: The session.
+
+        Returns:
+            The row.
+        """
+        return old.pop("stale", None) or real_get(session_id)
+
+    monkeypatch.setattr(store, "set_payload_overview", overview)
+    session_id = _open(store)
+    assert old["job"]["execution_budget_id"] is None
+    assert store.get_job(session_id)["execution_budget_id"] is not None
+    old["stale"] = old["job"]
+    monkeypatch.setattr(store, "get_job", get)
+    assert cancel_optimization(store, session_id, owner, None).status == "cancelled"
+    assert "stale" not in old
+    job = store.get_job(session_id)
+    assert job["status"] == "cancelled"
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state, budget.blocked_reason) == (session_id, "closed", "judge_ended")
+    assert repo_judge.open_session_ids(store.engine, USER, "d1") == []
+    answer = _call(store, session_id)
+    assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
+    assert boxes["paid"] == []
+
+
+class _WriteError(Exception):
+    """Stand for a database error on the open's first conditional write."""
+
+
+def _resume(job_store: SQLiteJobStore, session_id: str) -> str:
+    """Resume the open of draft ``d1`` with the key and budget key of :func:`_open`.
+
+    Args:
+        job_store: The store.
+        session_id: The row the earlier open left behind.
+
+    Returns:
+        The session id.
+    """
+    return repo_judge.open_session(
+        _open_request(),
+        repo_judge.judge_key("d1", "e" * 16),
+        "budget-key",
+        SimpleNamespace(username=USER),
+        job_store=job_store,
+        token=None,
+        floor_cents=100,
+        draft_id="d1",
+        resume_id=session_id,
+    )
+
+
+def test_an_open_that_stops_after_it_creates_the_row_answers_pending_and_resumes(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat a pending row with no payload as opening, and let a resume finish the open and score."""
+    _fake_open_gates(monkeypatch)
+    real = store.update_job_if_status
+
+    def fail(*args: Any, **kwargs: Any) -> bool:
+        """Fail the opening write once, then write as the store does.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's fields.
+
+        Returns:
+            Whether the write stored the row.
+
+        Raises:
+            _WriteError: On the first write.
+        """
+        monkeypatch.setattr(store, "update_job_if_status", real)
+        raise _WriteError
+
+    monkeypatch.setattr(store, "update_job_if_status", fail)
+    with pytest.raises(_WriteError):
+        _open(store)
+    session_id = store.find_job_by_idempotency_key(USER, repo_judge.judge_key("d1", "e" * 16))
+    job = store.get_job(session_id)
+    assert (job["status"], job["payload"], job["execution_budget_id"]) == ("pending", None, None)
+    assert repo_judge.is_opening(job)
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id)
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state) == (None, "open")
+    assert boxes["paid"] == []
+    assert _resume(store, session_id) == session_id
+    job = store.get_job(session_id)
+    assert job["status"] == "running"
+    assert not repo_judge.is_opening(job)
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], USER)
+    assert (budget.job_id, budget.state) == (session_id, "attached")
+    assert repo_judge.open_session_ids(store.engine, USER, "d1") == [session_id]
+    assert _call(store, session_id)["status"] == "scored"
+
+
+def test_a_resume_of_a_running_opening_row_finishes_the_open(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish an open that stopped after its opening write, when the row is running with the opening payload."""
+    _fake_open_gates(monkeypatch)
+
+    def crash(session_id: str, data: dict[str, Any]) -> None:
+        """Stop the open after its opening write and its budget attach.
+
+        Args:
+            session_id: The session.
+            data: The overview.
+
+        Raises:
+            _Crash: Always.
+        """
+        raise _Crash("the open stopped")
+
+    real = store.set_payload_overview
+    monkeypatch.setattr(store, "set_payload_overview", crash)
+    with pytest.raises(_Crash):
+        _open(store)
+    monkeypatch.setattr(store, "set_payload_overview", real)
+    session_id = store.find_job_by_idempotency_key(USER, repo_judge.judge_key("d1", "e" * 16))
+    job = store.get_job(session_id)
+    assert job["status"] == "running"
+    assert job["payload"] == {"judge": {"opening": True}}
+    assert _resume(store, session_id) == session_id
+    job = store.get_job(session_id)
+    assert job["status"] == "running"
+    assert not repo_judge.is_opening(job)
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], USER)
+    assert (budget.job_id, budget.state) == (session_id, "attached")
+    assert _call(store, session_id)["status"] == "scored"

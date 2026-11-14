@@ -193,8 +193,12 @@ def is_opening(job: dict[str, Any]) -> bool:
         job: The session's job record.
 
     Returns:
-        True while the row has no attached budget yet.
+        True while the row has no attached budget yet: the row has the
+        opening payload, or it is ``pending`` with no payload (an open that
+        stopped right after it created the row).
     """
+    if job.get("status") == "pending" and not job.get("payload"):
+        return True
     return bool(((job.get("payload") or {}).get("judge") or {}).get("opening"))
 
 
@@ -318,12 +322,16 @@ def open_session(
             job_store.create_job(session_id, username=username, idempotency_key=key)
         except IntegrityError as error:
             raise JudgePendingError("Another call opens this judge session.") from error
-        # Running, not pending: no worker may claim the row, and the sweeper skips judge rows.
-        if not job_store.update_job_if_status(
-            session_id, ("pending",), status="running", started_at=_utc_now(), payload={"judge": {"opening": True}}
-        ):
-            # Cancelled before the open wrote it; the budget stays open, unattached and holds no money.
-            return session_id
+    # Running, not pending: no worker may claim the row, and the sweeper skips judge rows. A resume makes this
+    # write too, because an open can stop between create_job and this write and leave a pending row with no payload.
+    opened = job_store.update_job_if_status(
+        session_id, ("pending",), status="running", started_at=_utc_now(), payload={"judge": {"opening": True}}
+    )
+    if not opened and resume_id is None:
+        # The row was cancelled before the open wrote it, or a concurrent resume of the same key took the open over.
+        # Either way this open stops; its budget is not attached and holds no money, and the caller's next step
+        # reads the row.
+        return session_id
     try:
         attached = budgets.attach_to_job(budget.id, username, session_id, expected_revision=budget.revision)
     except BudgetError as error:
@@ -1169,6 +1177,9 @@ def _best_call(engine: Any, budget_id: str) -> tuple[dict[str, Any] | None, int]
 def _stop(job_store: Any, job: dict[str, Any], status: str, message: str) -> None:
     """Write a terminal status, then close the budget to new work.
 
+    When ``job`` names no budget, the stored row is read again after the
+    status write, and the budget that the stored row names is closed.
+
     Args:
         job_store: Store that holds the session.
         job: The session's job record.
@@ -1178,11 +1189,13 @@ def _stop(job_store: Any, job: dict[str, Any], status: str, message: str) -> Non
     job_store.update_job_if_status(
         job["optimization_id"], _OPEN_STATUSES, status=status, message=message, completed_at=_utc_now()
     )
-    if job.get("execution_budget_id") is not None:
+    budget_id = job.get("execution_budget_id")
+    if budget_id is None:
+        # The open's last write can name the budget after the caller read the row, and before this status write.
+        budget_id = job_store.get_job(job["optimization_id"]).get("execution_budget_id")
+    if budget_id is not None:
         try:
-            BudgetService(engine=job_store.engine).stop_admission(
-                job["execution_budget_id"], job["username"], reason="judge_ended"
-            )
+            BudgetService(engine=job_store.engine).stop_admission(budget_id, job["username"], reason="judge_ended")
         except BudgetError:
             logger.warning("judge session %s: the budget did not close", job["optimization_id"])
 
