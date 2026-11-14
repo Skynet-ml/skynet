@@ -863,6 +863,7 @@ class BackgroundWorker:
                             username=execution_payload.username,
                             binding_id=job_data["execution_budget_id"],
                             engine=byok_engine,
+                            require_constraints=True,
                         )
                         self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
                         # Before the setup model and the scorer box, so a refused run costs nothing.

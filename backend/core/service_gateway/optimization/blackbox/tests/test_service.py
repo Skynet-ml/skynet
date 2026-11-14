@@ -35,8 +35,10 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_BEST_OF_N,
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_HARNESSES,
+    BlackboxRepoSource,
     BlackboxRunRequest,
     BlackboxRunResponse,
+    BlackboxTarget,
 )
 from core.models.results import ModelTokenUsage
 
@@ -1923,6 +1925,37 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     assert 0 < failed < len(report_on)
     assert response.details["failed_cases"] == failed
     assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
+
+
+def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored result holds no guest-side contract source; the stored payload holds the true one (SKY-693)."""
+    _winner_strategy(monkeypatch)
+    # The stubbed search never calls the native proposer, so the run needs no gateway.
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    payload = _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)})
+    # The parent strips the drafts before the guest gets them, so the guest's
+    # validator sees no optimize.toml and resets the source to "repository".
+    repo = BlackboxRepoSource(repository="o/r", editable_paths=["src"])
+    assert repo.contract_source == "repository"
+    target = BlackboxTarget(kind="repo", repo=repo)
+    job = replace(service_mod.job_spec_from_payload(payload), target=target)
+
+    response = service_mod.run_job(
+        job,
+        service_mod.build_scorer(payload.scorer, job_id="job-source"),
+        service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+        artifact_id="job-source",
+        started=time.perf_counter(),
+        progress_callback=None,
+        gepa_log_dir_path=str(tmp_path),
+        repo_scorer=True,
+    )
+
+    repo_meta = response.optimization_metadata["target"]["repo"]
+    assert repo_meta["repository"] == "o/r"
+    assert "contract_source" not in repo_meta
 
 
 def test_a_run_where_every_case_scores_a_valid_zero_succeeds(

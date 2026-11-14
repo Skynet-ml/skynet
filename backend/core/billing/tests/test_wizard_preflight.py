@@ -492,6 +492,47 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     assert cleaned == ["scorers", "tree"]
 
 
+def test_the_rest_setup_check_rewrites_an_mcp_contract_source(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stage a client's ``mcp`` contract as ``setup_screen`` in the REST setup check, as ``/blackbox/run`` does."""
+    client, _engine, calls = setup_client
+    archive = tmp_path / "tree.tgz"
+    raw = b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=archive), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+    )
+    sources = []
+
+    def stage(payload: dict, **kwargs) -> tuple[dict, SimpleNamespace]:
+        """Record the contract source that reaches staging."""
+        sources.append(payload["target"]["repo"]["contract_source"])
+        return payload, staged
+
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", stage)
+    repo = {
+        "repository": "example/site",
+        "commit": "0" * 40,
+        "editable_paths": ["src"],
+        "draft_files": {"optimize.toml": "version = 1\n"},
+        "draft_base": "0" * 40,
+        "contract_source": "mcp",
+    }
+    payload = {**PAYLOAD, "target": {"kind": "repo", "repo": repo}}
+
+    response = client.post("/wizard/preflight", json=_request(_budget(client), payload))
+
+    assert response.status_code == 200, response.json()
+    assert sources == ["setup_screen"]
+    assert not calls
+
+
 def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
     setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -8,6 +8,7 @@ import { cn } from "@/shared/lib/utils";
 import { GitDiff } from "@/shared/ui/icons";
 
 import type { RepoSource } from "../ide/repo-files";
+import { repoBaseText } from "../lib/repo-run";
 import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
 import { ChangesPane } from "./ChangesPane";
 import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
@@ -29,15 +30,17 @@ const CHAT_MAX = 0.75;
  *
  * Returns:
  *   Each read file's text ("" when the repository has none); a path still
- *   loading has no entry.
+ *   loading has no entry. A failed or unreadable optimize.toml read maps to
+ *   undefined: the repository may have the file, so the Metric screen must
+ *   not hold on it (SKY-693).
  */
 function useRepoBase(
   repo: RepoSource | null,
   paths: readonly string[],
-): ReadonlyMap<string, string> {
+): ReadonlyMap<string, string | undefined> {
   const [read, setRead] = React.useState<{
     repo: RepoSource | null;
-    texts: ReadonlyMap<string, string>;
+    texts: ReadonlyMap<string, string | undefined>;
   }>({
     repo,
     texts: new Map(),
@@ -54,15 +57,20 @@ function useRepoBase(
     for (const path of key ? key.split("\n") : []) {
       if (DRAFT_ONLY.has(path) || requested.current.paths.has(path)) continue;
       requested.current.paths.add(path);
-      const settle = (text: string) =>
+      const settle = (text: string | undefined) =>
         setRead((prev) => {
           const texts = new Map(prev.repo === repo ? prev.texts : []);
           texts.set(path, text);
           return { repo, texts };
         });
       repo.read(path).then(
-        (result) => settle("text" in result ? result.text : ""),
-        () => settle(""),
+        (result) => settle(repoBaseText(path, result)),
+        () => {
+          // A later change to the draft's paths reads the file again; the
+          // effect does not run on a render alone, so a failing read cannot loop.
+          requested.current.paths.delete(path);
+          settle(repoBaseText(path, null));
+        },
       );
     }
   }, [repo, key]);
@@ -142,9 +150,17 @@ export function AgenticIde({
   const base = useRepoBase(repo, basePaths);
   // The chat's "Edited N files" card diffs a file the draft
   // did not hold yet (the repository's optimize.toml) against this base.
+  // A read with no known text has no entry, so the Metric screen does not hold on it.
+  const knownBase = React.useMemo(
+    () =>
+      new Map(
+        [...base].filter((entry): entry is [string, string] => entry[1] !== undefined),
+      ) as ReadonlyMap<string, string>,
+    [base],
+  );
   React.useEffect(() => {
-    setRepoBase?.(base);
-  }, [setRepoBase, base]);
+    setRepoBase?.(knownBase);
+  }, [setRepoBase, knownBase]);
   React.useEffect(() => () => setRepoBase?.(null), [setRepoBase]);
 
   // A file whose text did not change keeps its object, so an agent write to

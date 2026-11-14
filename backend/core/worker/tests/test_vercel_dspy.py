@@ -206,13 +206,14 @@ def test_an_older_image_is_refused_for_a_run_with_outcome_values(
         (12, {"target": None, "require": {}}),
         (14, {}),
         (15, {"target": None, "require": {}}),
+        (16, {"target": 0.9, "require": {"latency": 0.5}}),
         (SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}}),
     ],
 )
 def test_an_image_runs_when_it_can_read_the_runs_outcome(
     image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An older image runs a run with no outcome values; a current image runs one with a target."""
+    """An older image runs a run with no outcome values; an image at 16 or later runs one with values."""
     session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
 
     assert session.steps[0] == "probe"

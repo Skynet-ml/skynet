@@ -17,6 +17,8 @@ The tools:
 | `repo_draft_set_repository` | Sets the repository, its branch or commit, and the paths the run may change. | Free |
 | `repo_draft_set_data` | Sets the cases the scorer runs on. Optional. | Free |
 | `repo_draft_set_scorer` | Sets the Python scorer that grades each version. | Free |
+| `repo_draft_contract_guide` | Returns the `optimize.toml` format guide and an example file. | Free |
+| `repo_draft_set_contract` | Saves the run's `optimize.toml` contract. Required when the repository has none. | Free |
 | `repo_draft_set_models` | Sets the model of the coding agent and who pays for its calls. | Free |
 | `repo_draft_set_engine` | Sets the optimization engine. | Free |
 | `repo_draft_set_budget` | Sets how many scorer runs the search can use. Optional. | Free |
@@ -64,6 +66,12 @@ change their plan. Then call `next_tool`.
    `{"score": <number>, "feedback": "<short text>"}`. Higher is better.
    Skynet refuses a bare number, because the engines learn from the
    feedback. Call `repo_draft_set_scorer` with the code as `metric_code`.
+   Then set the contract. Every new run needs an `optimize.toml`, in the
+   draft or in the repository. When the repository has none, call
+   `repo_draft_contract_guide`, write the file from its guide (start with
+   `version = 1`), and call `repo_draft_set_contract` with the text. Fix each
+   parser issue in the answer and call it again. When the repository has
+   the file, skip this unless the user wants to change it.
 6. **Set the models.** Call `repo_draft_set_models` with the
    `reflection_model` that the user names. It is the model of the coding
    agent that writes each version. Keep `token_source` at `managed` unless

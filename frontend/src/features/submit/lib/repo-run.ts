@@ -25,6 +25,45 @@ const OPTIMIZE_TOML = "optimize.toml";
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
 /**
+ * Whether a repository run has no optimize.toml contract, so its Metric
+ * screen holds (SKY-693). Every new run needs one, in the draft or in the
+ * repository.
+ *
+ * Args:
+ *   draft: The draft's optimize.toml text, if any.
+ *   repoFile: The repository's optimize.toml text ("" when it has none), or
+ *     undefined while the read loads or no pane reads it.
+ *
+ * Returns:
+ *   True only when the draft file is empty and the repository read found no
+ *   file; an unknown repository file leaves the decision to the server.
+ */
+export function contractMissing(draft: string | undefined, repoFile: string | undefined): boolean {
+  return !draft?.trim() && repoFile?.trim() === "";
+}
+
+/**
+ * The repository base text a read gives for one file (SKY-693).
+ *
+ * Args:
+ *   path: The file the read was for.
+ *   result: The read's result, or null when the read failed.
+ *
+ * Returns:
+ *   The file's text. With no text, "" for most files; for optimize.toml, ""
+ *   only when the read found no file, else undefined, so an unreadable or
+ *   failed read leaves the contract decision to the server.
+ */
+export function repoBaseText(
+  path: string,
+  result: { text: string } | { issue: string } | null,
+): string | undefined {
+  if (result && "text" in result) return result.text;
+  if (path !== OPTIMIZE_TOML) return "";
+  return result?.issue === "missing" ? "" : undefined;
+}
+
+/**
  * The `${NAME}` secrets that optimize.toml's `[services.<name>]` entries send,
  * each with the one host it goes to (E52, E53). A secret that two services use
  * goes to the last one's host, as on the server.
