@@ -48,6 +48,10 @@ interface ChatTranscriptProps {
   compacting?: React.ReactNode;
 }
 
+// The server and the hydrating client both see a time of 0, so no
+// separator depends on a clock; the client's real time follows at once.
+const serverNow = () => 0;
+
 // Owns the "messages → user/agent pairs → bubbles + edit-and-resend wiring"
 // glue that was duplicated between the generalist and code-agent panels.
 // The trailing slot keeps panel-specific UI (approval cards, breadcrumb,
@@ -89,7 +93,7 @@ export function ChatTranscript({
     [pairs, messages],
   );
 
-  const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, minuteClockNow);
+  const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, serverNow);
   const separators = React.useMemo(() => {
     const times = separatorTimes(
       pairs.map((pair) => [

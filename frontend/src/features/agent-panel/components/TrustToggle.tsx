@@ -85,8 +85,11 @@ export function TrustToggle({ mode, onCycle, className, plain }: TrustToggleProp
                   )}
                 >
                   <ModeIcon className="size-3 shrink-0 mt-[2px]" aria-hidden="true" />
-                  <span className={active ? "font-semibold" : undefined}>
-                    {TRUST_MODE_DESCRIPTION[m]()}
+                  <span>
+                    <span className={active ? "font-semibold" : "font-medium"}>
+                      {TRUST_MODE_LABEL[m]()}
+                    </span>
+                    <span className="opacity-80"> — {TRUST_MODE_DESCRIPTION[m]()}</span>
                   </span>
                 </li>
               );

@@ -378,12 +378,15 @@ const GUTTER_SHADE =
 function Half({
   path,
   line,
+  old = false,
   mark,
   wrap,
   onAdd,
 }: {
   path: string;
   line?: DiffLine;
+  /** The split view's left side, which numbers every line in the old file. */
+  old?: boolean;
   mark?: [number, number];
   wrap: boolean;
   onAdd?: () => void;
@@ -397,6 +400,7 @@ function Half({
     );
   const kind = line.kind;
   const ref = lineRef(line);
+  const no = old ? (line.oldNo ?? 0) : ref.no;
   const tint = !signs && kind !== "same";
   return (
     <div
@@ -415,7 +419,7 @@ function Half({
           !tint && "border-transparent text-muted-foreground",
         )}
       >
-        {ref.no}
+        {no}
         {onAdd && (
           <button
             type="button"
@@ -542,6 +546,14 @@ export function DiffView({
     );
     // Only a new text resets; `lines` is read for the check, not watched.
   }, [file.after]);
+  // Other options give other blocks, so the stored fold counts no longer fit.
+  const shownOptions = React.useRef(`${ignoreSpace}|${hideImports}|${context}`);
+  React.useEffect(() => {
+    const key = `${ignoreSpace}|${hideImports}|${context}`;
+    if (shownOptions.current === key) return;
+    shownOptions.current = key;
+    setShown(new Map());
+  }, [ignoreSpace, hideImports, context]);
   const notes = (line?: DiffLine, layout?: "split") => {
     if (!line) return null;
     const ref = lineRef(line);
@@ -587,13 +599,8 @@ export function DiffView({
       ? pairLines(part).map(({ left, right }, k) => (
           <React.Fragment key={`${key}-${k}`}>
             <div className={cn("flex", !wrap && "min-w-max")}>
-              <Half
-                path={file.path}
-                line={left}
-                mark={left && marks.get(left)}
-                wrap={wrap}
-                onAdd={addFor(left)}
-              />
+              {/* Comments sit on the draft's lines, so only the right side takes them. */}
+              <Half path={file.path} line={left} old mark={left && marks.get(left)} wrap={wrap} />
               <span className="w-px shrink-0 bg-border/70" />
               <Half
                 path={file.path}
@@ -632,7 +639,11 @@ export function DiffView({
       {blocks.map((block, n) => {
         if (block.kind === "lines") return renderLines(block.lines, `${n}`);
         // The lines nearest the change open first, so the fold shrinks from that side.
-        const open = Math.min(shown.get(n) ?? 0, block.lines.length);
+        // A fold with a comment in it stays open, so no comment hides.
+        const pinned = block.lines.some(
+          (l) => l.kind !== "del" && comments?.some((c) => c.path === file.path && c.line === l.newNo),
+        );
+        const open = pinned ? block.lines.length : Math.min(shown.get(n) ?? 0, block.lines.length);
         const hidden = block.lines.length - open;
         const fromTop = n > 0;
         const visible = fromTop ? block.lines.slice(0, open) : block.lines.slice(hidden);

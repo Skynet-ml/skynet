@@ -556,7 +556,9 @@ export function ReviewPane({
         t instanceof HTMLElement &&
         (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA") &&
         !root.current?.contains(t);
-      if (!typing && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
+      // A closed pane stays mounted; its shortcut must not act unseen.
+      const unseen = root.current?.checkVisibility?.({ opacityProperty: true }) === false;
+      if (!typing && !unseen && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
         e.preventDefault();
         setShowList((s) => !s);
       }

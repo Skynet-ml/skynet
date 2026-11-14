@@ -72,6 +72,7 @@ const { createRoot } = await import("react-dom/client");
 const { EditorView } = await import("@codemirror/view");
 const { ReviewPane } = await import("./review/review-pane");
 const { AgenticIde } = await import("./AgenticIde");
+const { DiffView } = await import("./review/parts");
 const { diffLines, statusOf } = await import("./review/lib");
 const { lineCommentId } = await import("@/shared/ui/agent/line-comments");
 const { WizardStateProvider, useWizardStateOptional } = await import("@/features/agent-panel");
@@ -195,6 +196,45 @@ void test("a re-render with a new edit handler keeps the editor's configuration"
   });
   assert.deepEqual(edits, ["second"]);
   await pane.unmount();
+});
+
+const gutter = (root: ParentNode) =>
+  [...root.querySelectorAll("span.tabular-nums")].map((el) => el.firstChild?.textContent);
+const foldLabel = (root: ParentNode) =>
+  [...root.querySelectorAll("button")].map((b) => b.textContent).find((t) => t?.includes("unmodified"));
+const LONG = `${Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+
+void test("the split diff numbers its left side in the old file", async () => {
+  const file = { path: "a.txt", before: "a\nb\nc\n", after: "b\nc\n" };
+  const view = await mount(<DiffView file={file} mode="split" />);
+  // Rows: a removed (old 1, empty right), b (old 2, new 1), c (old 3, new 2).
+  assert.deepEqual(gutter(view.container), ["1", "2", "1", "3", "2"]);
+  await view.unmount();
+});
+
+void test("a fold closes again when the diff options change", async () => {
+  const file = { path: "a.txt", before: LONG, after: `${LONG}added\n` };
+  const view = await mount(<DiffView file={file} />);
+  assert.equal(foldLabel(view.container), "27 unmodified lines");
+  const bar = [...view.container.querySelectorAll("button")].find((b) => b.textContent === "27 unmodified lines")!;
+  await click(bar);
+  assert.equal(foldLabel(view.container), "7 unmodified lines");
+  await view.render(<DiffView file={file} ignoreSpace />);
+  assert.equal(foldLabel(view.container), "27 unmodified lines");
+  await view.unmount();
+});
+
+void test("a fold with a comment in it stays open", async () => {
+  const file = { path: "a.txt", before: LONG, after: `${LONG}added\n` };
+  const comments = [{ id: "c1", path: "a.txt", line: 5, text: "Look here" }];
+  const view = await mount(
+    <SessionProvider session={{ user: { name: "Test User" }, expires: "2099-01-01" }} refetchOnWindowFocus={false}>
+      <DiffView file={file} comments={comments} />
+    </SessionProvider>,
+  );
+  assert.equal(foldLabel(view.container), undefined);
+  assert.ok(view.container.textContent?.includes("Look here"));
+  await view.unmount();
 });
 
 void test("a busy agent makes the editor read-only", async () => {
