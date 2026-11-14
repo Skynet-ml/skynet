@@ -36,7 +36,9 @@ from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore
 from .. import repo_judge
+from ..auth import AuthenticatedUser
 from ..errors import DomainError
+from ..routers.optimizations.lifecycle import cancel_optimization
 
 USER = "alice@example.com"
 BASE = "a" * 40
@@ -1654,8 +1656,12 @@ def test_open_session_ids_lists_only_open_sessions_of_the_draft(store: SQLiteJob
     assert repo_judge.open_session_ids(store.engine, USER, "d1") == []
 
 
-def test_open_session_funds_attaches_and_pins_the_base(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Create one budget, attach it to the row, and pin the branch's commit, once for a resume."""
+def _fake_open_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass the admission, balance, model and quota gates of an open, which other tests cover.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     for name in (
         "_materialize_repo_cases",
         "_enforce_submission_admission",
@@ -1671,7 +1677,15 @@ def test_open_session_funds_attaches_and_pins_the_base(store: SQLiteJobStore, mo
     monkeypatch.setattr(repo_judge, "_execution_overview", lambda payload: {})
     monkeypatch.setattr(repo_judge, "_persistable_payload", lambda payload, job_store: payload.model_dump(mode="json"))
     monkeypatch.setattr(repo_judge.repo_hosts, "resolve_commit", lambda provider, token, repository, branch: BASE)
-    request = repo_judge.BlackboxRunRequest.model_validate(
+
+
+def _open_request() -> repo_judge.BlackboxRunRequest:
+    """Build the run request of a draft with a 500-cent limit.
+
+    Returns:
+        The request.
+    """
+    return repo_judge.BlackboxRunRequest.model_validate(
         {
             "recipe": "repo",
             "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return 1.0, 'ok'\n"},
@@ -1681,6 +1695,12 @@ def test_open_session_funds_attaches_and_pins_the_base(store: SQLiteJobStore, mo
             "max_cost_cents": 500,
         }
     )
+
+
+def test_open_session_funds_attaches_and_pins_the_base(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Create one budget, attach it to the row, and pin the branch's commit, once for a resume."""
+    _fake_open_gates(monkeypatch)
+    request = _open_request()
     user = SimpleNamespace(username=USER)
     key = repo_judge.judge_key("d1", "e" * 16)
     session_id = repo_judge.open_session(
@@ -1707,3 +1727,86 @@ def test_open_session_funds_attaches_and_pins_the_base(store: SQLiteJobStore, mo
         == session_id
     )
     assert store.get_job(session_id)["execution_budget_id"] == budget.id
+
+
+def _open(job_store: SQLiteJobStore) -> str:
+    """Open the judge session of draft ``d1`` with a 500-cent limit.
+
+    Args:
+        job_store: The store.
+
+    Returns:
+        The session id.
+    """
+    return repo_judge.open_session(
+        _open_request(),
+        repo_judge.judge_key("d1", "e" * 16),
+        "budget-key",
+        SimpleNamespace(username=USER),
+        job_store=job_store,
+        token=None,
+        floor_cents=100,
+        draft_id="d1",
+    )
+
+
+def test_a_stop_run_while_the_session_opens_keeps_it_ended_and_closes_its_budget(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a session cancelled by a stop_run during its open, close the budget the open attached, and pay nothing."""
+    _fake_open_gates(monkeypatch)
+    owner = AuthenticatedUser(username=USER, role="user", groups=())
+    stops: list[str] = []
+    real = store.set_payload_overview
+
+    def overview(session_id: str, data: dict[str, Any]) -> None:
+        """Write the overview, then stop the session through the stop_run route, as the owner can from this point.
+
+        Args:
+            session_id: The session.
+            data: The overview.
+        """
+        real(session_id, data)
+        stops.append(cancel_optimization(store, session_id, owner, None).status)
+
+    monkeypatch.setattr(store, "set_payload_overview", overview)
+    session_id = _open(store)
+    job = store.get_job(session_id)
+    assert stops == ["cancelled"]
+    assert (job["status"], job["message"]) == ("cancelled", "The judge session ended before its final score.")
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state, budget.blocked_reason) == (session_id, "closed", "judge_ended")
+    assert repo_judge.open_session_ids(store.engine, USER, "d1") == []
+    answer = _call(store, session_id)
+    assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
+    assert boxes["paid"] == []
+
+
+def test_a_cancel_before_the_opening_write_keeps_the_session_ended_and_attaches_no_budget(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a row that an admin cancelled while it was still pending, and leave the new budget unattached."""
+    _fake_open_gates(monkeypatch)
+    real = store.create_job
+
+    def create(session_id: str, **kwargs: Any) -> None:
+        """Create the row, then cancel it as the admin cancel route does while the row is pending.
+
+        Args:
+            session_id: The session.
+            **kwargs: The row's fields.
+        """
+        real(session_id, **kwargs)
+        store.update_job(session_id, status="cancelled")
+
+    monkeypatch.setattr(store, "create_job", create)
+    session_id = _open(store)
+    job = store.get_job(session_id)
+    assert (job["status"], job["execution_budget_id"]) == ("cancelled", None)
+    budget = BudgetService(engine=store.engine).find_by_creation_key(USER, "budget-key")
+    assert budget is not None
+    assert (budget.job_id, budget.state, budget.reserved_cents) == (None, "open", 0)
+    answer = _call(store, session_id)
+    assert (answer["status"], answer["run_status"]) == ("ended", "cancelled")
+    assert boxes["paid"] == []

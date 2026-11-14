@@ -258,7 +258,9 @@ def open_session(
         resume_id: Row an interrupted open left behind, to finish opening.
 
     Returns:
-        The session id.
+        The session id. A stop or a cancel can end the session while it
+        opens; the open then leaves the row ended and its budget closed or
+        unattached, and the caller's next call gets the ended answer.
 
     Raises:
         DomainError: 402 without balance, 409 for a quota or budget conflict.
@@ -317,7 +319,11 @@ def open_session(
         except IntegrityError as error:
             raise JudgePendingError("Another call opens this judge session.") from error
         # Running, not pending: no worker may claim the row, and the sweeper skips judge rows.
-        job_store.update_job(session_id, status="running", started_at=_utc_now(), payload={"judge": {"opening": True}})
+        if not job_store.update_job_if_status(
+            session_id, ("pending",), status="running", started_at=_utc_now(), payload={"judge": {"opening": True}}
+        ):
+            # Cancelled before the open wrote it; the budget stays open, unattached and holds no money.
+            return session_id
     try:
         attached = budgets.attach_to_job(budget.id, username, session_id, expected_revision=budget.revision)
     except BudgetError as error:
@@ -350,14 +356,20 @@ def open_session(
         "floor_cents": floor_cents,
     }
     dump["execution_budget_generation"] = attached.generation
-    job_store.update_job(
+    if not job_store.update_job_if_status(
         session_id,
+        ("running",),
         payload=dump,
-        status="running",
         code_version=settings.code_version,
         execution_budget_id=attached.id,
         execution_budget_generation=attached.generation,
-    )
+    ):
+        # A stop_run during the open ended the row, but the row did not name this budget yet, so its end left it open.
+        try:
+            budgets.stop_admission(attached.id, username, reason="judge_ended")
+        except BudgetError:
+            logger.warning("judge session %s: the budget did not close", session_id)
+        return session_id
     image = protected_image(settings)
     if image is not None:
         job_store.pin_sandbox_image(session_id, image)
