@@ -585,7 +585,7 @@ def is_effortless_model(name: str) -> bool:
         # Before the boot prewarm lands, wait for its build (or start one):
         # otherwise a stored effortless pick fails validation once with a 422.
         # Joining the shared refresh thread keeps it to one build at a time.
-        refresh = _kick_background_refresh()
+        refresh = _kick_background_refresh(only_when_cold=True)
         if refresh is not None:
             refresh.join()
     if name in _hidden_effortless_values:
@@ -1810,8 +1810,13 @@ def _refresh_catalog_in_background() -> None:
         )
 
 
-def _kick_background_refresh() -> Thread | None:
+def _kick_background_refresh(*, only_when_cold: bool = False) -> Thread | None:
     """Spawn the background refresh thread if one isn't already running.
+
+    Args:
+        only_when_cold: Start no refresh when the cache already holds a
+            catalog. A cold caller checks the cache without the lock, so a
+            refresh can land before it gets here.
 
     Returns:
         The current refresh thread, read under the cache lock, so it has
@@ -1819,7 +1824,7 @@ def _kick_background_refresh() -> Thread | None:
     """
     global _refresh_in_flight, _refresh_thread
     with _cache_lock:
-        if _refresh_in_flight:
+        if _refresh_in_flight or (only_when_cold and _cached_response is not None):
             return _refresh_thread
         _refresh_in_flight = True
         # Set with the flag, so a caller that sees the flag can join this thread.

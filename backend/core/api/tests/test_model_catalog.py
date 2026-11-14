@@ -1141,6 +1141,16 @@ def test_two_cold_effort_checks_at_once_share_one_build(monkeypatch: pytest.Monk
     assert len(builds) == 1
 
 
+def test_a_cold_kick_after_a_landed_refresh_starts_no_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check that read an empty cache just before a refresh landed starts no second build."""
+    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[]))
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+
+    assert mc._kick_background_refresh(only_when_cold=True) is None
+    assert mc._refresh_in_flight is False
+
+
 def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
     """Below-``low`` efforts are skipped, and a model that thinks by default still gets its catalog default."""
 
@@ -1207,13 +1217,16 @@ def test_cold_effort_check_joins_the_thread_the_kick_returns(monkeypatch: pytest
     plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
     real_kick = mc._kick_background_refresh
 
-    def kick_then_replace() -> threading.Thread | None:
+    def kick_then_replace(*, only_when_cold: bool = False) -> threading.Thread | None:
         """Start the refresh, then store an unstarted thread, as a racing new refresh can.
+
+        Args:
+            only_when_cold: Passed on to the real kick.
 
         Returns:
             The thread the real kick returned.
         """
-        thread = real_kick()
+        thread = real_kick(only_when_cold=only_when_cold)
         mc._refresh_thread = threading.Thread(target=lambda: None)
         return thread
 
