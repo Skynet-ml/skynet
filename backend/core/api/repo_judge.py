@@ -19,9 +19,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import tempfile
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -60,7 +62,7 @@ from ..constants import (
     PAYLOAD_OVERVIEW_TOKEN_SOURCES_BY_MODEL,
     PAYLOAD_OVERVIEW_USERNAME,
 )
-from ..exceptions import ServiceError
+from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..models import BlackboxRunRequest, JobCancelResponse
 from ..models.blackbox import BLACKBOX_MODULE_NAME, BlackboxNamedScore, BlackboxRunResponse
 from ..sandbox.bridge import default_provider
@@ -112,6 +114,9 @@ _LEASE_MARGIN_SECONDS = 60
 _MESSAGE_CHARS = 2000
 ENDED_DETAIL = "This judge session ended. Call get_run with session_id for its final score."
 _END_MESSAGE = "The judge session ended and scored its best version once."
+_NO_FINAL_MESSAGE = "The budget ran out before the final score, so the session has no held-out score."
+# A retry can succeed after these failures, so a call does not store them as its result.
+_TRANSIENT_ERRORS = (RepoFetchError, InfrastructureInterruptionError)
 
 
 class JudgeError(Exception):
@@ -404,6 +409,57 @@ def _search_cases(cases: list[Any], seed: int | None) -> list[tuple[int, Any]]:
     return sorted(chosen.values(), key=lambda item: item[0])
 
 
+def _final_cases(cases: list[Any], seed: int | None) -> tuple[list[Any], bool]:
+    """Choose the cases the end scores: the held-out ones, or every case when the split holds none out.
+
+    Args:
+        cases: The staged cases, in their order.
+        seed: The session's seed.
+
+    Returns:
+        The cases, and whether they are held-out cases.
+    """
+    splits = legacy_case_splits(cases, seed) if cases else None
+    if splits is not None and splits.test:
+        return list(splits.test), True
+    return cases, False
+
+
+def needed_cents(floor_cents: int, calls: list[dict[str, Any]], final_count: int) -> int:
+    """Return the headroom a call needs: its own hold and the reserve of the final score.
+
+    The reserve is one floor until a call scored. Then it is 1.5 times the
+    mean settled spend per search case times the final case count, and never
+    below one floor. Without cases, one score of the version counts as a case.
+
+    Args:
+        floor_cents: Smallest limit of one scored call.
+        calls: The stored results of the session's scored calls.
+        final_count: How many cases the final score runs (1 without cases).
+
+    Returns:
+        The cents that must remain unspent before a call starts.
+    """
+    reserve = floor_cents
+    cases = sum(max(len(call.get("cases") or []), 1) for call in calls)
+    if cases:
+        spent = sum(Decimal(str(call.get("spent_cents") or 0)) for call in calls)
+        reserve = max(floor_cents, math.ceil(Decimal(3) * spent * final_count / (2 * cases)))
+    return floor_cents + reserve
+
+
+def session_minimum_cents(floor_cents: int) -> int:
+    """Return the smallest limit of a judge session: one call and the final score.
+
+    Args:
+        floor_cents: Smallest limit of one scored call.
+
+    Returns:
+        The minimum ``max_cost_cents``.
+    """
+    return needed_cents(floor_cents, [], 1)
+
+
 def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str) -> FinalRun:
     """Score a patch on cases with the staged repository scorer.
 
@@ -609,12 +665,24 @@ def judge_call(
     sha = _sha256(patch)
     budget = _budget(job_store, job)
     assert budget is not None
-    floor = int(judge.get("floor_cents") or 0)
-    # One call and the end's final score each need a floor, so the session
-    # ends while the budget still pays for the final score.
-    if budget.state != "attached" or (not budget.uncapped and budget.available_cents < 2 * floor):
+    final_row = _final_row(job_store.engine, budget.id)
+    if final_row is not None:
+        return _ending_answer(job_store, job, final_row)
+    if budget.state != "attached":
         ended = end_session(job_store, job, ended_by="budget")
         return _ended_answer(session_id, ended.status)
+    if not budget.uncapped:
+        final_cases, _held_out = _final_cases(list(payload.get("cases") or []), payload.get("seed"))
+        needed = needed_cents(
+            int(judge.get("floor_cents") or 0), _scored_results(job_store.engine, budget.id), max(len(final_cases), 1)
+        )
+        # The session ends while the budget still pays for the final score.
+        if budget.total_cents - budget.setup_spent_cents - budget.run_spent_cents < needed:
+            ended = end_session(job_store, job, ended_by="budget")
+            return _ended_answer(session_id, ended.status)
+        if budget.available_cents < needed:
+            # Only the holds of calls in flight are in the way, and they release when those calls settle.
+            raise JudgePendingError("Other calls of this session hold its budget. Call again with the same arguments.")
     store = _store(job_store.engine, payload)
     try:
         claim = store.claim(
@@ -633,6 +701,15 @@ def judge_call(
     if claim.token is None:
         return _replay(claim.document, session_id, _budget(job_store, job))
     token_ = claim.token
+    # The end's claim takes the same budget lock, so an end that claimed first is visible here.
+    if _final_row(job_store.engine, budget.id) is not None:
+        store.finish(
+            identity,
+            claim_token=token_,
+            status="failed",
+            result=_failure("judge.session_ended", "The judge session ended before this call scored."),
+        )
+        return _ended_answer(session_id, str(job_store.get_job(session_id)["status"]))
 
     def refuse(protected: dict[str, Any], staged: StagedRepository) -> None:
         """Refuse a candidate that changes the contract or a protected path, before any paid box.
@@ -642,7 +719,7 @@ def judge_call(
             staged: The staged repository.
 
         Raises:
-            _RefusedError: With the first broken rule.
+            _RefusedError: With every broken rule.
         """
         problems = patch_violations(
             patch,
@@ -652,9 +729,10 @@ def judge_call(
             exploit_paths=(staged.exploits_path,),
         )
         if problems:
-            raise _RefusedError(problems[0])
+            raise _RefusedError(" ".join(problems))
 
     budget_ended = False
+    transient = False
     error: JudgeError | None = None
     try:
         with store.heartbeat(identity, claim_token=token_):
@@ -672,6 +750,12 @@ def judge_call(
                 ) as (protected, staged, _gateway):
                     chosen = _search_cases(list(protected.get("cases") or []), payload.get("seed"))
                     final = _score(staged, patch, [case for _, case in chosen], label="candidate")
+                after = _budget(job_store, job)
+                assert after is not None
+                # Concurrent calls that settle in this window count too, so their overlap makes the spend err high.
+                spent = (
+                    after.setup_spent_cents + after.run_spent_cents - budget.setup_spent_cents - budget.run_spent_cents
+                )
                 result = {
                     "score": final.score,
                     "named_scores": _named(final),
@@ -682,6 +766,7 @@ def judge_call(
                     ],
                     "failed_cases": len(final.failures),
                     "patch_sha256": sha,
+                    "spent_cents": float(max(spent, Decimal(0))),
                 }
                 document = store.finish(
                     identity,
@@ -713,13 +798,27 @@ def judge_call(
                     identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
                 )
             except (ServiceError, RuntimeError, ValueError) as exc:
-                # ValueError covers the other budget errors; the message never holds metric code.
-                error = JudgeError("judge.score_failed", str(exc))
-                document = store.finish(
-                    identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
-                )
+                if isinstance(exc, _TRANSIENT_ERRORS) or isinstance(exc.__cause__, _TRANSIENT_ERRORS):
+                    transient = True
+                    # No judge_error, so the next claim runs the call again instead of replaying it.
+                    document = store.finish(
+                        identity,
+                        claim_token=token_,
+                        status="pending",
+                        result={"checks": [{"key": "judge", "status": "pending"}], "_retry_after_usage": True},
+                    )
+                else:
+                    # ValueError covers the other budget errors; the message never holds metric code.
+                    error = JudgeError("judge.score_failed", str(exc))
+                    document = store.finish(
+                        identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
+                    )
     except BudgetConflictError as exc:
         raise JudgePendingError("The session's budget changed during the call.") from exc
+    if transient:
+        raise JudgePendingError(
+            "A temporary repository or sandbox failure stopped the call. Call again with the same arguments."
+        )
     if budget_ended:
         ended = end_session(job_store, job_store.get_job(session_id), ended_by="budget")
         return _ended_answer(session_id, ended.status)
@@ -728,6 +827,99 @@ def judge_call(
     if document.get("status") != "succeeded":
         raise JudgePendingError("The call's usage settles. Call again with the same arguments.")
     return _scored_answer(session_id, document["judge_result"], _budget(job_store, job))
+
+
+def _rows(engine: Any, budget_id: str, scope: str, statuses: tuple[str, ...] | None = None) -> list[Any]:
+    """Read the session's evidence rows of one scope.
+
+    Args:
+        engine: Database that holds the evidence.
+        budget_id: The session's budget.
+        scope: ``judge`` or ``judge-final``.
+        statuses: Only rows with one of these statuses, or every row.
+
+    Returns:
+        The rows.
+    """
+    query = select(WizardPreflightModel).where(
+        WizardPreflightModel.budget_id == budget_id, WizardPreflightModel.scope == scope
+    )
+    if statuses is not None:
+        query = query.where(WizardPreflightModel.status.in_(statuses))
+    with Session(engine) as session:
+        return list(session.scalars(query))
+
+
+def _scored_results(engine: Any, budget_id: str) -> list[dict[str, Any]]:
+    """Return the stored results of the session's scored calls.
+
+    Args:
+        engine: Database that holds the evidence.
+        budget_id: The session's budget.
+
+    Returns:
+        Each scored call's ``judge_result``.
+    """
+    rows = _rows(engine, budget_id, JUDGE_SCOPE, ("succeeded", "pending"))
+    return [row.result["judge_result"] for row in rows if isinstance((row.result or {}).get("judge_result"), dict)]
+
+
+def _final_row(engine: Any, budget_id: str) -> Any | None:
+    """Return the end's evidence row: once it exists, the session is ending.
+
+    Args:
+        engine: Database that holds the evidence.
+        budget_id: The session's budget.
+
+    Returns:
+        The row, or ``None`` before an end claimed.
+    """
+    return next(iter(_rows(engine, budget_id, FINAL_SCOPE)), None)
+
+
+def _live_calls(engine: Any, budget_id: str) -> bool:
+    """Tell whether a call of the session still runs under a lease its heartbeat renews.
+
+    A crashed call's lease expires, and the next claim marks its row pending,
+    so a dead call never holds the end.
+
+    Args:
+        engine: Database that holds the evidence.
+        budget_id: The session's budget.
+
+    Returns:
+        True while a live call runs.
+    """
+    now = datetime.now(UTC)
+    for row in _rows(engine, budget_id, JUDGE_SCOPE, ("running",)):
+        expires = row.lease_expires_at
+        if expires is not None and (expires if expires.tzinfo else expires.replace(tzinfo=UTC)) > now:
+            return True
+    return False
+
+
+def _ending_answer(job_store: Any, job: dict[str, Any], final_row: Any) -> dict[str, Any]:
+    """Answer a call in a session whose end claimed: the call runs no paid work.
+
+    An end that waits (its row is pending) runs again here, so a client that
+    keeps calling still drives the end to its final score.
+
+    Args:
+        job_store: Store that holds the session, its budget and its evidence.
+        job: The session's job record.
+        final_row: The end's evidence row.
+
+    Returns:
+        The ended answer.
+
+    Raises:
+        DomainError: 409 ``budget.pending`` while the end must still wait.
+    """
+    session_id = job["optimization_id"]
+    if final_row.status == "pending":
+        ended = end_session(job_store, job, ended_by=str((final_row.result or {}).get("ended_by") or "budget"))
+        return _ended_answer(session_id, ended.status)
+    return _ended_answer(session_id, str(job_store.get_job(session_id)["status"]))
 
 
 def _best_call(engine: Any, budget_id: str) -> tuple[dict[str, Any] | None, int]:
@@ -741,16 +933,7 @@ def _best_call(engine: Any, budget_id: str) -> tuple[dict[str, Any] | None, int]
         The best call's stored result (``None`` without a scored call), and
         how many calls the session scored.
     """
-    with Session(engine) as session:
-        rows = list(
-            session.scalars(
-                select(WizardPreflightModel).where(
-                    WizardPreflightModel.budget_id == budget_id,
-                    WizardPreflightModel.scope == JUDGE_SCOPE,
-                    WizardPreflightModel.status.in_(("succeeded", "pending")),
-                )
-            )
-        )
+    rows = _rows(engine, budget_id, JUDGE_SCOPE, ("succeeded", "pending"))
     done = [row for row in rows if isinstance((row.result or {}).get("judge_result"), dict)]
     scored = [row for row in done if isinstance(row.result["judge_result"].get("score"), int | float)]
     if not scored:
@@ -859,11 +1042,48 @@ def _final_result(
     return result
 
 
+def _reopen(job_store: Any, session_id: str, budget: BudgetSnapshot) -> BudgetSnapshot:
+    """Reopen a budget that a call closed at its limit, so the end can try the final score.
+
+    Only the ``budget_reached`` close reopens, and only for an open session
+    with a scored call. The budget total never changes, so the final score
+    still stops at the limit.
+
+    Args:
+        job_store: Store that holds the session and its budget.
+        session_id: The session.
+        budget: The session's closed budget.
+
+    Returns:
+        The reopened budget, or ``budget`` unchanged when it stays closed.
+
+    Raises:
+        DomainError: 409 ``budget.pending`` while paid work of the session settles.
+    """
+    if (
+        budget.blocked_reason != "budget_reached"
+        or job_store.get_job(session_id).get("status") not in _OPEN_STATUSES
+        or _best_call(job_store.engine, budget.id)[0] is None
+    ):
+        return budget
+    try:
+        return BudgetService(engine=job_store.engine).resume_admission(
+            budget.id, budget.username, expected_generation=budget.generation
+        )
+    except BudgetInFlightError as error:
+        raise DomainError("budget.pending", status=409) from error
+    except (BudgetInsufficientError, BudgetConflictError):
+        return budget
+
+
 def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCancelResponse:
     """End a judge session: score its best version once on the held-out cases.
 
     A retry after a crash finds the end's evidence row: a finished end
     returns the session status, and a running one answers ``budget.pending``.
+    The end also waits while a call of the session still runs, so that call
+    counts toward the best version. When a call closed the budget at its
+    limit, the end reopens it once to try the final score.
 
     Args:
         job_store: Store that holds the session, its budget and its evidence.
@@ -880,11 +1100,14 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
     username = job["username"]
     payload = job.get("payload") or {}
     budget = _budget(job_store, job)
+    if budget is not None and budget.state != "attached":
+        budget = _reopen(job_store, session_id, budget)
     if budget is None or budget.state != "attached":
         # Nothing can pay for a final score any more.
-        status = "cancelled" if budget is None else "stopped"
-        _stop(job_store, job, status, "The judge session ended before its final score.")
-        return JobCancelResponse(optimization_id=session_id, status=status)
+        reached = budget is not None and budget.blocked_reason == "budget_reached"
+        message = _NO_FINAL_MESSAGE if reached else "The judge session ended before its final score."
+        _stop(job_store, job, "cancelled" if budget is None else "stopped", message)
+        return JobCancelResponse(optimization_id=session_id, status=str(job_store.get_job(session_id)["status"]))
     store = _store(job_store.engine, payload)
     try:
         claim = store.claim(
@@ -903,6 +1126,11 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
             return JobCancelResponse(optimization_id=session_id, status=str(job_store.get_job(session_id)["status"]))
         raise DomainError("budget.pending", status=409)
     identity, token = claim.document["id"], claim.token
+    waiting = {"checks": [{"key": FINAL_SCOPE, "status": "pending"}], "_retry_after_usage": True, "ended_by": ended_by}
+    # After this claim no new call starts, and a claim marks a crashed call's row pending.
+    if _live_calls(job_store.engine, budget.id):
+        store.finish(identity, claim_token=token, status="pending", result=waiting)
+        raise DomainError("budget.pending", status=409)
     done = {"checks": [{"key": FINAL_SCOPE, "status": "succeeded"}]}
     best, calls = _best_call(job_store.engine, budget.id)
     started = time.perf_counter()
@@ -926,9 +1154,7 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                 ) as (protected, staged, _gateway):
                     cases = list(protected.get("cases") or [])
                     seed = payload.get("seed")
-                    splits = legacy_case_splits(cases, seed) if cases else None
-                    held_out = splits is not None and bool(splits.test)
-                    final_cases = list(splits.test) if splits is not None and held_out else cases
+                    final_cases, held_out = _final_cases(cases, seed)
                     final = _score(staged, best["_patch"], final_cases, label="best version")
                     result = _final_result(
                         final,
@@ -944,16 +1170,11 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                         image=job.get("sandbox_image"),
                     )
             except (UsagePendingError, BudgetInFlightError) as error:
-                store.finish(
-                    identity,
-                    claim_token=token,
-                    status="pending",
-                    result={"checks": [{"key": FINAL_SCOPE, "status": "pending"}], "_retry_after_usage": True},
-                )
+                store.finish(identity, claim_token=token, status="pending", result=waiting)
                 raise DomainError("budget.pending", status=409) from error
             except (BudgetReached, BudgetInsufficientError):
                 status = "stopped"
-                _stop(job_store, job, status, "The budget ran out before the final score.")
+                _stop(job_store, job, status, _NO_FINAL_MESSAGE)
             except (ServiceError, RuntimeError, ValueError) as error:
                 status = "failed"
                 _stop(job_store, job, status, f"The final score failed: {str(error)[:_MESSAGE_CHARS]}")

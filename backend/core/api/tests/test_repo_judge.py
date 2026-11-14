@@ -19,9 +19,11 @@ from typing import Any
 import pytest
 from sqlalchemy.orm import Session
 
-from ...billing.budgets import BudgetService
+from ...billing.budgets import BudgetInsufficientError, BudgetService
 from ...billing.runtime import UsagePendingError
-from ...exceptions import ServiceError
+from ...billing.signals import BudgetReached
+from ...connectors.github_repo import RepoRateLimitError
+from ...exceptions import InfrastructureInterruptionError, ServiceError
 from ...models.blackbox import BlackboxNamedScore
 from ...service_gateway.optimization.blackbox.service import FinalRun
 from ...storage.models import BillingCustomerModel
@@ -35,6 +37,8 @@ GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/
 CONTRACT_PATCH = (
     "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n@@ -1 +1 @@\n-a\n+b\n"
 )
+OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-a\n+c\n"
+OUTSIDE_PATCH = "diff --git a/other/x.py b/other/x.py\n--- a/other/x.py\n+++ b/other/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 
 
 @pytest.fixture
@@ -54,6 +58,36 @@ def store() -> Iterator[SQLiteJobStore]:
     job_store.engine.dispose()
 
 
+def _charge(attempt: dict[str, Any], cents: int) -> None:
+    """Pay for one score through the real ledger, and close the budget at its limit as the run runtime does.
+
+    Args:
+        attempt: The scorer arguments of the attempt.
+        cents: What the score costs.
+
+    Raises:
+        BudgetReached: When the budget cannot hold the cost.
+    """
+    service = BudgetService(engine=attempt["engine"])
+    try:
+        operation = service.reserve(
+            attempt["budget_id"],
+            USER,
+            operation_key=attempt["owner_id"],
+            generation=attempt["generation"],
+            phase="run",
+            cost_kind="sandbox",
+            request_fingerprint="fp",
+            price_snapshot={"version": "v1"},
+            max_cents=cents,
+        )
+    except BudgetInsufficientError as error:
+        service.stop_admission(attempt["budget_id"], USER, reason="budget_reached")
+        raise BudgetReached(str(error)) from error
+    service.mark_dispatched(operation.id, USER)
+    service.settle(operation.id, USER, evidence_key="final", actual_cents=cents, evidence={})
+
+
 @pytest.fixture
 def boxes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace the staging and the scorer boxes with counted fakes.
@@ -64,13 +98,23 @@ def boxes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     Returns:
         A mutable record: ``paid`` lists each attempt that reached the paid
         boxes, ``scored`` lists each ``(patch, case count, label)``, ``score``
-        maps a patch to its score, and ``raise`` makes the next score raise.
+        maps a patch to its score, ``raise`` makes the next score raise,
+        ``hook`` runs once at the start of the next score, and ``charge`` maps
+        a label to the cents that one case of that score settles.
     """
-    record: dict[str, Any] = {"paid": [], "scored": [], "score": {}, "raise": None, "staged": []}
+    record: dict[str, Any] = {
+        "paid": [],
+        "scored": [],
+        "score": {},
+        "raise": None,
+        "hook": None,
+        "charge": {},
+        "staged": [],
+    }
 
     @contextmanager
     def scorer(
-        payload: dict[str, Any], *, before_scoring: Any = None, owner_id: str, **_kwargs: Any
+        payload: dict[str, Any], *, before_scoring: Any = None, owner_id: str, **kwargs: Any
     ) -> Iterator[tuple[dict[str, Any], Any, Any]]:
         """Stage nothing and check the candidate as the real scorer does, before any paid box.
 
@@ -78,11 +122,12 @@ def boxes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             payload: The session payload.
             before_scoring: The judge's refusal check.
             owner_id: The attempt's owner id.
-            **_kwargs: The other scorer arguments.
+            **kwargs: The other scorer arguments; the budget ones pay for ``charge``.
 
         Yields:
             A protected payload, a staged repository and no gateway.
         """
+        record["attempt"] = {"owner_id": owner_id, **kwargs}
         record["staged"].append(owner_id)
         protected = {"target": {"repo": {"editable_paths": ["src"]}}, "cases": payload.get("cases") or []}
         staged = SimpleNamespace(
@@ -111,6 +156,11 @@ def boxes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         Raises:
             BaseException: The error the test set in ``record["raise"]``.
         """
+        if record["hook"] is not None:
+            hook, record["hook"] = record["hook"], None
+            hook()
+        if record["charge"].get(label):
+            _charge(record["attempt"], record["charge"][label] * max(len(cases), 1))
         if record["raise"] is not None:
             error, record["raise"] = record["raise"], None
             raise error
@@ -341,7 +391,7 @@ def test_stop_scores_the_best_version_once_on_the_held_out_cases(store: SQLiteJo
     # A second stop finds the finished end and scores nothing again.
     scored = len(boxes["scored"])
     again = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
-    assert again.status in ("success", "stopped")
+    assert again.status == "success"
     assert len(boxes["scored"]) == scored
 
 
@@ -387,6 +437,198 @@ def test_a_call_after_the_end_answers_ended(store: SQLiteJobStore, boxes: Any) -
     answer = _call(store, session_id)
     assert answer["status"] == "ended"
     assert answer["run_status"] == "success"
+
+
+def test_a_call_that_reaches_the_budget_still_ends_with_the_held_out_score(store: SQLiteJobStore, boxes: Any) -> None:
+    """Reopen a budget that a call closed at its limit, and score the best version on the held-out cases."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    budget_id = store.get_job(session_id)["execution_budget_id"]
+    boxes["hook"] = lambda: BudgetService(engine=store.engine).stop_admission(budget_id, USER, reason="budget_reached")
+    boxes["raise"] = BudgetReached("over")
+    answer = _call(store, session_id, OTHER_PATCH)
+    assert (answer["status"], answer["run_status"]) == ("ended", "success")
+    patch, _count, label = boxes["scored"][-1]
+    assert (patch, label) == (GOOD_PATCH, "best version")
+    details = store.get_job(session_id)["result"]["details"]
+    assert details["judge"]["ended_by"] == "budget"
+    assert details["judge"]["held_out"] is True
+    assert details["record"]["held_out"] is True
+
+
+def _three_calls(job_store: SQLiteJobStore, session_id: str) -> list[dict[str, Any]]:
+    """Score three different patches in a session.
+
+    Args:
+        job_store: The store.
+        session_id: The session.
+
+    Returns:
+        The three answers.
+    """
+    return [_call(job_store, session_id, GOOD_PATCH.replace("+b", f"+v{index}")) for index in range(3)]
+
+
+def test_the_session_ends_while_the_budget_still_pays_for_the_final_score(store: SQLiteJobStore, boxes: Any) -> None:
+    """End before a call spends the final score's reserve, which grows with the settled spend per case."""
+    # Two calls settle 90 each; the reserve then is 1.5 * 30 * 3 = 135, so 200 left cannot pay a call and the end.
+    session_id = _session(store, _cases(3), total=380, floor=90)
+    boxes["charge"] = {"candidate": 30, "best version": 40}
+    answers = _three_calls(store, session_id)
+    assert [answer["status"] for answer in answers] == ["scored", "scored", "ended"]
+    assert answers[-1]["run_status"] == "success"
+    assert boxes["scored"][-1][2] == "best version"
+    assert _spent(store, session_id) == 300
+
+
+def test_an_end_that_cannot_pay_the_final_score_stops_without_a_held_out_score(
+    store: SQLiteJobStore, boxes: Any
+) -> None:
+    """Stop the session with a plain message, and never spend above the limit."""
+    session_id = _session(store, _cases(3), total=380, floor=90)
+    boxes["charge"] = {"candidate": 30, "best version": 100}
+    answers = _three_calls(store, session_id)
+    assert [answer["status"] for answer in answers] == ["scored", "scored", "ended"]
+    assert answers[-1]["run_status"] == "stopped"
+    job = store.get_job(session_id)
+    assert job["status"] == "stopped"
+    assert "no held-out score" in job["message"]
+    assert all(label != "best version" for _patch, _count, label in boxes["scored"])
+    assert _spent(store, session_id) <= 380
+
+
+def test_a_held_reservation_answers_in_progress_and_keeps_the_session_open(store: SQLiteJobStore, boxes: Any) -> None:
+    """Ask the client to call again while only the holds of calls in flight block the call."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    job = store.get_job(session_id)
+    budgets = BudgetService(engine=store.engine)
+    budgets.reserve(
+        job["execution_budget_id"],
+        USER,
+        operation_key="other-call",
+        generation=job["execution_budget_generation"],
+        phase="run",
+        cost_kind="sandbox",
+        request_fingerprint="fp",
+        price_snapshot={"version": "v1"},
+        max_cents=850,
+    )
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id, OTHER_PATCH)
+    assert store.get_job(session_id)["status"] == "running"
+    assert budgets.get(job["execution_budget_id"], USER).state == "attached"
+    assert len(boxes["paid"]) == 1
+
+
+def test_a_late_stop_reports_the_stored_status(store: SQLiteJobStore, boxes: Any) -> None:
+    """Answer success to a stop that read the session before another stop ended it."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    stale = store.get_job(session_id)
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "success"
+    assert repo_judge.end_session(store, stale, ended_by="stop_run").status == "success"
+
+
+def test_a_call_during_the_end_answers_ended_and_is_not_scored(store: SQLiteJobStore, boxes: Any) -> None:
+    """Give a call that starts while the end scores the ended answer, with no paid box."""
+    session_id = _session(store, _cases(10))
+    boxes["score"][OTHER_PATCH] = 0.99
+    _call(store, session_id)
+    inner: dict[str, Any] = {}
+    boxes["hook"] = lambda: inner.setdefault("answer", _call(store, session_id, OTHER_PATCH))
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "success"
+    assert inner["answer"]["status"] == "ended"
+    assert all(patch != OTHER_PATCH for patch, _count, _label in boxes["scored"])
+    assert len(boxes["paid"]) == 2
+    assert store.get_job(session_id)["result"]["best_candidate"] == GOOD_PATCH
+
+
+def test_a_call_that_claims_after_the_end_claimed_scores_nothing(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close the call's row as ended when the end claims between the call's check and its claim."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    boxes["raise"] = UsagePendingError("usage pending")
+    with pytest.raises(DomainError):
+        repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    real = repo_judge._final_row
+    lookups: list[int] = []
+
+    def late_final_row(engine: Any, budget_id: str) -> Any:
+        """Miss the end's row on the first lookup, as a call that checked before the end claimed.
+
+        Args:
+            engine: Database that holds the evidence.
+            budget_id: The session's budget.
+
+        Returns:
+            ``None`` first, then the real row.
+        """
+        lookups.append(1)
+        return None if len(lookups) == 1 else real(engine, budget_id)
+
+    monkeypatch.setattr(repo_judge, "_final_row", late_final_row)
+    answer = _call(store, session_id, OTHER_PATCH)
+    assert answer["status"] == "ended"
+    assert len(boxes["paid"]) == 2
+    budget_id = store.get_job(session_id)["execution_budget_id"]
+    assert repo_judge._best_call(store.engine, budget_id)[1] == 1
+
+
+def test_the_end_waits_while_a_call_runs_and_then_counts_it(store: SQLiteJobStore, boxes: Any) -> None:
+    """Answer budget.pending to an end while a call scores, and count that call at the next end."""
+    session_id = _session(store, _cases(10))
+    boxes["score"][OTHER_PATCH] = 0.99
+    _call(store, session_id)
+    inner: dict[str, Any] = {}
+
+    def end_inside() -> None:
+        """Try to end the session while the call scores."""
+        with pytest.raises(DomainError) as pending:
+            repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+        inner["code"] = pending.value.code
+
+    boxes["hook"] = end_inside
+    assert _call(store, session_id, OTHER_PATCH)["status"] == "scored"
+    assert inner["code"] == "budget.pending"
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "success"
+    assert store.get_job(session_id)["result"]["best_candidate"] == OTHER_PATCH
+
+
+def _wrapped_interruption() -> ServiceError:
+    """Build a scorer error caused by a sandbox interruption.
+
+    Returns:
+        The wrapped error.
+    """
+    error = ServiceError("scorer failed")
+    error.__cause__ = InfrastructureInterruptionError("the sandbox connection dropped")
+    return error
+
+
+@pytest.mark.parametrize("failure", [lambda: RepoRateLimitError("rate limit"), _wrapped_interruption])
+def test_a_temporary_failure_answers_in_progress_and_a_retry_scores(
+    store: SQLiteJobStore, boxes: Any, failure: Any
+) -> None:
+    """Leave the call free for a retry after a temporary failure, and replay the score after it."""
+    session_id = _session(store, _cases(3))
+    boxes["raise"] = failure()
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id)
+    assert _call(store, session_id)["status"] == "scored"
+    assert _call(store, session_id)["status"] == "scored"
+    assert len(boxes["paid"]) == 2
+
+
+def test_a_refusal_names_every_broken_rule(store: SQLiteJobStore, boxes: Any) -> None:
+    """Report the contract change and the path outside the editable paths in one refusal."""
+    session_id = _session(store, _cases(3))
+    with pytest.raises(repo_judge.JudgeError) as refused:
+        _call(store, session_id, CONTRACT_PATCH + OUTSIDE_PATCH)
+    assert "optimize.toml" in refused.value.detail
+    assert "other/x.py" in refused.value.detail
 
 
 def test_open_session_ids_lists_only_open_sessions_of_the_draft(store: SQLiteJobStore) -> None:

@@ -72,6 +72,7 @@ from .repo_judge import (
     judge_key,
     open_session,
     open_session_ids,
+    session_minimum_cents,
 )
 from .routers.connectors import connector_secret
 from .routers.execution_budgets import budget_http_error
@@ -758,6 +759,7 @@ def _ready_request(
     *,
     job_store: Any,
     http_client: Callable[[], httpx.Client],
+    session_minimum: Callable[[int], int] | None = None,
 ) -> tuple[BlackboxRunRequest, str, str | None]:
     """Check a whole draft and its limit, and build the run request and its keys.
 
@@ -774,6 +776,7 @@ def _ready_request(
         user: Account that asks.
         job_store: Store that holds the draft's data, the hardening jobs and the wallet.
         http_client: Factory for the model catalog client.
+        session_minimum: For a judge session, the rule that turns the run's floor into the session's minimum.
 
     Returns:
         The run request, the submission key, and the budget creation key.
@@ -787,16 +790,15 @@ def _ready_request(
     if issues:
         raise ToolError(json.dumps({"code": "draft.not_ready", "issues": issues, "next_tool": "repo_draft_review"}))
     floor = price["min_max_cost_cents"]
-    if max_cost_cents < floor:
-        raise ToolError(
-            json.dumps(
-                {
-                    "code": "budget.below_minimum",
-                    "detail": f"max_cost_cents {max_cost_cents} is below this run's minimum of {floor} cents.",
-                    "min_max_cost_cents": floor,
-                }
-            )
+    minimum = floor if session_minimum is None else session_minimum(floor)
+    if max_cost_cents < minimum:
+        detail = (
+            f"max_cost_cents {max_cost_cents} is below this run's minimum of {floor} cents."
+            if session_minimum is None
+            else f"A judge session needs max_cost_cents of at least {minimum} cents: "
+            "one scored call and the final score."
         )
+        raise ToolError(json.dumps({"code": "budget.below_minimum", "detail": detail, "min_max_cost_cents": minimum}))
     if hardening_job_id is not None:
         with Session(job_store.engine) as session:
             _load_hardening_job(session, user.username, hardening_job_id, lock=False)
@@ -998,6 +1000,8 @@ def judge_draft(
     job = job_store.get_job(session_id) if session_id else None
     if job is not None and job.get("status") not in ("pending", "running"):
         raise ToolError(json.dumps({"code": "judge.session_ended", "detail": ENDED_DETAIL, "session_id": session_id}))
+    # Not atomic: two first calls with different limits can open two sessions. Each budget
+    # still caps its own spend, so that costs no money and gives no wrong score (SKY-696).
     if job is None and open_session_ids(job_store.engine, user.username, draft_id):
         raise ToolError(
             json.dumps(
@@ -1016,21 +1020,17 @@ def judge_draft(
         token = _github_token(job_store, user.username, provider)
     if job is None or is_opening(job):
         request, key, budget_key = _ready_request(
-            spec, draft_id, max_cost_cents, None, key, user, job_store=job_store, http_client=http_client
+            spec,
+            draft_id,
+            max_cost_cents,
+            None,
+            key,
+            user,
+            job_store=job_store,
+            http_client=http_client,
+            session_minimum=session_minimum_cents,
         )
         floor = repo_floor_cents(spec, http_client)[0]
-        # One scored call and the end's final score each need the floor.
-        if max_cost_cents < 2 * floor:
-            raise ToolError(
-                json.dumps(
-                    {
-                        "code": "budget.below_minimum",
-                        "detail": f"A judge session needs max_cost_cents of at least {2 * floor} cents: "
-                        "one scored call and the final score.",
-                        "min_max_cost_cents": 2 * floor,
-                    }
-                )
-            )
         session_id = open_session(
             request,
             key,
@@ -1550,8 +1550,9 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Score your own version of the repository against the draft's metric. It spends from max_cost_cents.
 
         Send exactly one of candidate_commit and candidate_patch. The first
-        call opens a judge session with one budget of max_cost_cents; later
-        calls with the same draft_id and max_cost_cents score in it. Skynet
+        call opens a judge session with one budget of max_cost_cents, at
+        least two times the draft's minimum (one call and the final score);
+        later calls with the same draft_id and max_cost_cents score in it. Skynet
         reads optimize.toml at the base commit and refuses a version that
         changes it or a protected path. The answer has the score, the named
         scores and the feedback on the search cases only. A retry with the

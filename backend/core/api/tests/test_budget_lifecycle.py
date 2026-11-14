@@ -88,3 +88,46 @@ def test_cancel_of_a_judge_session_ends_it_with_the_final_score(monkeypatch: pyt
     assert response.json() == {"optimization_id": "judge-session", "status": "success"}
     assert ends == [("judge-session", "stop_run")]
     assert store.get_job("judge-session")["status"] == "running"
+
+
+def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave a judge session (SKY-696) to stop_run, with its budget open, and still cancel the other run."""
+    store = _BaseFakeJobStore()
+    store.seed_job("judge-session", status="running", username="alice")
+    store.update_job("judge-session", execution_budget_id="judge-budget", payload={"judge": {"version": 1}})
+    store.seed_job("normal-run", status="running", username="alice")
+    store.update_job("normal-run", execution_budget_id="run-budget")
+    store.engine = object()
+    stops = []
+    ends = []
+
+    class Budgets:
+        """Record each budget close without creating any paid work."""
+
+        def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
+            """Record the close.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                reason: Why the budget closes.
+            """
+            stops.append((identity, reason))
+
+    monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
+    monkeypatch.setattr(lifecycle.repo_judge, "end_session", lambda *args, **kwargs: ends.append(args))
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+    response = TestClient(app).post(
+        "/optimizations/bulk-cancel", json={"optimization_ids": ["judge-session", "normal-run"]}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["cancelled"] == ["normal-run"]
+    assert [entry["optimization_id"] for entry in body["skipped"]] == ["judge-session"]
+    assert "stop_run" in body["skipped"][0]["reason"]
+    assert stops == [("run-budget", "user_cancelled")]
+    assert ends == []
+    assert store.get_job("judge-session")["status"] == "running"
+    assert store.get_job("normal-run")["status"] == "cancelled"

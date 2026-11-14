@@ -132,7 +132,8 @@ Finish the draft and call `repo_draft_review` first.
   descends from the base commit, or `candidate_patch`, a `git diff`
   against the base commit.
 - `max_cost_cents` is the limit of the whole session. It must be at least
-  two times the draft's minimum: one scored call and the final score.
+  two times the draft's minimum: one scored call and the final score. A
+  lower limit gets `budget.below_minimum`, which names this minimum.
 
 The first call opens a judge session. It creates one budget and one run,
 and the answer gives the `session_id`. Skynet pins the base commit on that
@@ -143,18 +144,35 @@ same session. While a session is open, the draft steps refuse a change
 
 Each call reads `optimize.toml` at the base commit. Skynet refuses a
 candidate that changes `optimize.toml` or a protected path
-(`judge.candidate_refused`). The candidate runs in its own sandbox, and the
-metric runs in a separate sandbox. The answer gives the mean `score`, the
-`named_scores`, the `feedback` and the result of each search case. The
-answer never holds the metric code or a held-out case. A retry with the same
-candidate returns the stored score and does not pay again. An answer with
-`status: in_progress` means: call again with the same arguments.
+(`judge.candidate_refused`), and the refusal names every broken rule. The
+candidate runs in its own sandbox, and the metric runs in a separate
+sandbox. The answer gives the mean `score`, the `named_scores`, the
+`feedback` and the result of each search case. The answer never holds the
+metric code or a held-out case. A retry with the same candidate returns the
+stored score and does not pay again. An answer with `status: in_progress`
+means: call again with the same arguments. Skynet answers `in_progress`
+while other calls of the session hold its budget, and after a temporary
+repository or sandbox failure. A retry after such a failure pays for its
+own work.
 
-Only the budget or `stop_run` with the `session_id` ends a session. When
-the budget cannot pay for one more call and the final score, the next call
-ends the session. The end scores the best version once on the held-out
-cases. With fewer than five cases, nothing is held out, and the end scores
-the best version on every case. With no cases, it scores the version once.
+Only the budget or `stop_run` with the `session_id` ends a session. A bulk
+cancel skips a judge session. Before each call, the budget must still pay
+for one call (the draft's minimum) and a reserve for the final score. The
+reserve is one minimum at first. After scored calls, it is 1.5 times the
+mean spend per search case times the number of final cases, and never less
+than one minimum. When the budget cannot pay for that, the call ends the
+session. The end scores the best version once on the held-out cases. With
+fewer than five cases, nothing is held out, and the end scores the best
+version on every case. With no cases, it scores the version once.
+
+The end waits (`budget.pending`) while a call of the session still runs. A
+call that starts after the end starts gets the ended answer and pays
+nothing. When a call stops at the budget limit, the end still tries the
+final score with the money that is left. When that money cannot pay for
+it, the session ends `stopped`, and its message says that no held-out score
+exists. One call can still spend more than the reserve, because Skynet does
+not cap the spend of a single call.
+
 `get_run` gives the result: `details.judge` holds the call count, the
 `best_patch_sha256`, the search score and the held-out score, and
 `details.record` holds the run record with the final `score`. Skynet opens

@@ -1057,6 +1057,16 @@ def test_judge_refuses_a_limit_below_two_floors(judge: Any) -> None:
     assert record["opens"] == []
 
 
+def test_judge_names_the_session_minimum_for_a_limit_below_the_floor(judge: Any) -> None:
+    """Name the two-floor minimum in the first refusal, so the limit it names is enough."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=100)))
+    assert (error["code"], error["min_max_cost_cents"]) == ("budget.below_minimum", 384)
+    assert "384" in error["detail"]
+    assert record["opens"] == []
+
+
 def test_judge_refuses_an_incomplete_draft(judge: Any) -> None:
     """Answer draft.not_ready before any session."""
     client, _engine, record = judge
