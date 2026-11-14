@@ -250,23 +250,34 @@ export function CodeEditor({
     [base],
   );
   // Showing the changes again after a hide needs a fresh count; the editor stays mounted.
+  // Only a changed position re-renders the pane: a cursor move inside one change keeps it.
+  const lastNav = React.useRef<ChangeNav | null>(null);
+  const report = React.useCallback((nav: ChangeNav, send?: (nav: ChangeNav) => void) => {
+    const prev = lastNav.current;
+    if (prev && prev.pos === nav.pos && prev.count === nav.count) return;
+    lastNav.current = nav;
+    send?.(nav);
+  }, []);
   React.useEffect(() => {
-    if (review && view.current) onNav?.(navOf(view.current.state, base));
+    lastNav.current = null;
+    if (review && view.current) report(navOf(view.current.state, base), onNav);
   }, [review, base]);
   // The callbacks read the latest props through a ref, so their identity stays fixed.
-  const latest = React.useRef({ review, base, onNav });
+  // A new onChange or onUpdate makes CodeMirror reconfigure the whole editor.
+  const latest = React.useRef({ review, base, onNav, onChange });
   React.useLayoutEffect(() => {
-    latest.current = { review, base, onNav };
+    latest.current = { review, base, onNav, onChange };
   });
   const onCreateEditor = React.useCallback((v: EditorView) => {
     view.current = v;
     const { review, base, onNav } = latest.current;
-    if (review) onNav?.(navOf(v.state, base));
-  }, []);
+    if (review) report(navOf(v.state, base), onNav);
+  }, [report]);
   const onUpdate = React.useCallback((u: ViewUpdate) => {
     const { review, base, onNav } = latest.current;
-    if (review && (u.docChanged || u.selectionSet)) onNav?.(navOf(u.state, base));
-  }, []);
+    if (review && (u.docChanged || u.selectionSet)) report(navOf(u.state, base), onNav);
+  }, [report]);
+  const handleChange = React.useCallback((text: string) => latest.current.onChange(text), []);
   const lang = useLanguage(path);
   const extensions = React.useMemo(
     () => [
@@ -283,7 +294,7 @@ export function CodeEditor({
     <div className="ide-editor h-full min-w-0" dir="ltr">
       <CodeMirror
         value={value}
-        onChange={onChange}
+        onChange={handleChange}
         readOnly={readOnly}
         editable={!readOnly}
         extensions={extensions}

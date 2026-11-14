@@ -181,6 +181,22 @@ void test("an edit in a file tab writes the file's new text", async () => {
   await pane.unmount();
 });
 
+void test("a re-render with a new edit handler keeps the editor's configuration", async () => {
+  const edits: string[] = [];
+  const pane = await mount(<ReviewPane {...props({ onEdit: () => edits.push("first") })} />);
+  await openInTab(pane.container, "src/a.py");
+  const view = editorView(pane.container);
+  const state = view.state;
+  await pane.render(<ReviewPane {...props({ onEdit: () => edits.push("second") })} />);
+  // A reconfigure dispatches a transaction, which gives the view a new state.
+  assert.equal(view.state, state);
+  await React.act(async () => {
+    view.dispatch({ changes: { from: 0, insert: "#\n" }, userEvent: "input.type" });
+  });
+  assert.deepEqual(edits, ["second"]);
+  await pane.unmount();
+});
+
 void test("a busy agent makes the editor read-only", async () => {
   const pane = await mount(<ReviewPane {...props({ readOnly: true })} />);
   await openInTab(pane.container, "src/a.py");
