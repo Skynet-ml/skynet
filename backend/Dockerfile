@@ -177,7 +177,7 @@ RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]
             > /etc/sudoers.d/sandbox \
         && chmod 0440 /etc/sudoers.d/sandbox \
         && visudo -cf /etc/sudoers.d/sandbox \
-        && command -v setpriv \
+        && test -x /usr/bin/setpriv \
         && install -d -o root -g root -m 0755 /usr/local/libexec/skynet-path-guard \
         && ln -s /usr/bin/sudo /usr/local/libexec/skynet-path-guard/sudo; \
     fi

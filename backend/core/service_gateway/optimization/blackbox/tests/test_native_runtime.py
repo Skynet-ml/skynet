@@ -1188,7 +1188,7 @@ def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() 
     assert f"'export PATH=\"{guard}:/app/.venv/bin:$PATH\"' > /etc/profile.d/skynet-runtime.sh" in dockerfile
     assert "chmod 0440 /etc/sudoers.d/sandbox" in step
     assert "visudo -cf /etc/sudoers.d/sandbox" in step
-    assert "command -v setpriv" in step
+    assert f"test -x {vercel.NO_NEW_PRIVS[0]}" in step
     assert len(re.findall(r"apt-get install[^\n]*\bsudo\b", dockerfile)) == 1
 
 
