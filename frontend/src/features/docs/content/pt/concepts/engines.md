@@ -68,7 +68,6 @@ Um agente de programação lê o feedback do seu avaliador e corrige a versão. 
 | Configuração                   | Padrão     | Intervalo                                                    |
 | ------------------------------ | ---------- | ------------------------------------------------------------ |
 | Máx. de execuções do avaliador | 200        | 1 a 100000                              |
-| Parar na pontuação             | Desativada | 0 ou mais                                                    |
 | Máx. de iterações              | Desativada | 1 a 1000. Apenas Meta-Harness, AutoSaddler e ShinkaEvolve.   |
 
 Uma execução do avaliador é uma chamada do seu avaliador em um caso. A nova pontuação final da versão inicial e do vencedor não conta para **Máx. de execuções do avaliador**.

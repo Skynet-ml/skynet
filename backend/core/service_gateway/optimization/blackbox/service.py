@@ -17,6 +17,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import tempfile
 import time
 from collections import Counter
@@ -515,6 +516,9 @@ class FinalRun:
     # run, the traceback of the version's own crashed run, which scores 0 (SKY-221).
     # The traceback is stored without its "Run failed: " prefix.
     failures: list[str] = field(default_factory=list)
+    # How many cases returned each named score. ``named`` holds a name's mean
+    # but cannot show that some cases left the name out (SKY-692).
+    named_cases: dict[str, int] = field(default_factory=dict)
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
@@ -680,6 +684,7 @@ def _final_run(
         score=mean,
         feedback=None if cases else feedbacks[0],
         named={} if errors else _mean_named_scores(side_infos),
+        named_cases={} if errors else Counter(name for side_info in side_infos for name in named_scores(side_info)),
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
@@ -722,6 +727,68 @@ def _case_results(baseline: FinalRun | None, best: FinalRun | None) -> list[Blac
             )
         )
     return rows
+
+
+def _reaches(value: float, bound: float) -> bool:
+    """Tell whether ``value`` is equal to or above ``bound``.
+
+    Args:
+        value: The measured score; finite.
+        bound: The target or minimum from ``optimize.toml``.
+
+    Returns:
+        True when ``value`` is above ``bound`` or equal to it within float rounding.
+    """
+    # A mean of equal case scores can land one rounding step below the number in the file.
+    return value >= bound or math.isclose(value, bound, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
+    """Judge the ``[outcome]`` target and minimums of ``optimize.toml`` on the reported final run.
+
+    The engine may stop on its search-time score; this verdict uses the final
+    run of the reported version, so the search can stop and the target still
+    fail. The verdict only reports: it never changes what the run publishes.
+
+    Args:
+        outcome: The snapshot's ``{"target": float | None, "require": {name: minimum}}``.
+        best: The reported version's final run, if it had one.
+
+    Returns:
+        ``target`` and ``target_reached`` when the file sets a target, and
+        ``minimums_passed`` and ``failed_minimums`` when it sets minimums.
+        A version with no final score reaches no target and passes no minimum.
+        A score that is not a finite number reaches nothing and is stored as
+        ``None``, because this dict is stored without ``finite_json``.
+    """
+    score = best.score if best else None
+    verdict: dict[str, Any] = {}
+    if outcome.get("target") is not None:
+        target = float(outcome["target"])
+        reached = score is not None and math.isfinite(score) and _reaches(score, target)
+        verdict.update(target=target, target_reached=reached)
+    minimums = outcome.get("require") or {}
+    if minimums:
+        failed = []
+        for name, minimum in minimums.items():
+            entry = best.named.get(name) if best and score is not None else None
+            if score is None:
+                reason = f"The final run has no score, so {name!r} has no value."
+            elif best is None or entry is None:
+                reason = f"The metric returned no score named {name!r}."
+            elif (returned := best.named_cases.get(name, 0)) < best.runs:
+                reason = f"The metric returned {name!r} on only {returned} of {best.runs} cases."
+            elif not math.isfinite(entry.score):
+                reason = f"The metric returned a value for {name!r} that is not a finite number."
+            elif not _reaches(entry.score, float(minimum)):
+                # Twelve digits always show the gap: ``_reaches`` passes anything closer than that.
+                reason = f"{name!r} scored {entry.score:.12g}, below its minimum {float(minimum):.12g}."
+            else:
+                continue
+            value = entry.score if entry and math.isfinite(entry.score) else None
+            failed.append({"name": name, "minimum": float(minimum), "value": value, "reason": reason})
+        verdict.update(minimums_passed=not failed, failed_minimums=failed)
+    return verdict
 
 
 # Side info persisted with the version history is capped so a run whose scorer
@@ -1218,13 +1285,16 @@ def _run_job(
         valset=list(splits.val),
         context=job.context,
     )
+    # A run stored before SKY-691 has no ``[outcome]`` in its snapshot; its
+    # retired ``budget.stop_at_score`` stays its stop score.
+    outcome_target = ((repo_snapshot or {}).get("outcome") or {}).get("target")
     ctx = EngineContext(
         reflection_lm=reflection_lm,
         native_options=native_options,
         proposer_token_budget_usd=token_budget,
         run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
         seed=job.seed or 0,
-        stop_at_score=job.budget.stop_at_score,
+        stop_at_score=outcome_target if outcome_target is not None else job.budget._legacy_stop_at_score,
         max_iterations=job.budget.max_iterations,
         concurrency=concurrency,
         target_label=f"{target.harness} · {target.model}" if caps.agent_target else None,
@@ -1419,6 +1489,7 @@ def _run_job(
         for node in result.metadata.pop("candidate_tree", [])
     ]
     optimizer_best_score = None if engine_pick_error is not None else result.best_score
+    verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,
@@ -1471,6 +1542,8 @@ def _run_job(
             **finite_json(result.metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
+            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
+            **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,

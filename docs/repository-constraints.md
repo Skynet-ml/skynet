@@ -36,7 +36,7 @@ network = ["docs.python.org"]
 cases = "data/cases.jsonl"
 
 [outcome]
-# Optional. The score that is good enough. Runs cannot use [outcome] yet.
+# Optional. The score that is good enough. The search stops when it reaches it.
 target = 0.9
 
 [outcome.require]
@@ -92,12 +92,28 @@ because the scorer sets no range for a score. A score name must not be
 empty. `[outcome.require]` holds at most 50 names. An empty `[outcome]`, or
 an `[outcome]` with only `[outcome.require]`, is valid.
 
+At the end of a run, Skynet judges `[outcome]` on the final score of the
+reported version. Skynet splits the cases 70/15/15 with the run seed. The
+engine can stop on its search score, but the verdict uses the held-out
+score: the mean of `score()` over the held-out cases. With fewer than 5
+cases there is no held-out part, so the run uses its validation cases, or
+its train cases when there are none. A
+run with no cases has no split, so the verdict uses the one `score()` of
+the version. "Target reached" is true when that score is equal to or above
+`target`. "Minimums passed" is true when each named score is equal to or
+above its minimum. A named score is its mean over the same cases. The
+metric must return the name on each of those cases, or the minimum fails.
+The reason gives the count, or names the score when no case returns it.
+The run stores the verdict as `details.outcome` in its result, with
+the list of the failed minimums. The verdict does not change what the run
+publishes.
+
 `[outcome]` has no `accept` key, and an `accept` key fails as an unknown
 setting. Every run opens a pull request, as before. Skynet does not merge it
 by itself.
 
-Runs cannot use `[outcome]` yet. The parser reads it, but the setup check
-refuses a file that sets `target` or `[outcome.require]`.
+The search stops when its score reaches `target`. A file without `target`
+has no stop score.
 
 ## Cases: `[data] cases`
 
@@ -357,8 +373,6 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A service or MCP server that breaks the secret rules below.
-- `[outcome] target` or an `[outcome.require]` table. Runs cannot use these
-  settings yet. An empty `[outcome]` passes.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
   A `tool` value or a `tool.<name>` value that is not a table.

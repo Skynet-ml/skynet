@@ -23,7 +23,7 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
-from .sandbox_protocol import READABLE_PROTOCOLS, SANDBOX_PROTOCOL
+from .sandbox_protocol import OUTCOME_VERDICT_PROTOCOL, READABLE_PROTOCOLS, SANDBOX_PROTOCOL
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ _CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
 BROKEN_IMAGE_MESSAGE = "The sandbox image cannot start its optimizer; rebuild the sandbox image."
 OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
+)
+OUTCOME_IMAGE_MESSAGE = (
+    "The sandbox image is older than [outcome] support in optimize.toml; rebuild and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
@@ -143,6 +146,30 @@ def _require_image_protocol(session: Any, lifetime: float) -> int:
     raise _guest_failure(result)
 
 
+def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[outcome]`` values.
+
+    An image before protocol 15 reads the stop score only from
+    ``budget.stop_at_score``, so it would run without the file's target or
+    minimums and report no error. An image at protocol 15 stops at the target
+    but writes no run end verdict, so it would accept a target or minimums
+    that it does not judge.
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and the snapshot's outcome sets
+            a target or a minimum.
+    """
+    if image_protocol >= OUTCOME_VERDICT_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    outcome = snapshot.get("outcome") or {}
+    if outcome.get("target") is not None or outcome.get("require"):
+        raise RuntimeError(OUTCOME_IMAGE_MESSAGE)
+
+
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
     """Execute the full optimizer in the pinned backend image without provider credentials.
 
@@ -200,6 +227,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             )
         )
         image_protocol = _require_image_protocol(session, lifetime)
+        _require_outcome_support(image_protocol, staged)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip

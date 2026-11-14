@@ -372,7 +372,6 @@ export interface BlackboxScorer {
 export interface BlackboxBudget {
   max_scorer_runs: number;
   max_iterations?: number | null;
-  stop_at_score?: number | null;
 }
 
 /** One environment variable the repository scorer receives: typed in, or saved on the account. */
@@ -398,6 +397,8 @@ interface BlackboxRepoSource {
   draft_files?: Record<string, string>;
   /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
   draft_base?: string;
+  /** What the server recorded from optimize.toml; `outcome.target` is the score that stops the search. */
+  environment?: { outcome?: { target?: number | null } } | null;
 }
 
 export interface BlackboxTarget {

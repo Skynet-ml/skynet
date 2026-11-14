@@ -81,7 +81,6 @@ La procedura guidata elenca solo gli ottimizzatori adatti alla tua attività e a
 Imposta per quanto tempo l'esecuzione può continuare a provare e quanto può spendere:
 
 - **Esecuzioni dello scorer max** (Guidato: **Tentativi max**): il numero massimo di candidati a cui Skynet assegna un punteggio. Alcuni ottimizzatori richiedono un numero minimo.
-- **Fermati al punteggio** (Guidato: **Fermati prima quando il punteggio raggiunge**): l'esecuzione si ferma quando una versione raggiunge questo punteggio.
 - **Iterazioni max** (Guidato: **Round max**): mostrato per gli ottimizzatori che lo supportano.
 - **Limite di spesa**: il massimo che l'esecuzione può spendere. Il valore predefinito è 5 $, oppure l'importo **Necessario per iniziare** se è maggiore. Puoi anche selezionare **Nessun limite**.
 

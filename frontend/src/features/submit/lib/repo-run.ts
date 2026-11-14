@@ -281,6 +281,11 @@ export function repoRunRequest(
     savedSecrets,
     new Set(secrets.map((secret) => secret.name.trim())),
   );
+  // A clone or a restored setup can still hold the retired stop score, which a
+  // new request refuses; the run stops at the file's `[outcome] target` (SKY-691).
+  const { stop_at_score: _retired, ...budget } = optimizer.budget as typeof optimizer.budget & {
+    stop_at_score?: unknown;
+  };
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -300,7 +305,7 @@ export function repoRunRequest(
         input_fields: inputs.inputFields,
         expected_field: inputs.expectedField,
       }),
-    budget: optimizer.budget,
+    budget,
     ...(optimizer.sandboxProvider && { sandbox_provider: optimizer.sandboxProvider }),
     // Auto composes the repository engines on the server; a named engine runs alone.
     strategy: auto ? { mode: "auto" } : { mode: "single", engine },

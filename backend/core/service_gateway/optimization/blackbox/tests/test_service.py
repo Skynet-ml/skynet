@@ -265,7 +265,6 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert reflection_stats.avg_response_time_ms is not None
     assert response.optimization_metadata["budget"] == {
         "max_scorer_runs": 12,
-        "stop_at_score": None,
         "max_iterations": None,
     }
     assert response.optimization_metadata["target"]["kind"] == "text"
@@ -335,6 +334,66 @@ def test_auto_run_hands_off_between_engines(
     handoffs = [m for e, m in sink if e == PROGRESS_LANE_HANDOFF]
     assert len(handoffs) == 1
     assert handoffs[0]["to_engine"] == "gepa"
+
+
+@pytest.mark.parametrize(("outcome", "stop_at"), [({"target": 0.9, "require": {}}, 0.9), (None, None)])
+def test_native_proposers_stop_at_the_outcome_target(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    outcome: dict[str, Any] | None,
+    stop_at: float | None,
+) -> None:
+    """The snapshot's ``[outcome] target`` is every engine's stop score; with no target there is none (SKY-691)."""
+    run_blackbox_optimization(
+        _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
+        artifact_id="job-target",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot=None if outcome is None else {"outcome": outcome},
+    )
+
+    assert fake_native_proposers
+    assert all(ctx.stop_at_score == stop_at for _, ctx in fake_native_proposers)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stop_at"),
+    [(None, 0.9), ({"target": None, "require": {}}, 0.9), ({"target": 0.8, "require": {}}, 0.8)],
+)
+def test_a_stored_run_keeps_its_retired_stop_score_unless_the_file_sets_a_target(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    outcome: dict[str, Any] | None,
+    stop_at: float,
+) -> None:
+    """A run stored with ``budget.stop_at_score`` keeps it as the stop score; a file target wins (SKY-691)."""
+    stored = _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100).model_dump()
+    stored["budget"]["stop_at_score"] = 0.9
+    payload = BlackboxRunRequest.model_validate(stored, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    run_blackbox_optimization(
+        payload,
+        artifact_id="job-legacy-stop",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot=None if outcome is None else {"outcome": outcome},
+    )
+
+    assert fake_native_proposers
+    assert all(ctx.stop_at_score == stop_at for _, ctx in fake_native_proposers)
+
+
+def test_the_search_stops_when_the_score_reaches_the_outcome_target(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
+    """A target that an early proposal reaches ends the search before the scorer-run cap does (SKY-691)."""
+    full = run_blackbox_optimization(_payload(), artifact_id="job-full", gepa_log_dir_path=str(tmp_path / "full"))
+    stopped = run_blackbox_optimization(
+        _payload(),
+        artifact_id="job-stop",
+        gepa_log_dir_path=str(tmp_path / "stop"),
+        repo_snapshot={"outcome": {"target": 0.5, "require": {}}},
+    )
+
+    assert stopped.total_scorer_runs < full.total_scorer_runs
 
 
 def test_byok_reflection_budget_does_not_limit_model_calls(
@@ -2137,3 +2196,312 @@ def test_stored_result_with_removed_keys_still_loads() -> None:
     response = BlackboxRunResponse.model_validate(stored)
     assert response.best_candidate == "Be brief."
     assert "program_artifact" not in response.model_dump()
+
+
+# The starting point scores low, so the regression guard keeps the winner. The
+# winner scores each case's ``s``, and 0.6 without cases; "accuracy" repeats it.
+_OUTCOME_CODE = """
+def score(candidate, case=None):
+    value = 0.1 if candidate == "hello world" else (0.6 if case is None else case["s"])
+    return value, {"feedback": "ok", "scores": {"accuracy": {"score": value, "feedback": "ok"}}}
+"""
+
+_OUTCOME_CASES = [{"s": 0.2 + i / 50} for i in range(20)]
+
+
+def _outcome_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: dict[str, Any] | None, **overrides: Any
+) -> BlackboxRunResponse:
+    """Run a job whose search returns "winner" with the outcome block that the snapshot carries.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        tmp_path: Private optimizer workspace.
+        outcome: The snapshot's ``outcome`` dict; ``None`` for a run without a snapshot.
+        **overrides: Fields to replace in the default payload.
+
+    Returns:
+        The run's response.
+    """
+    _winner_strategy(monkeypatch)
+    payload = _payload(
+        **{"scorer": {"kind": "python", "metric_code": _OUTCOME_CODE}, "cases": _OUTCOME_CASES, **overrides}
+    )
+    return run_blackbox_optimization(
+        payload,
+        artifact_id="job-outcome",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot=None if outcome is None else {"outcome": outcome},
+    )
+
+
+def _held_out_mean() -> float:
+    """Return the winner's mean score over the held-out part of the run's split.
+
+    Returns:
+        The mean of ``s`` over the test cases that the seed-1 split holds out.
+    """
+    held_out = service_mod.legacy_case_splits(list(_OUTCOME_CASES), 1).test
+    assert held_out
+    return sum(case["s"] for case in held_out) / len(held_out)
+
+
+def test_the_target_is_reached_when_the_held_out_score_equals_it(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verdict uses the reported final score, the held-out mean, and a score equal to the target reaches it."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": 0.36, "require": {}})
+
+    assert response.best_score == pytest.approx(_held_out_mean())
+    assert response.best_score == pytest.approx(0.36)
+    assert response.details["outcome"] == {"target": 0.36, "target_reached": True}
+
+
+def test_the_target_is_not_reached_below_it(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held-out score below the target stores false, and the run still reports and keeps the winner."""
+    target = _held_out_mean() + 0.01
+
+    response = _outcome_run(monkeypatch, tmp_path, {"target": target, "require": {}})
+
+    assert response.details["outcome"] == {"target": target, "target_reached": False}
+    assert response.best_candidate == "winner"
+    assert response.regression_guard_applied is False
+
+
+def test_a_search_that_stops_on_its_score_can_end_with_the_target_not_reached(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The search reports 1.0 and stops at the target 0.9; the held-out score is lower, so the target is not reached."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": 0.9, "require": {}})
+
+    assert response.details["optimizer_best_score"] == 1.0
+    assert response.best_score is not None
+    assert response.best_score < 0.9
+    assert response.details["outcome"] == {"target": 0.9, "target_reached": False}
+    assert response.best_candidate == "winner"
+
+
+@pytest.mark.parametrize("outcome", [None, {"target": None, "require": {}}])
+def test_a_run_with_no_target_and_no_minimum_stores_no_verdict(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any] | None
+) -> None:
+    """Without a target or a minimum the stored result has no outcome dict."""
+    response = _outcome_run(monkeypatch, tmp_path, outcome)
+
+    assert "outcome" not in response.details
+
+
+def test_minimums_pass_when_each_named_score_reaches_its_minimum(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named score's held-out mean at or above its minimum passes, and a run with no target stores no target."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": _held_out_mean()}})
+
+    assert response.details["outcome"] == {"minimums_passed": True, "failed_minimums": []}
+
+
+def test_a_named_score_below_its_minimum_fails_with_its_value(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failed minimum names the score, its minimum, its held-out mean and why it failed."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": 0.99}})
+
+    outcome = response.details["outcome"]
+    assert outcome["minimums_passed"] is False
+    [failed] = outcome["failed_minimums"]
+    assert failed["name"] == "accuracy"
+    assert failed["minimum"] == 0.99
+    assert failed["value"] == pytest.approx(_held_out_mean())
+    assert failed["value"] == pytest.approx(response.best_named_scores["accuracy"].score)
+    assert "'accuracy'" in failed["reason"]
+    assert "0.99" in failed["reason"]
+
+
+def test_a_minimum_for_a_score_the_metric_does_not_return_fails(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A minimum for a missing named score fails with no value, and the reason names the score."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": 0.0, "latency": 0.5}})
+
+    assert response.details["outcome"] == {
+        "minimums_passed": False,
+        "failed_minimums": [
+            {
+                "name": "latency",
+                "minimum": 0.5,
+                "value": None,
+                "reason": "The metric returned no score named 'latency'.",
+            }
+        ],
+    }
+
+
+def test_a_run_without_cases_judges_the_winners_single_score(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no cases there is no split, so the verdict uses the winner's one ``score(candidate)``."""
+    response = _outcome_run(monkeypatch, tmp_path, {"target": 0.6, "require": {"accuracy": 0.7}}, cases=None)
+
+    assert response.case_count == 0
+    assert response.best_score == pytest.approx(0.6)
+    outcome = response.details["outcome"]
+    assert (outcome["target_reached"], outcome["minimums_passed"]) == (True, False)
+    assert outcome["failed_minimums"][0]["value"] == pytest.approx(0.6)
+
+
+def test_a_version_with_no_final_score_reaches_no_target_and_passes_no_minimum() -> None:
+    """A run that ended before its final score, or whose metric crashed, fails the target and every minimum."""
+    crashed = service_mod.FinalRun(score=None, feedback=None, named={})
+
+    for best in (None, crashed):
+        verdict = service_mod._outcome_verdict({"target": 0.5, "require": {"accuracy": 0.5}}, best)
+
+        assert verdict["target_reached"] is False
+        assert verdict["failed_minimums"] == [
+            {
+                "name": "accuracy",
+                "minimum": 0.5,
+                "value": None,
+                "reason": "The final run has no score, so 'accuracy' has no value.",
+            }
+        ]
+
+
+def _constant_run(value: float, count: int) -> service_mod.FinalRun:
+    """Run the real final pass with a scorer that gives every case the same score and named score.
+
+    Args:
+        value: The score and the ``accuracy`` score of each case.
+        count: How many cases to score.
+
+    Returns:
+        The final run.
+    """
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float, dict[str, Any]]:
+        """Score each case ``value``."""
+        return value, {"feedback": "ok", "scores": {"accuracy": {"score": value, "feedback": "ok"}}}
+
+    cases = [{"n": n} for n in range(count)]
+    return service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL)
+
+
+@pytest.mark.parametrize(("value", "count"), [(0.7, 3), (0.1, 6)])
+def test_a_mean_equal_to_the_target_reaches_it_despite_float_rounding(value: float, count: int) -> None:
+    """Equal case scores can average one rounding step below the number in the file; that still reaches it."""
+    run = _constant_run(value, count)
+    assert run.score is not None
+    assert run.score < value
+
+    verdict = service_mod._outcome_verdict({"target": value, "require": {"accuracy": value}}, run)
+
+    assert verdict == {"target": value, "target_reached": True, "minimums_passed": True, "failed_minimums": []}
+
+
+def test_a_mean_below_the_target_by_a_real_margin_still_fails() -> None:
+    """A real miss is not a rounding step, so 0.69 against 0.7 fails the target and the minimum."""
+    verdict = service_mod._outcome_verdict({"target": 0.7, "require": {"accuracy": 0.7}}, _constant_run(0.69, 3))
+
+    assert verdict["target_reached"] is False
+    assert verdict["minimums_passed"] is False
+
+
+def test_the_reason_of_a_near_miss_shows_the_gap_to_the_minimum() -> None:
+    """A mean just below the minimum must not print as the minimum itself."""
+    verdict = service_mod._outcome_verdict({"target": None, "require": {"accuracy": 0.9}}, _constant_run(0.8996, 1))
+
+    assert verdict["failed_minimums"] == [
+        {
+            "name": "accuracy",
+            "minimum": 0.9,
+            "value": 0.8996,
+            "reason": "'accuracy' scored 0.8996, below its minimum 0.9.",
+        }
+    ]
+
+
+def _named_run(per_case: list[dict[str, Any]]) -> service_mod.FinalRun:
+    """Run the real final pass with a scorer that returns the given side info on each case.
+
+    Args:
+        per_case: The side info of each case, in case order; each case scores 0.5.
+
+    Returns:
+        The final run.
+    """
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float, dict[str, Any]]:
+        """Return the side info that the test gives for this case."""
+        return 0.5, per_case[case["n"]]
+
+    cases = [{"n": n} for n in range(len(per_case))]
+    return service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_named_score_that_is_not_a_finite_number_fails_its_minimum(value: float) -> None:
+    """A NaN or infinite named score fails its minimum, and the stored verdict holds no NaN or infinity."""
+    run = _named_run([{"feedback": "ok", "scores": {"latency": {"score": value, "feedback": "odd"}}}] * 2)
+
+    outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
+
+    assert outcome["minimums_passed"] is False
+    [failed] = outcome["failed_minimums"]
+    assert failed["value"] is None
+    assert failed["reason"] == "The metric returned a value for 'latency' that is not a finite number."
+    json.dumps(outcome, allow_nan=False)
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_a_final_score_that_is_not_a_finite_number_reaches_no_target(value: float) -> None:
+    """An infinite or NaN final score does not reach the target."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float, dict[str, Any]]:
+        """Score each case ``value``."""
+        return value, {"feedback": "ok"}
+
+    run = service_mod._final_run(scorer, "v", [{"n": 1}, {"n": 2}], label="optimized version", phase=PHASE_FINAL)
+
+    assert service_mod._outcome_verdict({"target": 0.5, "require": {}}, run) == {"target": 0.5, "target_reached": False}
+
+
+def test_a_named_score_returned_on_only_some_cases_fails_its_minimum() -> None:
+    """A name on 1 of 3 cases fails its minimum with the count, and the displayed mean stays as it is."""
+    run = _named_run(
+        [{"feedback": "ok", "scores": {"latency": {"score": 1.0, "feedback": "fast"}}}, {"feedback": "ok"}, {}]
+    )
+
+    outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
+
+    assert run.named["latency"].score == 1.0
+    assert outcome["failed_minimums"] == [
+        {
+            "name": "latency",
+            "minimum": 0.9,
+            "value": 1.0,
+            "reason": "The metric returned 'latency' on only 1 of 3 cases.",
+        }
+    ]
+
+
+def test_a_crashed_repository_run_counts_as_a_case_without_the_name() -> None:
+    """A case whose repository run crashed has no ``error`` key, and it still counts against the name."""
+    named = {"feedback": "ok", "scores": {"latency": {"score": 1.0, "feedback": "fast"}}}
+    run = _named_run([{"status": "run_failed", "feedback": "Run failed: boom"}, named, named])
+
+    outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
+
+    assert outcome["minimums_passed"] is False
+    assert "2 of 3" in outcome["failed_minimums"][0]["reason"]
+
+
+def test_a_case_with_an_error_and_no_named_scores_counts_against_the_name() -> None:
+    """A case that failed before the metric returned the name makes the minimum fail with the count."""
+    run = _named_run([{"error": "TimeoutError: the run timed out"}, {"feedback": "ok", "scores": {"latency": 1.0}}])
+
+    outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.4}}, run)
+
+    assert outcome["minimums_passed"] is False
+    assert "1 of 2" in outcome["failed_minimums"][0]["reason"]

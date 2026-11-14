@@ -13,8 +13,9 @@ import { v2Msg } from "./ArtifactConfirmCard";
 
 /**
  * Step 3's budget: how many scorer runs the optimizer may spend, the
- * iteration cap where the engine honours one, the score that ends the run
- * early, and the spending limit with the least it can be.
+ * iteration cap where the engine honours one, and the spending limit with
+ * the least it can be. The score that ends the run early is `[outcome] target`
+ * in optimize.toml.
  */
 export function BudgetSection({ choice }: { choice: OptimizerChoice }) {
   const ctx = useWizardV2();
@@ -53,20 +54,6 @@ export function BudgetSection({ choice }: { choice: OptimizerChoice }) {
               {t("submit.v2.optimizer.budget.min_runs", { p1: String(minRuns) })}
             </p>
           )}
-        </Field>
-        <Field
-          label={t("submit.v2.optimizer.budget.stop_at")}
-          htmlFor="v2-stop-at"
-          tip="blackbox.config.budget_stop"
-        >
-          <NumberInput
-            id="v2-stop-at"
-            value={budget.stop_at_score ?? ""}
-            onChange={(value) => patchBudget({ stop_at_score: value })}
-            onClear={() => patchBudget({ stop_at_score: null })}
-            min={0}
-            step={0.1}
-          />
         </Field>
         {iterationLimit && (
           <Field

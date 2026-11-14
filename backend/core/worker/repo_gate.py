@@ -62,6 +62,9 @@ _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "t
 _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
+_OUTCOME_TARGET = frozenset({"outcome.target"})
+# The run end judges each minimum on the final score (SKY-692).
+_OUTCOME_MINIMUMS = frozenset({"outcome.require"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -72,6 +75,8 @@ _ENFORCED_EVERYWHERE = (
     | _TARGET_MCP
     | _RUN_ENTRY
     | _ROLE_BOXES
+    | _OUTCOME_TARGET
+    | _OUTCOME_MINIMUMS
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -125,6 +130,7 @@ def check_repository(
     place: Place,
     bindings: Mapping[str, str] | None = None,
     allowed_hosts: Mapping[str, Collection[str]] | None = None,
+    require_version: bool = True,
 ) -> list[GateFailure]:
     """List every reason the repository's ``optimize.toml`` stops this run.
 
@@ -138,6 +144,8 @@ def check_repository(
             a name it does not hold binds to the user's secret.
         allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
             does not hold may go to no host.
+        require_version: Passed to :func:`read_constraints`; the staging of
+            the same tree gives it.
 
     Returns:
         The failures, in file order. An empty list means the run may start.
@@ -146,7 +154,7 @@ def check_repository(
         ConstraintsError: When the file or a role's MCP file is invalid.
     """
     raw = read_constraints_file(archive)
-    constraints = read_constraints(archive) if raw is not None else None
+    constraints = read_constraints(archive, require_version=require_version) if raw is not None else None
     if raw is None or constraints is None:
         return []
     failures = [
@@ -477,7 +485,6 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
     metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
-    # No run reads [outcome] yet, so a file that sets it stops here (SKY-691, SKY-692).
     outcome = document.get("outcome", {})
     if "target" in outcome:
         keys.append(("outcome.target", "[outcome] target"))

@@ -130,6 +130,30 @@ def test_process_job_parses_json_string_payload_overview(
     assert store._jobs["opt-2"]["status"] == "success"
 
 
+def test_process_job_runs_a_stored_payload_with_the_retired_stop_score(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+) -> None:
+    """A run stored with ``budget.stop_at_score`` still starts and finishes, as on a resume or restart (SKY-691)."""
+    payload = copy.deepcopy(REAL_RUN_PAYLOAD)
+    payload["budget"] = {**payload.get("budget", {}), "stop_at_score": 0.9}
+    store.seed_job("opt-stop", payload=payload)
+    worker.enqueue_job("opt-stop")
+    ctx, _proc = make_mp_context(
+        exitcode=0,
+        result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
+    )
+    protect_dispatch(store, ctx)
+
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
+        worker._process_job("opt-stop", 0)
+
+    assert store._jobs["opt-stop"]["status"] == "success"
+
+
 def test_process_job_handles_invalid_json_string_payload_overview_gracefully(
     worker: BackgroundWorker,
     store: FakeJobStore,
@@ -1198,6 +1222,85 @@ def test_the_run_gate_reads_secret_bindings_and_allowed_hosts_before_staging(
     assert expected in [failure.code for failure in failures]
     setup.assert_not_called()
     assert store._jobs["repo-gated"]["status"] == "failed"
+
+
+def test_the_run_gate_reads_a_started_run_file_with_no_version(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """The run gate reads the tree with the staging's version rule, so a started run passes it (SKY-690).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: The folder for the packed tree.
+    """
+    raw = b"[paths]\neditable = ['src']\n"
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+    request = BlackboxRunRequest(
+        username="alice",
+        recipe="repo",
+        scorer={"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
+        target={"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
+        reflection_model_config={"name": "gpt-4o"},
+    )
+    store.engine = MagicMock()
+    store.seed_job(
+        "repo-started",
+        payload=request.model_dump(mode="json", by_alias=True),
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("repo-started")
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = lambda payload, **kwargs: payload
+    gateway.cost_ceiling_cents.return_value = 100
+    staged = MagicMock()
+    staged.snapshot.archive = archive
+    staged.secrets = {}
+    staged.require_version = False
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Stage the repository the way the real step leaves the payload."""
+        payload[REPO_SNAPSHOT_KEY] = {}
+        return payload, staged
+
+    found: list[list[repo_gate.GateFailure]] = []
+
+    def gate(*args: object, **kwargs: object) -> list[repo_gate.GateFailure]:
+        """Run the real gate and keep what it found."""
+        found.append(repo_gate.check_repository(*args, **kwargs))  # type: ignore[arg-type]
+        return found[-1]
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("core.worker.engine.notify_job_completed"))
+        stack.enter_context(patch("core.worker.engine.record_server_event"))
+        stack.enter_context(patch("core.worker.engine.validate_blackbox_payload"))
+        stack.enter_context(patch("core.worker.engine.payload_uses_token_source", return_value=False))
+        stack.enter_context(patch("core.worker.engine.ModelGateway", return_value=gateway))
+        stack.enter_context(patch("core.worker.engine.BudgetService"))
+        stack.enter_context(patch("core.worker.engine.BudgetRuntime"))
+        stack.enter_context(patch("core.worker.engine.bind_protected_sandbox"))
+        stack.enter_context(patch("core.worker.engine.protected_image", return_value=None))
+        stack.enter_context(
+            patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload)
+        )
+        stack.enter_context(patch("core.worker.engine.host_proposer", return_value=None))
+        stack.enter_context(patch("core.worker.engine.stage_repository", side_effect=stage))
+        stack.enter_context(patch("core.worker.engine.check_repository", side_effect=gate))
+        # The run stops at the next step: this test covers only the gate.
+        setup = stack.enter_context(
+            patch("core.worker.engine.infer_repo_setup", side_effect=RuntimeError("past the gate"))
+        )
+        stack.enter_context(patch.object(worker, "_record_repo_commit"))
+        stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
+        worker._process_job("repo-started", 0)
+    assert found == [[]]
+    setup.assert_called_once()
 
 
 @pytest.mark.parametrize(

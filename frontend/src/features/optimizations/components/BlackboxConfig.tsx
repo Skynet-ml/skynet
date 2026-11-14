@@ -135,6 +135,18 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
 }
 
 /**
+ * The score that stops a run's search: `[outcome] target` from optimize.toml
+ * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
+ */
+export function runStopScore(
+  budget: Partial<BlackboxBudget>,
+  target: Partial<BlackboxTarget>,
+): number | null {
+  const legacy = (budget as { stop_at_score?: number | null }).stop_at_score;
+  return target.repo?.environment?.outcome?.target ?? legacy ?? null;
+}
+
+/**
  * Config view for a black-box run: the same carousel shell as the regular
  * path, with the payload grouped into general / optimization / models /
  * target & scorer / data slides. Reads the raw payload the wizard sent; the
@@ -298,10 +310,11 @@ export function BlackboxConfigCard({
       icon: <Repeat />,
     });
   }
-  if (budget.stop_at_score != null) {
+  const stopScore = runStopScore(budget, target);
+  if (stopScore != null) {
     optimizationRows.push({
       label: msg("optimization.blackbox.config.budget_stop_label"),
-      value: String(budget.stop_at_score),
+      value: String(stopScore),
       icon: <Target />,
     });
   }

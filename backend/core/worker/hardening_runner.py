@@ -834,11 +834,12 @@ def _pack_tree(tree: Path, archive: Path) -> None:
             packed.add(entry, arcname=entry.name)
 
 
-def _trusted_constraints(trusted_root: Path) -> RepoConstraints | None:
+def _trusted_constraints(trusted_root: Path, *, require_version: bool) -> RepoConstraints | None:
     """Read the constraints file of the unfixed trusted tree.
 
     Args:
         trusted_root: The base-commit tree.
+        require_version: Passed to :func:`read_constraints`, as the pass's staging used it.
 
     Returns:
         The validated constraints, or None when the tree has no constraints file.
@@ -846,7 +847,7 @@ def _trusted_constraints(trusted_root: Path) -> RepoConstraints | None:
     with tempfile.TemporaryDirectory(prefix="hardening-constraints-") as folder:
         archive = Path(folder) / "tree.tgz"
         _pack_tree(trusted_root, archive)
-        return read_constraints(archive)
+        return read_constraints(archive, require_version=require_version)
 
 
 @contextmanager
@@ -931,7 +932,7 @@ def open_hardening_runner(
         # every scorer box of the pass gets the unfixed tree's services, metric
         # file list and [run] and [metric] settings. Each box still packs the
         # metric files from its own fixed tree into the metric box (SKY-398).
-        constraints = _trusted_constraints(workspace.trusted_root)
+        constraints = _trusted_constraints(workspace.trusted_root, require_version=workspace.require_version)
         compose_services = constraints.compose_services if constraints is not None else ()
         hidden = hidden_repo_paths(constraints)
 

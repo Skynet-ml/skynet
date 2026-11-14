@@ -81,7 +81,6 @@ O assistente lista apenas os otimizadores adequados à sua tarefa e às suas ent
 Defina por quanto tempo a execução pode continuar tentando e quanto pode gastar:
 
 - **Máx. de execuções do avaliador** (Guiado: **Máx. de tentativas**): o número máximo de candidatos que o Skynet pontua. Alguns otimizadores precisam de um número mínimo.
-- **Parar na pontuação** (Guiado: **Parar mais cedo quando a pontuação chegar a**): a execução para quando uma versão atinge essa pontuação.
 - **Máx. de iterações** (Guiado: **Máx. de rondas**): aparece para os otimizadores que suportam essa configuração.
 - **Limite de gastos**: o máximo que a execução pode gastar. O padrão é US$ 5, ou o valor **Necessário para começar**, se for maior. Você também pode selecionar **Sem limite**.
 
