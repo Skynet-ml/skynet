@@ -63,6 +63,8 @@ _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
 _OUTCOME_TARGET = frozenset({"outcome.target"})
+# The run end judges each minimum on the final score (SKY-692).
+_OUTCOME_MINIMUMS = frozenset({"outcome.require"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -74,6 +76,7 @@ _ENFORCED_EVERYWHERE = (
     | _RUN_ENTRY
     | _ROLE_BOXES
     | _OUTCOME_TARGET
+    | _OUTCOME_MINIMUMS
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -482,7 +485,6 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
     metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
-    # The run stops at [outcome] target (SKY-691). No run checks [outcome.require] yet, so it stops here (SKY-692).
     outcome = document.get("outcome", {})
     if "target" in outcome:
         keys.append(("outcome.target", "[outcome] target"))

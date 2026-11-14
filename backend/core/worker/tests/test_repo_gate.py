@@ -147,15 +147,17 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     assert key in [failure.key for failure in failures]
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"version = 1\n[outcome.require]\nlatency = 0.5\n",
+        b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n",
+    ],
+)
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_an_outcome_minimum_fails_because_no_run_checks_it(tmp_path: Path, place: str) -> None:
-    """No run checks a minimum yet, so a file that sets [outcome.require] stops here (SKY-690, SKY-692)."""
-    code = I18nKey.REPO_GATE_UNENFORCED_LOCAL if place == "local" else I18nKey.REPO_GATE_UNENFORCED_CLOUD
-    raw = b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n"
-
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
-
-    assert [(failure.key, failure.code) for failure in failures] == [("[outcome.require]", code)]
+def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The run end checks each [outcome.require] minimum on the final score, so the gate lets it through (SKY-692)."""
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

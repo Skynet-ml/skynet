@@ -151,7 +151,9 @@ def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
 
     An image before protocol 15 reads the stop score only from
     ``budget.stop_at_score``, so it would run without the file's target or
-    minimums and report no error.
+    minimums and report no error. An image at protocol 15 stops at the target
+    but writes no run end verdict, so it would accept a target or minimums
+    that it does not judge.
 
     Args:
         image_protocol: The image's protocol, from :func:`_require_image_protocol`.

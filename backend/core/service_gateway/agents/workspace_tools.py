@@ -157,8 +157,8 @@ How to write the run's files:
     host only.
   - ``[outcome]``: ``target`` (the score that is good enough, such as ``0.9``) and ``require``, an
     ``[outcome.require]`` table that sets a name from the ``scores`` the metric returns to its minimum score.
-    A run stops its search when the score reaches ``target``. A run cannot check ``[outcome.require]`` yet and
-    stops when the file sets it, so leave that table out of the file you write.
+    A run stops its search when the score reaches ``target``. At the end of a run, Skynet checks the final
+    score against ``target`` and against each ``[outcome.require]`` minimum, and stores the verdict.
   The errors you must avoid most: "[run] entry is missing", "network entry ... must be a host name such as
   api.example.com, not a URL", "... is not a supported setting" and "url must be an https:// address". This
   file is valid. The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders:

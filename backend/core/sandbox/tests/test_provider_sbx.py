@@ -591,8 +591,14 @@ async def test_definite_4xx_create_looks_for_no_sandbox(status: int) -> None:
     assert CLOUD.calls("DELETE", "") == []
 
 
-async def test_lost_create_with_no_sandbox_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+async def test_lost_create_with_no_sandbox_logs_a_warning(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Stop polling after ORPHAN_WAIT and log that the sandbox may leak."""
+    # The fixture's 1 s STOP_TIMEOUT also bounds the orphan poll. A loop that
+    # stalls past both deadlines runs both timeout callbacks in one pass, and
+    # the outer one then wins. Keep the production gap, so only ORPHAN_WAIT can end the poll.
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
     CLOUD.failures[("POST", "/v1/sandboxes")] = (503, "unavailable")
     with pytest.raises(SandboxTransientError):
         await SbxEnvironment(_spec()).start()
