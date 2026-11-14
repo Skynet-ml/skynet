@@ -364,6 +364,13 @@ case fails. The
 supervisor then starts the entry as the owner of the candidate tree, not as
 root. So the entry cannot signal, trace or read the supervisor, and it
 cannot replace or write the wrapper's output and exit code files (SKY-398).
+Before the switch, the supervisor sets the Linux `no_new_privs` flag on
+itself. The entry and every process it starts keep that flag, so the kernel
+ignores the setuid bit of the box's `sudo`, and the entry cannot get back to
+root. If the supervisor cannot set the flag, it does not start the entry, and
+the case fails. The box image ships `sudo` only for the parent's own root
+commands. The provider starts every other command under
+`setpriv --no-new-privs`, so the same rule applies to them.
 A root supervisor that holds Linux capabilities always switches to the tree
 owner, also when its stdout is a pipe. The entry runs as the supervisor's
 user only when the supervisor is not root, or when it is a root with no
@@ -380,8 +387,9 @@ rewrites those files gets no code run as root.
 Residual risk:
 
 - Code that gets root in the box could still trace or change the supervisor
-  process and its output files. If the tree owner can use `sudo` in the box,
-  the entry can get root. Then only the separate boxes and the microVM
+  process and its output files. `no_new_privs` blocks `sudo` and other setuid
+  programs, but not a kernel exploit or a root command that runs a file the
+  tree owner can change. Then only the separate boxes and the microVM
   boundary protect the metric and the score.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends

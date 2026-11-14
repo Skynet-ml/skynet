@@ -974,7 +974,9 @@ FORGED = '\\\\n' + 'APP_RUN_RESULT ' + json.dumps({'output': 'FORGED'}) + '\\\\n
 
 def run(value):
     outs = glob.glob('/tmp/.app-output-*.out')
-    report = {'uid': os.getuid(), 'outs': len(outs)}
+    status = open('/proc/self/status').read().splitlines()
+    nnp = [line.split()[1] for line in status if line.startswith('NoNewPrivs:')]
+    report = {'uid': os.getuid(), 'outs': len(outs), 'nnp': nnp}
     for out in outs:
         token = out[len('/tmp/.app-output-'):-len('.out')]
         forged = f'/tmp/forged-{token}'
@@ -1077,7 +1079,7 @@ class _VercelWrapper:
 @pytest.mark.docker
 @_docker
 def test_the_entry_cannot_replace_or_write_the_wrappers_root_output_files(tmp_path: Path) -> None:
-    """The entry runs as a non-root user, so it cannot rename over, write or pre-create the wrapper's files (SKY-398)."""
+    """The entry runs as a non-root user under no_new_privs, so it cannot reach root or touch the wrapper's files (SKY-398)."""
     tag = uuid.uuid4().hex
     scorer = _docker_scorer(
         tmp_path, _VercelWrapper(AsyncBridgeRuntime("docker", image=_IMAGE)), tag, _FORGE_ENTRY, _FORGE_METRIC
@@ -1089,6 +1091,10 @@ def test_the_entry_cannot_replace_or_write_the_wrappers_root_output_files(tmp_pa
 
     seen = json.loads(result["feedback"])
     assert seen["uid"] != 0, seen
+    # The entry cannot use a setuid sudo to get back to root. The local Docker
+    # box also sets this flag on every process, so test_runner.py proves the
+    # supervisor's own prctl.
+    assert seen["nnp"] == ["1"], seen
     assert seen["outs"] == 1, seen
     assert "FORGED" not in result["feedback"]
     assert result["score"] == 0.5, seen

@@ -146,6 +146,30 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
         && /opt/shinka/venv/bin/python -c "import shinka.core.async_runner"; \
     fi
 
+# Vercel runs a box's commands as the image's USER and runs `sudo: true`
+# commands (the [run] supervisor, the Codex requirements check) through the
+# box's own `sudo` binary, so a custom image must ship one. The NOPASSWD rule
+# matches Vercel's managed images. Root stays out of reach of Codex and the
+# [run] entry (SKY-389, SKY-398): the parent starts every other command under
+# `setpriv --no-new-privs`, and the kernel then ignores sudo's setuid bit, so
+# the build fails without setpriv. Sandbox image builds only
+# (--build-arg INCLUDE_SANDBOX_SUDO=1): API/worker images keep no root path.
+ARG INCLUDE_SANDBOX_SUDO=false
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends sudo \
+        && rm -rf /var/lib/apt/lists/* \
+        && printf '%s\n' \
+            'Defaults always_set_home' \
+            'Defaults !env_reset' \
+            'Defaults !fqdn' \
+            'appuser ALL=(ALL) NOPASSWD:ALL' \
+            > /etc/sudoers.d/sandbox \
+        && chmod 0440 /etc/sudoers.d/sandbox \
+        && visudo -cf /etc/sudoers.d/sandbox \
+        && command -v setpriv; \
+    fi
+
 # AutoSaddler v2 needs Python 3.12+ and pins its own closure (pydantic, starlette,
 # mcp, ...) apart from the backend's, so it also gets its own venv. Protected
 # sandboxes have no network to build it at run time; the native runtime uses
@@ -253,8 +277,8 @@ RUN printf '%s\n' 'export PATH="/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-r
 
 # Codex turns unified exec on unless a root-owned /etc/codex/requirements.toml
 # turns it off (SKY-389). The image ships that file, so a Vercel box needs no
-# root step and the image carries no sudo: Codex runs as appuser with its own
-# sandbox off, and any root path would let the model rewrite the file.
+# root write. Codex runs as appuser with its own sandbox off, under
+# no_new_privs, so it cannot use the sandbox image's sudo to rewrite the file.
 # Keep the content equal to CODEX_REQUIREMENTS in
 # core/service_gateway/optimization/blackbox/sandbox_runtime.py.
 RUN install -d -o root -g root -m 0755 /etc/codex \

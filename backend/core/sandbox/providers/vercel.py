@@ -140,6 +140,12 @@ EXIT_PREFIX = "/tmp/.app-exit-"
 OUTPUT_PREFIX = "/tmp/.app-output-"
 TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
+# The sandbox image ships a NOPASSWD sudo for the parent's own `sudo: true`
+# commands. Every other command starts under no_new_privs: its descendants
+# inherit the flag and cannot drop it, and the kernel then ignores sudo's
+# setuid bit, so Codex and the [run] entry never reach root (SKY-389, SKY-398).
+# The absolute path keeps a planted `setpriv` earlier on PATH from skipping it.
+NO_NEW_PRIVS = ("/usr/bin/setpriv", "--no-new-privs")
 OUTPUT_POLL = 0.5
 OUTPUT_POLL_WARN_AFTER = 3
 # The SDK streams a run with no read timeout, so a stalled tail read would stop
@@ -261,6 +267,21 @@ async def _close_client(client: Any) -> None:
         await asyncio.wait_for(client.aclose(), STOP_TIMEOUT)
     except Exception as error:
         logger.warning("Sandbox snapshot client did not close: %s", type(error).__name__)
+
+
+def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
+    """Make the program and arguments that start one box bash.
+
+    Args:
+        args: The arguments after the shell flags: the script, then its ``$0`` and parameters.
+        sudo: The command runs as root, so it keeps the right to raise privileges.
+
+    Returns:
+        The program and its arguments for the SDK.
+    """
+    if sudo:
+        return "bash", [*SHELL_FLAGS, *args]
+    return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "bash", *SHELL_FLAGS, *args]
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
@@ -639,9 +660,7 @@ class VercelEnvironment(SandboxEnvironment):
         if self._pacing is not None:
             await self._pacing.reads.acquire()
         async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
-            return await session.run_process(
-                "bash", [*SHELL_FLAGS, script], capture_output=True, kill_after=OUTPUT_POLL_TIMEOUT
-            )
+            return await session.run_process(*_bash([script]), capture_output=True, kill_after=OUTPUT_POLL_TIMEOUT)
 
     async def _start_egress_proxy(self) -> None:
         """Start the record-only egress proxy in the box. Never raises an Exception.
@@ -1035,7 +1054,8 @@ class VercelEnvironment(SandboxEnvironment):
             on_output: Receives each new ``(stream, text)`` chunk while the
                 command runs, and the rest after it ends. The chunks of one
                 stream join to its full text.
-            sudo: Run the command as root.
+            sudo: Run the command as root. Any other command runs under
+                ``NO_NEW_PRIVS``, so nothing it starts can reach root.
 
         Returns:
             The exit code and the captured output.
@@ -1127,8 +1147,7 @@ class VercelEnvironment(SandboxEnvironment):
         for attempt in range(1, EXEC_ATTEMPTS + 1):
             try:
                 return await session.create_process(
-                    "bash",
-                    [*SHELL_FLAGS, script],
+                    *_bash([script], sudo=sudo),
                     cwd=cwd,
                     env=dict(env) if env else None,
                     sudo=sudo,
@@ -1166,8 +1185,7 @@ class VercelEnvironment(SandboxEnvironment):
                 # read ends, and then ``_stop_poller`` waits forever.
                 async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
                     completed = await session.run_process(
-                        "bash",
-                        [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs],
+                        *_bash([TAIL_SCRIPT, "tail", *pairs]),
                         capture_output=True,
                         kill_after=OUTPUT_POLL_TIMEOUT,
                     )

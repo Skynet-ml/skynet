@@ -1156,8 +1156,8 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
 
 
-def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -> None:
-    """Bake the exact requirements file as root before ``USER 1001``, and give the image user no root path (SKY-389)."""
+def test_dockerfile_ships_the_codex_requirements_file_root_owned() -> None:
+    """Bake the exact requirements file as root before ``USER 1001`` (SKY-389)."""
     dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
     bake = dockerfile.index(f"> {CODEX_REQUIREMENTS_PATH}")
     assert "install -d -o root -g root -m 0755 /etc/codex" in dockerfile
@@ -1165,8 +1165,20 @@ def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -
     assert f"chown root:root {CODEX_REQUIREMENTS_PATH}" in dockerfile
     assert f"chmod 0644 {CODEX_REQUIREMENTS_PATH}" in dockerfile
     assert bake < dockerfile.index("\nUSER 1001\n")
-    assert "sudoers" not in dockerfile
-    assert not re.search(r"apt-get install[^\n]*\bsudo\b", dockerfile)
+
+
+def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() -> None:
+    """Install sudo only on opt-in, before ``USER 1001``, and fail the build without the ``no_new_privs`` launcher."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    block = dockerfile[dockerfile.index("ARG INCLUDE_SANDBOX_SUDO=false") : dockerfile.index("\nUSER 1001\n")]
+    step = block[block.index("RUN ") : block.index("\n    fi\n")]
+    assert step.startswith('RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then')
+    assert re.search(r"apt-get install[^\n]*\bsudo\b", step)
+    assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in step
+    assert "chmod 0440 /etc/sudoers.d/sandbox" in step
+    assert "visudo -cf /etc/sudoers.d/sandbox" in step
+    assert "command -v setpriv" in step
+    assert len(re.findall(r"apt-get install[^\n]*\bsudo\b", dockerfile)) == 1
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:

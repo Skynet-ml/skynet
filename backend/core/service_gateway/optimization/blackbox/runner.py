@@ -154,6 +154,7 @@ ELAPSED_PARAM = "elapsed_s"
 # the image's venv has no system site, so the runner adds this one (SKY-398).
 METRIC_SITE_PARAM = "metric_site"
 _PR_SET_DUMPABLE = 4
+_PR_SET_NO_NEW_PRIVS = 38
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -1455,7 +1456,7 @@ def refuse_processes() -> list[bool]:
 
 
 class EntryUserError(Exception):
-    """The root supervisor found no user other than root to run the entry as."""
+    """The root supervisor cannot run the entry safely as a user other than root."""
 
 
 def unsafe_output() -> str | None:
@@ -1548,7 +1549,8 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
         The ``subprocess.Popen`` arguments that switch the user, or none.
 
     Raises:
-        EntryUserError: When root owns the candidate tree.
+        EntryUserError: When root owns the candidate tree, or the
+            supervisor cannot set ``no_new_privs``.
     """
     if os.geteuid() != 0 or (not stat.S_ISREG(os.fstat(1).st_mode) and not _has_capabilities()):
         return {}
@@ -1561,7 +1563,29 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
         pass
     else:
         env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    _block_privilege_gain()
     return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
+
+
+def _block_privilege_gain() -> None:
+    """Set ``no_new_privs`` on the root supervisor before it starts the entry as another user.
+
+    The entry and every process it starts inherit the flag, and no process
+    can clear it. The kernel then ignores setuid bits, so the entry cannot
+    use the box's ``sudo`` to get back to root (SKY-398). The flag does not
+    take root's own capabilities, so the user switch still works. The flag
+    is set here and not in ``preexec_fn``, which is unsafe once the relay
+    threads run.
+
+    Raises:
+        EntryUserError: When the flag cannot be set.
+    """
+    try:
+        failed = ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+    except (AttributeError, OSError):
+        failed = True
+    if failed:
+        raise EntryUserError("The supervisor cannot set no_new_privs, so it does not start the [run] entry.")
 
 
 def _read_answer(path: Path, user: Any) -> dict[str, Any]:
