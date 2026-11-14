@@ -371,6 +371,11 @@ root. If the supervisor cannot set the flag, it does not start the entry, and
 the case fails. The box image ships `sudo` only for the parent's own root
 commands. The provider starts every other command under
 `setpriv --no-new-privs`, so the same rule applies to them.
+A root command never finds a program in a folder the box user can write,
+such as `/app/.venv/bin`: the image's `sudo` rule and the provider both set
+root's `PATH` to the system folders only. After the user switch, the
+supervisor gives the entry the image's box `PATH` (`APP_ENTRY_PATH`), so the
+entry still finds the `[setup]` packages.
 A root supervisor that holds Linux capabilities always switches to the tree
 owner, also when its stdout is a pipe. The entry runs as the supervisor's
 user only when the supervisor is not root, or when it is a root with no
@@ -391,6 +396,11 @@ Residual risk:
   programs, but not a kernel exploit or a root command that runs a file the
   tree owner can change. Then only the separate boxes and the microVM
   boundary protect the metric and the score.
+- The `no_new_privs` flag covers only the processes that Skynet starts.
+  Vercel's own in-box agent and its file helpers run as the box user without
+  the flag. So the block also depends on the box kernel refusing `ptrace`
+  between unrelated processes of one user (Yama `ptrace_scope` 1 or higher).
+  This is not verified yet.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).

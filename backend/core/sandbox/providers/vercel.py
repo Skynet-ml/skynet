@@ -146,6 +146,11 @@ SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # setuid bit, so Codex and the [run] entry never reach root (SKY-389, SKY-398).
 # The absolute path keeps a planted `setpriv` earlier on PATH from skipping it.
 NO_NEW_PRIVS = ("/usr/bin/setpriv", "--no-new-privs")
+# A root command must never find a program in a folder the box user can write,
+# such as /app/.venv/bin. The box's sudo may pass the box PATH through, so
+# every root script sets this PATH first. Keep it equal to the image's
+# sudoers secure_path.
+ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 OUTPUT_POLL = 0.5
 OUTPUT_POLL_WARN_AFTER = 3
 # The SDK streams a run with no read timeout, so a stalled tail read would stop
@@ -274,13 +279,15 @@ def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
 
     Args:
         args: The arguments after the shell flags: the script, then its ``$0`` and parameters.
-        sudo: The command runs as root, so it keeps the right to raise privileges.
+        sudo: The command runs as root, so it keeps the right to raise
+            privileges, and its script starts with ``PATH`` set to ``ROOT_PATH``.
 
     Returns:
         The program and its arguments for the SDK.
     """
     if sudo:
-        return "bash", [*SHELL_FLAGS, *args]
+        script, *rest = args
+        return "/bin/bash", [*SHELL_FLAGS, f"export PATH={ROOT_PATH}; {script}", *rest]
     return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "bash", *SHELL_FLAGS, *args]
 
 

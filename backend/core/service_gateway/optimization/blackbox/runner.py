@@ -110,6 +110,9 @@ LLM_HELPER_NAME = "llm"
 # The gateway key rides in the environment so it never touches the box filesystem.
 ENV_API_KEY = "APP_API_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
+# The image's box PATH, with /app/.venv/bin first. sudo gives a root supervisor
+# a secure PATH without it, so the entry gets this one after the user switch.
+ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 # This file runs alone in the box, without ``core.config``; boxes started by an
 # older control plane still carry only the pre-rename spellings.
 _LEGACY_ENV_PREFIX = "SKYNET_"
@@ -1543,7 +1546,8 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
     stdout runs the entry as itself.
 
     Args:
-        env: The entry's environment; gets ``HOME``, ``USER`` and ``LOGNAME``.
+        env: The entry's environment; on a user switch it gets ``HOME``,
+            ``USER``, ``LOGNAME``, and ``PATH`` from ``ENV_ENTRY_PATH``.
 
     Returns:
         The ``subprocess.Popen`` arguments that switch the user, or none.
@@ -1563,6 +1567,8 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
         pass
     else:
         env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    if env.get(ENV_ENTRY_PATH):
+        env["PATH"] = env[ENV_ENTRY_PATH]
     _block_privilege_gain()
     return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
 

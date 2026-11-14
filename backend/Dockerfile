@@ -152,7 +152,9 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
 # matches Vercel's managed images. Root stays out of reach of Codex and the
 # [run] entry (SKY-389, SKY-398): the parent starts every other command under
 # `setpriv --no-new-privs`, and the kernel then ignores sudo's setuid bit, so
-# the build fails without setpriv. Sandbox image builds only
+# the build fails without setpriv. The box user can write /app/.venv/bin, so
+# root must never find a program there: secure_path sets root's own PATH here
+# and not in the base image's sudoers. Sandbox image builds only
 # (--build-arg INCLUDE_SANDBOX_SUDO=1): API/worker images keep no root path.
 ARG INCLUDE_SANDBOX_SUDO=false
 RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
@@ -163,6 +165,7 @@ RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]
             'Defaults always_set_home' \
             'Defaults !env_reset' \
             'Defaults !fqdn' \
+            'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
             'appuser ALL=(ALL) NOPASSWD:ALL' \
             > /etc/sudoers.d/sandbox \
         && chmod 0440 /etc/sudoers.d/sandbox \
@@ -289,6 +292,9 @@ RUN install -d -o root -g root -m 0755 /etc/codex \
 USER 1001
 
 ENV PATH="/app/.venv/bin:$PATH"
+# sudo gives a root command its secure_path, without /app/.venv/bin. The root
+# [run] supervisor gives this PATH back to the entry it starts as the box user.
+ENV APP_ENTRY_PATH="$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV WORKER_CONCURRENCY=4
 ENV WORKER_POLL_INTERVAL=2.0

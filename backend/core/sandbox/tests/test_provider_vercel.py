@@ -749,18 +749,22 @@ async def test_a_command_without_sudo_starts_under_no_new_privs(
     call = client.boxes[env.name].create_calls[0]
     assert call["command"] == "/usr/bin/setpriv"
     assert call["args"][:2] == ["--no-new-privs", "bash"]
+    assert "export PATH=" not in call["args"][-1]
     assert call["sudo"] is False
     await env.stop()
 
 
 async def test_a_sudo_command_starts_without_no_new_privs(client: FakeClient, log: list[str]) -> None:
-    """Check that the parent's own root command still runs bash directly, so sudo can raise it."""
+    """Check that the parent's own root command runs /bin/bash directly with a PATH the box user cannot write."""
     env = make_env(client, log)
     await env.start()
     await env.exec("echo hello", timeout_sec=30, sudo=True)
     call = client.boxes[env.name].create_calls[0]
-    assert call["command"] == "bash"
+    assert call["command"] == "/bin/bash"
     assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
+    assert len(call["args"]) == 4
+    assert call["args"][-1].startswith(f"export PATH={vercel.ROOT_PATH}; timeout --signal=KILL 30s bash ")
+    assert "/app/.venv" not in vercel.ROOT_PATH
     assert "setpriv" not in call["args"][-1]
     assert call["sudo"] is True
     await env.stop()

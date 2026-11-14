@@ -50,7 +50,10 @@ The supervisor checks that file, then starts the entry as the owner of the
 candidate tree, so the entry cannot write the wrapper's files. Before the
 switch, the supervisor sets `no_new_privs` on itself, so the entry cannot use
 the box's `sudo` to get back to root. If it cannot set the flag, it does not
-start the entry. In a local
+start the entry. A root command gets only the system folders on `PATH`, from
+the image's `sudo` rule and from the provider, because the box user can write
+`/app/.venv/bin`. After the switch, the entry gets the image's box `PATH` from
+`APP_ENTRY_PATH`, with `/app/.venv/bin` first. In a local
 Docker box the supervisor's stdout is a pipe and its root has no
 capabilities, so it cannot switch users and the entry runs as the
 supervisor's user. A root with capabilities switches users also with a pipe.

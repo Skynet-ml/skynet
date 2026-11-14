@@ -34,6 +34,7 @@ from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
 from core.models.unified import UnifiedCase
+from core.sandbox.providers import vercel
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
@@ -47,6 +48,7 @@ from .. import (
     native_runner,
     native_runtime,
     repo_tree,
+    runner,
     sandbox_log,
 )
 from ..harness import GatewayConfig, build_launch, launch_payload
@@ -1175,6 +1177,10 @@ def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() 
     assert step.startswith('RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then')
     assert re.search(r"apt-get install[^\n]*\bsudo\b", step)
     assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in step
+    assert f"'Defaults secure_path=\"{vercel.ROOT_PATH}\"'" in step
+    path = dockerfile.index('\nENV PATH="/app/.venv/bin:$PATH"\n')
+    assert dockerfile.index('\nENV APP_ENTRY_PATH="$PATH"\n') > path
+    assert f"ENV {runner.ENV_ENTRY_PATH}=" in dockerfile
     assert "chmod 0440 /etc/sudoers.d/sandbox" in step
     assert "visudo -cf /etc/sudoers.d/sandbox" in step
     assert "command -v setpriv" in step
