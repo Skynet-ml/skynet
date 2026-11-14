@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { activityGroupOpen, joinSummary, summarizeActivity } from "./activity-summary.ts";
 import { diffHunks, diffStats, lineDiff } from "./line-diff.ts";
 
-test("a burst names each kind once, edits first, with how many ran", () => {
+test("a burst names each kind once in Codex's order, with how many ran", () => {
   const summary = summarizeActivity([
     { kind: "read", status: "done" },
     { kind: "edit", status: "done" },
@@ -13,8 +13,8 @@ test("a burst names each kind once, edits first, with how many ran", () => {
   ]);
   assert.deepEqual(summary.parts, [
     { kind: "edit", count: 1 },
-    { kind: "check", count: 1 },
     { kind: "read", count: 2 },
+    { kind: "check", count: 1 },
   ]);
   assert.equal(summary.lead, "edit");
   assert.equal(summary.running, false);

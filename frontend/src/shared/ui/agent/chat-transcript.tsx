@@ -9,7 +9,9 @@ import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { AgentBubble } from "./agent-bubble";
 import { compactionSlots, placeSlots, type SlotPlace } from "./compaction-slots";
 import { MessageActions } from "./message-actions";
+import { minuteClockNow, separatorTimes, subscribeMinuteClock } from "./message-time";
 import { pairMessages, type Pair as TranscriptPair } from "./transcript-pairs";
+import { TimestampSeparator } from "./timestamp-separator";
 import { TtftIndicator } from "./ttft-indicator";
 import { UserBubble, UserBubbleEditor } from "./user-bubble";
 import type { AgentMessage, AgentThinking, AgentToolCall, ChatCompaction } from "./types";
@@ -45,6 +47,10 @@ interface ChatTranscriptProps {
   /** The live row of a compaction that the streaming turn runs before its answer. */
   compacting?: React.ReactNode;
 }
+
+// The server and the hydrating client both see a time of 0, so no
+// separator depends on a clock; the client's real time follows at once.
+const serverNow = () => 0;
 
 // Owns the "messages → user/agent pairs → bubbles + edit-and-resend wiring"
 // glue that was duplicated between the generalist and code-agent panels.
@@ -86,6 +92,18 @@ export function ChatTranscript({
       ),
     [pairs, messages],
   );
+
+  const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, serverNow);
+  const separators = React.useMemo(() => {
+    const times = separatorTimes(
+      pairs.map((pair) => [
+        ...(pair.user ? [{ role: "user" as const, at: pair.user.msg.createdAt }] : []),
+        ...(pair.agent ? [{ role: "agent" as const, at: pair.agent.createdAt }] : []),
+      ]),
+      now,
+    );
+    return new Map(pairs.map((pair, i) => [pair.key, times[i] ?? null]));
+  }, [pairs, now]);
 
   const latestAgentKey = React.useMemo(() => {
     for (let i = pairs.length - 1; i >= 0; i--) {
@@ -176,8 +194,10 @@ export function ChatTranscript({
           <React.Fragment key={slot.anchor}>{renderCompaction(slot.entry)}</React.Fragment>
         ));
 
+    const separatorAt = separators.get(pair.key) ?? null;
     return (
       <>
+        {separatorAt !== null && <TimestampSeparator at={separatorAt} now={now} />}
         {rows("before")}
         {pair.user &&
           (isEditing ? (

@@ -150,10 +150,11 @@ export function AgentBubble({
       answer: m.content.trim() ? renderAnswer(m.content) : null,
       durationMs: m.stats?.durationMs,
     }));
-    if (!turnStreaming && !hasText && !hasActivity && !plan && !earlierTurns.length) return null;
+    const hasTurn = turnStreaming || hasActivity || Boolean(plan) || earlierTurns.length > 0;
+    if (!hasTurn && !hasText && !afterContent) return null;
     return (
       <div className={cn("flex w-full min-w-0 flex-col gap-3", className)}>
-        <TurnActivity
+        {(hasTurn || hasText) && <TurnActivity
           thinking={allThinking}
           steps={visibleToolCalls.map((v) => ({
             ...v,
@@ -167,7 +168,7 @@ export function AgentBubble({
           durationMs={msg.stats?.durationMs}
           startedAt={turnStart(allThinking, [])}
           earlier={earlierTurns}
-        />
+        />}
         {answer}
         {afterContent}
       </div>

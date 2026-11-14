@@ -351,6 +351,17 @@ export function Composer({
   const maxLength = midTurn?.maxLength ?? 20_000;
   const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
   const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
+  const [dropping, setDropping] = React.useState(false);
+  const dropDepth = React.useRef(0);
+  const dragsFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
+  const canDrop = !inline && attachments && !disabled && !locked;
+  // A composer that locks mid-drag drops the highlight; no drop event comes to clear it.
+  React.useEffect(() => {
+    if (canDrop) return;
+    dropDepth.current = 0;
+    setDropping(false);
+  }, [canDrop]);
+
   const attachFiles = async (picked: File[]) => {
     const {
       claimed,
@@ -646,8 +657,46 @@ export function Composer({
             "relative rounded-2xl border border-border bg-muted/20 transition-colors",
             "focus-within:border-primary-fill",
             inline && "flex min-h-[44px] items-end gap-1 p-1",
+            dropping && "border-primary-fill",
           )}
+          onDragEnter={(e) => {
+            if (!canDrop || !dragsFiles(e)) return;
+            e.preventDefault();
+            dropDepth.current += 1;
+            setDropping(true);
+          }}
+          onDragOver={(e) => {
+            if (!canDrop || !dragsFiles(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+          }}
+          onDragLeave={() => {
+            // The depth, not the state: a leave can come before the enter's render.
+            if (!dropDepth.current) return;
+            dropDepth.current -= 1;
+            if (!dropDepth.current) setDropping(false);
+          }}
+          onDrop={(e) => {
+            dropDepth.current = 0;
+            setDropping(false);
+            if (!canDrop || !dragsFiles(e)) return;
+            e.preventDefault();
+            // A dropped folder is not a file to read, so it is skipped.
+            const files = Array.from(e.dataTransfer.items)
+              .filter((item) => item.kind === "file" && !item.webkitGetAsEntry?.()?.isDirectory)
+              .map((item) => item.getAsFile())
+              .filter((f): f is File => f !== null);
+            if (files.length) void attachFiles(files);
+          }}
         >
+          {dropping && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-2xl border border-dashed border-primary-fill bg-background/85 text-sm font-medium text-foreground"
+            >
+              {msg("agent.composer.drop_files")}
+            </div>
+          )}
           {menu && (
             <div
               id={slashListId}

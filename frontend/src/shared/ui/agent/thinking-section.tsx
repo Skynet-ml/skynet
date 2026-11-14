@@ -11,6 +11,7 @@ import { splitSummary, thoughtSeconds } from "@/shared/lib/thinking-segments";
 
 import { RevealText } from "./reveal-text";
 import { ThinkingDots } from "./thinking-dots";
+import { formatSpan } from "./turn-activity";
 import type { AgentThinking } from "./types";
 
 // Lazy for the same reason as in agent-bubble: the parser stays out of the
@@ -36,19 +37,12 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
   const { reasoning, startedAt, endedAt, streaming, summary } = thinking;
   const isThinking = streaming && !endedAt && Boolean(startedAt);
   const [open, setOpen] = React.useState(false);
-  const [nowTs, setNowTs] = React.useState(() => Date.now());
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const stickToBottomRef = React.useRef(true);
   const reduce = useReducedMotion();
   // A summary there on mount belongs to a reopened chat and shows at once;
   // one that lands while the panel watches writes itself in.
   const [summaryOnMount] = React.useState(summary);
-
-  React.useEffect(() => {
-    if (!isThinking) return;
-    const id = setInterval(() => setNowTs(Date.now()), 200);
-    return () => clearInterval(id);
-  }, [isThinking]);
 
   // Follow the stream only while the reader is at the bottom, so scrolling
   // up to read earlier reasoning isn't yanked back down by new tokens.
@@ -70,16 +64,15 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
 
   if (!reasoning && !isThinking) return null;
 
-  const elapsedMs = startedAt ? (endedAt ?? nowTs) - startedAt : 0;
-  const elapsedSec = Math.max(0, Math.round(elapsedMs / 100) / 10);
-  const thought = thoughtSeconds(startedAt, endedAt ?? nowTs);
+  // Codex shows no live clock on "Thinking". Without an end time the span is unknown, so it reads "briefly".
+  const thought = endedAt ? thoughtSeconds(startedAt, endedAt) : null;
   const showSummary = Boolean(summary) && !isThinking;
   const { heading, detail } = splitSummary(summary ?? "");
   const label = isThinking
     ? msg("shared.agent.thinking")
-    : thought === null
+    : thought === null || thought < 1
       ? msg("shared.agent.thought_briefly")
-      : formatMsg("shared.agent.thought_seconds", { seconds: thought.toFixed(1) });
+      : formatMsg("shared.agent.thought_for", { duration: formatSpan(thought * 1000) });
 
   return (
     <div className={cn(!compact && "px-4 py-2")}>
@@ -136,12 +129,6 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
             {label}
           </motion.span>
         </AnimatePresence>
-        {isThinking && !compact && (
-          <span className="font-mono tabular-nums text-[0.6875rem] text-muted-foreground/60">
-            {elapsedSec.toFixed(1)}
-            {msg("shared.agent.seconds_short")}
-          </span>
-        )}
         {reasoning && (
           <CaretRight
             className={cn(

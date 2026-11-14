@@ -30,19 +30,17 @@ function scrollPane(el: HTMLElement): HTMLElement | null {
 
 interface CollapsibleMessageProps {
   children: React.ReactNode;
-  /** Bubble fill the fade blends into, as a Tailwind `from-*` class. */
-  fadeFromClass?: string;
   /** Off while a message is still streaming, so the view never jumps. */
   collapsible?: boolean;
 }
 
 /**
- * Clamp a long message to 18 rendered lines behind an animated Show more /
- * Show less toggle. Shorter messages render untouched with no toggle.
+ * Clamp a long message to 20 rendered lines behind an animated Show more /
+ * Show less toggle. As in Codex, the last line is a "…" line, not a fade.
+ * Shorter messages render untouched with no toggle.
  */
 export function CollapsibleMessage({
   children,
-  fadeFromClass = "from-primary-fill",
   collapsible = true,
 }: CollapsibleMessageProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -127,19 +125,12 @@ export function CollapsibleMessage({
         }}
       >
         <div ref={bodyRef}>{children}</div>
-        {overflowing && (
-          <div
-            aria-hidden
-            className={cn(
-              "pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t to-transparent",
-              "transition-opacity motion-reduce:transition-none",
-              fadeFromClass,
-              expanded ? "opacity-0" : "opacity-100",
-            )}
-            style={motion}
-          />
-        )}
       </div>
+      {overflowing && !expanded && (
+        <span aria-hidden className="block">
+          …
+        </span>
+      )}
       {overflowing && (
         <button
           type="button"
