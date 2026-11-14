@@ -3215,9 +3215,26 @@ def _record_payload(**extra: Any) -> dict[str, Any]:
     return {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": _RECORD_METRIC}, "seed": 7, **extra}
 
 
+def _ruled_cases_tree(*, target: bool = False, minimums: bool = False) -> dict[str, str]:
+    """Build the cases tree whose ``optimize.toml`` sets a target, a ``recall`` minimum, both or neither.
+
+    Args:
+        target: Whether the file sets ``[outcome] target = 0.9``.
+        minimums: Whether the file sets ``[outcome.require] recall = 0.8``.
+
+    Returns:
+        The tree.
+    """
+    rules = ("\n[outcome]\ntarget = 0.9\n" if target else "") + (
+        "\n[outcome.require]\nrecall = 0.8\n" if minimums else ""
+    )
+    return {**_CASES_TREE, "optimize.toml": _CASES_TREE["optimize.toml"] + rules}
+
+
 def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
     """A run with a cases file gets the file's hashes, the guest's split and the verdict keys (SKY-694)."""
-    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    tree = _ruled_cases_tree(target=True)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
         outcome = {"target": 0.9, "target_reached": True}
         result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
@@ -3230,7 +3247,7 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
     metric = hashlib.sha256(
         _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): ...\n")
     )
-    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+    assert record["contract_sha256"] == hashlib.sha256(tree["optimize.toml"].encode()).hexdigest()
     assert record["metric_sha256"] == metric.hexdigest()
     assert record["metric_home"] == "repository"
     assert record["cases_sha256"] == hashlib.sha256(_CASES_JSONL.encode()).hexdigest()
@@ -3636,7 +3653,9 @@ def test_hostile_guest_values_never_break_the_pull_request_text(
     monkeypatch: pytest.MonkeyPatch, split: dict[str, Any], outcome: dict[str, Any]
 ) -> None:
     """Any guest split or verdict either gives a record the block can write, or no record; nothing raises."""
-    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    # The file sets the rules the verdict names, so the shape guard, not the rule check, decides.
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
         details = _guest_details(staged_payload["cases"], 7, outcome=outcome)
         details[CASE_SPLIT_KEY].update(split)
@@ -3676,7 +3695,8 @@ def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeyp
 )
 def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any]) -> None:
     """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included."""
-    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
         repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
@@ -3684,3 +3704,96 @@ def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch
         staged.cleanup()
 
     assert "Run record:" in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+_MET_TARGET = {"target": 0.9, "target_reached": True}
+_PASSED = {"minimums_passed": True, "failed_minimums": []}
+
+
+@pytest.mark.parametrize(
+    ("target", "minimums", "outcome"),
+    [
+        (False, False, _MET_TARGET),
+        (False, False, _PASSED),
+        (False, False, {"failed_minimums": []}),
+        (True, False, {}),
+        (True, False, _PASSED),
+        (True, False, {**_MET_TARGET, **_PASSED}),
+        (False, True, {}),
+        (False, True, {"failed_minimums": []}),
+        (False, True, _MET_TARGET),
+        (True, True, _MET_TARGET),
+        (True, True, _PASSED),
+    ],
+    ids=[
+        "no-rule-target-key",
+        "no-rule-minimum-keys",
+        "no-rule-failed-list",
+        "target-rule-no-verdict",
+        "target-rule-minimum-keys",
+        "target-rule-extra-minimum-keys",
+        "minimum-rule-no-verdict",
+        "minimum-rule-no-passed-key",
+        "minimum-rule-target-key",
+        "both-rules-no-minimum-key",
+        "both-rules-no-target-key",
+    ],
+)
+def test_a_verdict_that_does_not_match_the_file_rules_gets_no_record(
+    monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any]
+) -> None:
+    """A guest can forge ``details["outcome"]``, so verdict keys the file's rules do not allow, or omit, give no record."""
+    tree = _ruled_cases_tree(target=target, minimums=minimums)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+@pytest.mark.parametrize(
+    ("target", "minimums", "outcome", "contract_met"),
+    [
+        (False, False, {}, True),
+        (True, False, {"target": 0.9, "target_reached": False}, False),
+        (False, True, _minimum(), False),
+        (True, True, {**_MET_TARGET, **_PASSED}, True),
+    ],
+    ids=["no-rule", "target-only", "minimums-only", "both"],
+)
+def test_a_verdict_that_matches_the_file_rules_gets_a_record(
+    monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any], contract_met: bool
+) -> None:
+    """Each rule set keeps the verdict keys Skynet writes for it, so a true verdict always gets its record."""
+    tree = _ruled_cases_tree(target=target, minimums=minimums)
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert record["contract_met"] is contract_met
+    for key in ("target_reached", "minimums_passed", "failed_minimums"):
+        assert (key in record) == (key in outcome)
+
+
+@pytest.mark.parametrize(("outcome", "recorded"), [({}, True), (_MET_TARGET, False)], ids=["no-verdict", "verdict"])
+def test_a_snapshot_with_no_outcome_sets_no_rule(
+    monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any], recorded: bool
+) -> None:
+    """An older staged payload keeps no ``outcome`` in its snapshot, which means the file sets no rule."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        del staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["outcome"]
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert ("record" in result["details"]) is recorded

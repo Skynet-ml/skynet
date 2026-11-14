@@ -2293,6 +2293,47 @@ def test_a_run_with_no_target_and_no_minimum_stores_no_verdict(
     assert "outcome" not in response.details
 
 
+@pytest.mark.parametrize(
+    ("outcome", "verdict"),
+    [
+        ({"target": None, "require": {}}, None),
+        ({"target": 0.9, "require": {}}, {"target": 0.9, "target_reached": False}),
+    ],
+    ids=["no-rule", "target"],
+)
+def test_an_engine_outcome_never_passes_for_the_verdict(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: dict[str, Any],
+    verdict: dict[str, Any] | None,
+) -> None:
+    """The engine metadata comes from the guest, so its ``outcome`` is dropped and only Skynet's verdict stays."""
+    forged = {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []}
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(
+                best_candidate="winner",
+                best_score=1.0,
+                total_evals=0,
+                metadata={"outcome": dict(forged), "selection_source": "engine"},
+            ),
+            [],
+        ),
+    )
+    payload = _payload(scorer={"kind": "python", "metric_code": _OUTCOME_CODE}, cases=_OUTCOME_CASES)
+
+    response = run_blackbox_optimization(
+        payload, artifact_id="job-forged-outcome", gepa_log_dir_path=str(tmp_path), repo_snapshot={"outcome": outcome}
+    )
+
+    assert response.details.get("outcome") == verdict
+    assert ("outcome" in response.details) is (verdict is not None)
+    assert response.details["selection_source"] == "engine"
+
+
 def test_minimums_pass_when_each_named_score_reaches_its_minimum(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2388,7 +2429,9 @@ def _constant_run(value: float, count: int) -> service_mod.FinalRun:
     return service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL)
 
 
-@pytest.mark.parametrize(("value", "count"), [(0.7, 3), (0.1, 6)])
+# Python 3.12 made float ``sum()`` compensated, so some means flip to above the
+# value (six 0.1 give 0.10000000000000002). These pairs fall below on both sums.
+@pytest.mark.parametrize(("value", "count"), [(0.7, 3), (0.83, 5)])
 def test_a_mean_equal_to_the_target_reaches_it_despite_float_rounding(value: float, count: int) -> None:
     """Equal case scores can average one rounding step below the number in the file; that still reaches it."""
     run = _constant_run(value, count)
