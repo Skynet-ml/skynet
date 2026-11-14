@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from ...billing.budgets import BudgetInsufficientError, BudgetService
+from ...billing.budgets import BudgetFencedError, BudgetInsufficientError, BudgetService
 from ...billing.runtime import UsagePendingError
 from ...billing.signals import BudgetReached
 from ...connectors.github_repo import RepoFetchError, RepoRateLimitError
@@ -44,6 +44,10 @@ OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\
 OUTSIDE_PATCH = "diff --git a/other/x.py b/other/x.py\n--- a/other/x.py\n+++ b/other/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 THIRD_PATCH = "diff --git a/src/c.py b/src/c.py\n--- a/src/c.py\n+++ b/src/c.py\n@@ -1 +1 @@\n-a\n+d\n"
 FOURTH_PATCH = "diff --git a/src/d.py b/src/d.py\n--- a/src/d.py\n+++ b/src/d.py\n@@ -1 +1 @@\n-a\n+e\n"
+
+
+class _Crash(BaseException):
+    """Stop the process in the middle of a score, past every handler of the judge code."""
 
 
 @pytest.fixture
@@ -700,8 +704,8 @@ def test_a_call_finishes_an_end_that_crashed(store: SQLiteJobStore, boxes: Any) 
     """Drive a crashed stop_run end to its final score from a call, and keep its ended_by."""
     session_id = _session(store, _cases(10))
     _call(store, session_id)
-    boxes["raise"] = OSError("the worker stopped")
-    with pytest.raises(OSError):
+    boxes["raise"] = _Crash("the worker stopped")
+    with pytest.raises(_Crash):
         repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
     _expire_the_end(store)
     answer = _call(store, session_id)
@@ -717,8 +721,8 @@ def test_a_call_during_a_live_end_answers_pending_and_scores_nothing(store: SQLi
     """Answer budget.pending to a call while the end's lease is live, with no score."""
     session_id = _session(store, _cases(10))
     _call(store, session_id)
-    boxes["raise"] = OSError("the worker stopped")
-    with pytest.raises(OSError):
+    boxes["raise"] = _Crash("the worker stopped")
+    with pytest.raises(_Crash):
         repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
     scored = len(boxes["scored"])
     with pytest.raises(DomainError) as pending:
@@ -1037,7 +1041,7 @@ def test_a_stop_run_end_that_waits_on_old_work_keeps_its_ended_by(store: SQLiteJ
         """Dispatch a paid operation, then stop as a crashed worker does.
 
         Raises:
-            OSError: Always.
+            _Crash: Always.
         """
         attempt = boxes["attempt"]
         service = BudgetService(engine=attempt["engine"])
@@ -1054,10 +1058,10 @@ def test_a_stop_run_end_that_waits_on_old_work_keeps_its_ended_by(store: SQLiteJ
         )
         service.mark_dispatched(operation.id, USER)
         held["operation"] = operation.id
-        raise OSError("the worker stopped")
+        raise _Crash("the worker stopped")
 
     boxes["hook"] = crash
-    with pytest.raises(OSError):
+    with pytest.raises(_Crash):
         _call(store, session_id, OTHER_PATCH)
     with Session(store.engine) as session:
         session.execute(
@@ -1120,8 +1124,8 @@ def test_an_end_with_a_closed_budget_waits_for_a_live_call(store: SQLiteJobStore
 def test_a_crashed_call_does_not_hold_an_end_with_a_closed_budget(store: SQLiteJobStore, boxes: Any) -> None:
     """Wait for a call's live lease at a closed-budget end, and end once a crashed call's lease expired."""
     session_id = _session(store, _cases(3))
-    boxes["raise"] = OSError("the worker stopped")
-    with pytest.raises(OSError):
+    boxes["raise"] = _Crash("the worker stopped")
+    with pytest.raises(_Crash):
         _call(store, session_id)
     BudgetService(engine=store.engine).stop_admission(_budget_id(store, session_id), USER, reason="budget_reached")
     with pytest.raises(DomainError) as pending:
@@ -1144,6 +1148,220 @@ def test_a_refusal_names_every_broken_rule(store: SQLiteJobStore, boxes: Any) ->
         _call(store, session_id, CONTRACT_PATCH + OUTSIDE_PATCH)
     assert "optimize.toml" in refused.value.detail
     assert "other/x.py" in refused.value.detail
+
+
+def _hold(attempt: dict[str, Any], cents: int, *, pending: bool) -> tuple[BudgetService, str]:
+    """Dispatch a paid operation of an attempt that is still unsettled when the attempt returns.
+
+    Args:
+        attempt: The scorer arguments of the attempt.
+        cents: The operation's hold.
+        pending: Mark the operation as awaiting its usage, as after a lost box.
+
+    Returns:
+        The budget service and the operation id.
+    """
+    service = BudgetService(engine=attempt["engine"])
+    operation = service.reserve(
+        attempt["budget_id"],
+        USER,
+        operation_key=attempt["owner_id"],
+        generation=attempt["generation"],
+        phase="run",
+        cost_kind="sandbox",
+        request_fingerprint="fp",
+        price_snapshot={"version": "v1"},
+        max_cents=cents,
+    )
+    service.mark_dispatched(operation.id, USER)
+    if pending:
+        service.mark_pending(operation.id, USER)
+    return service, operation.id
+
+
+def _call_rows(job_store: SQLiteJobStore, session_id: str) -> list[tuple[str, bool]]:
+    """List each call row's status, and whether it stores an error.
+
+    Args:
+        job_store: The store.
+        session_id: The session.
+
+    Returns:
+        The sorted pairs.
+    """
+    rows = repo_judge._rows(job_store.engine, _budget_id(job_store, session_id), repo_judge.JUDGE_SCOPE)
+    return sorted((row.status, "judge_error" in row.result) for row in rows)
+
+
+def _refuse_while_usage_waits(job_store: SQLiteJobStore, boxes: Any, session_id: str) -> str:
+    """Leave one call's usage unsettled, then refuse a candidate, so the refusal is stored pending.
+
+    Args:
+        job_store: The store.
+        boxes: The fake boxes.
+        session_id: The session.
+
+    Returns:
+        The id of the unsettled operation.
+    """
+    held: dict[str, str] = {}
+
+    def hold() -> None:
+        """Keep a sandbox operation awaiting its usage when the call returns."""
+        held["operation"] = _hold(boxes["attempt"], 100, pending=True)[1]
+
+    boxes["hook"] = hold
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(job_store, session_id)
+    with pytest.raises(repo_judge.JudgeError) as refused:
+        _call(job_store, session_id, CONTRACT_PATCH)
+    assert refused.value.code == "judge.candidate_refused"
+    assert _call_rows(job_store, session_id) == [("pending", False), ("pending", True)]
+    return held["operation"]
+
+
+def test_a_retry_of_a_refusal_stored_pending_replays_it_without_headroom(store: SQLiteJobStore, boxes: Any) -> None:
+    """Replay a refusal that finished while usage settled, also when the budget no longer pays for a new call."""
+    session_id = _session(store, _cases(3), total=400, floor=100)
+    operation = _refuse_while_usage_waits(store, boxes, session_id)
+    BudgetService(engine=store.engine).settle(operation, USER, evidence_key="final", actual_cents=100, evidence={})
+    boxes["charge"]["candidate"] = 30
+    assert _call(store, session_id, OTHER_PATCH)["status"] == "scored"
+    staged = len(boxes["staged"])
+    with pytest.raises(repo_judge.JudgeError) as again:
+        _call(store, session_id, CONTRACT_PATCH)
+    assert again.value.code == "judge.candidate_refused"
+    assert "optimize.toml" in again.value.detail
+    assert _final_rows(store, session_id) == 0
+    assert store.get_job(session_id)["status"] == "running"
+    assert len(boxes["staged"]) == staged
+
+
+def test_a_retry_of_a_refusal_during_a_live_box_replays_it_without_headroom(store: SQLiteJobStore, boxes: Any) -> None:
+    """Replay a refusal that finished while another call's box ran, when the budget no longer pays for a call."""
+    session_id = _session(store, _cases(3), total=400, floor=100)
+
+    def refuse_during_the_box() -> None:
+        """Refuse a candidate while this call's box is dispatched, then settle the box."""
+        service, operation = _hold(boxes["attempt"], 100, pending=False)
+        with pytest.raises(repo_judge.JudgeError) as refused:
+            _call(store, session_id, CONTRACT_PATCH)
+        assert refused.value.code == "judge.candidate_refused"
+        service.settle(operation, USER, evidence_key="a", actual_cents=100, evidence={})
+
+    boxes["hook"] = refuse_during_the_box
+    assert _call(store, session_id)["status"] == "scored"
+    assert ("pending", True) in _call_rows(store, session_id)
+    boxes["charge"]["candidate"] = 30
+    assert _call(store, session_id, OTHER_PATCH)["status"] == "scored"
+    staged = len(boxes["staged"])
+    with pytest.raises(repo_judge.JudgeError) as again:
+        _call(store, session_id, CONTRACT_PATCH)
+    assert again.value.code == "judge.candidate_refused"
+    assert _final_rows(store, session_id) == 0
+    assert store.get_job(session_id)["status"] == "running"
+    assert len(boxes["staged"]) == staged
+
+
+def test_a_retry_of_a_refusal_stored_pending_waits_while_usage_settles(store: SQLiteJobStore, boxes: Any) -> None:
+    """Answer in_progress to the retry of a pending refusal while usage is unsettled, and do not end the session."""
+    session_id = _session(store, _cases(3), total=400, floor=100)
+    _refuse_while_usage_waits(store, boxes, session_id)
+    staged = len(boxes["staged"])
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id, CONTRACT_PATCH)
+    assert _final_rows(store, session_id) == 0
+    assert store.get_job(session_id)["status"] == "running"
+    assert len(boxes["staged"]) == staged
+
+
+def test_a_pending_temporary_failure_without_headroom_still_ends_the_session(store: SQLiteJobStore, boxes: Any) -> None:
+    """Keep a temporary failure free for a new attempt: with no headroom, its retry ends the session."""
+    session_id = _session(store, _cases(10), total=260, floor=100)
+    assert _call(store, session_id)["status"] == "scored"
+    boxes["charge"]["candidate"] = 20
+    boxes["raise"] = RepoFetchError("lost")
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id, OTHER_PATCH)
+    boxes["charge"] = {}
+    assert ("pending", False) in _call_rows(store, session_id)
+    ended = _call(store, session_id, OTHER_PATCH)
+    assert (ended["status"], ended["run_status"]) == ("ended", "success")
+    assert _final_rows(store, session_id) == 1
+
+
+def test_a_missing_saved_secret_fails_the_end_and_a_later_stop_pays_nothing(store: SQLiteJobStore, boxes: Any) -> None:
+    """Fail the session at once when the final score's saved secret is gone, with the reason the setup check gives."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    missing = DomainError("secrets.not_found", status=404)
+    boxes["raise"] = missing
+    ended = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert ended.status == "failed"
+    job = store.get_job(session_id)
+    assert job["status"] == "failed"
+    assert missing.detail in job["message"]
+    assert "404" not in job["message"]
+    assert repo_judge._final_row(store.engine, _budget_id(store, session_id)).status == "succeeded"
+    assert _final_rows(store, session_id) == 1
+    paid = len(boxes["paid"])
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "failed"
+    assert len(boxes["paid"]) == paid
+
+
+def test_a_missing_saved_secret_fails_the_call_and_a_retry_replays_it(store: SQLiteJobStore, boxes: Any) -> None:
+    """Store score_failed when a call's saved secret is gone, and replay it with no new paid attempt."""
+    session_id = _session(store, _cases(3))
+    missing = DomainError("secrets.not_found", status=404)
+    boxes["raise"] = missing
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert (failed.value.code, failed.value.detail) == ("judge.score_failed", missing.detail)
+    with pytest.raises(repo_judge.JudgeError) as again:
+        _call(store, session_id)
+    assert (again.value.code, again.value.detail) == ("judge.score_failed", missing.detail)
+    assert len(boxes["paid"]) == 1
+    assert store.get_job(session_id)["status"] == "running"
+    assert _final_rows(store, session_id) == 0
+
+
+def test_an_unexpected_error_names_only_its_type(
+    store: SQLiteJobStore, boxes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep the text of an unexpected error out of the call's answer, the session's message and the log."""
+    caplog.set_level("ERROR", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(10))
+    boxes["raise"] = KeyError("secret text")
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert failed.value.code == "judge.score_failed"
+    assert "KeyError" in failed.value.detail
+    assert "secret text" not in failed.value.detail
+    _call(store, session_id, OTHER_PATCH)
+    boxes["raise"] = KeyError("secret text")
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "failed"
+    message = store.get_job(session_id)["message"]
+    assert "KeyError" in message
+    assert "secret text" not in message
+    assert caplog.text.count("failed with KeyError") == 2
+    assert "secret text" not in caplog.text
+
+
+def test_a_budget_conflict_of_the_final_score_waits_and_a_retry_finishes(store: SQLiteJobStore, boxes: Any) -> None:
+    """Answer budget.pending and change no status when the final score meets a fenced generation."""
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    boxes["raise"] = BudgetFencedError("The execution generation is obsolete.")
+    with pytest.raises(DomainError) as pending:
+        repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert (pending.value.code, pending.value.status_code) == ("budget.pending", 409)
+    assert store.get_job(session_id)["status"] == "running"
+    row = repo_judge._final_row(store.engine, _budget_id(store, session_id))
+    assert (row.status, row.result["ended_by"]) == ("pending", "stop_run")
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="budget").status == "success"
+    judge = store.get_job(session_id)["result"]["details"]["judge"]
+    assert judge["held_out"] is True
+    assert judge["ended_by"] == "stop_run"
 
 
 def test_open_session_ids_lists_only_open_sessions_of_the_draft(store: SQLiteJobStore) -> None:

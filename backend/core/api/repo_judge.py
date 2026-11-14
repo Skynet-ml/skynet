@@ -22,6 +22,7 @@ import logging
 import math
 import tempfile
 import time
+import traceback
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -630,6 +631,40 @@ def _temporary(error: BaseException) -> bool:
     return isinstance(error, _TRANSIENT_ERRORS) or isinstance(error.__cause__, _TRANSIENT_ERRORS)
 
 
+def _reason(error: Exception) -> str:
+    """Give the plain reason of a failed score, as a setup check stores it.
+
+    Args:
+        error: The error of a score.
+
+    Returns:
+        The capped reason. An unexpected error type gives only its name,
+        because its text can quote payload content.
+    """
+    if isinstance(error, (ServiceError, RuntimeError, ValueError)):
+        reason = str(error)
+    elif isinstance(error, DomainError):
+        reason = str(error.detail)
+    else:
+        reason = type(error).__name__
+    return reason[:_MESSAGE_CHARS]
+
+
+def _log_unexpected(what: str, session_id: str, error: Exception) -> None:
+    """Log an unexpected error of a score for an operator, without its text.
+
+    The error's text can quote payload content, so the log holds only the
+    error type and the code frames.
+
+    Args:
+        what: The failed step, for the log line.
+        session_id: The judge session.
+        error: The unexpected error.
+    """
+    frames = "".join(traceback.format_tb(error.__traceback__))
+    logger.error("%s of judge session %s failed with %s\n%s", what, session_id, type(error).__name__, frames)
+
+
 def _replay(document: dict[str, Any], session_id: str, budget: BudgetSnapshot | None) -> dict[str, Any]:
     """Answer a call whose evidence already exists or another request holds.
 
@@ -708,6 +743,15 @@ def judge_call(
         if _unsettled_usage(job_store.engine, budget.id):
             raise JudgePendingError("The call's usage settles. Call again with the same arguments.")
         return _scored_answer(session_id, stored.result["judge_result"], budget)
+    if stored is not None and stored.status == "pending" and isinstance(stored.result.get("judge_error"), dict):
+        # A refused or failed call finished while usage was pending; only a later claim marks it failed.
+        if _unsettled_usage(job_store.engine, budget.id):
+            raise JudgePendingError("The call's usage settles. Call again with the same arguments.")
+        stored_error = stored.result["judge_error"]
+        raise JudgeError(
+            str(stored_error.get("code") or "judge.score_failed"),
+            str(stored_error.get("message") or "The candidate could not be scored."),
+        )
     if not budget.uncapped:
         needed = _needed(job_store.engine, budget.id, payload)
         # The session ends while the budget still pays for the final score.
@@ -836,7 +880,7 @@ def judge_call(
                 document = store.finish(
                     identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
                 )
-            except (ServiceError, RuntimeError, ValueError) as exc:
+            except Exception as exc:
                 failures = int(claim.kept.get("temporary_failures") or 0) + 1
                 if _temporary(exc) and failures < _TEMPORARY_FAILURE_LIMIT:
                     transient = True
@@ -852,8 +896,10 @@ def judge_call(
                         },
                     )
                 else:
+                    if not isinstance(exc, (ServiceError, RuntimeError, ValueError, DomainError)):
+                        _log_unexpected("A call", session_id, exc)
                     # ValueError covers the other budget errors; the message never holds metric code.
-                    error = JudgeError("judge.score_failed", str(exc))
+                    error = JudgeError("judge.score_failed", _reason(exc))
                     document = store.finish(
                         identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
                     )
@@ -1234,6 +1280,8 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
     final score. A temporary repository or sandbox failure of the final score
     answers ``budget.pending`` and a retry scores again, up to
     ``_TEMPORARY_FAILURE_LIMIT`` failures; at the limit the session fails.
+    Any other failure of the final score fails the session at once. A budget
+    conflict answers ``budget.pending`` and changes no status.
 
     Args:
         job_store: Store that holds the session, its budget and its evidence.
@@ -1245,7 +1293,7 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
 
     Raises:
         DomainError: 409 ``budget.pending`` while the end runs, usage settles,
-            or a temporary failure waits for a retry.
+            the budget changes, or a temporary failure waits for a retry.
     """
     session_id = job["optimization_id"]
     username = job["username"]
@@ -1332,13 +1380,14 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                         started=started,
                         image=job.get("sandbox_image"),
                     )
-            except (UsagePendingError, BudgetInFlightError) as error:
+            except (UsagePendingError, BudgetInFlightError, BudgetConflictError) as error:
+                # A fenced owner must not end the session: its finish fails, and the retry checks the budget again.
                 store.finish(identity, claim_token=token, status="pending", result=waiting)
                 raise DomainError("budget.pending", status=409) from error
             except (BudgetReached, BudgetInsufficientError):
                 status = "stopped"
                 _stop(job_store, job, status, _NO_FINAL_MESSAGE)
-            except (ServiceError, RuntimeError, ValueError) as error:
+            except Exception as error:
                 if _temporary(error) and failures + 1 < _TEMPORARY_FAILURE_LIMIT:
                     store.finish(
                         identity,
@@ -1347,8 +1396,10 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                         result={**waiting, "temporary_failures": failures + 1},
                     )
                     raise DomainError("budget.pending", status=409) from error
+                if not isinstance(error, (ServiceError, RuntimeError, ValueError, DomainError)):
+                    _log_unexpected("The final score", session_id, error)
                 status = "failed"
-                _stop(job_store, job, status, f"The final score failed: {str(error)[:_MESSAGE_CHARS]}")
+                _stop(job_store, job, status, f"The final score failed: {_reason(error)}")
             else:
                 status = "success"
                 job_store.update_job_if_status(

@@ -155,7 +155,9 @@ means: call again with the same arguments. Skynet answers `in_progress`
 while other calls of the session hold its budget, and after a temporary
 repository or sandbox failure. A retry after such a failure pays for its
 own work. After three temporary failures of the same candidate, the call
-answers `judge.score_failed`.
+answers `judge.score_failed`. Any other failure, for example a saved
+secret that the user deleted, answers `judge.score_failed` at once, and a
+retry returns the same error.
 
 Only the budget or `stop_run` with the `session_id` ends a session. A bulk
 cancel skips a judge session. Before each call, the budget must still pay
@@ -173,7 +175,9 @@ also when the budget is closed.
 After a temporary repository or sandbox failure of the final score, the end
 also answers `budget.pending`, and the session stays open. The next
 `stop_run` or call scores again. After three such failures, the session
-ends `failed`. A call that starts after the end starts scores nothing. It
+ends `failed`. Any other failure of the final score, for example a saved
+secret that the user deleted, ends the session `failed` at once. A call
+that starts after the end starts scores nothing. It
 gets `in_progress` while the end runs. After that, it drives an end that
 waits or that stopped before it finished, and then gets the ended answer.
 Every later end keeps the `ended_by` of the first end. When a call stops at the budget limit, the end still tries the
