@@ -22,6 +22,7 @@ from core.billing.pricing import ModelUsage
 from core.billing.service import LOCAL_CUSTOMER_PREFIX, StripeBillingService, local_customer_id
 from core.config import app_env, settings
 from core.storage.models import (
+    AgentConversationModel,
     Base,
     BillingCustomerModel,
     ExecutionBudgetModel,
@@ -47,6 +48,7 @@ BILLING_TABLES = [
         ExecutionBudgetModel,
         ExecutionOperationModel,
         ExecutionUsageEvidenceModel,
+        AgentConversationModel,
         JobModel,
     )
 ]
