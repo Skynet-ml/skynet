@@ -266,7 +266,7 @@ openai==2.24.0
     #   litellm
 openapi-pydantic==0.5.1
     # via fastmcp-slim
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via fastmcp-slim
 orjson==3.11.8
     # via dspy
