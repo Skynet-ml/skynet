@@ -35,6 +35,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     15: {"blackbox": "05f352755db27ac1"},
     # The same request; the image writes the run end verdict of the outcome (SKY-692).
     16: {"blackbox": "05f352755db27ac1"},
+    # target.repo.contract_source: where the run's optimize.toml comes from (SKY-693).
+    17: {"blackbox": "f9cc6701c073a012"},
 }
 
 

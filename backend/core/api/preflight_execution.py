@@ -560,6 +560,7 @@ def _perform_preflight(
                 username=user.username,
                 binding_id=request.execution_budget_id,
                 engine=engine,
+                require_constraints=True,
             )
             gate_failures = check_repository(
                 staged.snapshot.archive,

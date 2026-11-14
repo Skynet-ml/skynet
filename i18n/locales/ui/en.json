@@ -4329,6 +4329,7 @@
   "usage.day.truncated": "Showing the latest {shown} of {total} calls.",
   "usage.day.loading": "Loading the calls for this day…",
   "submit.setup_check.invalid": "Fix optimize.toml before you continue. {p1}",
+  "submit.setup_check.missing": "The run needs an optimize.toml contract. Ask the agent to write it, or add it to the repository.",
   "submit.setup_check.unavailable": "We could not check optimize.toml. Try again.",
   "agent.tool.check_setup.title": "Check the setup",
   "agent.tool.check_setup.running": "Checking optimize.toml",

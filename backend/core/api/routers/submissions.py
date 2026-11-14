@@ -983,6 +983,11 @@ def create_submissions_router(*, job_store) -> APIRouter:
             DomainError: 400 (not a repository target, or the scorer does not
                 load), 402 (no balance), 409 (quota or a failed setup check).
         """
+        repo = payload.target.repo
+        # Only the MCP draft flow builds an ``mcp`` contract (SKY-693). A client
+        # that sends its own draft here wrote it as the setup screen does.
+        if repo is not None and repo.contract_source == "mcp":
+            repo.contract_source = "setup_screen"
         return submit_repo_payload(
             payload,
             job_store=job_store,

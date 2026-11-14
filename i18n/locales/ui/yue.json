@@ -4353,6 +4353,7 @@
   "agent.tools.tour.ask_user": "問你一條問題，附幾個選項俾你揀。",
   "agent.tools.tour.repositories": "列出你喺 GitHub、GitLab 同 Bitbucket 嘅代碼庫，或者為運行建立一個新嘅。",
   "submit.setup_check.invalid": "繼續之前請先修正 optimize.toml。{p1}",
+  "submit.setup_check.missing": "呢次運行需要一份 optimize.toml 合約。叫代理寫一份，或者加入儲存庫。",
   "submit.setup_check.unavailable": "檢查唔到 optimize.toml，請再試一次。",
   "agent.tool.check_setup.title": "檢查設定",
   "agent.tool.check_setup.running": "檢查緊 optimize.toml",

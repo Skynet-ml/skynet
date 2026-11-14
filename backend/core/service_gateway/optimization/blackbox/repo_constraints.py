@@ -67,6 +67,11 @@ from urllib.parse import urlsplit
 from ....sandbox.services import ComposeError, ComposeService, parse_compose
 
 CONSTRAINTS_FILE = "optimize.toml"
+# Every new run needs a contract (SKY-693); the setup screen, the MCP contract step and staging all say this.
+CONSTRAINTS_REQUIRED = (
+    "The run needs an optimize.toml contract. Add optimize.toml to the repository,"
+    " or write it on the Metric screen or with repo_draft_set_contract."
+)
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_PATHS = 200
 _MAX_INTENT_CHARS = 4_000

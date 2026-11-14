@@ -1530,7 +1530,9 @@ def _run_job(
         optimization_metadata={
             "strategy": job.strategy.model_dump(),
             "budget": job.budget.model_dump(),
-            "target": target.model_dump(),
+            # The guest sees the drafts without optimize.toml, so its validator
+            # resets the source to "repository"; the stored payload keeps the true one.
+            "target": target.model_dump(exclude={"repo": {"contract_source"}}),
             "proposer_runtime": job.proposer_runtime,
             "upstream_revision": GEPA_REVISION,
         },
