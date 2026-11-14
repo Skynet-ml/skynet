@@ -99,6 +99,7 @@ import { useSettingsModal } from "../hooks/use-settings-modal";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { AdminMetricsCard } from "./AdminMetricsCard";
 import { NotificationsTab } from "./NotificationsTab";
+import { CodeTab } from "./CodeTab";
 import { PrivacyTab } from "./PrivacyTab";
 import { ColorThemeControl } from "./ColorThemeControl";
 import { OptimizationDefaults } from "./OptimizationDefaults";
@@ -1246,6 +1247,9 @@ export function SettingsModal() {
               </TabsContent>
               <TabsContent value="notifications">
                 <NotificationsTab />
+              </TabsContent>
+              <TabsContent value="code">
+                <CodeTab />
               </TabsContent>
               <TabsContent value="security">
                 <SecurityTab />

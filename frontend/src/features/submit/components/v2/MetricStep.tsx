@@ -20,6 +20,12 @@ import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
+const HOST_ORIGIN: Record<RepoHost, string> = {
+  github: "https://github.com",
+  gitlab: "https://gitlab.com",
+  bitbucket: "https://bitbucket.org",
+};
+
 /**
  * The repository's checkout for the IDE's explorer, read from its host at the
  * run's commit (or branch) as the run will clone it.
@@ -136,6 +142,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
             repo={repoFiles}
             busy={agent?.agentBusy ?? false}
             onWrite={setWorkspaceFile}
+            host={repoName ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` } : null}
           />
         ) : (
           ideWorkspace(

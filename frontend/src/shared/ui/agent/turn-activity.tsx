@@ -1,13 +1,19 @@
 "use client";
 
 import * as React from "react";
+import { motion, useReducedMotion } from "framer-motion";
+
+import { CaretRight } from "@/shared/ui/icons";
 
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
 
+
 import { ActivityGroup } from "./activity-steps";
+import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
 import {
   blockWorkMs,
@@ -64,12 +70,15 @@ interface TurnActivityProps {
   earlier?: readonly EarlierTurn[];
 }
 
-// Mirrors Codex's local turn: a "Working for 14s" line over what the agent
-// said and the tools it ran, then a single shimmering line at the bottom
-// naming what it is thinking about, which gives way to a running tool or to
-// the answer. Reasoning itself never shows as rows. Once done, the line reads
-// "Worked for 39s". The history always stays open, with no fold of its own;
-// only each burst of steps folds into its summary line.
+// Mirrors Codex's local turn: a "Working" line ("Working for 14s" after the
+// first second) over what the agent said and the tools it ran, then a single
+// shimmering line at the bottom naming what it is thinking about, which gives
+// way to a running tool or to the answer. Reasoning itself never shows as
+// rows. Once the answer starts, the history folds behind one "Worked for 39s"
+// row with a chevron and a full-width rule; cards and failed steps stay out.
+// Matches the fold's close time in reveal.tsx.
+const FOLD_CLOSE_S = 0.14;
+
 export function TurnActivity({
   thinking,
   steps,
@@ -111,6 +120,28 @@ export function TurnActivity({
   const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
+  // Codex folds the history once the final answer starts; a click overrides.
+  const [openChoice, setOpenChoice] = React.useState<boolean | null>(null);
+  const foldable = !isLive || answering;
+  const historyOpen = !foldable || (openChoice ?? false);
+
+  const renderBurst = (group: Step[]) => {
+    const kinds = group.map(({ call }) => stepKind?.(call) ?? "tool");
+    const explore = kinds.every(isExplore);
+    return (
+      <ActivityGroup
+        key={`steps-${group[0]?.call.id}`}
+        autoOpen={false}
+        activeLabel={explore ? msg("shared.agent.exploring") : undefined}
+        title={explore ? exploredTitle(kinds) : undefined}
+        steps={group.map(({ call }, i) => ({ kind: kinds[i] ?? "tool", status: call.status }))}
+      >
+        {group.map(({ call, isRetry }) => (
+          <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
+        ))}
+      </ActivityGroup>
+    );
+  };
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
@@ -118,18 +149,7 @@ export function TurnActivity({
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
       </div>
     ) : piece.kind === "steps" ? (
-      <ActivityGroup
-        key={`steps-${piece.steps[0]?.call.id}`}
-        autoOpen={false}
-        steps={piece.steps.map(({ call }) => ({
-          kind: stepKind?.(call) ?? "tool",
-          status: call.status,
-        }))}
-      >
-        {piece.steps.map(({ call, isRetry }) => (
-          <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
-        ))}
-      </ActivityGroup>
+      splitExploration(piece.steps, (step) => isExplore(stepKind?.(step.call) ?? "tool")).map(renderBurst)
     ) : null;
 
   const renderPlan = (text: string | undefined, key: string) =>
@@ -143,11 +163,43 @@ export function TurnActivity({
     ) : null;
   const planLine = renderPlan(plan, "plan");
 
+  // The fold hides only what sits between the cards. A card waits on the
+  // user, so it keeps one place in the tree and never remounts when the turn
+  // folds; a failed step must not hide behind a fold either.
+  const fold = (key: string, node: React.ReactNode) => (
+    <Reveal key={`fold-${key}`} open={historyOpen}>
+      {node}
+    </Reveal>
+  );
+  const reduceMotion = Boolean(useReducedMotion());
+  const renderFolded = (piece: (typeof pieces)[number]) =>
+    piece.kind === "card" ? (
+      renderPiece(piece)
+    ) : piece.kind === "steps" ? (
+      <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
+        {fold("steps", renderPiece(piece))}
+        {!historyOpen &&
+          piece.steps
+            .filter(({ call }) => call.status === "error")
+            .map(({ call, isRetry }) => (
+              // It shows once the fold's exit ends, so the step never shows twice.
+              <motion.div
+                key={call.id}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                transition={{ duration: 0, delay: reduceMotion ? 0 : FOLD_CLOSE_S }}
+              >
+                {renderStep(call, { isRetry })}
+              </motion.div>
+            ))}
+      </React.Fragment>
+    ) : null;
+
   const earlierNodes = earlier.map((turn, i) => (
     <React.Fragment key={`earlier-${i}`}>
-      {renderPlan(turn.plan, `plan-${i}`)}
-      {(earlierPieces[i] ?? []).map(renderPiece)}
-      {turn.answer && <div className="py-1">{turn.answer}</div>}
+      {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
+      {(earlierPieces[i] ?? []).map(renderFolded)}
+      {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
     </React.Fragment>
   ));
 
@@ -163,9 +215,11 @@ export function TurnActivity({
     { thinking, steps, durationMs, start: isLive ? (start ?? mountedAt) : start },
     isLive ? nowTs : null,
   );
-  const label = isLive
-    ? formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) })
-    : formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) });
+  const label = !isLive
+    ? formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) })
+    : workedMs < 1000
+      ? msg("shared.agent.working")
+      : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });
 
   if (!hasHistory) {
     return start === null ? null : <Header label={label} />;
@@ -173,15 +227,48 @@ export function TurnActivity({
 
   return (
     <div className="flex flex-col">
-      <Header label={label} />
-      <div className="flex flex-col pt-1.5">
+      <Header
+        label={label}
+        open={foldable ? historyOpen : undefined}
+        onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
+      />
+      <div className="flex flex-col pt-1.5 empty:hidden">
         {earlierNodes}
-        {planLine}
-        {pieces.map(renderPiece)}
+        {plan && fold("plan", planLine)}
+        {pieces.map(renderFolded)}
       </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
   );
+}
+
+/** Codex's exploration: reading and searching, which fold together into one "Exploring" unit. */
+function isExplore(kind: ActivityKind): boolean {
+  return kind === "read" || kind === "search";
+}
+
+/** Split a burst into runs, so each run of exploration steps folds on its own, as in Codex. */
+function splitExploration<T>(steps: readonly T[], explore: (step: T) => boolean): T[][] {
+  const runs: T[][] = [];
+  for (const step of steps) {
+    const last = runs.at(-1);
+    if (last && explore(last[0] as T) === explore(step)) last.push(step);
+    else runs.push([step]);
+  }
+  return runs;
+}
+
+/** "Explored 2 files, 1 search", from the kinds of an exploration run. */
+function exploredTitle(kinds: readonly ActivityKind[]): string {
+  const files = kinds.filter((k) => k === "read").length;
+  const searches = kinds.length - files;
+  const parts = [
+    files ? formatMsg("shared.agent.explored_files", { count: files }) : "",
+    searches ? formatMsg("shared.agent.explored_searches", { count: searches }) : "",
+  ].filter(Boolean);
+  return formatMsg("shared.agent.explored", {
+    items: new Intl.ListFormat(getActiveIntlLocale(), { style: "short", type: "unit" }).format(parts),
+  });
 }
 
 // Most wizard tools answer in tens of ms; swapping the "Thinking" line out
@@ -215,25 +302,62 @@ function ThinkingLine({ label }: { label: string }) {
   );
 }
 
-function Header({ label }: { label: string }) {
+/**
+ * The turn's "Worked for" row; with ``onToggle`` it folds the history, as in Codex.
+ */
+function Header({
+  label,
+  open,
+  onToggle,
+}: {
+  label: string;
+  open?: boolean;
+  onToggle?: () => void;
+}) {
+  const rule = "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted-foreground";
   return (
-    <div className="flex w-full items-center border-b border-border/60 pb-2 text-[0.8125rem] text-muted-foreground">
-      <span className="truncate">{label}</span>
+    <div className="flex w-full min-w-0 items-center gap-2 border-b border-border/60 pb-2">
+      {onToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className={cn(rule, "w-auto cursor-pointer text-start transition-colors hover:text-foreground")}
+        >
+          <span className="truncate">{label}</span>
+          <CaretRight
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+              open ? "rotate-90" : "rtl:-scale-x-100",
+            )}
+            aria-hidden
+          />
+        </button>
+      ) : (
+        <span className={cn(rule, "w-auto")}>
+          <span className="truncate">{label}</span>
+        </span>
+      )}
     </div>
   );
 }
 
-/** A duration as "8s" or "1m 5s", in the active locale. */
+/** A duration as Codex writes it: "42s", "1m 5s", "1h 2m 3s", in the active locale. Never under 1s. */
 export function formatSpan(ms: number): string {
-  const total = Math.max(1, Math.round(ms / 1000));
-  const unit = (value: number, u: "minute" | "second") =>
+  const total = Math.max(1, Math.floor(ms / 1000));
+  const unit = (value: number, u: "hour" | "minute" | "second") =>
     new Intl.NumberFormat(getActiveIntlLocale(), {
       style: "unit",
       unit: u,
       unitDisplay: "narrow",
     }).format(value);
-  const mins = Math.floor(total / 60);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
   const secs = total % 60;
-  if (!mins) return unit(secs, "second");
-  return secs ? `${unit(mins, "minute")} ${unit(secs, "second")}` : unit(mins, "minute");
+  const parts = [
+    hours ? unit(hours, "hour") : "",
+    mins ? unit(mins, "minute") : "",
+    secs ? unit(secs, "second") : "",
+  ].filter(Boolean);
+  return parts.join(" ");
 }

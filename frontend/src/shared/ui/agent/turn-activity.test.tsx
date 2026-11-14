@@ -33,8 +33,8 @@ const { MotionGlobalConfig } = await import("framer-motion");
 MotionGlobalConfig.skipAnimations = true;
 const { TurnActivity } = await import("./turn-activity");
 
-function call(id: string): Call {
-  return { id, tool: id, reason: "", status: "done", startedAt: 1_000, endedAt: 2_000 };
+function call(id: string, status: Call["status"] = "done"): Call {
+  return { id, tool: id, reason: "", status, startedAt: 1_000, endedAt: 2_000 };
 }
 
 type Props = Parameters<typeof TurnActivity>[0];
@@ -45,7 +45,8 @@ async function mount(
     streaming = false,
     earlier,
     plan,
-  }: { streaming?: boolean; earlier?: Props["earlier"]; plan?: string } = {},
+    stepKind,
+  }: { streaming?: boolean; earlier?: Props["earlier"]; plan?: string; stepKind?: Props["stepKind"] } = {},
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -60,6 +61,7 @@ async function mount(
           steps={steps}
           earlier={earlier}
           plan={plan}
+          stepKind={stepKind}
           renderStep={(c) => <span data-step={c.id}>{c.id}</span>}
         />,
       );
@@ -98,7 +100,15 @@ function turnRow(host: HTMLElement, key = "worked_for"): Element {
   return label.parentElement!;
 }
 
-void it("shows a finished turn open, with no toggle of its own", async () => {
+/** Clicks the turn's "Worked for" row and returns it. */
+async function openTurn(host: HTMLElement): Promise<Element> {
+  const row = turnRow(host);
+  assert.equal(row.tagName, "BUTTON", "the finished turn row is a toggle");
+  await act(async () => (row as HTMLButtonElement).click());
+  return row;
+}
+
+void it("folds a finished turn behind its Worked for row, as Codex does", async () => {
   const { host, unmount } = await mount([
     { call: call("ask"), isRetry: false, index: 0, card: true },
     { call: call("read-a"), isRetry: false, index: 1 },
@@ -106,40 +116,42 @@ void it("shows a finished turn open, with no toggle of its own", async () => {
   ]);
 
   const row = turnRow(host);
-  assert.ok(row.closest("button") === null, "the turn row is not inside a button");
-  assert.ok(row.closest("[aria-expanded]") === null, "the turn row is not a toggle");
-  assert.ok(row.querySelector("svg") === null, "the turn row has no chevron");
+  assert.equal(row.tagName, "BUTTON", "the turn row is a toggle");
+  assert.equal(row.getAttribute("aria-expanded"), "false", "the history starts folded");
+  assert.ok(row.querySelector("svg"), "the turn row has a chevron");
 
+  // A card waits on the user, so the fold never hides it.
   const card = host.querySelector('[data-step="ask"]');
   assert.ok(card, "the card renders without a click");
   assert.ok(shown(card), "the card is not hidden");
+  assert.equal(host.querySelectorAll("button[aria-expanded]").length, 1, "only the turn row shows");
 
-  // The step group's summary line shows before any click, and it still folds.
-  const summary = host.querySelector("button[aria-expanded]");
+  await openTurn(host);
+  assert.equal(row.getAttribute("aria-expanded"), "true");
+  assert.equal(host.querySelectorAll('[data-step="ask"]').length, 1, "the card shows once");
+  // The step group's summary line shows inside, and it still folds.
+  const summary = [...host.querySelectorAll("button[aria-expanded]")].find((b) => b !== row);
   assert.ok(summary, "the step group's summary line shows");
   assert.equal(summary.getAttribute("aria-expanded"), "false");
   assert.ok(host.querySelector('[data-step="read-a"]') === null, "the reads start folded");
   await act(async () => (summary as HTMLButtonElement).click());
-  assert.equal(summary.getAttribute("aria-expanded"), "true");
   assert.ok(host.querySelector('[data-step="read-a"]'));
 
   await unmount();
 });
 
-void it("shows a turn with only steps open too", async () => {
+void it("keeps a failed step outside the fold", async () => {
   const { host, unmount } = await mount([
     { call: call("read-a"), isRetry: false, index: 0 },
-    { call: call("read-b"), isRetry: false, index: 1 },
+    { call: call("run-b", "error"), isRetry: false, index: 1 },
   ]);
-  assert.ok(turnRow(host).closest("button") === null, "the turn row is not inside a button");
-  const toggles = host.querySelectorAll("button[aria-expanded]");
-  assert.equal(toggles.length, 1, "only the group's summary line folds");
-  await act(async () => (toggles[0] as HTMLButtonElement).click());
-  assert.ok(host.querySelector('[data-step="read-a"]'), "the summary opens its reads");
+  assert.equal(turnRow(host).getAttribute("aria-expanded"), "false");
+  assert.ok(host.querySelector('[data-step="run-b"]'), "the failed step shows while folded");
+  assert.ok(host.querySelector('[data-step="read-a"]') === null, "the read stays folded");
   await unmount();
 });
 
-void it("shows an earlier turn's card and answer, outside any fold", async () => {
+void it("folds an earlier turn's answer but keeps its card", async () => {
   const { host, unmount } = await mount([{ call: call("read-a"), isRetry: false, index: 1 }], {
     plan: "Now read the config.",
     earlier: [
@@ -152,20 +164,21 @@ void it("shows an earlier turn's card and answer, outside any fold", async () =>
     ],
   });
   const card = host.querySelector('[data-step="ask"]');
+  assert.ok(card && shown(card), "the earlier card shows while folded");
+  assert.ok(host.querySelector("[data-answer]") === null, "the earlier answer folds");
+
+  await openTurn(host);
   const answer = host.querySelector("[data-answer]");
-  assert.ok(card, "the earlier card renders");
-  assert.ok(answer, "the earlier answer renders");
-  assert.ok(shown(card), "the earlier card is not hidden");
-  assert.ok(shown(answer), "the earlier answer is not hidden");
+  // jsdom never finishes the open motion, so an opened fold is checked by presence.
+  assert.ok(answer, "the earlier answer renders once opened");
   for (const text of ["First ask the user.", "Now read the config."]) {
     const line = [...host.querySelectorAll("*")].find((el) => el.textContent === text);
     assert.ok(line, `the plan line "${text}" renders`);
-    assert.ok(shown(line), `the plan line "${text}" is not hidden`);
   }
   await unmount();
 });
 
-void it("keeps the history open when the turn ends", async () => {
+void it("shows the history while the turn runs, and folds it when the turn ends", async () => {
   const { host, rerender, unmount } = await mount(
     [
       { call: call("ask"), isRetry: false, index: 0, card: true },
@@ -174,7 +187,6 @@ void it("keeps the history open when the turn ends", async () => {
     ],
     { streaming: true },
   );
-  // While the turn runs, the history shows too.
   const liveCard = host.querySelector('[data-step="ask"]');
   assert.ok(liveCard, "the card shows while the turn runs");
   assert.ok(liveCard.closest("button") === null, "the live card is not inside a toggle");
@@ -185,14 +197,12 @@ void it("keeps the history open when the turn ends", async () => {
   );
   await rerender(false);
   const card = host.querySelector('[data-step="ask"]');
-  assert.ok(card, "the card still shows");
-  assert.ok(shown(card), "the card is not hidden");
-  assert.ok(turnRow(host).closest("button") === null, "the turn row is not a toggle");
-  // The group's own summary line still folds its reads.
-  const summary = host.querySelector("button[aria-expanded]");
-  assert.ok(summary, "the summary line still shows");
-  await act(async () => (summary as HTMLElement).click());
-  assert.ok(host.querySelector('[data-step="read-a"]'), "the summary opens its reads");
+  assert.ok(card && shown(card), "the card still shows");
+  // A card holds the user's input, so folding the turn must not remount it.
+  assert.equal(card, liveCard, "the card keeps its node when the turn folds");
+  assert.equal(turnRow(host).getAttribute("aria-expanded"), "false", "the finished turn folds");
+  await openTurn(host);
+  assert.equal(host.querySelector('[data-step="ask"]'), liveCard, "opening the history keeps the card's node");
   await unmount();
 });
 
@@ -209,5 +219,18 @@ void it("shows the thinking line after the history while the turn runs", async (
     step.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING,
     "the thinking line comes after the history",
   );
+  await unmount();
+});
+
+void it("folds a run of reads and searches apart from the edits after it", async () => {
+  const ids = ["read-a", "search-b", "edit-c", "edit-d"];
+  const { host, unmount } = await mount(
+    ids.map((id, index) => ({ call: call(id), isRetry: false, index })),
+    { stepKind: (c) => c.id.split("-")[0] as "read" | "search" | "edit" },
+  );
+  const row = await openTurn(host);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
+  assert.equal(groups.length, 2, "one group for the exploration, one for the edits");
+  assert.match(groups[0]?.textContent ?? "", /xplored/, "the first group names what it explored");
   await unmount();
 });
