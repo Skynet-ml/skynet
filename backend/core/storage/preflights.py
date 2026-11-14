@@ -6,7 +6,7 @@ import math
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -91,6 +91,8 @@ class PreflightClaim:
     token: str | None
     generation: int
     attempt: int = 0
+    # The public document hides the row's result, so a new attempt reads its ``carry`` values here.
+    kept: dict[str, Any] = field(default_factory=dict)
 
 
 def _utc(value: datetime) -> datetime:
@@ -292,6 +294,7 @@ class PreflightStore:
         reuse_failed: bool = False,
         exclusive_scope: bool = False,
         session_id: str | None = None,
+        carry: dict[str, Any] | None = None,
     ) -> PreflightClaim:
         """Reuse matching success or atomically claim a new verification attempt.
 
@@ -305,6 +308,8 @@ class PreflightStore:
             reuse_failed: Preserve an explicit debug request's failed result on transport replay.
             exclusive_scope: Bind a debug request's idempotency scope to exactly one input fingerprint.
             session_id: Judge session (SKY-696) whose attached budget pays for the attempt.
+            carry: Result keys, with their defaults, that a new attempt keeps from the
+                previous attempt, also after a crash; ``None`` starts every attempt empty.
 
         Returns:
             Public evidence, private owner token when claimed, and authoritative generation.
@@ -413,13 +418,14 @@ class PreflightStore:
                     row.status = "failed"
                     session.flush()
                     return PreflightClaim(preflight_document(row), None, budget.generation)
+            kept = {key: row.result.get(key, default) for key, default in (carry or {}).items()}
             row.attempt += 1
-            row.status, row.result = "running", {}
+            row.status, row.result = "running", dict(kept)
             row.started_at, row.finished_at = now, None
             row.claim_token, row.execution_generation = str(uuid4()), budget.generation
             row.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
             session.flush()
-            return PreflightClaim(preflight_document(row), row.claim_token, budget.generation, row.attempt)
+            return PreflightClaim(preflight_document(row), row.claim_token, budget.generation, row.attempt, kept)
 
     def renew(self, identity: str, *, claim_token: str) -> bool:
         """Extend only a live owner whose shared budget generation is still current.

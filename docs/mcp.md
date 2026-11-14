@@ -153,7 +153,8 @@ stored score and does not pay again. An answer with `status: in_progress`
 means: call again with the same arguments. Skynet answers `in_progress`
 while other calls of the session hold its budget, and after a temporary
 repository or sandbox failure. A retry after such a failure pays for its
-own work.
+own work. After three temporary failures of the same candidate, the call
+answers `judge.score_failed`.
 
 Only the budget or `stop_run` with the `session_id` ends a session. A bulk
 cancel skips a judge session. Before each call, the budget must still pay
@@ -161,13 +162,19 @@ for one call (the draft's minimum) and a reserve for the final score. The
 reserve is one minimum at first. After scored calls, it is 1.5 times the
 mean spend per search case times the number of final cases, and never less
 than one minimum. When the budget cannot pay for that, the call ends the
-session. The end scores the best version once on the held-out cases. With
+session. While usage of an earlier call still settles, it answers
+`in_progress` instead. The end scores the best version once on the held-out cases. With
 fewer than five cases, nothing is held out, and the end scores the best
 version on every case. With no cases, it scores the version once.
 
-The end waits (`budget.pending`) while a call of the session still runs. A
-call that starts after the end starts gets the ended answer and pays
-nothing. When a call stops at the budget limit, the end still tries the
+The end waits (`budget.pending`) while a call of the session still runs.
+After a temporary repository or sandbox failure of the final score, the end
+also answers `budget.pending`, and the session stays open. The next
+`stop_run` or call scores again. After three such failures, the session
+ends `failed`. A call that starts after the end starts scores nothing. It
+gets `in_progress` while the end runs. After that, it drives an end that
+waits or that stopped before it finished, and then gets the ended answer.
+Every later end keeps the `ended_by` of the first end. When a call stops at the budget limit, the end still tries the
 final score with the money that is left. When that money cannot pay for
 it, the session ends `stopped`, and its message says that no held-out score
 exists. One call can still spend more than the reserve, because Skynet does

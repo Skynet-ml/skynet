@@ -32,6 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..billing.budget_amounts import cents_from_units
 from ..billing.budgets import (
     BudgetConflictError,
     BudgetError,
@@ -80,7 +81,7 @@ from ..service_gateway.optimization.blackbox.service import (
     case_split_positions,
     legacy_case_splits,
 )
-from ..storage.models import JobModel
+from ..storage.models import ExecutionOperationModel, JobModel
 from ..storage.preflights import PreflightStore, WizardPreflightModel
 from ..storage.usage import json_byte_size
 from ..worker.repo_staging import StagedRepository, add_run_record
@@ -117,6 +118,9 @@ _END_MESSAGE = "The judge session ended and scored its best version once."
 _NO_FINAL_MESSAGE = "The budget ran out before the final score, so the session has no held-out score."
 # A retry can succeed after these failures, so a call does not store them as its result.
 _TRANSIENT_ERRORS = (RepoFetchError, InfrastructureInterruptionError)
+# RepoFetchError also covers lasting failures, such as a lost connection, so only this many count as temporary.
+_TEMPORARY_FAILURE_LIMIT = 3
+_ACTIVE_OPERATIONS = ("reserved", "dispatched", "pending")
 
 
 class JudgeError(Exception):
@@ -189,6 +193,18 @@ def is_opening(job: dict[str, Any]) -> bool:
         True while the row has no attached budget yet.
     """
     return bool(((job.get("payload") or {}).get("judge") or {}).get("opening"))
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Read a stored time as UTC, since SQLite returns it without a zone.
+
+    Args:
+        value: A stored time.
+
+    Returns:
+        The time in UTC.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _utc_now() -> str:
@@ -420,7 +436,8 @@ def _final_cases(cases: list[Any], seed: int | None) -> tuple[list[Any], bool]:
         The cases, and whether they are held-out cases.
     """
     splits = legacy_case_splits(cases, seed) if cases else None
-    if splits is not None and splits.test:
+    # With one case the split's test set is the search case itself, so it is not held out.
+    if splits is not None and splits.test and splits.counts.held_out:
         return list(splits.test), True
     return cases, False
 
@@ -601,6 +618,18 @@ def _failure(code: str, message: str) -> dict[str, Any]:
     }
 
 
+def _temporary(error: BaseException) -> bool:
+    """Tell whether an error is a repository or sandbox failure that a retry can pass.
+
+    Args:
+        error: The error of a score.
+
+    Returns:
+        True for a transient error, raw or as the direct cause.
+    """
+    return isinstance(error, _TRANSIENT_ERRORS) or isinstance(error.__cause__, _TRANSIENT_ERRORS)
+
+
 def _replay(document: dict[str, Any], session_id: str, budget: BudgetSnapshot | None) -> dict[str, Any]:
     """Answer a call whose evidence already exists or another request holds.
 
@@ -678,6 +707,9 @@ def judge_call(
         )
         # The session ends while the budget still pays for the final score.
         if budget.total_cents - budget.setup_spent_cents - budget.run_spent_cents < needed:
+            if _unsettled_usage(job_store.engine, budget.id):
+                # The spend counts unsettled holds in full, so a high reading must not end the session for good.
+                raise JudgePendingError("Usage of an earlier call still settles. Call again with the same arguments.")
             ended = end_session(job_store, job, ended_by="budget")
             return _ended_answer(session_id, ended.status)
         if budget.available_cents < needed:
@@ -694,6 +726,7 @@ def judge_call(
             payload={"session": session_id, "patch_sha256": sha},
             session_id=session_id,
             reuse_failed=True,
+            carry={"temporary_failures": 0},
         )
     except BudgetConflictError as error:
         raise JudgePendingError("The session's budget changed during the call.") from error
@@ -750,12 +783,7 @@ def judge_call(
                 ) as (protected, staged, _gateway):
                     chosen = _search_cases(list(protected.get("cases") or []), payload.get("seed"))
                     final = _score(staged, patch, [case for _, case in chosen], label="candidate")
-                after = _budget(job_store, job)
-                assert after is not None
-                # Concurrent calls that settle in this window count too, so their overlap makes the spend err high.
-                spent = (
-                    after.setup_spent_cents + after.run_spent_cents - budget.setup_spent_cents - budget.run_spent_cents
-                )
+                # No spend is stored: usage can settle after the call, so _scored_results reads it from the ledger.
                 result = {
                     "score": final.score,
                     "named_scores": _named(final),
@@ -766,7 +794,6 @@ def judge_call(
                     ],
                     "failed_cases": len(final.failures),
                     "patch_sha256": sha,
-                    "spent_cents": float(max(spent, Decimal(0))),
                 }
                 document = store.finish(
                     identity,
@@ -798,14 +825,19 @@ def judge_call(
                     identity, claim_token=token_, status="failed", result=_failure(error.code, error.detail)
                 )
             except (ServiceError, RuntimeError, ValueError) as exc:
-                if isinstance(exc, _TRANSIENT_ERRORS) or isinstance(exc.__cause__, _TRANSIENT_ERRORS):
+                failures = int(claim.kept.get("temporary_failures") or 0) + 1
+                if _temporary(exc) and failures < _TEMPORARY_FAILURE_LIMIT:
                     transient = True
                     # No judge_error, so the next claim runs the call again instead of replaying it.
                     document = store.finish(
                         identity,
                         claim_token=token_,
                         status="pending",
-                        result={"checks": [{"key": "judge", "status": "pending"}], "_retry_after_usage": True},
+                        result={
+                            "checks": [{"key": "judge", "status": "pending"}],
+                            "_retry_after_usage": True,
+                            "temporary_failures": failures,
+                        },
                     )
                 else:
                     # ValueError covers the other budget errors; the message never holds metric code.
@@ -851,17 +883,62 @@ def _rows(engine: Any, budget_id: str, scope: str, statuses: tuple[str, ...] | N
 
 
 def _scored_results(engine: Any, budget_id: str) -> list[dict[str, Any]]:
-    """Return the stored results of the session's scored calls.
+    """Return the stored results of the session's scored calls, each with its spend from the ledger.
+
+    A call's spend is what the budget's operations created during its last
+    attempt cost: the settled amount, or the whole hold while usage is not
+    settled. So it is exact after settlement and errs high before it, also
+    when usage settles after the call returned. The operations of a
+    concurrent call that overlaps the attempt count too, so overlap errs high.
 
     Args:
-        engine: Database that holds the evidence.
+        engine: Database that holds the evidence and the ledger.
         budget_id: The session's budget.
 
     Returns:
-        Each scored call's ``judge_result``.
+        Each scored call's ``judge_result`` with ``spent_cents``.
     """
     rows = _rows(engine, budget_id, JUDGE_SCOPE, ("succeeded", "pending"))
-    return [row.result["judge_result"] for row in rows if isinstance((row.result or {}).get("judge_result"), dict)]
+    done = [row for row in rows if isinstance((row.result or {}).get("judge_result"), dict)]
+    with Session(engine) as session:
+        operations = list(
+            session.scalars(select(ExecutionOperationModel).where(ExecutionOperationModel.budget_id == budget_id))
+        )
+    now = datetime.now(UTC)
+    results = []
+    for row in done:
+        start, end = _as_utc(row.started_at), _as_utc(row.finished_at) if row.finished_at else now
+        units = sum(
+            operation.max_units if operation.state in _ACTIVE_OPERATIONS else operation.actual_units
+            for operation in operations
+            if start <= _as_utc(operation.created_at) <= end
+        )
+        results.append({**row.result["judge_result"], "spent_cents": float(cents_from_units(units))})
+    return results
+
+
+def _unsettled_usage(engine: Any, budget_id: str) -> bool:
+    """Tell whether an operation of the budget is not settled yet, so its spend is only a hold.
+
+    Args:
+        engine: Database that holds the ledger.
+        budget_id: The session's budget.
+
+    Returns:
+        True while an operation is reserved, dispatched or pending.
+    """
+    with Session(engine) as session:
+        return (
+            session.scalar(
+                select(ExecutionOperationModel.id)
+                .where(
+                    ExecutionOperationModel.budget_id == budget_id,
+                    ExecutionOperationModel.state.in_(_ACTIVE_OPERATIONS),
+                )
+                .limit(1)
+            )
+            is not None
+        )
 
 
 def _final_row(engine: Any, budget_id: str) -> Any | None:
@@ -901,8 +978,10 @@ def _live_calls(engine: Any, budget_id: str) -> bool:
 def _ending_answer(job_store: Any, job: dict[str, Any], final_row: Any) -> dict[str, Any]:
     """Answer a call in a session whose end claimed: the call runs no paid work.
 
-    An end that waits (its row is pending) runs again here, so a client that
-    keeps calling still drives the end to its final score.
+    While the session is open, the end runs again here: one that waits, or
+    one whose owner crashed. So a client that keeps calling still drives the
+    end to its final score. A live end answers ``budget.pending``, so no final
+    score runs twice.
 
     Args:
         job_store: Store that holds the session, its budget and its evidence.
@@ -916,7 +995,7 @@ def _ending_answer(job_store: Any, job: dict[str, Any], final_row: Any) -> dict[
         DomainError: 409 ``budget.pending`` while the end must still wait.
     """
     session_id = job["optimization_id"]
-    if final_row.status == "pending":
+    if job_store.get_job(session_id).get("status") in _OPEN_STATUSES:
         ended = end_session(job_store, job, ended_by=str((final_row.result or {}).get("ended_by") or "budget"))
         return _ended_answer(session_id, ended.status)
     return _ended_answer(session_id, str(job_store.get_job(session_id)["status"]))
@@ -1080,21 +1159,26 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
     """End a judge session: score its best version once on the held-out cases.
 
     A retry after a crash finds the end's evidence row: a finished end
-    returns the session status, and a running one answers ``budget.pending``.
-    The end also waits while a call of the session still runs, so that call
-    counts toward the best version. When a call closed the budget at its
-    limit, the end reopens it once to try the final score.
+    returns the session status, a running one answers ``budget.pending``, and
+    one whose owner crashed runs again. The first end that claims fixes
+    ``ended_by`` for every later attempt. The end also waits while a call of
+    the session still runs, so that call counts toward the best version. When
+    a call closed the budget at its limit, the end reopens it once to try the
+    final score. A temporary repository or sandbox failure of the final score
+    answers ``budget.pending`` and a retry scores again, up to
+    ``_TEMPORARY_FAILURE_LIMIT`` failures; at the limit the session fails.
 
     Args:
         job_store: Store that holds the session, its budget and its evidence.
         job: The session's job record, with its payload.
-        ended_by: ``budget`` or ``stop_run``.
+        ended_by: ``budget`` or ``stop_run``; an earlier end's value wins.
 
     Returns:
         The session id and its terminal status.
 
     Raises:
-        DomainError: 409 ``budget.pending`` while the end runs or usage settles.
+        DomainError: 409 ``budget.pending`` while the end runs, usage settles,
+            or a temporary failure waits for a retry.
     """
     session_id = job["optimization_id"]
     username = job["username"]
@@ -1118,6 +1202,7 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
             scope=FINAL_SCOPE,
             payload={"session": session_id},
             session_id=session_id,
+            carry={"ended_by": ended_by, "temporary_failures": 0},
         )
     except BudgetConflictError as error:
         raise DomainError("budget.pending", status=409) from error
@@ -1126,7 +1211,15 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
             return JobCancelResponse(optimization_id=session_id, status=str(job_store.get_job(session_id)["status"]))
         raise DomainError("budget.pending", status=409)
     identity, token = claim.document["id"], claim.token
-    waiting = {"checks": [{"key": FINAL_SCOPE, "status": "pending"}], "_retry_after_usage": True, "ended_by": ended_by}
+    # The first end that claimed fixes ended_by; a later stop_run or call keeps it.
+    ended_by = str(claim.kept["ended_by"])
+    failures = int(claim.kept["temporary_failures"] or 0)
+    waiting = {
+        "checks": [{"key": FINAL_SCOPE, "status": "pending"}],
+        "_retry_after_usage": True,
+        "ended_by": ended_by,
+        "temporary_failures": failures,
+    }
     # After this claim no new call starts, and a claim marks a crashed call's row pending.
     if _live_calls(job_store.engine, budget.id):
         store.finish(identity, claim_token=token, status="pending", result=waiting)
@@ -1176,6 +1269,14 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                 status = "stopped"
                 _stop(job_store, job, status, _NO_FINAL_MESSAGE)
             except (ServiceError, RuntimeError, ValueError) as error:
+                if _temporary(error) and failures + 1 < _TEMPORARY_FAILURE_LIMIT:
+                    store.finish(
+                        identity,
+                        claim_token=token,
+                        status="pending",
+                        result={**waiting, "temporary_failures": failures + 1},
+                    )
+                    raise DomainError("budget.pending", status=409) from error
                 status = "failed"
                 _stop(job_store, job, status, f"The final score failed: {str(error)[:_MESSAGE_CHARS]}")
             else:
