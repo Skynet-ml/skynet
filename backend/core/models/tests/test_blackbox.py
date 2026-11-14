@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -172,6 +173,46 @@ def test_iteration_limit_requires_single_meta_harness(strategy: dict[str, str], 
 
     payload["budget"]["max_iterations"] = None
     assert BlackboxRunRequest.model_validate(payload).budget.max_iterations is None
+
+
+@pytest.mark.parametrize("value", [0.9, None])
+def test_a_new_request_with_the_retired_stop_score_names_the_outcome_target(value: float | None) -> None:
+    """A new request that still sends ``budget.stop_at_score``, even as null, gets an error naming the file key."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
+
+    with pytest.raises(ValidationError, match=r"\[outcome\] target in optimize\.toml"):
+        BlackboxRunRequest.model_validate(payload)
+
+
+def test_a_stored_payload_with_the_retired_stop_score_still_loads() -> None:
+    """A stored run keeps its retired stop score privately; the public model and its dump have no such key."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": 0.9})
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.budget.max_scorer_runs == 20
+    assert request.budget._legacy_stop_at_score == 0.9
+    assert "stop_at_score" not in request.model_dump()["budget"]
+    assert "stop_at_score" not in request.model_dump(mode="json")["budget"]
+
+
+@pytest.mark.parametrize("value", [None, "0.9", True, float("nan"), float("inf")])
+def test_a_stored_retired_stop_score_that_is_not_a_finite_number_gives_none(value: object) -> None:
+    """A stored null or a value of another type loads with no legacy stop score and no crash."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.budget._legacy_stop_at_score is None
+
+
+def test_a_new_request_has_no_legacy_stop_score_and_the_schema_has_no_stop_score() -> None:
+    """A new request has no legacy stop score, and no JSON schema names the retired key."""
+    request = BlackboxRunRequest.model_validate(_payload(budget={"max_scorer_runs": 20}))
+
+    assert request.budget._legacy_stop_at_score is None
+    assert "stop_at_score" not in blackbox_models.BlackboxBudget.model_json_schema()["properties"]
+    assert "stop_at_score" not in json.dumps(BlackboxRunRequest.model_json_schema())
 
 
 def _repo_request(**overrides: object) -> dict:

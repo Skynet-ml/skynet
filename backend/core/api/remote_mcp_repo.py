@@ -1149,16 +1149,14 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             int, Field(ge=1, le=100_000, description="Most scorer runs in the whole run.")
         ] = 200,
         max_iterations: Annotated[int | None, Field(ge=1, le=1000)] = None,
-        stop_at_score: Annotated[float | None, Field(description="Stop early at this score.")] = None,
     ) -> dict[str, Any]:
         """Set how long the run searches. Optional: the default is 200 scorer runs.
 
-        The money limit is not set here. repo_draft_submit takes it.
+        The money limit is not set here. repo_draft_submit takes it. The run
+        stops early at the ``[outcome] target`` score in optimize.toml.
         """
         try:
-            budget = BlackboxBudget(
-                max_scorer_runs=max_scorer_runs, max_iterations=max_iterations, stop_at_score=stop_at_score
-            )
+            budget = BlackboxBudget(max_scorer_runs=max_scorer_runs, max_iterations=max_iterations)
         except ValidationError as error:
             raise ToolError("; ".join(_validation_issues(error))) from error
 

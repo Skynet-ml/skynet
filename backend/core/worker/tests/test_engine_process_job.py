@@ -130,6 +130,30 @@ def test_process_job_parses_json_string_payload_overview(
     assert store._jobs["opt-2"]["status"] == "success"
 
 
+def test_process_job_runs_a_stored_payload_with_the_retired_stop_score(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+) -> None:
+    """A run stored with ``budget.stop_at_score`` still starts and finishes, as on a resume or restart (SKY-691)."""
+    payload = copy.deepcopy(REAL_RUN_PAYLOAD)
+    payload["budget"] = {**payload.get("budget", {}), "stop_at_score": 0.9}
+    store.seed_job("opt-stop", payload=payload)
+    worker.enqueue_job("opt-stop")
+    ctx, _proc = make_mp_context(
+        exitcode=0,
+        result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
+    )
+    protect_dispatch(store, ctx)
+
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
+        worker._process_job("opt-stop", 0)
+
+    assert store._jobs["opt-stop"]["status"] == "success"
+
+
 def test_process_job_handles_invalid_json_string_payload_overview_gracefully(
     worker: BackgroundWorker,
     store: FakeJobStore,

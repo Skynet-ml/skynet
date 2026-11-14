@@ -81,7 +81,6 @@ L'assistant ne liste que les optimiseurs adaptés à votre tâche et à vos entr
 Définissez combien de temps l'exécution peut continuer à essayer, et combien elle peut dépenser :
 
 - **Exécutions du scoreur max.** (Guidé : **Essais max.**) : le nombre maximal de candidats que Skynet note. Certains optimiseurs exigent un nombre minimal.
-- **Arrêter au score** (Guidé : **Arrêter plus tôt quand le score atteint**) : l'exécution s'arrête quand une version atteint ce score.
 - **Itérations max.** (Guidé : **Tours max.**) : affiché pour les optimiseurs qui le prennent en charge.
 - **Plafond de dépenses** : le montant maximal que l'exécution peut dépenser. La valeur par défaut est de 5 $, ou le montant **Nécessaire pour démarrer** s'il est plus élevé. Vous pouvez aussi sélectionner **Sans plafond**.
 
