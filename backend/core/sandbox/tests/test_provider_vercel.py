@@ -218,6 +218,7 @@ class FakeSession:
         self.tail_reads = 0
         self.scripts: list[str] = []
         self.script_answers: list[tuple[int, str]] = []
+        self.launchers: list[list[str]] = []
 
     @property
     def fs(self) -> FakeFs:
@@ -253,7 +254,7 @@ class FakeSession:
 
         Args:
             command: The program.
-            args: The shell flags, the script, ``$0``, then the pairs.
+            args: The launcher flags, ``/bin/bash``, the shell flags, the script, ``$0``, then the pairs.
             kwargs: The other SDK arguments.
 
         Returns:
@@ -264,12 +265,14 @@ class FakeSession:
         """
         if self.stops:
             raise _gone()
-        if args[3] != vercel.TAIL_SCRIPT:
-            self.scripts.append(args[3])
+        script = args.index("-c") + 1
+        self.launchers.append([command, *args[: script - len(vercel.SHELL_FLAGS)]])
+        if args[script] != vercel.TAIL_SCRIPT:
+            self.scripts.append(args[script])
             code, stdout = self.script_answers.pop(0) if self.script_answers else (0, "")
             return SimpleNamespace(returncode=code, stdout=stdout, stderr="")
         self.tail_reads += 1
-        pairs = args[5:]
+        pairs = args[script + 2 :]
         lines = []
         for start, path in zip(pairs[::2], pairs[1::2], strict=True):
             value = self.fs.files.get(path, "")
@@ -730,9 +733,69 @@ async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeC
     await env.start()
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
-    assert call["command"] == "bash"
-    assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
+    assert [call["command"], *call["args"][:5]] == [*vercel.NO_NEW_PRIVS, "/bin/bash", "--noprofile", "--norc", "-c"]
     assert call["args"][-1].startswith("bash --noprofile --norc -c ")
+    await env.stop()
+
+
+@pytest.mark.parametrize("timeout_sec", [None, 30])
+async def test_a_command_without_sudo_starts_under_no_new_privs(
+    client: FakeClient, log: list[str], timeout_sec: float | None
+) -> None:
+    """Check that the box's sudo can never raise a non-root command, its timeout wrapper or its children."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=timeout_sec)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "/usr/bin/setpriv"
+    assert call["args"][:2] == ["--no-new-privs", "/bin/bash"]
+    assert "export PATH=" not in call["args"][-1]
+    assert call["sudo"] is False
+    await env.stop()
+
+
+async def test_a_sudo_command_starts_without_no_new_privs(client: FakeClient, log: list[str]) -> None:
+    """Check that the parent's own root command runs /bin/bash directly with a PATH the box user cannot write."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=30, sudo=True)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "/bin/bash"
+    assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
+    assert len(call["args"]) == 4
+    assert call["args"][-1].startswith(f"export PATH={vercel.ROOT_PATH}; timeout --signal=KILL 30s bash ")
+    assert "/app/.venv" not in vercel.ROOT_PATH
+    assert "setpriv" not in call["args"][-1]
+    assert call["sudo"] is True
+    await env.stop()
+
+
+async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: FakeClient, log: list[str]) -> None:
+    """Check that the egress proxy start and the output polls run under no_new_privs, as exec does."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Run until the provider reads the output once.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "hello\n"
+        await _until_read(session, 1)
+        return 0
+
+    await env._run_box_script(session, "true")
+    _guest(client.boxes[env.name], run)
+    await asyncio.wait_for(env.exec("guest", on_output=lambda stream, text: None), 5)
+    assert session.scripts == ["true"]
+    assert session.tail_reads >= 1
+    assert all(launcher == [*vercel.NO_NEW_PRIVS, "/bin/bash"] for launcher in session.launchers)
     await env.stop()
 
 

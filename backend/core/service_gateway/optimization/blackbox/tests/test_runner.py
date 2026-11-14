@@ -1514,12 +1514,70 @@ def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: P
     assert done.stderr.strip("'\"").startswith("The supervisor")
 
 
-_ENTRY_USER = (
-    "import importlib.util,json,sys;"
-    "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
-    "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;"
-    "m._has_capabilities=lambda:sys.argv[2]=='caps';sys.stderr.write(json.dumps(m._entry_user({})))"
-)
+# Runs the runner as a root supervisor would: root, with or without
+# capabilities, and a libc whose prctl records its calls and can fail. With a
+# call folder it runs the whole candidate path, else only the user choice and
+# the entry's PATH.
+_ROOT_SUPERVISOR = """
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("r", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules["r"] = m
+spec.loader.exec_module(m)
+m.os.geteuid = lambda: 0
+m._has_capabilities = lambda: sys.argv[2] == "caps"
+calls = []
+
+
+class Libc:
+    def prctl(self, *args):
+        calls.append(list(args))
+        return -1 if sys.argv[3] == "fails" else 0
+
+
+m.ctypes.CDLL = lambda *args, **kwargs: Libc()
+if len(sys.argv) > 4:
+    report = {"code": m.main([m.CANDIDATE_FLAG, sys.argv[4]])}
+else:
+    try:
+        env = dict(m.os.environ)
+        report = {"chosen": m._entry_user(env), "path": env.get("PATH")}
+    except m.EntryUserError as error:
+        report = {"refused": str(error)}
+report["calls"] = calls
+print(json.dumps(report))
+"""
+
+
+def _root_supervisor(
+    tmp_path: Path, capabilities: str, prctl: str, *call_dir: str, entry_path: str | None = None
+) -> dict[str, Any]:
+    """Run ``_ROOT_SUPERVISOR`` in the tree ``tmp_path`` and return its report.
+
+    Args:
+        tmp_path: The candidate tree, owned by the test user.
+        capabilities: ``caps`` when the fake root holds capabilities.
+        prctl: ``fails`` when every prctl call fails.
+        call_dir: The call folder, to run the whole candidate path.
+        entry_path: The image's ``APP_ENTRY_PATH``, or ``None`` for an image without it.
+
+    Returns:
+        The report: the choice and the entry's PATH, the refusal or the exit
+        code, and the prctl calls.
+    """
+    env = {key: value for key, value in os.environ.items() if key != runner.ENV_ENTRY_PATH}
+    if entry_path is not None:
+        env[runner.ENV_ENTRY_PATH] = entry_path
+    done = subprocess.run(
+        [sys.executable, "-c", _ROOT_SUPERVISOR, runner.__file__, capabilities, prctl, *call_dir],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return json.loads(done.stdout.splitlines()[-1])
 
 
 @pytest.mark.parametrize(("capabilities", "switched"), [("caps", True), ("none", False)])
@@ -1527,14 +1585,64 @@ def test_a_root_with_capabilities_drops_the_entry_to_the_tree_owner_also_with_a_
     tmp_path: Path, capabilities: str, switched: bool
 ) -> None:
     """Only a root with no capability, as in a local Docker box, keeps the entry as itself (SKY-398)."""
-    done = subprocess.run(
-        [sys.executable, "-c", _ENTRY_USER, runner.__file__, capabilities],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-
-    chosen = json.loads(done.stderr)
+    chosen = _root_supervisor(tmp_path, capabilities, "works")["chosen"]
     assert chosen == ({"user": os.getuid(), "group": os.getgid(), "extra_groups": []} if switched else {})
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "entry_path", "path"),
+    [
+        ("caps", "/app/.venv/bin:/usr/bin", "/app/.venv/bin:/usr/bin"),
+        ("caps", None, os.environ.get("PATH")),
+        ("caps", "", os.environ.get("PATH")),
+        ("none", "/app/.venv/bin:/usr/bin", os.environ.get("PATH")),
+    ],
+)
+def test_only_a_user_switch_gives_the_entry_the_image_box_path(
+    tmp_path: Path, capabilities: str, entry_path: str | None, path: str | None
+) -> None:
+    """sudo gives root a secure PATH, so the switched entry gets the box PATH with the [setup] venv back."""
+    assert _root_supervisor(tmp_path, capabilities, "works", entry_path=entry_path)["path"] == path
+
+
+@pytest.mark.parametrize(("capabilities", "calls"), [("caps", [[38, 1, 0, 0, 0]]), ("none", [])])
+def test_only_a_user_switch_sets_no_new_privs_on_the_supervisor(
+    tmp_path: Path, capabilities: str, calls: list[list[int]]
+) -> None:
+    """The entry that runs as the tree owner inherits no_new_privs, so the box's sudo cannot raise it (SKY-398)."""
+    assert _root_supervisor(tmp_path, capabilities, "works")["calls"] == calls
+
+
+def test_the_entry_does_not_start_when_no_new_privs_cannot_be_set(tmp_path: Path) -> None:
+    """A root supervisor that cannot set no_new_privs refuses the run and never starts the entry."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    payload = {"entry": ["sh", "-c", "touch started"], "input": None, "timeout": 30, "stages": None}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    assert _root_supervisor(tmp_path, "caps", "works")["chosen"]["user"] == os.getuid()
+
+    report = _root_supervisor(tmp_path, "caps", "fails", str(call_dir))
+
+    assert report["code"] == 3
+    assert [38, 1, 0, 0, 0] in report["calls"]
+    assert not (tmp_path / "started").exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="no_new_privs is a Linux process flag")
+def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp_path: Path) -> None:
+    """The real prctl call sets the flag that the entry inherits."""
+    script = (
+        "import importlib.util,sys;"
+        "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
+        "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;m._has_capabilities=lambda:True;"
+        "before=open('/proc/self/status').read();m._entry_user({});"
+        "print(before);print('--- after ---');print(open('/proc/self/status').read())"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, runner.__file__], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    before, after = done.stdout.split("--- after ---")
+    if "NoNewPrivs:\t1" in before:
+        pytest.skip("the test process already holds no_new_privs, so the call cannot show a change")
+    assert "NoNewPrivs:\t0" in before
+    assert "NoNewPrivs:\t1" in after
