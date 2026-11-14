@@ -728,10 +728,13 @@ def write_codex_requirements(session: SandboxSession) -> None:
     """Make sure the root-owned Codex requirements file is in place before Codex starts.
 
     The sandbox image ships the file root-owned, so the plain read-back passes
-    and the box needs no root. The image carries no ``sudo``: Codex runs as the
-    image user with its own sandbox off, so a root path in the box would let the
-    model rewrite the file (SKY-389). Only a box without the file, such as the
-    local Docker box that mounts an empty ``/etc/codex``, gets the root write.
+    and the box needs no root. Codex runs as the image user with its own
+    sandbox off, so it must never reach root, or the model could rewrite the
+    file (SKY-389). The image's ``sudo`` serves only the parent's own root
+    commands: the Vercel provider starts every other command under
+    ``no_new_privs``, which the kernel keeps for Codex and blocks ``sudo``
+    with. Only a box without the file, such as the local Docker box that
+    mounts an empty ``/etc/codex``, gets the root write.
 
     Args:
         session: A control-plane session; its ``run`` must run as root only when the box lacks the file.

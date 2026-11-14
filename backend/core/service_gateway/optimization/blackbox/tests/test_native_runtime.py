@@ -34,6 +34,7 @@ from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
 from core.models.unified import UnifiedCase
+from core.sandbox.providers import vercel
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
@@ -47,6 +48,7 @@ from .. import (
     native_runner,
     native_runtime,
     repo_tree,
+    runner,
     sandbox_log,
 )
 from ..harness import GatewayConfig, build_launch, launch_payload
@@ -1156,8 +1158,8 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
 
 
-def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -> None:
-    """Bake the exact requirements file as root before ``USER 1001``, and give the image user no root path (SKY-389)."""
+def test_dockerfile_ships_the_codex_requirements_file_root_owned() -> None:
+    """Bake the exact requirements file as root before ``USER 1001`` (SKY-389)."""
     dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
     bake = dockerfile.index(f"> {CODEX_REQUIREMENTS_PATH}")
     assert "install -d -o root -g root -m 0755 /etc/codex" in dockerfile
@@ -1165,8 +1167,59 @@ def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -
     assert f"chown root:root {CODEX_REQUIREMENTS_PATH}" in dockerfile
     assert f"chmod 0644 {CODEX_REQUIREMENTS_PATH}" in dockerfile
     assert bake < dockerfile.index("\nUSER 1001\n")
-    assert "sudoers" not in dockerfile
-    assert not re.search(r"apt-get install[^\n]*\bsudo\b", dockerfile)
+
+
+def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() -> None:
+    """Install sudo only on opt-in, before ``USER 1001``, and fail the build without the ``no_new_privs`` launcher."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    block = dockerfile[dockerfile.index("ARG INCLUDE_SANDBOX_SUDO=false") : dockerfile.index("\nUSER 1001\n")]
+    step = block[block.index("RUN ") : block.index("\n    fi\n")]
+    assert step.startswith('RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then')
+    assert re.search(r"apt-get install[^\n]*\bsudo\b", step)
+    assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in step
+    assert f"'Defaults secure_path=\"{vercel.ROOT_PATH}\"'" in step
+    guard = "/usr/local/libexec/skynet-path-guard"
+    assert f"install -d -o root -g root -m 0755 {guard}" in step
+    assert f"ln -s /usr/bin/sudo {guard}/sudo" in step
+    path = dockerfile.index(f'\nENV PATH="{guard}:/app/.venv/bin:$PATH"\n')
+    assert dockerfile.count("\nENV PATH=") == 1
+    assert dockerfile.index('\nENV APP_ENTRY_PATH="$PATH"\n') > path
+    assert f"ENV {runner.ENV_ENTRY_PATH}=" in dockerfile
+    assert f"'export PATH=\"{guard}:/app/.venv/bin:$PATH\"' > /etc/profile.d/skynet-runtime.sh" in dockerfile
+    assert "chmod 0440 /etc/sudoers.d/sandbox" in step
+    assert "visudo -cf /etc/sudoers.d/sandbox" in step
+    assert f"test -x {vercel.NO_NEW_PRIVS[0]}" in step
+    assert len(re.findall(r"apt-get install[^\n]*\bsudo\b", dockerfile)) == 1
+
+
+def test_dockerfile_closes_root_path_programs_to_the_box_user() -> None:
+    """Close the installed programs in ``/usr/local/bin`` and fail a sudo build if root's ``PATH`` stays open."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    assert (
+        "pip install --no-cache-dir uv \\\n        && chmod 0755 /usr/local/bin/uv /usr/local/bin/uvx \\" in dockerfile
+    )
+    assert "chmod 0755 /usr/local/bin/deno" in dockerfile
+    assert "chmod +x /usr/local/bin/deno" not in dockerfile
+    assert "tar --no-same-owner -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server" in dockerfile
+    assert "chmod 0755 /usr/local/bin/github-mcp-server" in dockerfile
+    user = dockerfile.index("\nUSER 1001\n")
+    start = dockerfile.rindex("\nRUN ", 0, dockerfile.index("open=$(find "))
+    step = dockerfile[start:user]
+    assert step.startswith('\nRUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then')
+    assert step.rstrip().endswith("fi")
+    assert "set -e;" in step
+    assert 'if [ -n "$open" ]; then' in step
+    assert "exit 1;" in step
+    folders = re.search(r"open=\$\(find -L ((?:/\S+ )+)\\\( ! -user root -o -perm /022 \\\) -print\)", step)
+    assert folders
+    assert "-type l" not in step
+    checked = set(folders.group(1).split())
+    assert checked == {"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin"}
+    # /bin and /sbin link to /usr/bin and /usr/sbin in the base image.
+    merged = {"/bin": "/usr/bin", "/sbin": "/usr/sbin"}
+    assert {merged.get(folder, folder) for folder in vercel.ROOT_PATH.split(":")} <= checked
+    for install in ("apt-get install", "pip install", "uv sync", "unzip ", "tar ", "/etc/codex/requirements.toml"):
+        assert dockerfile.rindex(install) < start
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:

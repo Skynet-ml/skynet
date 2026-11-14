@@ -8,7 +8,13 @@ Push a **linux/amd64** image to the selected project's Vercel Container Registry
 
 When extending a VCR image with zstd layers, publish through the Vercel CLI’s OCI Buildx exporter. Preserve the original compression media types when reusing layers; legacy Docker pushes can relabel zstd blobs as gzip. Verify a real sandbox command after publication even when the image is Ready.
 
-Build the sandbox image with `--build-arg INCLUDE_SHINKA_EVOLVE=1`. Vercel runs commands as the image's `USER` (`appuser`, UID 1001) and runs a `sudo: true` command through the box's own `sudo` binary. The image ships no `sudo`, on purpose: Codex runs as `appuser` with its own sandbox off, so any root path in the box would let the model rewrite `/etc/codex/requirements.toml` (SKY-389). Instead, the image build writes that file root-owned and mode 0644, and the parent only reads it back before Codex starts. Only a box that lacks the file, such as the local Docker box with its empty `/etc/codex` mount, gets the root write; on a Vercel image without the file, Codex setup fails closed.
+Build the sandbox image with `--build-arg INCLUDE_SHINKA_EVOLVE=1 --build-arg INCLUDE_SANDBOX_SUDO=1`. Vercel runs commands as the image's `USER` (`appuser`, UID 1001) and runs a `sudo: true` command through the box's own `sudo` binary. The sandbox image ships `sudo` with a NOPASSWD rule for `appuser`, as Vercel's managed images do, because the `[run]` supervisor needs root. Only the parent's own `sudo: true` commands reach root. The Vercel provider starts every non-root command through `/usr/bin/setpriv --no-new-privs`, so the box image must have `/usr/bin/setpriv`. Every image built from `backend/Dockerfile` has it (util-linux). On an image without it, each command fails; no command runs without the block. Every process that command starts keeps the Linux `no_new_privs` flag, and the kernel then ignores the setuid bit of `sudo`. So Codex, which runs as `appuser` with its own sandbox off, cannot rewrite `/etc/codex/requirements.toml` (SKY-389), and the `[run]` entry cannot get root (SKY-398). The sandbox image build fails when `/usr/bin/setpriv` is missing. API/worker images ship no `sudo`. The image build writes the requirements file root-owned and mode 0644, and the parent only reads it back before Codex starts. Only a box that lacks the file, such as the local Docker box with its empty `/etc/codex` mount, gets the root write; on a Vercel image without the file, the root write runs through the image's `sudo`, and an image without `sudo` fails Codex setup closed.
+
+Code from before the sudo image starts user code as plain `bash`, without `no_new_privs`. On the sudo image, the box's NOPASSWD `sudo` then gives that user code root. To roll out, deploy this code to every worker first, and only then pin the sudo image in `VERCEL_SANDBOX_IMAGE`. To roll the code back to a commit before the sudo image, do these steps in this order:
+
+1. Pin a no-sudo image in `VERCEL_SANDBOX_IMAGE` again.
+2. Cancel or wait out the runs that use the sudo image. A run keeps the first image it opens, and a resume reuses it.
+3. Then deploy the older code.
 
 Vercel does not execute Docker `CMD` or `ENTRYPOINT`; Skynet starts the runner explicitly. `WORKDIR` is honored. The image is the whole optimizer: the guest runs the image's own `/app` copy of the backend with the image's Python and dependencies, and the parent ships only the request. The two share one contract, `SANDBOX_PROTOCOL` in `core/worker/sandbox_protocol.py`, covering the request and event shapes; bump it whenever either changes, including an added request field, which an older image's models drop without an error (`core/worker/tests/test_sandbox_protocol.py` pins the request shapes per protocol). Before sending a request, the worker reads the image's own protocol from that module and refuses an image that lacks it (built before it existed) or speaks another one, asking for a rebuild. Worker dependency or Python updates never block a sandbox. A run records the image it first opens on the job (`sandbox_image`), and every later sandbox for that run, including a resume after a redeploy, boots from that image; its GEPA checkpoints are tied to that image alone, not to the worker. Rebuild and re-pin the image to ship optimizer code changes to new runs. Image publication and dependency installation alone do not establish that a live setup check succeeded. [Vercel image documentation](https://vercel.com/docs/sandbox/concepts/images)
 
@@ -47,7 +53,20 @@ The parent starts the `[run]` supervisor with `sudo: true`, through the model
 mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
 the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
 The supervisor checks that file, then starts the entry as the owner of the
-candidate tree, so the entry cannot write the wrapper's files. In a local
+candidate tree, so the entry cannot write the wrapper's files. Before the
+switch, the supervisor sets `no_new_privs` on itself, so the entry cannot use
+the box's `sudo` to get back to root. If it cannot set the flag, it does not
+start the entry. A root command gets only the system folders on `PATH`, from
+the image's `sudo` rule and from the provider, because the box user can write
+`/app/.venv/bin`. Those folders are root-owned, and the box user cannot write
+any program file in them. Vercel's in-box agent starts `sudo` itself, so the
+image puts a root-only guard folder, `/usr/local/libexec/skynet-path-guard`,
+with one link to `/usr/bin/sudo`, first on its `PATH` and its login shell
+`PATH`. A `sudo` that the box user plants in `/app/.venv/bin` is then never
+found first. How the agent finds `sudo` is not verified on a real box; check
+it on a real box before you pin the sandbox image. After the switch, the
+entry gets the image's box `PATH` from `APP_ENTRY_PATH`: the guard folder
+first, then `/app/.venv/bin`. In a local
 Docker box the supervisor's stdout is a pipe and its root has no
 capabilities, so it cannot switch users and the entry runs as the
 supervisor's user. A root with capabilities switches users also with a pipe.

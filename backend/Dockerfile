@@ -115,6 +115,7 @@ RUN if [ "$PKG_MANAGER" = "pip" ]; then \
     else \
         umask 0002; \
         pip install --no-cache-dir uv \
+        && chmod 0755 /usr/local/bin/uv /usr/local/bin/uvx \
         && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-install-project; \
     fi
 
@@ -144,6 +145,41 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
         && /opt/shinka/venv/bin/python -m pip install --no-cache-dir --no-deps \
             -r /opt/shinka/requirements.txt \
         && /opt/shinka/venv/bin/python -c "import shinka.core.async_runner"; \
+    fi
+
+# Vercel runs a box's commands as the image's USER and runs `sudo: true`
+# commands (the [run] supervisor, the Codex requirements write) through the
+# box's own `sudo` binary, so a custom image must ship one. The NOPASSWD rule
+# matches Vercel's managed images. Root stays out of reach of Codex and the
+# [run] entry (SKY-389, SKY-398): the parent starts every other command under
+# `setpriv --no-new-privs`, and the kernel then ignores sudo's setuid bit, so
+# the build fails without setpriv. The box user can write /app/.venv/bin, so
+# root must never find a program there: secure_path sets root's own PATH here
+# and not in the base image's sudoers. Root's PATH holds only root-owned
+# folders, and a check before USER 1001 fails the build if the box user can
+# change a program in them. Vercel's in-box agent starts `sudo` itself,
+# without no_new_privs, and may find it by a PATH lookup. A planted
+# /app/.venv/bin/sudo would then get root, so a root-only guard folder with a
+# link to the real sudo comes first on the image PATH. Sandbox image builds
+# only (--build-arg INCLUDE_SANDBOX_SUDO=1): API/worker images keep no root
+# path.
+ARG INCLUDE_SANDBOX_SUDO=false
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends sudo \
+        && rm -rf /var/lib/apt/lists/* \
+        && printf '%s\n' \
+            'Defaults always_set_home' \
+            'Defaults !env_reset' \
+            'Defaults !fqdn' \
+            'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+            'appuser ALL=(ALL) NOPASSWD:ALL' \
+            > /etc/sudoers.d/sandbox \
+        && chmod 0440 /etc/sudoers.d/sandbox \
+        && visudo -cf /etc/sudoers.d/sandbox \
+        && test -x /usr/bin/setpriv \
+        && install -d -o root -g root -m 0755 /usr/local/libexec/skynet-path-guard \
+        && ln -s /usr/bin/sudo /usr/local/libexec/skynet-path-guard/sudo; \
     fi
 
 # AutoSaddler v2 needs Python 3.12+ and pins its own closure (pydantic, starlette,
@@ -177,7 +213,7 @@ RUN umask 0002; \
             "https://github.com/denoland/deno/releases/download/v$DENO_VERSION/deno-$DENO_TARGET.zip" -o /tmp/deno.zip \
         && unzip -o /tmp/deno.zip -d /usr/local/bin \
         && rm /tmp/deno.zip \
-        && chmod +x /usr/local/bin/deno \
+        && chmod 0755 /usr/local/bin/deno \
         && if [ "$PKG_MANAGER" = "uv" ]; then PY=/app/.venv/bin/python; else PY=python; fi \
         && RUNNER_JS=$("$PY" -c 'import os, dspy.primitives.python_interpreter as m; print(os.path.join(os.path.dirname(m.__file__), "runner.js"))') \
         && deno cache "$RUNNER_JS"
@@ -194,7 +230,7 @@ RUN case "$(dpkg --print-architecture)" in \
             "https://github.com/github/github-mcp-server/releases/download/v$GITHUB_MCP_VERSION/github-mcp-server_Linux_$GH_MCP_ARCH.tar.gz" \
             -o /tmp/github-mcp-server.tar.gz \
         && echo "$GH_MCP_SHA256  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
-        && tar -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
+        && tar --no-same-owner -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
         && rm /tmp/github-mcp-server.tar.gz \
         && chmod 0755 /usr/local/bin/github-mcp-server
 
@@ -249,12 +285,13 @@ RUN install -d -o 1001 -g 0 -m 0770 /opt/swe-agent-root /opt/swe-agent-root/tool
 ARG GIT_SHA=unknown
 
 # Login shells must retain the same interpreter used to install the pinned dependencies.
-RUN printf '%s\n' 'export PATH="/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
+# The sudo guard folder comes first, as on the image PATH below.
+RUN printf '%s\n' 'export PATH="/usr/local/libexec/skynet-path-guard:/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
 
 # Codex turns unified exec on unless a root-owned /etc/codex/requirements.toml
 # turns it off (SKY-389). The image ships that file, so a Vercel box needs no
-# root step and the image carries no sudo: Codex runs as appuser with its own
-# sandbox off, and any root path would let the model rewrite the file.
+# root write. Codex runs as appuser with its own sandbox off, under
+# no_new_privs, so it cannot use the sandbox image's sudo to rewrite the file.
 # Keep the content equal to CODEX_REQUIREMENTS in
 # core/service_gateway/optimization/blackbox/sandbox_runtime.py.
 RUN install -d -o root -g root -m 0755 /etc/codex \
@@ -262,9 +299,33 @@ RUN install -d -o root -g root -m 0755 /etc/codex \
     && chown root:root /etc/codex/requirements.toml \
     && chmod 0644 /etc/codex/requirements.toml
 
+# Root commands trust every program on root's PATH, so a sandbox sudo build
+# fails if the box user (UID 1001, GID 0) can change one. /bin and /sbin link
+# to /usr/bin and /usr/sbin here. A link is checked by its target, and a
+# broken link fails the build. The check tests only the final target of a
+# link, not the folders on the way. A build with PKG_MANAGER=pip and the sudo
+# argument fails here by design; the sandbox image uses the default uv
+# installer.
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        set -e; \
+        open=$(find -L /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin \( ! -user root -o -perm /022 \) -print); \
+        if [ -n "$open" ]; then \
+            echo "box user can change these root PATH entries:" >&2; \
+            echo "$open" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
 USER 1001
 
-ENV PATH="/app/.venv/bin:$PATH"
+# The box user can write /app/.venv/bin. A PATH lookup of `sudo` by a process
+# without no_new_privs must never find a box user program, so the root-only
+# guard folder comes first. Images without INCLUDE_SANDBOX_SUDO have no such
+# folder, and the box user cannot create it.
+ENV PATH="/usr/local/libexec/skynet-path-guard:/app/.venv/bin:$PATH"
+# sudo gives a root command its secure_path, without /app/.venv/bin. The root
+# [run] supervisor gives this PATH back to the entry it starts as the box user.
+ENV APP_ENTRY_PATH="$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV WORKER_CONCURRENCY=4
 ENV WORKER_POLL_INTERVAL=2.0
