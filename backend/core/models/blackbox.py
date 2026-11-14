@@ -13,11 +13,22 @@ above each class, not in class bodies.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
@@ -154,16 +165,62 @@ class BlackboxScorer(BaseModel):
         return self
 
 
+STOP_AT_SCORE_RETIRED = (
+    "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in optimize.toml."
+)
+# A stored run's payload passes this context to ``model_validate``: it may
+# still hold the retired ``budget.stop_at_score``. The value leaves the public
+# model and stays private, so an older run keeps its stop score when its
+# snapshot has no ``[outcome] target`` (SKY-691).
+STORED_PAYLOAD_KEY = "stored_payload"
+STORED_PAYLOAD_CONTEXT = {STORED_PAYLOAD_KEY: True}
+
+
 # Hard stops for a run. ``max_scorer_runs`` caps optimizer-driven scorer
 # calls (the final run that re-scores the starting point and the winner is
 # outside the cap);
 # ``max_iterations`` caps proposer rounds for the engines that iterate
-# (Meta-Harness, AutoSaddler, ShinkaEvolve generations); ``stop_at_score`` ends the run early once a version
-# reaches it.
+# (Meta-Harness, AutoSaddler, ShinkaEvolve generations). The stop score is
+# ``[outcome] target`` in the repository's optimize.toml (SKY-691).
 class BlackboxBudget(BaseModel):
     max_scorer_runs: int = Field(default=200, ge=1, le=100_000)
     max_iterations: int | None = Field(default=None, ge=1, le=1_000)
-    stop_at_score: float | None = None
+
+    # A private attribute is not a field: it stays out of ``model_dump()``,
+    # the JSON schema and ``openapi.json``.
+    _legacy_stop_at_score: float | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _refuse_stop_at_score(
+        cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxBudget], info: ValidationInfo
+    ) -> BlackboxBudget:
+        """Refuse the retired stop score in a new request, and keep it privately for a stored run.
+
+        The model ignores unknown keys, so without this check a client that
+        still sends the key would lose its stop score with no error. A stored
+        run keeps a finite number as ``_legacy_stop_at_score``; a null or a
+        value of another type gives ``None``.
+
+        Args:
+            data: The raw budget before field validation.
+            handler: The standard validation of the budget fields.
+            info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            The validated budget.
+
+        Raises:
+            ValueError: When a new request holds ``stop_at_score``.
+        """
+        stored = bool((info.context or {}).get(STORED_PAYLOAD_KEY))
+        legacy = data.get("stop_at_score") if isinstance(data, dict) else None
+        if isinstance(data, dict) and "stop_at_score" in data and not stored:
+            raise ValueError(STOP_AT_SCORE_RETIRED)
+        model = handler(data)
+        if stored and isinstance(legacy, int | float) and not isinstance(legacy, bool) and math.isfinite(legacy):
+            model._legacy_stop_at_score = float(legacy)
+        return model
 
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"

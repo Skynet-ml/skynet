@@ -81,7 +81,6 @@ The wizard lists only the optimizers that fit your task and inputs. **Auto** is 
 Set how long the run may keep trying, and how much it may spend:
 
 - **Max scorer runs** (Guided: **Max tries**): the most candidates that Skynet scores. Some optimizers need a minimum number.
-- **Stop at score** (Guided: **Stop early once the score reaches**): the run stops when a version reaches this score.
 - **Max iterations** (Guided: **Max rounds**): shown for optimizers that support it.
 - **Spending limit**: the most the run may spend. The default is $5, or the amount **Needed to start** if that is more. You can also select **No limit**.
 

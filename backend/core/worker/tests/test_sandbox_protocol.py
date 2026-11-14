@@ -31,6 +31,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     13: {"blackbox": "b5878009b64947bc"},
     # target.repo.draft_files and draft_base: the setup draft's repository files and their base commit.
     14: {"blackbox": "6e0761a3f301b387"},
+    # budget.stop_at_score left the request; the stop score is the snapshot's outcome target (SKY-691).
+    15: {"blackbox": "05f352755db27ac1"},
 }
 
 

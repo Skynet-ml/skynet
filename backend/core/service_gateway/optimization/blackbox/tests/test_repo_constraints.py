@@ -252,6 +252,27 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
     assert environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])["rules"] == []
 
 
+@pytest.mark.parametrize(
+    ("raw", "outcome"),
+    [
+        (None, {"target": None, "require": {}}),
+        (b"version = 1\n", {"target": None, "require": {}}),
+        (
+            b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n",
+            {"target": 0.9, "require": {"latency": 0.5}},
+        ),
+    ],
+)
+def test_the_record_holds_the_outcome(raw: bytes | None, outcome: dict[str, object]) -> None:
+    """Every new run records the file's target and minimums, with null and empty when the file sets none (SKY-691)."""
+    constraints = None if raw is None else parse_constraints(raw)
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    record = environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])
+
+    assert record["outcome"] == outcome
+
+
 def test_parsing_alone_keeps_the_paths_and_leaves_the_text_empty() -> None:
     """parse_constraints reads only the toml; read_constraints fills the text from the same snapshot (E48)."""
     constraints = parse_constraints(_CFCA + _RULES.removeprefix(b"version = 1\n"))

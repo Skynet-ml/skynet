@@ -22,6 +22,7 @@ from .. import run_log
 from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX
 from ..models import BlackboxRunRequest
+from ..models.blackbox import STORED_PAYLOAD_CONTEXT
 from ..models.results import TerminalOutcome
 from ..service_gateway.language_models import activate_job_lm_budget, activate_job_usage_registry, job_usage_snapshot
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
@@ -226,7 +227,7 @@ def run_service_in_subprocess(
 
         if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
             raise ValueError(f"Unsupported optimization type: {optimization_type}")
-        blackbox_payload = BlackboxRunRequest.model_validate(payload_dict)
+        blackbox_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
         result = run_blackbox_optimization(
             blackbox_payload,
             artifact_id=stable_job_id,

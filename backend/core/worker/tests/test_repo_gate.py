@@ -147,29 +147,30 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     assert key in [failure.key for failure in failures]
 
 
-@pytest.mark.parametrize(
-    ("raw", "key"),
-    [
-        (b"version = 1\n[outcome]\ntarget = 0.9\n", "[outcome] target"),
-        (b"version = 1\n[outcome.require]\nlatency = 0.5\n", "[outcome.require]"),
-    ],
-)
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_an_outcome_setting_fails_because_no_run_reads_it(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
-    """No run stops at the target or checks a minimum yet, so a file that sets one stops here (SKY-690)."""
+def test_an_outcome_minimum_fails_because_no_run_checks_it(tmp_path: Path, place: str) -> None:
+    """No run checks a minimum yet, so a file that sets [outcome.require] stops here (SKY-690, SKY-692)."""
     code = I18nKey.REPO_GATE_UNENFORCED_LOCAL if place == "local" else I18nKey.REPO_GATE_UNENFORCED_CLOUD
+    raw = b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n"
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
 
-    assert [(failure.key, failure.code) for failure in failures] == [(key, code)]
+    assert [(failure.key, failure.code) for failure in failures] == [("[outcome.require]", code)]
 
 
 @pytest.mark.parametrize(
-    "raw", [b"version = 1\n", b"version = 1\n[outcome]\n", b"version = 1\n[tool.notes]\nowner = 'me'\n"]
+    "raw",
+    [
+        b"version = 1\n",
+        b"version = 1\n[outcome]\n",
+        b"version = 1\n[tool.notes]\nowner = 'me'\n",
+        b"version = 1\n[outcome]\ntarget = 0.9\n",
+    ],
 )
-def test_a_file_without_outcome_settings_passes(tmp_path: Path, raw: bytes) -> None:
-    """An empty [outcome] or a [tool.<name>] table asks the run for nothing, so the gate lets it through."""
-    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="cloud") == []
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_file_without_outcome_minimums_passes(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The run stops at [outcome] target (SKY-691); an empty [outcome] or a [tool.<name>] table asks for nothing."""
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

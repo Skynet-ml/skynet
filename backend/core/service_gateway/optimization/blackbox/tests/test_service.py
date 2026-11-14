@@ -263,7 +263,6 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert reflection_stats.avg_response_time_ms is not None
     assert response.optimization_metadata["budget"] == {
         "max_scorer_runs": 12,
-        "stop_at_score": None,
         "max_iterations": None,
     }
     assert response.optimization_metadata["target"]["kind"] == "text"
@@ -333,6 +332,66 @@ def test_auto_run_hands_off_between_engines(
     handoffs = [m for e, m in sink if e == PROGRESS_LANE_HANDOFF]
     assert len(handoffs) == 1
     assert handoffs[0]["to_engine"] == "gepa"
+
+
+@pytest.mark.parametrize(("outcome", "stop_at"), [({"target": 0.9, "require": {}}, 0.9), (None, None)])
+def test_native_proposers_stop_at_the_outcome_target(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    outcome: dict[str, Any] | None,
+    stop_at: float | None,
+) -> None:
+    """The snapshot's ``[outcome] target`` is every engine's stop score; with no target there is none (SKY-691)."""
+    run_blackbox_optimization(
+        _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
+        artifact_id="job-target",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot=None if outcome is None else {"outcome": outcome},
+    )
+
+    assert fake_native_proposers
+    assert all(ctx.stop_at_score == stop_at for _, ctx in fake_native_proposers)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stop_at"),
+    [(None, 0.9), ({"target": None, "require": {}}, 0.9), ({"target": 0.8, "require": {}}, 0.8)],
+)
+def test_a_stored_run_keeps_its_retired_stop_score_unless_the_file_sets_a_target(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    outcome: dict[str, Any] | None,
+    stop_at: float,
+) -> None:
+    """A run stored with ``budget.stop_at_score`` keeps it as the stop score; a file target wins (SKY-691)."""
+    stored = _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100).model_dump()
+    stored["budget"]["stop_at_score"] = 0.9
+    payload = BlackboxRunRequest.model_validate(stored, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    run_blackbox_optimization(
+        payload,
+        artifact_id="job-legacy-stop",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot=None if outcome is None else {"outcome": outcome},
+    )
+
+    assert fake_native_proposers
+    assert all(ctx.stop_at_score == stop_at for _, ctx in fake_native_proposers)
+
+
+def test_the_search_stops_when_the_score_reaches_the_outcome_target(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
+    """A target that an early proposal reaches ends the search before the scorer-run cap does (SKY-691)."""
+    full = run_blackbox_optimization(_payload(), artifact_id="job-full", gepa_log_dir_path=str(tmp_path / "full"))
+    stopped = run_blackbox_optimization(
+        _payload(),
+        artifact_id="job-stop",
+        gepa_log_dir_path=str(tmp_path / "stop"),
+        repo_snapshot={"outcome": {"target": 0.5, "require": {}}},
+    )
+
+    assert stopped.total_scorer_runs < full.total_scorer_runs
 
 
 def test_byok_reflection_budget_does_not_limit_model_calls(

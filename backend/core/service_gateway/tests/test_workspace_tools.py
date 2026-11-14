@@ -892,6 +892,13 @@ def test_guide_example_is_a_valid_optimize_toml() -> None:
     assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
 
 
+def test_guide_says_the_target_works_and_the_minimums_still_stop_the_run() -> None:
+    """The guide tells the agent the run stops at the target, and to leave out the minimums (SKY-691)."""
+    assert "A run stops its search when the score reaches ``target``." in METRIC_GUIDE
+    assert "cannot check ``[outcome.require]`` yet" in METRIC_GUIDE
+    assert "cannot use ``[outcome]``" not in METRIC_GUIDE
+
+
 def test_guide_quotes_the_parser_errors() -> None:
     """The guide names the errors the parser gives most, so the agent avoids them (SKY-184)."""
     prompt = _guide()

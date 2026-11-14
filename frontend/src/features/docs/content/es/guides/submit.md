@@ -81,7 +81,6 @@ El asistente solo muestra los optimizadores que encajan con tu tarea y tus entra
 Fija cuánto tiempo puede seguir intentándolo la ejecución, y cuánto puede gastar:
 
 - **Máximo de ejecuciones del evaluador** (Guiado: **Intentos máx.**): el número máximo de candidatos que puntúa Skynet. Algunos optimizadores necesitan un número mínimo.
-- **Detener al llegar a la puntuación** (Guiado: **Detener antes cuando la puntuación llegue a**): la ejecución se detiene cuando una versión alcanza esta puntuación.
 - **Iteraciones máx.** (Guiado: **Rondas máx.**): aparece para los optimizadores que lo admiten.
 - **Límite de gasto**: lo máximo que puede gastar la ejecución. El valor predeterminado es 5 $, o el importe **Necesario para empezar** si es mayor. También puedes seleccionar **Sin límite**.
 
