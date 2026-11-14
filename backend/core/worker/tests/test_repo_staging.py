@@ -3485,3 +3485,164 @@ def test_the_pull_request_counts_a_long_split_and_points_to_get_run() -> None:
 
     assert "seed 7: 70 search, 15 validation, 15 held_out cases (`get_run` lists the positions)" in body
     assert "[0, 1" not in body
+
+
+_FORGED_RECORD = {"contract_sha256": "f" * 64, "target_reached": True, "contract_met": True}
+
+
+@pytest.mark.parametrize(
+    ("files", "split", "details"),
+    [
+        ({"src/app.py": "x = 1\n"}, False, {}),
+        (_CASES_TREE, False, {"outcome": {"target": 0.9, "target_reached": True}}),
+        (_CASES_TREE, True, {CASE_SPLIT_KEY: {"rule": "pairs", "search": 5, "validation": [], "held_out": []}}),
+        (_CASES_TREE, True, {"outcome": {"target": 10**400, "target_reached": False}}),
+    ],
+    ids=["no-optimize-toml", "older-guest-no-split", "refused-split", "huge-target"],
+)
+def test_a_record_the_guest_wrote_is_removed_when_the_worker_makes_none(
+    monkeypatch: pytest.MonkeyPatch, files: dict[str, str], split: bool, details: dict[str, Any]
+) -> None:
+    """Only the worker writes the record, so a guest copy never reaches ``get_run`` or the pull request."""
+    staged_payload, staged = _stage_with(files, monkeypatch, _record_payload())
+    try:
+        guest = _guest_details(staged_payload["cases"], 7) if split else {}
+        result = _result(0.5, 0.8, details={**guest, **details, "record": dict(_FORGED_RECORD)})
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_a_record_the_guest_wrote_is_removed_when_staging_kept_no_record_facts(tmp_path: Path) -> None:
+    """A constrained tree from before the record keeps no facts, and the guest's record still goes."""
+    staged = dataclasses.replace(_staged(tmp_path), constrained=True)
+    result = _result(0.5, 0.8, details={"record": dict(_FORGED_RECORD)})
+
+    repo_staging.add_run_record(result, _payload("c" * 40), staged, image=_PINNED_IMAGE)
+
+    assert "record" not in result["details"]
+
+
+def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid run gets Skynet's own record, not the guest's fields."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        details = _guest_details(staged_payload["cases"], 7, record={"forged": True, **_FORGED_RECORD})
+        result = _result(0.5, 0.8, details=details)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert "forged" not in record
+    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+
+
+_HUGE = 10**400
+
+
+def _minimum(**entry: Any) -> dict[str, Any]:
+    """Build a failed-minimum verdict around one entry.
+
+    Args:
+        **entry: Keys that replace the valid entry's keys.
+
+    Returns:
+        The ``details["outcome"]`` value.
+    """
+    valid = {"name": "recall", "minimum": 0.8, "value": 0.5, "reason": "'recall' scored 0.5, below its minimum 0.8."}
+    return {"minimums_passed": False, "failed_minimums": [{**valid, **entry}]}
+
+
+@pytest.mark.parametrize(
+    ("split", "outcome"),
+    [
+        ({}, {"target": _HUGE, "target_reached": False}),
+        ({}, {"target": -_HUGE, "target_reached": True}),
+        ({}, {"target": True, "target_reached": False}),
+        ({}, {"target": "0.9", "target_reached": False}),
+        ({}, {"target": [[0.9]], "target_reached": False}),
+        ({}, {"target": None, "target_reached": False}),
+        ({}, {"target": float("inf"), "target_reached": False}),
+        ({}, {"target": 0.9, "target_reached": None}),
+        ({}, _minimum(minimum=_HUGE)),
+        ({}, _minimum(minimum=True)),
+        ({}, _minimum(minimum="0.8")),
+        ({}, _minimum(value=_HUGE)),
+        ({}, _minimum(value=False)),
+        ({}, _minimum(value=[0.5])),
+        ({}, _minimum(name=None)),
+        ({}, _minimum(reason=_HUGE)),
+        ({}, _minimum(reason=[["nested"]])),
+        ({}, _minimum(reason=None)),
+        ({}, {"minimums_passed": False, "failed_minimums": [None]}),
+        ({}, {"minimums_passed": False, "failed_minimums": [{}]}),
+        ({"search": [1.5]}, {}),
+        ({"search": [True]}, {}),
+        ({"validation": ["0"]}, {}),
+        ({"held_out": [[0]]}, {}),
+        ({"held_out": [None]}, {}),
+        ({"search": [_HUGE]}, {}),
+        ({"search": None}, {}),
+        ({"rule": _HUGE}, {}),
+        ({"rule": None}, {}),
+        ({"seed": _HUGE}, {}),
+        ({"seed": True}, {}),
+        ({"seed": "7"}, {}),
+    ],
+)
+def test_hostile_guest_values_never_break_the_pull_request_text(
+    monkeypatch: pytest.MonkeyPatch, split: dict[str, Any], outcome: dict[str, Any]
+) -> None:
+    """Any guest split or verdict either gives a record the block can write, or no record; nothing raises."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        details = _guest_details(staged_payload["cases"], 7, outcome=outcome)
+        details[CASE_SPLIT_KEY].update(split)
+        result = _result(0.5, 0.8, details=details)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert ("Run record:" in body) == ("record" in result["details"])
+
+
+def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A target past the float range would raise in the ``g`` format, so the guard refuses it."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        outcome = {"target": _HUGE, "target_reached": False}
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "record" not in result["details"]
+    assert "Run record" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"target": 1, "target_reached": False},
+        _minimum(value=None),
+        {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []},
+        {},
+    ],
+    ids=["integer-target", "missing-score", "met", "no-outcome"],
+)
+def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any]) -> None:
+    """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert "Run record:" in repo_staging._description(result, _EDIT, "https://x/run")

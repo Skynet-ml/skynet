@@ -8,11 +8,13 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
@@ -1270,11 +1272,32 @@ def _record_facts(
     }
 
 
+def _finite_number(value: Any) -> bool:
+    """Check that a guest value is a number the record block can format.
+
+    A ``bool`` is not a number here. An ``int`` past the float range fails,
+    as its ``g`` format raises ``OverflowError``.
+
+    Args:
+        value: Any value from the guest's ``details``.
+
+    Returns:
+        True for a finite ``float``, or an ``int`` inside the float range.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return abs(value) <= sys.float_info.max if isinstance(value, int) else math.isfinite(value)
+
+
 def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
     """Check the split and verdict shapes the record and its pull request block read.
 
     The guest writes both into ``details``, so a value of another shape must
-    skip the record instead of failing a finished run.
+    skip the record instead of failing a finished run. The rule follows the
+    shapes Skynet's own guest writes: the split has a ``str`` rule, an ``int``
+    seed and ``int`` positions; a verdict with ``target_reached`` has a finite
+    ``target``; each failed minimum has a ``str`` name and reason, a finite
+    minimum, and a finite or ``None`` value. A number never means a ``bool``.
 
     Args:
         split: ``details["case_split"]``, or ``None`` for a run with no cases.
@@ -1285,17 +1308,31 @@ def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
     """
     if split is not None and not (
         isinstance(split, dict)
-        and all(isinstance(split.get(name), list) for name in ("search", "validation", "held_out"))
+        and isinstance(split.get("rule"), str)
+        and isinstance(split.get("seed"), int)
+        and not isinstance(split.get("seed"), bool)
+        and all(
+            isinstance(split.get(name), list)
+            and all(isinstance(position, int) and not isinstance(position, bool) for position in split[name])
+            for name in ("search", "validation", "held_out")
+        )
     ):
         return False
     if not isinstance(outcome, dict):
         return False
     if any(key in outcome and not isinstance(outcome[key], bool) for key in ("target_reached", "minimums_passed")):
         return False
-    if outcome.get("target_reached") is False and not isinstance(outcome.get("target"), int | float):
+    if "target_reached" in outcome and not _finite_number(outcome.get("target")):
         return False
     failed = outcome.get("failed_minimums", [])
-    return isinstance(failed, list) and all(isinstance(entry, dict) for entry in failed)
+    return isinstance(failed, list) and all(
+        isinstance(entry, dict)
+        and isinstance(entry.get("name"), str)
+        and isinstance(entry.get("reason"), str)
+        and _finite_number(entry.get("minimum"))
+        and (entry.get("value") is None or _finite_number(entry.get("value")))
+        for entry in failed
+    )
 
 
 def add_run_record(
@@ -1310,8 +1347,9 @@ def add_run_record(
     is true when no rule failed, also when the file sets no target and no
     minimum. A run with no ``optimize.toml``, a result with no ``details``, a
     run with cases whose guest wrote no split positions (an older image), or a
-    guest split or verdict of another shape gets no record. The record holds
-    no secret, no case content and no metric code.
+    guest split or verdict of another shape gets no record. A ``record`` the
+    guest wrote is removed on every path. The record holds no secret, no case
+    content and no metric code.
 
     Args:
         result: The run's final result; changed in place.
@@ -1320,7 +1358,11 @@ def add_run_record(
         image: The sandbox image pinned for the run, or ``None``.
     """
     details = result.get("details")
-    if not staged.constrained or not staged.record_facts or not isinstance(details, dict):
+    if not isinstance(details, dict):
+        return
+    # Only the worker writes the record; a guest copy would pass for Skynet's own.
+    details.pop("record", None)
+    if not staged.constrained or not staged.record_facts:
         return
     split = details.get(CASE_SPLIT_KEY) if payload.get("cases") else None
     if payload.get("cases") and not isinstance(split, dict):
@@ -1361,7 +1403,7 @@ def _record_block(result: dict[str, Any]) -> str:
         if record.get("target_reached") is False:
             target = ((result.get("details") or {}).get("outcome") or {}).get("target")
             score = result.get("best_score")
-            reached = f"{score:.12g}" if isinstance(score, int | float) else "no score"
+            reached = f"{score:.12g}" if _finite_number(score) else "no score"
             failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
         failed.extend(str(entry.get("reason")) for entry in record.get("failed_minimums") or [])
         verdict = "This run did not meet the contract. " + " ".join(failed)
