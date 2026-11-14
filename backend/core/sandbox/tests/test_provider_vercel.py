@@ -254,7 +254,7 @@ class FakeSession:
 
         Args:
             command: The program.
-            args: The launcher flags, ``bash``, the shell flags, the script, ``$0``, then the pairs.
+            args: The launcher flags, ``/bin/bash``, the shell flags, the script, ``$0``, then the pairs.
             kwargs: The other SDK arguments.
 
         Returns:
@@ -733,7 +733,7 @@ async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeC
     await env.start()
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
-    assert [call["command"], *call["args"][:5]] == [*vercel.NO_NEW_PRIVS, "bash", "--noprofile", "--norc", "-c"]
+    assert [call["command"], *call["args"][:5]] == [*vercel.NO_NEW_PRIVS, "/bin/bash", "--noprofile", "--norc", "-c"]
     assert call["args"][-1].startswith("bash --noprofile --norc -c ")
     await env.stop()
 
@@ -748,7 +748,7 @@ async def test_a_command_without_sudo_starts_under_no_new_privs(
     await env.exec("echo hello", timeout_sec=timeout_sec)
     call = client.boxes[env.name].create_calls[0]
     assert call["command"] == "/usr/bin/setpriv"
-    assert call["args"][:2] == ["--no-new-privs", "bash"]
+    assert call["args"][:2] == ["--no-new-privs", "/bin/bash"]
     assert "export PATH=" not in call["args"][-1]
     assert call["sudo"] is False
     await env.stop()
@@ -795,7 +795,7 @@ async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: 
     await asyncio.wait_for(env.exec("guest", on_output=lambda stream, text: None), 5)
     assert session.scripts == ["true"]
     assert session.tail_reads >= 1
-    assert all(launcher == [*vercel.NO_NEW_PRIVS, "bash"] for launcher in session.launchers)
+    assert all(launcher == [*vercel.NO_NEW_PRIVS, "/bin/bash"] for launcher in session.launchers)
     await env.stop()
 
 

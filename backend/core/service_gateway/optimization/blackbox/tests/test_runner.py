@@ -1635,9 +1635,14 @@ def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp
         "import importlib.util,sys;"
         "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
         "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;m._has_capabilities=lambda:True;"
-        "m._entry_user({});print(open('/proc/self/status').read())"
+        "before=open('/proc/self/status').read();m._entry_user({});"
+        "print(before);print('--- after ---');print(open('/proc/self/status').read())"
     )
     done = subprocess.run(
         [sys.executable, "-c", script, runner.__file__], cwd=tmp_path, capture_output=True, text=True, check=True
     )
-    assert "NoNewPrivs:\t1" in done.stdout
+    before, after = done.stdout.split("--- after ---")
+    if "NoNewPrivs:\t1" in before:
+        pytest.skip("the test process already holds no_new_privs, so the call cannot show a change")
+    assert "NoNewPrivs:\t0" in before
+    assert "NoNewPrivs:\t1" in after

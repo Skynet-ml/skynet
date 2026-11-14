@@ -288,7 +288,8 @@ def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
     if sudo:
         script, *rest = args
         return "/bin/bash", [*SHELL_FLAGS, f"export PATH={ROOT_PATH}; {script}", *rest]
-    return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "bash", *SHELL_FLAGS, *args]
+    # setpriv looks up a bare name on the box PATH, which the box user can write.
+    return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "/bin/bash", *SHELL_FLAGS, *args]
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:

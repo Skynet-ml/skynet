@@ -148,7 +148,7 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
     fi
 
 # Vercel runs a box's commands as the image's USER and runs `sudo: true`
-# commands (the [run] supervisor, the Codex requirements check) through the
+# commands (the [run] supervisor, the Codex requirements write) through the
 # box's own `sudo` binary, so a custom image must ship one. The NOPASSWD rule
 # matches Vercel's managed images. Root stays out of reach of Codex and the
 # [run] entry (SKY-389, SKY-398): the parent starts every other command under
