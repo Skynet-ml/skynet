@@ -7,8 +7,9 @@ import gc
 import json
 import logging
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,7 +18,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from ...billing.cli_dispatch import CHAT_TITLE_ROLE
 from ...models import ModelConfig
@@ -90,15 +90,23 @@ class _TitleLM:
 
 
 @pytest.fixture
-def engine() -> Engine:
-    """Build a SQLite engine with the app tables.
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    """Build a file-backed SQLite engine with the app tables.
 
-    Returns:
+    The title thread and the turn's persist thread write at the same time.
+    A shared in-memory connection lets one thread's rollback drop the other's
+    insert, so each thread gets its own connection, as in production.
+
+    Args:
+        tmp_path: Pytest per-test temporary directory.
+
+    Yields:
         The engine.
     """
-    db = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    db = create_engine(f"sqlite:///{tmp_path / 'chat.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(db)
-    return db
+    yield db
+    db.dispose()
 
 
 @pytest.fixture
