@@ -1210,8 +1210,9 @@ def test_dockerfile_closes_root_path_programs_to_the_box_user() -> None:
     assert "set -e;" in step
     assert 'if [ -n "$open" ]; then' in step
     assert "exit 1;" in step
-    folders = re.search(r"open=\$\(find ((?:/\S+ )+)! -type l \\\( ! -user root -o -perm /022 \\\) -print\)", step)
+    folders = re.search(r"open=\$\(find -L ((?:/\S+ )+)\\\( ! -user root -o -perm /022 \\\) -print\)", step)
     assert folders
+    assert "-type l" not in step
     checked = set(folders.group(1).split())
     assert checked == {"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin"}
     # /bin and /sbin link to /usr/bin and /usr/sbin in the base image.
