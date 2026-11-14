@@ -800,7 +800,11 @@ export function ReviewPane({
                     id={tabId(tab)}
                     panelId={panelId}
                     selected={active === tab}
-                    onSelect={() => setActive(tab)}
+                    onSelect={() => {
+                      // A file that failed to read tries again, as an open from the tree does.
+                      if (!isNewTab(tab)) onOpenFile(tab);
+                      setActive(tab);
+                    }}
                     onPin={() => preview === tab && setPreview(null)}
                     onClose={() => closeTab(tab)}
                     icon={

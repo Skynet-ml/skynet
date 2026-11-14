@@ -474,3 +474,46 @@ void test("a failed read shows a notice, and opening the file again reads it aga
   assert.equal(editorView(ide.container).state.doc.toString(), "y = 2\n");
   await ide.unmount();
 });
+
+void test("a click on the tab of an unread file reads it again", async () => {
+  let attempt = 0;
+  let finish: (value: { text: string }) => void = noop;
+  const repo = {
+    folder: "repo",
+    tree: Promise.resolve({ children: new Map(), files: new Set(["src/x.py"]) }),
+    read: (path: string) => {
+      if (path !== "src/x.py") return Promise.resolve({ issue: "missing" as const });
+      attempt += 1;
+      if (attempt === 1) return Promise.reject(new Error("network"));
+      return new Promise<{ text: string }>((resolve) => (finish = resolve));
+    },
+  };
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={repo}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  await flush();
+  const row = () => treeRow(ide.container, "x.py")!;
+  await click(treeRow(ide.container, "src")!);
+  await click(row());
+  await flush();
+  assert.equal(attempt, 1);
+  assert.ok(ide.container.textContent?.includes("Skynet could not read this file"));
+
+  const tab = [...ide.container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === "x.py")!;
+  await click(tab);
+  await flush();
+  assert.equal(attempt, 2);
+  assert.ok(ide.container.textContent?.includes("Loading the file"), "the retry shows as loading");
+  assert.equal(ide.container.textContent?.includes("Skynet could not read this file"), false);
+
+  await React.act(async () => finish({ text: "y = 2\n" }));
+  await flush();
+  assert.equal(editorView(ide.container).state.doc.toString(), "y = 2\n");
+  await ide.unmount();
+});

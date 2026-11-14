@@ -45,7 +45,10 @@ function recentPicks(): string[] {
 
 function recordPick(label: string) {
   const next = [label, ...recentPicks().filter((l) => l !== label)].slice(0, RECENT_MAX);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  // Blocked or full storage must not stop the pick itself.
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {}
 }
 
 const fragmentsOf = new WeakMap<Completion, Fragment[]>();
