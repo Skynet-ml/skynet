@@ -156,8 +156,8 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
 # the build fails without setpriv. The box user can write /app/.venv/bin, so
 # root must never find a program there: secure_path sets root's own PATH here
 # and not in the base image's sudoers. Root's PATH holds only root-owned
-# folders, and the install steps keep their program files closed to the box
-# user. Vercel's in-box agent starts `sudo` itself, without no_new_privs, and
+# folders, and a check before USER 1001 fails the build if the box user can
+# change a program in them. Vercel's in-box agent starts `sudo` itself, without no_new_privs, and
 # may find it by a PATH lookup. A planted /app/.venv/bin/sudo would then get
 # root, so a root-only guard folder with a link to the real sudo comes first
 # on the image PATH. Sandbox image builds only
@@ -297,6 +297,21 @@ RUN install -d -o root -g root -m 0755 /etc/codex \
     && printf '[features]\nunified_exec = false\n' > /etc/codex/requirements.toml \
     && chown root:root /etc/codex/requirements.toml \
     && chmod 0644 /etc/codex/requirements.toml
+
+# Root commands trust every program on root's PATH, so a sandbox sudo build
+# fails if the box user (UID 1001, GID 0) can change one. /bin and /sbin link
+# to /usr/bin and /usr/sbin here. A build with PKG_MANAGER=pip and the sudo
+# argument fails here by design; the sandbox image uses the default uv
+# installer.
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        set -e; \
+        open=$(find /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin ! -type l \( ! -user root -o -perm /022 \) -print); \
+        if [ -n "$open" ]; then \
+            echo "box user can change these root PATH entries:" >&2; \
+            echo "$open" >&2; \
+            exit 1; \
+        fi; \
+    fi
 
 USER 1001
 

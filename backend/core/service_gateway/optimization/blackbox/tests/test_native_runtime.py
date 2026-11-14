@@ -1193,7 +1193,7 @@ def test_dockerfile_ships_sudo_only_in_the_sandbox_image_and_requires_setpriv() 
 
 
 def test_dockerfile_closes_root_path_programs_to_the_box_user() -> None:
-    """Keep every program file the installs put in ``/usr/local/bin`` root-owned and mode 0755."""
+    """Close the installed programs in ``/usr/local/bin`` and fail a sudo build if root's ``PATH`` stays open."""
     dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
     assert (
         "pip install --no-cache-dir uv \\\n        && chmod 0755 /usr/local/bin/uv /usr/local/bin/uvx \\" in dockerfile
@@ -1202,6 +1202,23 @@ def test_dockerfile_closes_root_path_programs_to_the_box_user() -> None:
     assert "chmod +x /usr/local/bin/deno" not in dockerfile
     assert "tar --no-same-owner -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server" in dockerfile
     assert "chmod 0755 /usr/local/bin/github-mcp-server" in dockerfile
+    user = dockerfile.index("\nUSER 1001\n")
+    start = dockerfile.rindex("\nRUN ", 0, dockerfile.index("open=$(find "))
+    step = dockerfile[start:user]
+    assert step.startswith('\nRUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then')
+    assert step.rstrip().endswith("fi")
+    assert "set -e;" in step
+    assert 'if [ -n "$open" ]; then' in step
+    assert "exit 1;" in step
+    folders = re.search(r"open=\$\(find ((?:/\S+ )+)! -type l \\\( ! -user root -o -perm /022 \\\) -print\)", step)
+    assert folders
+    checked = set(folders.group(1).split())
+    assert checked == {"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin"}
+    # /bin and /sbin link to /usr/bin and /usr/sbin in the base image.
+    merged = {"/bin": "/usr/bin", "/sbin": "/usr/sbin"}
+    assert {merged.get(folder, folder) for folder in vercel.ROOT_PATH.split(":")} <= checked
+    for install in ("apt-get install", "pip install", "uv sync", "unzip ", "tar ", "/etc/codex/requirements.toml"):
+        assert dockerfile.rindex(install) < start
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:
