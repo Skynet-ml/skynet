@@ -4353,6 +4353,7 @@
   "agent.tools.tour.ask_user": "از شما سؤالی با چند گزینه برای انتخاب می‌پرسد.",
   "agent.tools.tour.repositories": "مخزن‌های GitHub، GitLab و Bitbucket شما را فهرست می‌کند یا مخزن تازه‌ای برای اجرا می‌سازد.",
   "submit.setup_check.invalid": "پیش از ادامه، optimize.toml را اصلاح کنید. {p1}",
+  "submit.setup_check.missing": "این اجرا به قرارداد optimize.toml نیاز دارد. از عامل بخواهید آن را بنویسد، یا آن را به مخزن اضافه کنید.",
   "submit.setup_check.unavailable": "بررسی optimize.toml ممکن نشد. دوباره تلاش کنید.",
   "agent.tool.check_setup.title": "بررسی تنظیمات",
   "agent.tool.check_setup.running": "در حال بررسی optimize.toml",

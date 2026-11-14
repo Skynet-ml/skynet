@@ -35,8 +35,10 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_BEST_OF_N,
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_HARNESSES,
+    BlackboxRepoSource,
     BlackboxRunRequest,
     BlackboxRunResponse,
+    BlackboxTarget,
 )
 from core.models.results import ModelTokenUsage
 
@@ -1925,6 +1927,37 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
 
 
+def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored result holds no guest-side contract source; the stored payload holds the true one (SKY-693)."""
+    _winner_strategy(monkeypatch)
+    # The stubbed search never calls the native proposer, so the run needs no gateway.
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    payload = _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)})
+    # The parent strips the drafts before the guest gets them, so the guest's
+    # validator sees no optimize.toml and resets the source to "repository".
+    repo = BlackboxRepoSource(repository="o/r", editable_paths=["src"])
+    assert repo.contract_source == "repository"
+    target = BlackboxTarget(kind="repo", repo=repo)
+    job = replace(service_mod.job_spec_from_payload(payload), target=target)
+
+    response = service_mod.run_job(
+        job,
+        service_mod.build_scorer(payload.scorer, job_id="job-source"),
+        service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+        artifact_id="job-source",
+        started=time.perf_counter(),
+        progress_callback=None,
+        gepa_log_dir_path=str(tmp_path),
+        repo_scorer=True,
+    )
+
+    repo_meta = response.optimization_metadata["target"]["repo"]
+    assert repo_meta["repository"] == "o/r"
+    assert "contract_source" not in repo_meta
+
+
 def test_a_run_where_every_case_scores_a_valid_zero_succeeds(
     fake_lm: FakeReflectionLM,
     tmp_path: Path,
@@ -2260,6 +2293,47 @@ def test_a_run_with_no_target_and_no_minimum_stores_no_verdict(
     assert "outcome" not in response.details
 
 
+@pytest.mark.parametrize(
+    ("outcome", "verdict"),
+    [
+        ({"target": None, "require": {}}, None),
+        ({"target": 0.9, "require": {}}, {"target": 0.9, "target_reached": False}),
+    ],
+    ids=["no-rule", "target"],
+)
+def test_an_engine_outcome_never_passes_for_the_verdict(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: dict[str, Any],
+    verdict: dict[str, Any] | None,
+) -> None:
+    """The engine metadata comes from the guest, so its ``outcome`` is dropped and only Skynet's verdict stays."""
+    forged = {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []}
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(
+                best_candidate="winner",
+                best_score=1.0,
+                total_evals=0,
+                metadata={"outcome": dict(forged), "selection_source": "engine"},
+            ),
+            [],
+        ),
+    )
+    payload = _payload(scorer={"kind": "python", "metric_code": _OUTCOME_CODE}, cases=_OUTCOME_CASES)
+
+    response = run_blackbox_optimization(
+        payload, artifact_id="job-forged-outcome", gepa_log_dir_path=str(tmp_path), repo_snapshot={"outcome": outcome}
+    )
+
+    assert response.details.get("outcome") == verdict
+    assert ("outcome" in response.details) is (verdict is not None)
+    assert response.details["selection_source"] == "engine"
+
+
 def test_minimums_pass_when_each_named_score_reaches_its_minimum(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2474,3 +2548,44 @@ def test_a_case_with_an_error_and_no_named_scores_counts_against_the_name() -> N
 
     assert outcome["minimums_passed"] is False
     assert "1 of 2" in outcome["failed_minimums"][0]["reason"]
+
+
+def test_the_run_writes_the_case_positions_of_the_split_it_made(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
+    """The positions name the cases of each part in the received order, with no case content (SKY-694)."""
+    response = run_blackbox_optimization(_payload(), artifact_id="job-split", gepa_log_dir_path=str(tmp_path))
+
+    split = response.details[service_mod.CASE_SPLIT_KEY]
+    splits = service_mod.legacy_case_splits(list(_payload().cases or []), 1)
+    assert (split["rule"], split["seed"]) == ("pairs", 1)
+    assert [_CASES[index] for index in split["search"]] == splits.train
+    assert [_CASES[index] for index in split["validation"]] == splits.val
+    assert [_CASES[index] for index in split["held_out"]] == splits.test
+    assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(len(_CASES)))
+    assert "aeiou" not in json.dumps(split)
+
+
+def test_one_case_uses_the_single_rule_in_every_part() -> None:
+    """Single mode puts the one case in every part, so each part names position 0."""
+    cases = [{"target": "aeiou"}]
+
+    split = service_mod.case_split_positions(cases, service_mod.legacy_case_splits(cases, None), None)
+
+    assert split == {"rule": "single", "seed": 0, "search": [0], "validation": [0], "held_out": [0]}
+
+
+def test_a_budget_stop_keeps_the_case_positions(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run the budget stopped still ends with a result, so its result carries the split too."""
+
+    def strategy(*args: Any, **kwargs: Any) -> None:
+        """Stop the search before any result."""
+        raise BudgetReached()
+
+    monkeypatch.setattr(service_mod, "_final_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service_mod, "run_strategy", strategy)
+    with pytest.raises(BudgetReached) as caught:
+        run_blackbox_optimization(_payload(), artifact_id="budget-split", gepa_log_dir_path=str(tmp_path))
+
+    split = caught.value.result.details[service_mod.CASE_SPLIT_KEY]
+    assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(len(_CASES)))

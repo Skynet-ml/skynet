@@ -65,12 +65,22 @@ knows what to fix and what to do next:
 | Repository | `repo_draft_set_repository` (owner/name, branch or commit, editable paths, setup command) | Yes |
 | Data | `repo_draft_set_data` (inline cases or a staged dataset) | No |
 | Scorer | `repo_draft_set_scorer` (Python metric code) | Yes |
+| Contract | `repo_draft_set_contract` (the `optimize.toml` text) | When the repository has no `optimize.toml` |
 | Models | `repo_draft_set_models` (reflection model, token source, more models) | Yes |
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |
 | Budget | `repo_draft_set_budget` (scorer runs, iterations; the run stops at `[outcome] target` in optimize.toml) | No |
 | Review | `repo_draft_review` | Yes |
 | Setup check | `repo_draft_preflight` (paid; it runs the setup check of the run once) | No |
 | Submit | `repo_draft_submit` (optional `hardening_job_id`) | Yes |
+
+Every new run needs an `optimize.toml` contract, in the draft or in the
+repository. `repo_draft_contract_guide` gives the format guide and an example
+file. The setup screen's agent uses the same guide. `repo_draft_set_contract`
+saves the text into the draft, and the run writes it over the repository's
+own file. A parser error is an issue with the parser's message. When the
+repository has an `optimize.toml`, the step is optional. When the draft and
+the repository both have none, `repo_draft_review` reports an issue and the
+run does not start.
 
 `repo_draft_review` gives the minimum spending limit, a suggested limit and
 the amount the account can spend now (`spendable_cents`). The agent must show

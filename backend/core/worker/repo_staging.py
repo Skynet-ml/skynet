@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import logging
+import math
 import os
 import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
@@ -65,6 +68,7 @@ from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
+    CONSTRAINTS_REQUIRED,
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
@@ -83,6 +87,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
     drop_paths,
+    inside,
     linked_hidden_paths,
     patch_paths,
     patch_violations,
@@ -98,6 +103,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
 
@@ -182,6 +188,9 @@ class StagedRepository:
     # Whether staging refused an optimize.toml with no version. Every later read
     # of this tree uses the same rule, so one pass never reads the file two ways.
     require_version: bool = True
+    # The run record's hashes and metric home, taken from the staged tree the
+    # run reads, so the run end never reads the repository again (SKY-694).
+    record_facts: Mapping[str, Any] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -319,6 +328,7 @@ def stage_repository(
     username: str,
     binding_id: str,
     engine: Any,
+    require_constraints: bool = False,
     started: bool = False,
 ) -> tuple[dict[str, Any], StagedRepository]:
     """Fetch the pinned tree and decrypt the run's secrets in the parent.
@@ -332,6 +342,8 @@ def stage_repository(
         username: Owner of the run and of the GitHub connection.
         binding_id: Execution budget the vaulted secrets are bound to.
         engine: SQLAlchemy engine for the vaults.
+        require_constraints: Refuse a new run whose tree and drafts have no
+            ``optimize.toml``. A run that recorded its environment before keeps going.
         started: Whether the caller's job already started; a hardening job
             records no environment.
 
@@ -342,8 +354,8 @@ def stage_repository(
         ``target.repo.environment``, plus the staged tree and secrets for the parent.
 
     Raises:
-        ConstraintsError: When the repository's ``optimize.toml`` is invalid,
-            asks for more than the run approved, or a resumed run's rules
+        ConstraintsError: When the repository's ``optimize.toml`` is invalid or
+            missing for a new run that requires it, asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
             uploads cases and the repository defines its own in ``[data] cases``,
             or when a hidden path is, holds or lies inside a link, or when a
@@ -400,8 +412,12 @@ def stage_repository(
             apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
+        constraints = read_constraints(snapshot.archive, require_version=require_version)
+        # A started run (resume, recovery) already recorded the rules it runs under, so only a new run stops here.
+        if require_constraints and constraints is None and not isinstance(repo.get(ENVIRONMENT_KEY), dict):
+            raise ConstraintsError(CONSTRAINTS_REQUIRED)
         environment = effective_environment(
-            read_constraints(snapshot.archive, require_version=require_version),
+            constraints,
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
         )
@@ -451,6 +467,19 @@ def stage_repository(
         if leaks:
             raise RepoGateError(leaks)
         warnings = tuple(metric_import_warnings(snapshot.archive, metric.files))
+        record_facts = (
+            _record_facts(
+                snapshot.archive,
+                contract_sha256=environment.constraints.sha256,
+                metric_files=metric.files,
+                metric_code=str((result.get("scorer") or {}).get("metric_code") or ""),
+                drafts=drafts,
+                cases_file=cases_file,
+                cases=result.get("cases"),
+            )
+            if environment.constraints is not None
+            else {}
+        )
         scorer_archive = (
             relay_mcp_archive(
                 snapshot.archive,
@@ -526,6 +555,7 @@ def stage_repository(
         secret_allowed_hosts=secret_allowed_hosts,
         drafts=drafts,
         require_version=require_version,
+        record_facts=record_facts,
     )
 
 
@@ -1141,6 +1171,287 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     return best if optimized > baseline else None
 
 
+# The record hashes stream each member in parts of this size, so a large
+# metric file never sits in the worker's memory (SKY-694).
+_HASH_CHUNK = 1 << 20
+
+
+def _framed(path: str, size: int, digest: str) -> bytes:
+    """Frame one file for the metric hash as ``<path>\\0<byte length>\\0<SHA-256 hex>``.
+
+    The part holds the file's hex digest, not its bytes, so a person can
+    rebuild it from ``sha256sum`` output and the worker never holds a whole file.
+
+    Args:
+        path: Repository-relative path, encoded as UTF-8.
+        size: The file's byte length.
+        digest: The SHA-256 of the file's bytes, as 64 lowercase hex characters.
+
+    Returns:
+        The framed part.
+    """
+    return path.encode("utf-8") + b"\0" + str(size).encode("ascii") + b"\0" + digest.encode("ascii")
+
+
+def _stream_digest(handle: Any) -> tuple[int, str]:
+    """Hash one archive member in fixed-size parts.
+
+    Args:
+        handle: The member's file object from ``TarFile.extractfile``.
+
+    Returns:
+        The byte length and the SHA-256 hex digest of the member's bytes.
+    """
+    digest, size = hashlib.sha256(), 0
+    while chunk := handle.read(_HASH_CHUNK):
+        digest.update(chunk)
+        size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def _record_facts(
+    archive: Path,
+    *,
+    contract_sha256: str,
+    metric_files: tuple[str, ...],
+    metric_code: str,
+    drafts: Mapping[str, str],
+    cases_file: str | None,
+    cases: list[Any] | None,
+) -> dict[str, Any]:
+    """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
+
+    ``metric_sha256`` is one SHA-256 over framed parts: first the entry code
+    (path ``metric.py``, the UTF-8 bytes of ``metric_code``), then each
+    regular file under the ``[metric] files`` paths in sorted path order; see
+    :func:`_framed`. The entry code stays first, so a repository file named
+    ``metric.py`` cannot take its place. ``metric_home`` describes the
+    ``[metric] files`` only: it is ``repository`` when the file sets
+    ``[metric] files`` and every one comes from the pinned commit, and
+    ``judge`` when there are none or a draft file replaces or adds one.
+    ``cases_sha256`` hashes the ``[data] cases`` file bytes (``cases_source``
+    ``file``), or else the compact JSON of the request's cases with sorted
+    keys (``cases_source`` ``request``).
+
+    The archive is read once, as a stream, and each member is hashed in
+    parts, so memory stays constant for any file size. When a path appears
+    twice, the later member wins, as extraction writes it last.
+
+    Args:
+        archive: The staged tree, after the draft files apply.
+        contract_sha256: SHA-256 of the ``optimize.toml`` bytes the run read.
+        metric_files: The ``[metric] files`` paths, files or folders.
+        metric_code: The scorer's entry code.
+        drafts: The run's draft files by path.
+        cases_file: The ``[data] cases`` path, or ``None``.
+        cases: The request's cases, used when there is no cases file.
+
+    Returns:
+        ``contract_sha256``, ``metric_sha256``, ``metric_home``,
+        ``cases_sha256`` and ``cases_source``; the last two are ``None`` with no cases.
+    """
+    roots = tuple(metric_files) + ((cases_file,) if cases_file is not None else ())
+    digests: dict[str, tuple[int, str]] = {}
+    # Stream mode refuses a backward seek, which in a gzip tar would decompress the archive again.
+    with tarfile.open(archive, "r|gz") as packed:
+        for member in packed:
+            path = posixpath.normpath(member.name).lstrip("/")
+            if member.isfile() and inside(path, roots):
+                digests[path] = _stream_digest(packed.extractfile(member))
+    code = metric_code.encode("utf-8")
+    metric = hashlib.sha256(_framed("metric.py", len(code), hashlib.sha256(code).hexdigest()))
+    for path in sorted(path for path in digests if inside(path, metric_files)):
+        metric.update(_framed(path, *digests[path]))
+    from_commit = bool(metric_files) and not any(inside(path, metric_files) for path in drafts)
+    if cases_file is not None:
+        cases_sha256 = digests[cases_file][1] if cases_file in digests else hashlib.sha256(b"").hexdigest()
+        cases_source = "file"
+    elif cases:
+        canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cases_sha256, cases_source = hashlib.sha256(canonical.encode("utf-8")).hexdigest(), "request"
+    else:
+        cases_sha256, cases_source = None, None
+    return {
+        "contract_sha256": contract_sha256,
+        "metric_sha256": metric.hexdigest(),
+        "metric_home": "repository" if from_commit else "judge",
+        "cases_sha256": cases_sha256,
+        "cases_source": cases_source,
+    }
+
+
+def _finite_number(value: Any) -> bool:
+    """Check that a guest value is a number the record block can format.
+
+    A ``bool`` is not a number here. An ``int`` past the float range fails,
+    as its ``g`` format raises ``OverflowError``.
+
+    Args:
+        value: Any value from the guest's ``details``.
+
+    Returns:
+        True for a finite ``float``, or an ``int`` inside the float range.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return abs(value) <= sys.float_info.max if isinstance(value, int) else math.isfinite(value)
+
+
+def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
+    """Check the split and verdict shapes the record and its pull request block read.
+
+    The guest writes both into ``details``, so a value of another shape must
+    skip the record instead of failing a finished run. The rule follows the
+    shapes Skynet's own guest writes: the split has a ``str`` rule, an ``int``
+    seed and ``int`` positions; a verdict with ``target_reached`` has a finite
+    ``target``; each failed minimum has a ``str`` name and reason, a finite
+    minimum, and a finite or ``None`` value. A number never means a ``bool``.
+
+    Args:
+        split: ``details["case_split"]``, or ``None`` for a run with no cases.
+        outcome: ``details["outcome"]``, or an empty dict when it is absent.
+
+    Returns:
+        True when :func:`add_run_record` and :func:`_record_block` can read both.
+    """
+    if split is not None and not (
+        isinstance(split, dict)
+        and isinstance(split.get("rule"), str)
+        and isinstance(split.get("seed"), int)
+        and not isinstance(split.get("seed"), bool)
+        and all(
+            isinstance(split.get(name), list)
+            and all(isinstance(position, int) and not isinstance(position, bool) for position in split[name])
+            for name in ("search", "validation", "held_out")
+        )
+    ):
+        return False
+    if not isinstance(outcome, dict):
+        return False
+    if any(key in outcome and not isinstance(outcome[key], bool) for key in ("target_reached", "minimums_passed")):
+        return False
+    if "target_reached" in outcome and not _finite_number(outcome.get("target")):
+        return False
+    failed = outcome.get("failed_minimums", [])
+    return isinstance(failed, list) and all(
+        isinstance(entry, dict)
+        and isinstance(entry.get("name"), str)
+        and isinstance(entry.get("reason"), str)
+        and _finite_number(entry.get("minimum"))
+        and (entry.get("value") is None or _finite_number(entry.get("value")))
+        for entry in failed
+    )
+
+
+def add_run_record(
+    result: dict[str, Any], payload: dict[str, Any], staged: StagedRepository, *, image: str | None
+) -> None:
+    """Write the run record into ``result["details"]["record"]`` at the run end (SKY-694).
+
+    The record lets another person reproduce the score: the hashes and the
+    metric home from staging (:func:`_record_facts`), the seed, the split the
+    guest made, the pinned sandbox image, and the ``[outcome]`` verdict keys
+    with the same absent-key rule as ``details["outcome"]``. ``contract_met``
+    is true when no rule failed, also when the file sets no target and no
+    minimum. A run with no ``optimize.toml``, a result with no ``details``, a
+    run with cases whose guest wrote no split positions (an older image), or a
+    guest split or verdict of another shape gets no record. A verdict whose
+    keys do not match the file's own rules in the staged snapshot also gets
+    no record: ``target_reached`` exactly when the file sets a target, and
+    ``minimums_passed`` exactly when it sets minimums, with
+    ``failed_minimums`` only then. A snapshot with no ``outcome`` (an older
+    payload) sets no rule. A ``record`` the guest wrote is removed on every
+    path. The record holds no secret, no case content and no metric code.
+
+    Args:
+        result: The run's final result; changed in place.
+        payload: The staged run payload, with the cases the guest received.
+        staged: The staged tree, which keeps the record facts.
+        image: The sandbox image pinned for the run, or ``None``.
+    """
+    details = result.get("details")
+    if not isinstance(details, dict):
+        return
+    # Only the worker writes the record; a guest copy would pass for Skynet's own.
+    details.pop("record", None)
+    if not staged.constrained or not staged.record_facts:
+        return
+    split = details.get(CASE_SPLIT_KEY) if payload.get("cases") else None
+    if payload.get("cases") and not isinstance(split, dict):
+        return
+    outcome = details.get("outcome") or {}
+    if not _guest_record_parts_ok(split, outcome):
+        return
+    # The verdict crosses the guest's result file, so its keys must match the file's own rules.
+    rules = (payload.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}
+    has_target, has_minimums = rules.get("target") is not None, bool(rules.get("require"))
+    if (
+        ("target_reached" in outcome) != has_target
+        or ("minimums_passed" in outcome) != has_minimums
+        or ("failed_minimums" in outcome and not has_minimums)
+    ):
+        return
+    verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
+    details["record"] = {
+        **staged.record_facts,
+        "seed": payload.get("seed"),
+        "split": split,
+        "image": image,
+        **verdict,
+        "contract_met": verdict.get("target_reached", True) is True and verdict.get("minimums_passed", True) is True,
+    }
+
+
+def _record_block(result: dict[str, Any]) -> str:
+    """Write the pull request's run record block, or nothing for a run with no record.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        Markdown that starts with one plain line on the contract, then the
+        record fields; an empty string when the result has no record.
+    """
+    record = (result.get("details") or {}).get("record")
+    if not isinstance(record, dict):
+        return ""
+    if "target_reached" not in record and "minimums_passed" not in record:
+        verdict = f"The {CONSTRAINTS_FILE} file sets no target and no minimum."
+    elif record.get("contract_met"):
+        verdict = "This run met the contract."
+    else:
+        failed = []
+        if record.get("target_reached") is False:
+            target = ((result.get("details") or {}).get("outcome") or {}).get("target")
+            score = result.get("best_score")
+            reached = f"{score:.12g}" if _finite_number(score) else "no score"
+            failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
+        failed.extend(str(entry.get("reason")) for entry in record.get("failed_minimums") or [])
+        verdict = "This run did not meet the contract. " + " ".join(failed)
+    split = record.get("split")
+    if split is None:
+        split_line = "none, the run has no cases"
+    else:
+        parts = {name: split.get(name) or [] for name in ("search", "validation", "held_out")}
+        if sum(len(positions) for positions in parts.values()) > 30:
+            counts = ", ".join(f"{len(positions)} {name}" for name, positions in parts.items())
+            split_line = (
+                f"`{split.get('rule')}`, seed {split.get('seed')}: {counts} cases (`get_run` lists the positions)"
+            )
+        else:
+            listed = "; ".join(f"{name} {positions}" for name, positions in parts.items())
+            split_line = f"`{split.get('rule')}`, seed {split.get('seed')}: {listed}"
+    fields = [
+        f"- Contract SHA-256: `{record.get('contract_sha256')}`",
+        f"- Metric SHA-256: `{record.get('metric_sha256')}` (metric home: {record.get('metric_home')})",
+        f"- Cases SHA-256: `{record.get('cases_sha256')}` (source: {record.get('cases_source')})",
+        f"- Seed: {record.get('seed')}",
+        f"- Split: {split_line}",
+        f"- Sandbox image: `{record.get('image')}`",
+    ]
+    return f"{verdict}\n\nRun record:\n" + "\n".join(fields) + "\n\n"
+
+
 def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
     """Write the pull request description.
 
@@ -1163,6 +1474,7 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
         f"{result.get('engine_used', 'an agent')}.\n\n"
         f"Score went from {baseline:.4g} to {optimized:.4g}.\n\n"
         f"Changed files:\n{listed}{more}\n\n"
+        f"{_record_block(result)}"
         f"Review the run: {run_url}\n"
     )
 

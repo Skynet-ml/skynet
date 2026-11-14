@@ -103,6 +103,20 @@ def test_repo_run_without_a_hardening_job_stores_none(client_and_store: tuple[An
     assert store._jobs[resp.json()["optimization_id"]]["payload"]["hardening_job_id"] is None
 
 
+def test_a_rest_run_cannot_store_an_mcp_contract(client_and_store: tuple[Any, _FakeJobStore]) -> None:
+    """Only the MCP draft flow stores ``mcp``; a REST draft contract is the setup screen's (SKY-693)."""
+    client, store = client_and_store
+    body = repo_payload()
+    body["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    body["target"]["repo"]["draft_base"] = "0" * 40
+    body["target"]["repo"]["contract_source"] = "mcp"
+
+    resp = client.post("/blackbox/run", json=body)
+
+    assert resp.status_code == 201, resp.json()
+    assert store._jobs[resp.json()["optimization_id"]]["payload"]["target"]["repo"]["contract_source"] == "setup_screen"
+
+
 def test_repo_run_binds_its_setup_chat_outside_the_payload(
     client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:

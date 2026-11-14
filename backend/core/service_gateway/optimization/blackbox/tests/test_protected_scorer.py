@@ -261,7 +261,7 @@ def test_job_finalization_preserves_outcome_while_usage_is_pending(
         monkeypatch: Pytest patch fixture.
         primary_error: Optional original optimizer stop to preserve.
     """
-    outcome = object()
+    outcome = SimpleNamespace(details={})
 
     def close() -> None:
         """Report a retained provider hold after sandbox cleanup.
@@ -292,6 +292,7 @@ def test_job_finalization_preserves_outcome_while_usage_is_pending(
     monkeypatch.setattr(service_module, "_run_job", run)
     if primary_error is None:
         assert service_module.run_blackbox_optimization(_payload(), artifact_id="completed") is outcome
+        assert service_module.CASE_SPLIT_KEY in outcome.details
     else:
         with pytest.raises(type(primary_error)) as caught:
             service_module.run_blackbox_optimization(_payload(), artifact_id="stopped")

@@ -469,6 +469,36 @@ def test_get_run_is_owner_scoped(harness: Any, monkeypatch: pytest.MonkeyPatch) 
     assert body["execution_budget"] == {"limit_cents": 500}
 
 
+def test_get_run_returns_the_run_record_as_stored(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record of a contract run reaches the caller with every field unchanged (SKY-694)."""
+    client, _store, _calls = harness
+    record = {
+        "contract_sha256": "1" * 64,
+        "metric_sha256": "2" * 64,
+        "metric_home": "repository",
+        "cases_sha256": None,
+        "cases_source": None,
+        "seed": 7,
+        "split": None,
+        "image": "registry.example/sandbox@sha256:" + "a" * 64,
+        "target_reached": True,
+        "contract_met": True,
+    }
+    stored = {"best_score": 0.9, "details": {"outcome": {"target": 0.8, "target_reached": True}, "record": record}}
+    job = {"optimization_id": "opt-1", "payload": {"username": USER}, "result": stored}
+    monkeypatch.setattr(remote_mcp, "load_job_for_user", lambda store, oid, user: job)
+    monkeypatch.setattr(
+        remote_mcp,
+        "build_summary",
+        lambda job: SimpleNamespace(status="success", model_dump=lambda mode: {"status": "success"}),
+    )
+    monkeypatch.setattr(remote_mcp, "execution_budget_view", lambda store, job: None)
+
+    body = _payload(_call(client, "get_run", {"optimization_id": "opt-1"}, token=READ_TOKEN))
+
+    assert body["result"] == stored
+
+
 def test_list_runs_lists_only_the_callers_runs(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Filter the list by the token's account and clamp the page size."""
     client, store, calls = harness

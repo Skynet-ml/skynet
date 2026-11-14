@@ -23,7 +23,7 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
-from .sandbox_protocol import READABLE_PROTOCOLS, SANDBOX_PROTOCOL
+from .sandbox_protocol import OUTCOME_VERDICT_PROTOCOL, READABLE_PROTOCOLS, SANDBOX_PROTOCOL
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
         RuntimeError: When the image is older and the snapshot's outcome sets
             a target or a minimum.
     """
-    if image_protocol >= SANDBOX_PROTOCOL or not isinstance(snapshot, dict):
+    if image_protocol >= OUTCOME_VERDICT_PROTOCOL or not isinstance(snapshot, dict):
         return
     outcome = snapshot.get("outcome") or {}
     if outcome.get("target") is not None or outcome.get("require"):

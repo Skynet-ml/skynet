@@ -4353,6 +4353,7 @@
   "agent.tools.tour.ask_user": "Vous pose une question avec quelques options au choix.",
   "agent.tools.tour.repositories": "Liste vos dépôts GitHub, GitLab et Bitbucket, ou en crée un nouveau pour l'exécution.",
   "submit.setup_check.invalid": "Corrigez optimize.toml avant de continuer. {p1}",
+  "submit.setup_check.missing": "L’exécution a besoin d’un contrat optimize.toml. Demandez à l’agent de l’écrire, ou ajoutez-le au dépôt.",
   "submit.setup_check.unavailable": "Impossible de vérifier optimize.toml. Réessayez.",
   "agent.tool.check_setup.title": "Vérifier la configuration",
   "agent.tool.check_setup.running": "Vérification de optimize.toml",

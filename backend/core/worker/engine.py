@@ -121,6 +121,7 @@ from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
     ENVIRONMENT_KEY,
     StagedRepository,
+    add_run_record,
     bind_repo_scorer,
     infer_repo_setup,
     is_repo_payload,
@@ -862,6 +863,7 @@ class BackgroundWorker:
                             username=execution_payload.username,
                             binding_id=job_data["execution_budget_id"],
                             engine=byok_engine,
+                            require_constraints=True,
                         )
                         self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
                         # Before the setup model and the scorer box, so a refused run costs nothing.
@@ -1070,6 +1072,8 @@ class BackgroundWorker:
                 final_message = terminal.message if terminal is not None else "Optimization completed successfully"
 
                 if staged_repository is not None and isinstance(result_dict, dict):
+                    # Before the pull request, so its text shows the record (SKY-694).
+                    add_run_record(result_dict, payload_dict, staged_repository, image=sandbox_image)
                     with self._renewing_lease(worker_id):
                         publish_improvement(
                             result_dict,
