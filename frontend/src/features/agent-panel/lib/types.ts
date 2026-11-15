@@ -104,14 +104,33 @@ export interface ToolEndPayload {
   result?: unknown;
 }
 
+/** How long an approval lasts: this call only, or this tool for the rest of the chat. */
+export type ApprovalScope = "once" | "conversation";
+
+/** What the user picked besides yes or no: the scope, and a note with a decline. */
+export interface ApprovalChoice {
+  scope?: ApprovalScope;
+  /** Tells the agent what to do instead; the backend keeps at most 500 characters. */
+  note?: string;
+}
+
 export interface PendingApprovalPayload {
   id: string;
   tool: string;
   arguments: Record<string, unknown>;
+  /** True when "Allow for this chat" may cover this tool. */
+  chat_rule?: boolean;
+  /** The auto-review stopped this call; the user can approve it anyway. */
+  auto_review?: { denied: true; reason: string };
 }
 
 export interface ApprovalResolvedPayload {
   id: string;
   tool: string;
   approved: boolean;
+  scope?: ApprovalScope;
+  /** The note the user sent with a decline. */
+  note?: string;
+  /** The auto-review denied this call before the user decided. */
+  auto_review_denied?: boolean;
 }

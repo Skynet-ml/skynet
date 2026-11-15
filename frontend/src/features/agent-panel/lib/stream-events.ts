@@ -1,5 +1,10 @@
 import type { GeneralistAgentHandlers } from "./stream";
 
+/** True when `value` is the auto-review's `{denied: true, reason}` block. */
+function isDenial(value: unknown): value is { denied: true; reason?: unknown } {
+  return typeof value === "object" && value !== null && (value as { denied?: unknown }).denied === true;
+}
+
 /**
  * Route one generalist-agent SSE event to its handler.
  *
@@ -59,6 +64,10 @@ export function dispatchGeneralistEvent(
         id: String(data.id ?? ""),
         tool: String(data.tool ?? ""),
         arguments: (data.arguments as Record<string, unknown>) ?? {},
+        ...(data.chat_rule === true ? { chat_rule: true } : {}),
+        ...(isDenial(data.auto_review)
+          ? { auto_review: { denied: true as const, reason: String(data.auto_review.reason ?? "") } }
+          : {}),
       });
       break;
     case "approval_resolved":
@@ -66,6 +75,9 @@ export function dispatchGeneralistEvent(
         id: String(data.id ?? ""),
         tool: String(data.tool ?? ""),
         approved: Boolean(data.approved),
+        ...(data.scope === "conversation" ? { scope: "conversation" as const } : {}),
+        ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
+        ...(data.auto_review_denied === true ? { auto_review_denied: true } : {}),
       });
       break;
     case "message_patch":

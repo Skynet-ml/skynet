@@ -2,7 +2,16 @@
 
 export type MessageKey =
   | "account.linked_fallback_name"
+  | "agent.approval.allow_chat"
+  | "agent.approval.approve_anyway"
+  | "agent.approval.auto_review_denied"
+  | "agent.approval.choices"
   | "agent.approval.confirm_failed"
+  | "agent.approval.decline_with_note"
+  | "agent.approval.keep_denied"
+  | "agent.approval.note_label"
+  | "agent.approval.note_placeholder"
+  | "agent.approval.send_note"
   | "agent.choices.hint"
   | "agent.choices.label"
   | "agent.compact.condensing"
@@ -2914,6 +2923,8 @@ export type MessageKey =
   | "shared.agent.copied"
   | "shared.agent.copy"
   | "shared.agent.copy_code"
+  | "shared.agent.denied_actions"
+  | "shared.agent.denied_actions_tooltip"
   | "shared.agent.edit_and_resend"
   | "shared.agent.explored"
   | "shared.agent.explored_files"
@@ -4516,7 +4527,16 @@ export type MessageKey =
 
 export const UI_MESSAGES: Record<MessageKey, string> = {
   "account.linked_fallback_name": "חשבון {term.appName}",
+  "agent.approval.allow_chat": "כן, ולאשר את הפעולה הזו עד סוף הצ'אט",
+  "agent.approval.approve_anyway": "לאשר בכל זאת",
+  "agent.approval.auto_review_denied": "הבדיקה האוטומטית חסמה",
+  "agent.approval.choices": "תשובות",
   "agent.approval.confirm_failed": "אישור הפעולה לא נקלט — נסו שוב",
+  "agent.approval.decline_with_note": "לא, ולכתוב לסוכן מה לעשות במקום",
+  "agent.approval.keep_denied": "להשאיר חסום",
+  "agent.approval.note_label": "מה הסוכן צריך לעשות במקום",
+  "agent.approval.note_placeholder": "לדוגמה: לשנות את השם במקום",
+  "agent.approval.send_note": "שליחה",
   "agent.choices.hint": "בחרו אפשרות, או כתבו תשובה משלכם למטה.",
   "agent.choices.label": "תשובות מוצעות",
   "agent.compact.condensing": "דחיסת ההקשר",
@@ -7428,6 +7448,8 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "shared.agent.copied": "הועתק",
   "shared.agent.copy": "העתק/העתיקי",
   "shared.agent.copy_code": "העתק/העתיקי את הקוד",
+  "shared.agent.denied_actions": "{count, plural, one {פעולה אחת נחסמה} other {# פעולות נחסמו}}",
+  "shared.agent.denied_actions_tooltip": "הבדיקה האוטומטית חסמה את הפעולות האלה, ולכן הסוכן לא הריץ אותן.",
   "shared.agent.edit_and_resend": "ערוך/ערכי ושלח/שלחי מחדש",
   "shared.agent.explored": "נסרקו: {items}",
   "shared.agent.explored_files": "{count, plural, one {קובץ אחד} other {# קבצים}}",
@@ -9031,7 +9053,16 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
 
 const ui_ar: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "حساب {term.appName}",
+  "agent.approval.allow_chat": "نعم، واسمح بهذا الإجراء لبقية هذه المحادثة",
+  "agent.approval.approve_anyway": "وافق على أي حال",
+  "agent.approval.auto_review_denied": "رفضت المراجعة التلقائية",
+  "agent.approval.choices": "الإجابات",
   "agent.approval.confirm_failed": "لم تُسجَّل الموافقة — حاول مرة أخرى",
+  "agent.approval.decline_with_note": "لا، أخبر الوكيل بما يفعله بدلاً من ذلك",
+  "agent.approval.keep_denied": "أبقِ الرفض",
+  "agent.approval.note_label": "ما الذي يجب أن يفعله الوكيل بدلاً من ذلك",
+  "agent.approval.note_placeholder": "مثال: أعد تسميته بدلاً من ذلك",
+  "agent.approval.send_note": "إرسال",
   "agent.choices.hint": "اختر إجابة، أو اكتب إجابتك أدناه.",
   "agent.choices.label": "إجابات مقترحة",
   "agent.compact.condensing": "جارٍ تكثيف السياق",
@@ -11943,6 +11974,8 @@ const ui_ar: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "تم النسخ",
   "shared.agent.copy": "نسخ",
   "shared.agent.copy_code": "نسخ الكود",
+  "shared.agent.denied_actions": "{count, plural, one {إجراء مرفوض واحد} other {# إجراءات مرفوضة}}",
+  "shared.agent.denied_actions_tooltip": "حظرت المراجعة التلقائية هذه الإجراءات، لذلك لم يشغّلها الوكيل.",
   "shared.agent.edit_and_resend": "تعديل وإعادة الإرسال",
   "shared.agent.explored": "تم استكشاف {items}",
   "shared.agent.explored_files": "{count, plural, zero {# ملفات} one {ملف واحد} two {ملفان} few {# ملفات} many {# ملفًا} other {# ملف}}",
@@ -13546,7 +13579,16 @@ const ui_ar: Partial<Record<MessageKey, string>> = {
 
 const ui_de: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName}-Konto",
+  "agent.approval.allow_chat": "Ja, und diese Aktion für den Rest dieses Chats erlauben",
+  "agent.approval.approve_anyway": "Trotzdem genehmigen",
+  "agent.approval.auto_review_denied": "Automatische Prüfung abgelehnt",
+  "agent.approval.choices": "Antworten",
   "agent.approval.confirm_failed": "Die Genehmigung ist nicht durchgegangen — versuchen Sie es erneut.",
+  "agent.approval.decline_with_note": "Nein, dem Agenten sagen, was er stattdessen tun soll",
+  "agent.approval.keep_denied": "Abgelehnt lassen",
+  "agent.approval.note_label": "Was der Agent stattdessen tun soll",
+  "agent.approval.note_placeholder": "Zum Beispiel: stattdessen umbenennen",
+  "agent.approval.send_note": "Senden",
   "agent.choices.hint": "Wähle eine Antwort oder tippe unten deine eigene.",
   "agent.choices.label": "Vorgeschlagene Antworten",
   "agent.compact.condensing": "Kontext wird verdichtet",
@@ -16458,6 +16500,8 @@ const ui_de: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Kopiert",
   "shared.agent.copy": "Kopieren",
   "shared.agent.copy_code": "Code kopieren",
+  "shared.agent.denied_actions": "{count, plural, one {# abgelehnte Aktion} other {# abgelehnte Aktionen}}",
+  "shared.agent.denied_actions_tooltip": "Die automatische Prüfung hat diese Aktionen blockiert, daher hat der Agent sie nicht ausgeführt.",
   "shared.agent.edit_and_resend": "Bearbeiten und erneut senden",
   "shared.agent.explored": "Erkundet: {items}",
   "shared.agent.explored_files": "{count, plural, one {# Datei} other {# Dateien}}",
@@ -18138,7 +18182,16 @@ const ui_de_AT: Partial<Record<MessageKey, string>> = {
 
 const ui_en: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} account",
+  "agent.approval.allow_chat": "Yes, and allow this action for the rest of this chat",
+  "agent.approval.approve_anyway": "Approve anyway",
+  "agent.approval.auto_review_denied": "Auto-review denied",
+  "agent.approval.choices": "Answers",
   "agent.approval.confirm_failed": "The approval didn't go through — try again",
+  "agent.approval.decline_with_note": "No, tell the agent what to do instead",
+  "agent.approval.keep_denied": "Keep denied",
+  "agent.approval.note_label": "What the agent should do instead",
+  "agent.approval.note_placeholder": "For example: rename it instead",
+  "agent.approval.send_note": "Send",
   "agent.choices.hint": "Pick one, or type your own answer below.",
   "agent.choices.label": "Suggested answers",
   "agent.compact.condensing": "Compacting context",
@@ -21050,6 +21103,8 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Copied",
   "shared.agent.copy": "Copy",
   "shared.agent.copy_code": "Copy code",
+  "shared.agent.denied_actions": "{count, plural, one {# denied action} other {# denied actions}}",
+  "shared.agent.denied_actions_tooltip": "The auto-review blocked these actions, so the agent did not run them.",
   "shared.agent.edit_and_resend": "Edit and resend",
   "shared.agent.explored": "Explored {items}",
   "shared.agent.explored_files": "{count, plural, one {# file} other {# files}}",
@@ -22892,7 +22947,16 @@ const ui_en_IN: Partial<Record<MessageKey, string>> = {
 
 const ui_es: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Cuenta de {term.appName}",
+  "agent.approval.allow_chat": "Sí, y permitir esta acción durante el resto de este chat",
+  "agent.approval.approve_anyway": "Aprobar de todos modos",
+  "agent.approval.auto_review_denied": "La revisión automática lo rechazó",
+  "agent.approval.choices": "Respuestas",
   "agent.approval.confirm_failed": "La aprobación no se registró — inténtalo de nuevo",
+  "agent.approval.decline_with_note": "No, decirle al agente qué hacer en su lugar",
+  "agent.approval.keep_denied": "Mantener rechazado",
+  "agent.approval.note_label": "Qué debe hacer el agente en su lugar",
+  "agent.approval.note_placeholder": "Por ejemplo: cámbiale el nombre en su lugar",
+  "agent.approval.send_note": "Enviar",
   "agent.choices.hint": "Elige una o escribe tu propia respuesta abajo.",
   "agent.choices.label": "Respuestas sugeridas",
   "agent.compact.condensing": "Condensando el contexto",
@@ -25804,6 +25868,8 @@ const ui_es: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Copiado",
   "shared.agent.copy": "Copiar",
   "shared.agent.copy_code": "Copiar código",
+  "shared.agent.denied_actions": "{count, plural, one {# acción rechazada} other {# acciones rechazadas}}",
+  "shared.agent.denied_actions_tooltip": "La revisión automática bloqueó estas acciones, así que el agente no las ejecutó.",
   "shared.agent.edit_and_resend": "Editar y reenviar",
   "shared.agent.explored": "Exploró {items}",
   "shared.agent.explored_files": "{count, plural, one {# archivo} other {# archivos}}",
@@ -27488,7 +27554,16 @@ const ui_es_419: Partial<Record<MessageKey, string>> = {
 
 const ui_fa: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "حساب {term.appName}",
+  "agent.approval.allow_chat": "بله، و این اقدام را برای بقیه این گفتگو مجاز کن",
+  "agent.approval.approve_anyway": "در هر صورت تأیید کن",
+  "agent.approval.auto_review_denied": "بازبینی خودکار رد کرد",
+  "agent.approval.choices": "پاسخ‌ها",
   "agent.approval.confirm_failed": "تأیید ثبت نشد — دوباره تلاش کنید",
+  "agent.approval.decline_with_note": "نه، به عامل بگو به جای آن چه کند",
+  "agent.approval.keep_denied": "رد شده بماند",
+  "agent.approval.note_label": "عامل به جای آن چه باید بکند",
+  "agent.approval.note_placeholder": "برای مثال: به جای آن نامش را تغییر بده",
+  "agent.approval.send_note": "ارسال",
   "agent.choices.hint": "یکی را انتخاب کنید یا پاسخ خودتان را در زیر بنویسید.",
   "agent.choices.label": "پاسخ‌های پیشنهادی",
   "agent.compact.condensing": "در حال فشرده‌سازی زمینه",
@@ -30400,6 +30475,8 @@ const ui_fa: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "کپی شد",
   "shared.agent.copy": "کپی",
   "shared.agent.copy_code": "کپی کد",
+  "shared.agent.denied_actions": "{count, plural, one {# اقدام رد شده} other {# اقدام رد شده}}",
+  "shared.agent.denied_actions_tooltip": "بازبینی خودکار این اقدام‌ها را مسدود کرد، پس عامل آن‌ها را اجرا نکرد.",
   "shared.agent.edit_and_resend": "ویرایش و ارسال مجدد",
   "shared.agent.explored": "{items} بررسی شد",
   "shared.agent.explored_files": "{count, plural, one {# فایل} other {# فایل}}",
@@ -32003,7 +32080,16 @@ const ui_fa: Partial<Record<MessageKey, string>> = {
 
 const ui_fr: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Compte {term.appName}",
+  "agent.approval.allow_chat": "Oui, et autoriser cette action pour le reste de ce chat",
+  "agent.approval.approve_anyway": "Approuver quand même",
+  "agent.approval.auto_review_denied": "Refusé par la revue automatique",
+  "agent.approval.choices": "Réponses",
   "agent.approval.confirm_failed": "L'approbation n'a pas abouti — réessayez",
+  "agent.approval.decline_with_note": "Non, dire à l'agent quoi faire à la place",
+  "agent.approval.keep_denied": "Garder refusé",
+  "agent.approval.note_label": "Ce que l'agent doit faire à la place",
+  "agent.approval.note_placeholder": "Par exemple : renomme-le plutôt",
+  "agent.approval.send_note": "Envoyer",
   "agent.choices.hint": "Choisissez une réponse, ou saisissez la vôtre ci-dessous.",
   "agent.choices.label": "Réponses suggérées",
   "agent.compact.condensing": "Condensation du contexte",
@@ -34915,6 +35001,8 @@ const ui_fr: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Copié",
   "shared.agent.copy": "Copier",
   "shared.agent.copy_code": "Copier le code",
+  "shared.agent.denied_actions": "{count, plural, one {# action refusée} other {# actions refusées}}",
+  "shared.agent.denied_actions_tooltip": "La revue automatique a bloqué ces actions, donc l'agent ne les a pas exécutées.",
   "shared.agent.edit_and_resend": "Modifier et renvoyer",
   "shared.agent.explored": "A exploré {items}",
   "shared.agent.explored_files": "{count, plural, one {# fichier} other {# fichiers}}",
@@ -36598,7 +36686,16 @@ const ui_fr_CA: Partial<Record<MessageKey, string>> = {
 
 const ui_hi: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} खाता",
+  "agent.approval.allow_chat": "हाँ, और इस चैट के बाकी समय के लिए यह कार्रवाई अनुमति दें",
+  "agent.approval.approve_anyway": "फिर भी स्वीकृत करें",
+  "agent.approval.auto_review_denied": "स्वचालित समीक्षा ने अस्वीकार किया",
+  "agent.approval.choices": "जवाब",
   "agent.approval.confirm_failed": "अनुमोदन पूरा नहीं हुआ — फिर से कोशिश करें",
+  "agent.approval.decline_with_note": "नहीं, एजेंट को बताएं कि इसके बजाय क्या करना है",
+  "agent.approval.keep_denied": "अस्वीकृत रहने दें",
+  "agent.approval.note_label": "एजेंट को इसके बजाय क्या करना चाहिए",
+  "agent.approval.note_placeholder": "उदाहरण: इसके बजाय इसका नाम बदलें",
+  "agent.approval.send_note": "भेजें",
   "agent.choices.hint": "एक चुनें, या नीचे अपना जवाब लिखें।",
   "agent.choices.label": "सुझाए गए जवाब",
   "agent.compact.condensing": "संदर्भ संक्षिप्त हो रहा है",
@@ -39510,6 +39607,8 @@ const ui_hi: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "कॉपी किया गया",
   "shared.agent.copy": "कॉपी करें",
   "shared.agent.copy_code": "कोड कॉपी करें",
+  "shared.agent.denied_actions": "{count, plural, one {# अस्वीकृत कार्रवाई} other {# अस्वीकृत कार्रवाइयाँ}}",
+  "shared.agent.denied_actions_tooltip": "स्वचालित समीक्षा ने ये कार्रवाइयाँ रोक दीं, इसलिए एजेंट ने इन्हें नहीं चलाया।",
   "shared.agent.edit_and_resend": "संपादित करें और फिर से भेजें",
   "shared.agent.explored": "{items} खोजे गए",
   "shared.agent.explored_files": "{count, plural, one {# फ़ाइल} other {# फ़ाइलें}}",
@@ -41113,7 +41212,16 @@ const ui_hi: Partial<Record<MessageKey, string>> = {
 
 const ui_it: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Account {term.appName}",
+  "agent.approval.allow_chat": "Sì, e consenti questa azione per il resto di questa chat",
+  "agent.approval.approve_anyway": "Approva comunque",
+  "agent.approval.auto_review_denied": "Rifiutato dalla revisione automatica",
+  "agent.approval.choices": "Risposte",
   "agent.approval.confirm_failed": "L'approvazione non è andata a buon fine — riprova",
+  "agent.approval.decline_with_note": "No, di' all'agente cosa fare invece",
+  "agent.approval.keep_denied": "Mantieni rifiutato",
+  "agent.approval.note_label": "Cosa deve fare invece l'agente",
+  "agent.approval.note_placeholder": "Ad esempio: rinominalo invece",
+  "agent.approval.send_note": "Invia",
   "agent.choices.hint": "Scegline una o scrivi sotto la tua risposta.",
   "agent.choices.label": "Risposte suggerite",
   "agent.compact.condensing": "Condensazione del contesto",
@@ -44025,6 +44133,8 @@ const ui_it: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Copiato",
   "shared.agent.copy": "Copia",
   "shared.agent.copy_code": "Copia il codice",
+  "shared.agent.denied_actions": "{count, plural, one {# azione rifiutata} other {# azioni rifiutate}}",
+  "shared.agent.denied_actions_tooltip": "La revisione automatica ha bloccato queste azioni, quindi l'agente non le ha eseguite.",
   "shared.agent.edit_and_resend": "Modifica e invia di nuovo",
   "shared.agent.explored": "Ha esplorato {items}",
   "shared.agent.explored_files": "{count, plural, one {# file} other {# file}}",
@@ -45628,7 +45738,16 @@ const ui_it: Partial<Record<MessageKey, string>> = {
 
 const ui_ja: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} アカウント",
+  "agent.approval.allow_chat": "はい、このチャットの残りの間はこの操作を許可します",
+  "agent.approval.approve_anyway": "それでも承認",
+  "agent.approval.auto_review_denied": "自動レビューで拒否されました",
+  "agent.approval.choices": "回答",
   "agent.approval.confirm_failed": "承認が反映されませんでした — もう一度お試しください",
+  "agent.approval.decline_with_note": "いいえ、代わりに何をするかエージェントに伝えます",
+  "agent.approval.keep_denied": "拒否のままにする",
+  "agent.approval.note_label": "エージェントが代わりにすべきこと",
+  "agent.approval.note_placeholder": "例: 代わりに名前を変更する",
+  "agent.approval.send_note": "送信",
   "agent.choices.hint": "ひとつ選ぶか、下に自由に入力してください。",
   "agent.choices.label": "候補の回答",
   "agent.compact.condensing": "コンテキストを要約しています",
@@ -48540,6 +48659,8 @@ const ui_ja: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "コピーしました",
   "shared.agent.copy": "コピー",
   "shared.agent.copy_code": "コードをコピー",
+  "shared.agent.denied_actions": "{count, plural, other {# 件の拒否された操作}}",
+  "shared.agent.denied_actions_tooltip": "自動レビューがこれらの操作をブロックしたため、エージェントは実行しませんでした。",
   "shared.agent.edit_and_resend": "編集して再送信",
   "shared.agent.explored": "{items}を探索しました",
   "shared.agent.explored_files": "{count, plural, other {# 個のファイル}}",
@@ -50143,7 +50264,16 @@ const ui_ja: Partial<Record<MessageKey, string>> = {
 
 const ui_ko: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} 계정",
+  "agent.approval.allow_chat": "예, 이 채팅의 나머지 동안 이 작업을 허용합니다",
+  "agent.approval.approve_anyway": "그래도 승인",
+  "agent.approval.auto_review_denied": "자동 검토에서 거부됨",
+  "agent.approval.choices": "답변",
   "agent.approval.confirm_failed": "승인이 처리되지 않았습니다 — 다시 시도하세요",
+  "agent.approval.decline_with_note": "아니요, 대신 할 일을 에이전트에게 알려 줍니다",
+  "agent.approval.keep_denied": "거부 유지",
+  "agent.approval.note_label": "에이전트가 대신 해야 할 일",
+  "agent.approval.note_placeholder": "예: 대신 이름을 바꿔 주세요",
+  "agent.approval.send_note": "보내기",
   "agent.choices.hint": "하나를 고르거나 아래에 직접 답변을 입력하세요.",
   "agent.choices.label": "추천 답변",
   "agent.compact.condensing": "컨텍스트를 요약하는 중",
@@ -53055,6 +53185,8 @@ const ui_ko: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "복사됨",
   "shared.agent.copy": "복사",
   "shared.agent.copy_code": "코드 복사",
+  "shared.agent.denied_actions": "{count, plural, other {거부된 작업 #개}}",
+  "shared.agent.denied_actions_tooltip": "자동 검토가 이 작업들을 차단했으므로 에이전트가 실행하지 않았습니다.",
   "shared.agent.edit_and_resend": "편집 후 다시 보내기",
   "shared.agent.explored": "{items} 탐색함",
   "shared.agent.explored_files": "{count, plural, other {파일 #개}}",
@@ -54658,7 +54790,16 @@ const ui_ko: Partial<Record<MessageKey, string>> = {
 
 const ui_pt: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Conta {term.appName}",
+  "agent.approval.allow_chat": "Sim, e permitir esta ação no resto desta conversa",
+  "agent.approval.approve_anyway": "Aprovar mesmo assim",
+  "agent.approval.auto_review_denied": "Recusado pela revisão automática",
+  "agent.approval.choices": "Respostas",
   "agent.approval.confirm_failed": "A aprovação não foi registada — tente novamente",
+  "agent.approval.decline_with_note": "Não, dizer ao agente o que fazer em vez disso",
+  "agent.approval.keep_denied": "Manter recusado",
+  "agent.approval.note_label": "O que o agente deve fazer em vez disso",
+  "agent.approval.note_placeholder": "Por exemplo: renomeie em vez disso",
+  "agent.approval.send_note": "Enviar",
   "agent.choices.hint": "Escolha uma opção ou digite sua própria resposta abaixo.",
   "agent.choices.label": "Respostas sugeridas",
   "agent.compact.condensing": "Condensando o contexto",
@@ -57570,6 +57711,8 @@ const ui_pt: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Copiado",
   "shared.agent.copy": "Copiar",
   "shared.agent.copy_code": "Copiar código",
+  "shared.agent.denied_actions": "{count, plural, one {# ação recusada} other {# ações recusadas}}",
+  "shared.agent.denied_actions_tooltip": "A revisão automática bloqueou estas ações, por isso o agente não as executou.",
   "shared.agent.edit_and_resend": "Editar e reenviar",
   "shared.agent.explored": "Explorou {items}",
   "shared.agent.explored_files": "{count, plural, one {# arquivo} other {# arquivos}}",
@@ -59468,7 +59611,16 @@ const ui_pt_PT: Partial<Record<MessageKey, string>> = {
 
 const ui_ru: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Аккаунт {term.appName}",
+  "agent.approval.allow_chat": "Да, и разрешить это действие до конца этого чата",
+  "agent.approval.approve_anyway": "Всё равно разрешить",
+  "agent.approval.auto_review_denied": "Автопроверка отклонила",
+  "agent.approval.choices": "Ответы",
   "agent.approval.confirm_failed": "Подтверждение не прошло — попробуйте снова",
+  "agent.approval.decline_with_note": "Нет, сказать агенту, что сделать вместо этого",
+  "agent.approval.keep_denied": "Оставить отклонённым",
+  "agent.approval.note_label": "Что агенту сделать вместо этого",
+  "agent.approval.note_placeholder": "Например: лучше переименуй его",
+  "agent.approval.send_note": "Отправить",
   "agent.choices.hint": "Выберите вариант или введите свой ответ ниже.",
   "agent.choices.label": "Варианты ответа",
   "agent.compact.condensing": "Сжимаем контекст",
@@ -62380,6 +62532,8 @@ const ui_ru: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Скопировано",
   "shared.agent.copy": "Копировать",
   "shared.agent.copy_code": "Копировать код",
+  "shared.agent.denied_actions": "{count, plural, one {# отклонённое действие} few {# отклонённых действия} many {# отклонённых действий} other {# отклонённого действия}}",
+  "shared.agent.denied_actions_tooltip": "Автопроверка заблокировала эти действия, поэтому агент их не выполнил.",
   "shared.agent.edit_and_resend": "Изменить и отправить снова",
   "shared.agent.explored": "Изучено: {items}",
   "shared.agent.explored_files": "{count, plural, one {# файл} few {# файла} many {# файлов} other {# файла}}",
@@ -63983,7 +64137,16 @@ const ui_ru: Partial<Record<MessageKey, string>> = {
 
 const ui_tr: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} hesabı",
+  "agent.approval.allow_chat": "Evet, ve bu sohbetin geri kalanı için bu işleme izin ver",
+  "agent.approval.approve_anyway": "Yine de onayla",
+  "agent.approval.auto_review_denied": "Otomatik inceleme reddetti",
+  "agent.approval.choices": "Yanıtlar",
   "agent.approval.confirm_failed": "Onay geçmedi — tekrar deneyin",
+  "agent.approval.decline_with_note": "Hayır, ajana bunun yerine ne yapacağını söyle",
+  "agent.approval.keep_denied": "Reddedilmiş kalsın",
+  "agent.approval.note_label": "Ajanın bunun yerine ne yapması gerektiği",
+  "agent.approval.note_placeholder": "Örneğin: bunun yerine yeniden adlandır",
+  "agent.approval.send_note": "Gönder",
   "agent.choices.hint": "Birini seçin ya da aşağıya kendi yanıtınızı yazın.",
   "agent.choices.label": "Önerilen yanıtlar",
   "agent.compact.condensing": "Bağlam özetleniyor",
@@ -66895,6 +67058,8 @@ const ui_tr: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Kopyalandı",
   "shared.agent.copy": "Kopyala",
   "shared.agent.copy_code": "Kodu kopyala",
+  "shared.agent.denied_actions": "{count, plural, one {# reddedilen işlem} other {# reddedilen işlem}}",
+  "shared.agent.denied_actions_tooltip": "Otomatik inceleme bu işlemleri engelledi, bu yüzden ajan bunları çalıştırmadı.",
   "shared.agent.edit_and_resend": "Düzenle ve yeniden gönder",
   "shared.agent.explored": "{items} incelendi",
   "shared.agent.explored_files": "{count, plural, one {# dosya} other {# dosya}}",
@@ -68498,7 +68663,16 @@ const ui_tr: Partial<Record<MessageKey, string>> = {
 
 const ui_uk: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "Обліковий запис {term.appName}",
+  "agent.approval.allow_chat": "Так, і дозволити цю дію до кінця цього чату",
+  "agent.approval.approve_anyway": "Усе одно дозволити",
+  "agent.approval.auto_review_denied": "Автоперевірка відхилила",
+  "agent.approval.choices": "Відповіді",
   "agent.approval.confirm_failed": "Підтвердження не пройшло — спробуйте ще раз",
+  "agent.approval.decline_with_note": "Ні, сказати агенту, що зробити натомість",
+  "agent.approval.keep_denied": "Залишити відхиленим",
+  "agent.approval.note_label": "Що агенту зробити натомість",
+  "agent.approval.note_placeholder": "Наприклад: краще перейменуй його",
+  "agent.approval.send_note": "Надіслати",
   "agent.choices.hint": "Оберіть варіант або введіть власну відповідь нижче.",
   "agent.choices.label": "Запропоновані відповіді",
   "agent.compact.condensing": "Стискаємо контекст",
@@ -71410,6 +71584,8 @@ const ui_uk: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "Скопійовано",
   "shared.agent.copy": "Копіювати",
   "shared.agent.copy_code": "Скопіювати код",
+  "shared.agent.denied_actions": "{count, plural, one {# відхилена дія} few {# відхилені дії} many {# відхилених дій} other {# відхиленої дії}}",
+  "shared.agent.denied_actions_tooltip": "Автоперевірка заблокувала ці дії, тому агент їх не виконав.",
   "shared.agent.edit_and_resend": "Редагувати та надіслати знову",
   "shared.agent.explored": "Досліджено: {items}",
   "shared.agent.explored_files": "{count, plural, one {# файл} few {# файли} many {# файлів} other {# файлу}}",
@@ -73013,7 +73189,16 @@ const ui_uk: Partial<Record<MessageKey, string>> = {
 
 const ui_yue: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} 帳戶",
+  "agent.approval.allow_chat": "係，而且喺呢個傾偈餘下嘅時間都容許呢個動作",
+  "agent.approval.approve_anyway": "照樣批准",
+  "agent.approval.auto_review_denied": "自動審查拒絕咗",
+  "agent.approval.choices": "答案",
   "agent.approval.confirm_failed": "審批未能完成 — 請再試一次",
+  "agent.approval.decline_with_note": "唔係，話畀代理知要改做咩",
+  "agent.approval.keep_denied": "保持拒絕",
+  "agent.approval.note_label": "代理應該改做咩",
+  "agent.approval.note_placeholder": "例如：改為幫佢改名",
+  "agent.approval.send_note": "傳送",
   "agent.choices.hint": "揀一個,或者喺下面輸入你自己嘅答案。",
   "agent.choices.label": "建議嘅答案",
   "agent.compact.condensing": "整緊上下文濃縮",
@@ -75925,6 +76110,8 @@ const ui_yue: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "已複製",
   "shared.agent.copy": "複製",
   "shared.agent.copy_code": "複製代碼",
+  "shared.agent.denied_actions": "{count, plural, other {# 個被拒絕嘅動作}}",
+  "shared.agent.denied_actions_tooltip": "自動審查封鎖咗呢啲動作，所以代理冇執行佢哋。",
   "shared.agent.edit_and_resend": "編輯並重新傳送",
   "shared.agent.explored": "探索咗{items}",
   "shared.agent.explored_files": "{count, plural, other {# 個檔案}}",
@@ -77528,7 +77715,16 @@ const ui_yue: Partial<Record<MessageKey, string>> = {
 
 const ui_zh_Hans: Partial<Record<MessageKey, string>> = {
   "account.linked_fallback_name": "{term.appName} 帐户",
+  "agent.approval.allow_chat": "是，并在此聊天的剩余时间内允许此操作",
+  "agent.approval.approve_anyway": "仍然批准",
+  "agent.approval.auto_review_denied": "自动审查已拒绝",
+  "agent.approval.choices": "回答",
   "agent.approval.confirm_failed": "审批未生效——请重试",
+  "agent.approval.decline_with_note": "否，告诉代理改做什么",
+  "agent.approval.keep_denied": "保持拒绝",
+  "agent.approval.note_label": "代理应改做什么",
+  "agent.approval.note_placeholder": "例如：改为重命名它",
+  "agent.approval.send_note": "发送",
   "agent.choices.hint": "选一个,或在下方输入你自己的回答。",
   "agent.choices.label": "建议的回答",
   "agent.compact.condensing": "正在压缩上下文",
@@ -80440,6 +80636,8 @@ const ui_zh_Hans: Partial<Record<MessageKey, string>> = {
   "shared.agent.copied": "已复制",
   "shared.agent.copy": "复制",
   "shared.agent.copy_code": "复制代码",
+  "shared.agent.denied_actions": "{count, plural, other {# 个被拒绝的操作}}",
+  "shared.agent.denied_actions_tooltip": "自动审查阻止了这些操作，因此代理没有运行它们。",
   "shared.agent.edit_and_resend": "编辑并重新发送",
   "shared.agent.explored": "已探索{items}",
   "shared.agent.explored_files": "{count, plural, other {# 个文件}}",

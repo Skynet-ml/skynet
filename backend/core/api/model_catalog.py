@@ -597,9 +597,10 @@ def is_effortless_model(name: str) -> bool:
 
 
 # D50: TypeSafe Jev is a router, so the removed-model rule hides it, but its
-# typed labels suit the classification roles (the watch hook and the exploit
-# judge). Only those roles may pick it; every other role keeps it hidden.
-CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge"})
+# typed labels suit the classification roles (the watch hook, the exploit
+# judge and the chat's auto-review of tool calls, SKY-706). Only those roles
+# may pick it; every other role keeps it hidden.
+CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge", "auto_review"})
 CLASSIFIER_ONLY_MODELS: frozenset[str] = frozenset({"openrouter/typesafe/jev-router"})
 
 

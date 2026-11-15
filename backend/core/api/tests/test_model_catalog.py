@@ -1180,9 +1180,9 @@ def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
 _JEV = "openrouter/typesafe/jev-router"
 
 
-@pytest.mark.parametrize("role", ["hook", "judge"])
+@pytest.mark.parametrize("role", ["hook", "judge", "auto_review"])
 def test_jev_is_selectable_for_the_classifier_roles(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
-    """TypeSafe Jev passes validation for the hook and judge roles."""
+    """TypeSafe Jev passes validation for the hook, judge and auto-review roles."""
     kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
     catalog = ModelCatalogResponse(providers=[], models=[kept])
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)

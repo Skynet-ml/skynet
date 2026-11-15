@@ -1,4 +1,5 @@
 import type {
+  ApprovalChoice,
   ApprovalResolvedPayload,
   ChatTurn,
   PendingApprovalPayload,
@@ -48,6 +49,8 @@ export interface GeneralistAgentRequest {
   persist?: boolean;
   /** The summary that stands in for the turns before `chat_history`, after a compaction. */
   compaction_summary?: string | null;
+  /** Exact tool names the user allowed for this chat; the backend drops protected ones. */
+  chat_allowed_tools?: string[];
 }
 
 interface ConversationMetaPayload {
@@ -197,13 +200,19 @@ export async function confirmGeneralistApproval(
   callId: string,
   approved: boolean,
   source: ApiSource = "local",
+  choice: ApprovalChoice = {},
 ): Promise<boolean> {
   let res: Response;
   try {
     res = await fetchWithAuthRetry(agentUrl("/optimizations/generalist-agent/confirm", source), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ call_id: callId, approved }),
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(choice.scope === "conversation" ? { scope: "conversation" } : {}),
+        ...(choice.note ? { note: choice.note } : {}),
+      }),
     });
   } catch {
     return false;
