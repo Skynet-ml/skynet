@@ -51,13 +51,21 @@ test("a closing bracket or quote that the line needs stays whole", () => {
   assert.equal(cleanCompletion("bar(1)", "foo(", ")"), "bar(1)");
   assert.equal(cleanCompletion("x[0]", "a = [", "]"), "x[0]");
   assert.equal(cleanCompletion('"a"', 'x = "', '"'), '"a"');
-  assert.equal(cleanCompletion('"a"', "x = ", '"'), '"a', "here the last quote is an echo");
+  assert.equal(cleanCompletion('"a"', "x = ", '"'), '"a"', "the answer opens and closes its own string");
   assert.equal(cleanCompletion("x)", "foo(bar(", ")"), "x)");
 });
 
 test("an apostrophe inside a string is plain text", () => {
   assert.equal(cleanCompletion(`'t know")`, 'print("don', '")'), "'t know");
   assert.equal(cleanCompletion(`'t do this."""`, '    """Don', '"""'), "'t do this.");
+});
+
+test("a closer for a bracket the answer opened stays, also with an opener on an earlier line", () => {
+  assert.equal(cleanCompletion("int(x)", "    value=", ")"), "int(x)");
+  assert.equal(cleanCompletion("f(b)", "    a, ", "):"), "f(b)");
+  assert.equal(cleanCompletion('get("k")', "    name=", ")"), 'get("k")');
+  assert.equal(cleanCompletion("len(x)", "print(", ")"), "len(x)");
+  assert.equal(cleanCompletion("x)", "foo(", ")"), "x");
 });
 
 test("a bracket opened on an earlier line keeps the answer whole", () => {

@@ -70,6 +70,40 @@ export function balanced(text: string): boolean {
   return !quote && stack.length === 0;
 }
 
+/**
+ * Whether a closer or a closing quote in the last `k` characters of the
+ * answer closes something that the answer itself opened. The scan runs over
+ * `before` + `answer` from the line start, so a string that `before` opens
+ * belongs to `before`. Such an end is part of the answer, not an echo.
+ */
+function closesOwnOpener(before: string, answer: string, k: number): boolean {
+  const text = before + answer;
+  const own = before.length;
+  const echo = text.length - k;
+  const stack: Array<{ ch: string; at: number }> = [];
+  let quote: { q: string; at: number } | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (text.startsWith(quote.q, i)) {
+        if (i >= echo && quote.at >= own) return true;
+        i += quote.q.length - 1;
+        quote = null;
+      }
+    } else if (QUOTES.has(ch)) {
+      const q = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
+      quote = { q, at: i };
+      i += q.length - 1;
+    } else if (OPENERS[ch]) stack.push({ ch: OPENERS[ch], at: i });
+    else if (CLOSERS.has(ch)) {
+      const opener = stack.pop();
+      if (opener?.ch === ch && i >= echo && opener.at >= own) return true;
+    }
+  }
+  return false;
+}
+
 /** The longest end of `text` that is also the start of `after`. */
 function overlap(text: string, after: string): number {
   for (let k = Math.min(text.length, after.length); k > 0; k--) {
@@ -83,7 +117,8 @@ function overlap(text: string, after: string): number {
  * end when it echoes the start of the text after the caret (an echoed closing
  * bracket would show twice). It scores the whole line, `before` + text +
  * `after`, with and without that end. It cuts only when the line is balanced
- * without the end and is not balanced with it. In all other cases the text
+ * without the end and is not balanced with it, and when the end closes
+ * nothing that the answer itself opened. In all other cases the text
  * stays whole, because a doubled character is easy to see and a dropped one
  * is not. Returns "" when nothing is left.
  */
@@ -92,6 +127,7 @@ export function cleanCompletion(text: string, before: string, after: string): st
   const k = overlap(out, after);
   if (!k) return out;
   const cut = out.slice(0, -k).trimEnd();
+  if (closesOwnOpener(before, out, k)) return out;
   return balanced(before + cut + after) && !balanced(before + out + after) ? cut : out;
 }
 
