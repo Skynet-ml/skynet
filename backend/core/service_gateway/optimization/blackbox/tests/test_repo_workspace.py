@@ -601,9 +601,23 @@ def _fail_answer_step(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, step: 
         monkeypatch: Pytest patcher.
         box: The candidate box.
         step: ``write`` (the answer command), ``check`` (the protected-file
-            check) or ``deliver`` (the file write of a large answer, a 503).
+            check), ``deliver`` (the file write of a large answer, a 503) or
+            ``fallback`` (the answer command exits 1, then its fallback file
+            write gets a 503).
     """
-    if step == "write":
+    if step == "fallback":
+        run = box.session.run
+        monkeypatch.setattr(
+            box.session,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._WRITE_ANSWER) in command
+                else run(command, **options)
+            ),
+        )
+        monkeypatch.setattr(box.session, "write_files", _RefusingSession(_write_error(503)).write_files)
+    elif step == "write":
         run = box.session.run
 
         def failing(command: str, **options: Any) -> CommandResult:
@@ -641,15 +655,16 @@ def _fail_answer_step(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, step: 
 
 
 @pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
-@pytest.mark.parametrize("step", ["write", "check", "deliver"])
+@pytest.mark.parametrize("step", ["write", "check", "deliver", "fallback"])
 def test_a_raised_answer_never_hides_a_protected_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, judge: bool
 ) -> None:
     """Name a protected file the version changed, also when the relay answer after the change raises.
 
     The answer command and the check write no file, so the final check still
-    runs. A large answer's file write may have moved the change times, so the
-    change its check found before the write is kept.
+    runs. A file write (of a large answer, or after a failed answer command)
+    may have moved the change times, so the change its check found before the
+    write is kept.
 
     Args:
         tmp_path: Scratch folder.
@@ -671,17 +686,18 @@ def test_a_raised_answer_never_hides_a_protected_change(
         with pytest.raises(RepoScoreError) as raised:
             RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
         assert "eval/labels.csv" in str(raised.value), str(raised.value)
-        assert box.unstamped is (step == "deliver")
+        assert box.unstamped is (step in ("deliver", "fallback"))
         box.close()
     finally:
         space.close()
 
 
 @pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
-def test_a_raised_large_answer_write_never_reports_no_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+@pytest.mark.parametrize("step", ["deliver", "fallback"])
+def test_a_raised_answer_file_write_never_reports_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, judge: bool
 ) -> None:
-    """A 503 on a large answer's file write gives the unchecked error, never a clean check.
+    """A 503 on an answer file write gives the unchecked error, never a clean check.
 
     The server can do the write before the 503, which moves every change time,
     so the final check cannot tell a change apart.
@@ -689,6 +705,7 @@ def test_a_raised_large_answer_write_never_reports_no_change(
     Args:
         tmp_path: Scratch folder.
         monkeypatch: Pytest patcher.
+        step: The file write that raises: a large answer's, or the fallback after a failed answer command.
         judge: Whether the scorer runs for the judge.
     """
     space, archive = _guarded(tmp_path)
@@ -696,7 +713,7 @@ def test_a_raised_large_answer_write_never_reports_no_change(
         box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
         box.stamp_before_run()
         with monkeypatch.context() as patched:
-            _fail_answer_step(patched, box, "deliver")
+            _fail_answer_step(patched, box, step)
             relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
             assert relay._answer("a" * 32, {"output": 1}) is False
             relay.close()
