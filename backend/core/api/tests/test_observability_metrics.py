@@ -157,12 +157,14 @@ def test_vercel_pending_reason_logs_once_per_operation_and_reason(
 ) -> None:
     """Show why a Vercel hold stays pending without repeating the same line every tick.
 
+    A settle forgets the operation, so a later pending tick with the same reason logs again.
+
     Args:
         monkeypatch: Test-owned dependency and settings replacements.
         caplog: Captured log records.
     """
     monkeypatch.setattr(obs, "BudgetService", lambda **kwargs: object())
-    monkeypatch.setattr(obs, "OpenRouterUsageReconciler", _paged_reconciler([[]] * 4))
+    monkeypatch.setattr(obs, "OpenRouterUsageReconciler", _paged_reconciler([[]] * 5))
     monkeypatch.setattr(obs, "VercelSessionUsageClient", lambda *args: object())
     monkeypatch.setattr(
         obs,
@@ -173,6 +175,7 @@ def test_vercel_pending_reason_logs_once_per_operation_and_reason(
                 [("op-1", "pending", "first reason")],
                 [("op-1", "pending", "second reason")],
                 [("op-1", "settled", None)],
+                [("op-1", "pending", "second reason")],
             ]
         ),
     )
@@ -181,13 +184,15 @@ def test_vercel_pending_reason_logs_once_per_operation_and_reason(
     caplog.set_level(logging.INFO, logger=obs.logger.name)
     sweeper = obs.OrphanRecoverySweeper(_OrphanStore())
 
-    for _ in range(4):
+    for _ in range(5):
         sweeper._reconcile_sandbox_usage(object())
 
     assert _pending_lines(caplog, "Vercel") == [
         "Vercel usage for operation op-1 stays pending: first reason",
         "Vercel usage for operation op-1 stays pending: second reason",
+        "Vercel usage for operation op-1 stays pending: second reason",
     ]
+    assert "op-2" not in sweeper._logged_pending_reasons
 
 
 def test_model_pending_reason_logs_once_per_operation_and_reason(
