@@ -426,7 +426,12 @@ def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:
 
 
 def _run_check_as(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tree: Path, *, euid: int, refuse: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tree: Path,
+    *,
+    euid: int,
+    fault: str | None = None,
 ) -> tuple[list[tuple[str, int]], dict[str, Any]]:
     """Run the protected-file check in this process, with a fake effective user and no real switch.
 
@@ -435,7 +440,9 @@ def _run_check_as(
         capsys: Captures the check's output.
         tree: The checkout the check runs in.
         euid: The effective user that the check starts as.
-        refuse: The user switch fails as for a root with no capabilities.
+        fault: ``"refuse"`` makes the switch fail as for a root with no
+            capabilities, ``"stay"`` makes ``setuid`` keep root, and
+            ``"root-tree"`` makes root own the tree.
 
     Returns:
         Each user switch and tree access with the effective user at that moment,
@@ -456,10 +463,10 @@ def _run_check_as(
 
         def call(value: Any) -> None:
             """Record the switch, and change the fake effective user on ``setuid``."""
-            if refuse:
+            if fault == "refuse":
                 raise PermissionError(name)
             events.append((name, state["euid"]))
-            if name == "setuid":
+            if name == "setuid" and fault != "stay":
                 state["euid"] = value
 
         return call
@@ -482,16 +489,26 @@ def _run_check_as(
 
         return call
 
+    real_stat = os.stat
+
+    def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        """Report root as the tree's owner when the fault asks for it."""
+        found = real_stat(path, *args, **kwargs)
+        if fault == "root-tree" and path == ".":
+            return os.stat_result((found.st_mode, found.st_ino, found.st_dev, found.st_nlink, 0, 0, *found[6:10]))
+        return found
+
     monkeypatch.setattr(os, "geteuid", lambda: state["euid"])
     for name in ("setgroups", "setgid", "setuid"):
         monkeypatch.setattr(os, name, switch(name))
-    monkeypatch.setattr(os, "walk", watch("walk", os.walk))
-    monkeypatch.setattr(os, "replace", watch("replace", os.replace))
+    monkeypatch.setattr(os, "stat", stat)
+    for name in ("walk", "open", "unlink", "replace"):
+        monkeypatch.setattr(os, name, watch(name, getattr(os, name)))
     monkeypatch.chdir(tree)
     monkeypatch.setattr(sys, "argv", ["-c", "eval"])
     monkeypatch.setenv("APP_ANSWER_PATH", "calls/a.json")
     monkeypatch.setenv("APP_ANSWER", '{"output": 1}')
-    names = {**vars(builtins), "open": watch("open", open)}
+    names = {**vars(builtins), "open": watch("read", open)}
     exec(compile(repo_workspace._HASH_PROTECTED, "<check>", "exec"), {"__builtins__": names})
     return events, json.loads(capsys.readouterr().out)
 
@@ -518,7 +535,7 @@ def _planted_tree(tmp_path: Path) -> Path:
 def test_the_check_becomes_the_tree_owner_before_it_reads_or_writes_the_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Drop root before the first tree access, so a link planted at the answer path gets no root write (PRE-1)."""
+    """Drop root before the first tree access, and never follow a link planted at the answer path (PRE-1)."""
     tree = _planted_tree(tmp_path)
     owner = tree.stat().st_uid
     assert owner != 0
@@ -527,26 +544,45 @@ def test_the_check_becomes_the_tree_owner_before_it_reads_or_writes_the_tree(
     accesses = events[3:]
     assert [name for name, _ in accesses] == [
         "walk eval",
-        "open eval/labels.csv",
+        "read eval/labels.csv",
+        "unlink calls/a.json.tmp",
         "open calls/a.json.tmp",
         "replace calls/a.json.tmp",
     ]
     assert {user for _, user in accesses} == {owner}
     assert set(result["files"]) == {"eval/labels.csv"}
+    assert (tree / "calls" / "a.json").read_text() == '{"output": 1}'
+    assert not (tree / "calls" / "a.json").is_symlink()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
 
 
-@pytest.mark.parametrize(("euid", "refuse"), [(None, False), (0, True)], ids=["box-user", "root-without-capabilities"])
-def test_a_check_that_cannot_or_need_not_switch_users_still_answers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], euid: int | None, refuse: bool
+@pytest.mark.parametrize("fault", ["root-tree", "refuse", "stay"])
+def test_a_root_check_that_cannot_leave_root_stops_before_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str
 ) -> None:
-    """Skip the switch for a non-root check, and keep going when a root with no capabilities cannot switch."""
+    """Fail closed when root owns the tree, the switch fails, or the check is still root after it (PRE-1)."""
     tree = _planted_tree(tmp_path)
-    start = os.geteuid() if euid is None else euid
-    events, result = _run_check_as(monkeypatch, capsys, tree, euid=start, refuse=refuse)
+    with pytest.raises(SystemExit) as stopped:
+        _run_check_as(monkeypatch, capsys, tree, euid=0, fault=fault)
+    assert stopped.value.code not in (0, None)
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert not (tree / "calls" / "a.json").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+def test_a_box_user_check_needs_no_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skip the switch for a non-root check, as in the local test runtime."""
+    tree = _planted_tree(tmp_path)
+    start = os.geteuid()
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=start)
     assert not [name for name, _ in events if name.startswith("set")]
     assert {user for _, user in events} == {start}
     assert set(result["files"]) == {"eval/labels.csv"}
     assert (tree / "calls" / "a.json").read_text() == '{"output": 1}'
+    assert (tmp_path / "root-only").read_text() == "secret\n"
 
 
 def test_a_failed_answer_check_is_told_apart_from_a_protected_change(

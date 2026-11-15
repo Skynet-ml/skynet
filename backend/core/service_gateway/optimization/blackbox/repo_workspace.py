@@ -150,19 +150,27 @@ _ANSWER_ENV_BYTES = 100_000
 # owner before it reads or writes anything in the tree. So no root read or
 # write follows a link that the version plants, and the kernel then marks it
 # not dumpable, so the version's processes cannot trace it or open its fds.
-# A root with no capabilities, as in a local Docker box, cannot switch, and
-# its version runs as that same root anyway.
+# The tree owner is the user that runner._entry_user starts the entry as. The
+# version can point the tree at a root-owned folder, and a root with no
+# capabilities cannot switch, so a check that stays root stops before it reads
+# the tree. The parent then counts the check as failed and gives no score.
+# The answer's temporary file is opened without following a link, and a
+# leftover one is removed first, so a planted file blocks only this answer.
 _HASH_PROTECTED = r"""
 import hashlib, json, os, sys
 
 if os.geteuid() == 0:
     owner = os.stat(".")
+    if owner.st_uid == 0:
+        sys.exit("root owns the tree, so the check has no other user to run as")
     try:
         os.setgroups([])
         os.setgid(owner.st_gid)
         os.setuid(owner.st_uid)
-    except PermissionError:
-        pass
+    except OSError as error:
+        sys.exit(f"the check cannot leave root: {error}")
+    if os.geteuid() == 0:
+        sys.exit("the check is still root after the switch")
 
 def digest(path):
     if os.path.islink(path):
@@ -196,9 +204,15 @@ for top in sys.argv[1:]:
 answer = os.environ.get("APP_ANSWER_PATH")
 if answer:
     os.makedirs(os.path.dirname(answer), exist_ok=True)
-    with open(answer + ".tmp", "w", encoding="utf-8") as handle:
+    temporary = answer + ".tmp"
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    with os.fdopen(os.open(temporary, flags, 0o666), "w", encoding="utf-8") as handle:
         handle.write(os.environ["APP_ANSWER"])
-    os.replace(answer + ".tmp", answer)
+    os.replace(temporary, answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
 """
 # Hashes the whole prepared tree, ``.git`` included: each path's type, mode,
