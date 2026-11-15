@@ -40,6 +40,11 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
     deleted.push(String(_url).split("/").pop() ?? "");
     return new Response(null, { status: 204 });
   }
+  // A restore reads a stored file's bytes; "gone" is a file the server no longer has.
+  if (!init?.method) {
+    if (String(_url).endsWith("/gone")) return new Response(null, { status: 404 });
+    return new Response(new Uint8Array(3), { headers: { "content-type": "image/png" } });
+  }
   const held = nextUpload;
   nextUpload = null;
   if (held) return held;
@@ -198,11 +203,11 @@ void test("Send waits with a reason while an upload runs, and a failed upload st
   await flush();
   assert.equal(latest!.tiles.length, 1, "the failed file keeps its tile");
   assert.equal(latest!.tiles[0]!.status, "failed");
-  assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
+  assert.equal(latest!.blocked, "Remove the files that failed to attach, then send.");
   await React.act(async () => root.unmount());
 });
 
-void test("a restore puts sent files back by their stored ids, and a remove keeps the stored file", async () => {
+void test("a restore uploads sent files again as new draft files, and a remove deletes them", async () => {
   let latest: ReturnType<typeof useChatMedia> | null = null;
   const keep = (value: ReturnType<typeof useChatMedia>) => {
     latest = value;
@@ -231,14 +236,21 @@ void test("a restore puts sent files back by their stored ids, and a remove keep
     { id: "sent-2", name: "b.png", kind: "image" as const, url: "blob:old-2" },
   ];
 
-  nextUpload = Promise.resolve(new Response(new Uint8Array(3)));
+  // Send waits from the restore call, before any tile shows.
+  let hold!: (r: Response) => void;
+  nextUpload = new Promise<Response>((resolve) => (hold = resolve));
   await React.act(async () => latest!.restore(sent));
+  assert.equal(latest!.blocked, "Wait for the files to finish uploading.");
   await flush();
-  assert.deepEqual(
-    latest!.ready()?.map((m) => m.id),
-    ["sent-1", "sent-2"],
-  );
-  assert.equal(latest!.tiles[0]!.status, undefined);
+  assert.equal(latest!.tiles.length, 2);
+  assert.equal(latest!.ready(), null, "the first upload still runs");
+  assert.equal(latest!.blocked, "Wait for the files to finish uploading.");
+  hold(Response.json({ id: "new-1", name: "a.png", kind: "image" }));
+  await flush();
+  const ids = latest!.ready()?.map((m) => m.id) ?? [];
+  assert.equal(ids.length, 2);
+  assert.ok(!ids.includes("sent-1") && !ids.includes("sent-2"), "the draft gets new ids");
+  assert.equal(latest!.blocked, null);
   assert.ok(latest!.tiles[0]!.url.startsWith("blob:"));
 
   // A chat switch frees the chat's display URLs, not the draft's own.
@@ -255,7 +267,7 @@ void test("a restore puts sent files back by their stored ids, and a remove keep
   await React.act(async () => toast.dismiss());
   await flush();
   assert.equal(latest!.tiles.length, 1);
-  assert.deepEqual(deleted, [], "another chat holds the restored file");
+  assert.deepEqual(deleted, ["new-1"], "the draft's own copy goes");
   assert.deepEqual(revoked, [url]);
   URL.revokeObjectURL = revoke;
   await React.act(async () => root.unmount());
@@ -273,13 +285,12 @@ void test("a restored file that does not load shows as failed and blocks Send", 
   const root = createRoot(document.createElement("div"));
   await React.act(async () => root.render(<Harness onDraft={keep} />));
 
-  nextUpload = Promise.resolve(new Response(null, { status: 404 }));
   await React.act(async () =>
     latest!.restore([{ id: "gone", name: "a.png", kind: "image", url: "" }]),
   );
   await flush();
   assert.equal(latest!.tiles.length, 1);
   assert.equal(latest!.tiles[0]!.status, "failed");
-  assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
+  assert.equal(latest!.blocked, "Remove the files that failed to attach, then send.");
   await React.act(async () => root.unmount());
 });

@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Sohbet özetlenemedi. Tekrar deneyin.",
   "agent.compact.wait_reply": "Yanıtın bitmesini bekleyin.",
   "agent.fork.failed": "Sohbet çatallanamadı. Tekrar deneyin.",
+  "agent.fork.in_history": "Çatal kaydedildi. Sohbet geçmişinden aç.",
   "agent.session.title": "Sohbet istatistikleri",
   "agent.session.user_messages": "Mesajlarınız",
   "agent.session.assistant_messages": "Ajan yanıtları",

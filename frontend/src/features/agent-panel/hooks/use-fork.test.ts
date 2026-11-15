@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 const stubs: Record<string, string> = {
   "react-toastify":
-    "export const toast = { info() {}, error: (k) => globalThis.forkTestToasts.push(k) };",
+    "export const toast = { info: (k) => globalThis.forkTestToasts.push(k), error: (k) => globalThis.forkTestToasts.push(k) };",
   "@/shared/lib/messages": "export const msg = (k) => k;",
   "../lib/conversation-api":
     "export const forkConversation = (id, turns) => new Promise((resolve) =>" +
@@ -93,6 +93,7 @@ async function mountFork(typed: string, messages: unknown[] = chat): Promise<Har
       agent,
       store,
       liveChatRef,
+      draft,
       setDraft,
       restoreMedia: (media) => void calls.push(`media:${media.map((m) => m.id).join(",")}`),
     });
@@ -159,7 +160,7 @@ test("a fork at the first message keeps text the user typed in the composer", as
   const h = await mountFork("my own words");
   try {
     await forkAt(h, 0, null);
-    assert.deepEqual(h.calls, ["newSession", "active:null", "media:"]);
+    assert.deepEqual(h.calls, ["newSession", "active:null"]);
     assert.equal(h.draft(), "my own words");
   } finally {
     await h.unmount();
@@ -205,11 +206,16 @@ test("a fork opens the saved copy and restores the forked message into an empty 
   }
 });
 
-test("a fork keeps text the user typed in the composer", async () => {
-  const h = await mountFork("my own words");
+test("a fork keeps text the user typed in the composer, and leaves the media out", async () => {
+  const withMedia = [
+    ...chat.slice(0, 2),
+    { ...chat[2], media: [{ id: "m2", kind: "image", name: "b.png", url: "" }] },
+  ];
+  const h = await mountFork("my own words", withMedia);
   try {
     await forkAt(h, 2, { id: "forked", title: "Fork" });
     assert.equal(h.draft(), "my own words");
+    assert.equal(h.calls.at(-1), "seen:forked");
   } finally {
     await h.unmount();
   }
@@ -244,7 +250,7 @@ test("a fork at the first message with media opens a new chat with its media in 
   }
 });
 
-test("a fork of media with no saved copy shows a toast and opens nothing", async () => {
+test("a fork of media with no saved copy says the fork is in the history and opens nothing", async () => {
   const withMedia = [
     { ...chat[0], media: [{ id: "m1", kind: "image", name: "a.png" }] },
     ...chat.slice(1),
@@ -252,7 +258,7 @@ test("a fork of media with no saved copy shows a toast and opens nothing", async
   const h = await mountFork("", withMedia);
   try {
     await forkAt(h, 2, { id: "forked", title: "Fork" });
-    assert.deepEqual(h.toasts, ["agent.fork.failed"]);
+    assert.deepEqual(h.toasts, ["agent.fork.in_history"]);
     assert.deepEqual(h.calls, ["list:forked"]);
     assert.equal(h.fork().forking, false);
   } finally {

@@ -22,14 +22,30 @@ interface UseForkArgs {
   store: Pick<ConversationStoreState, "setActiveId" | "upsertFromMeta" | "markSeen">;
   /** The chat on view now; a fork that ends after a switch or a send reads it. */
   liveChatRef: React.RefObject<{ id: string | null; messages: unknown[]; busy: boolean }>;
+  /** The composer text now; a fork fills the composer only when it is empty. */
+  draft: string;
   setDraft: React.Dispatch<React.SetStateAction<string>>;
   /** Puts the forked message's media into the composer when it has none. */
   restoreMedia: (media: readonly MediaAttachment[]) => void;
 }
 
 /** Fork the chat on view at a message index; `forking` is true while the calls run. */
-export function useFork({ agent, store, liveChatRef, setDraft, restoreMedia }: UseForkArgs) {
+export function useFork({ agent, store, liveChatRef, draft, setDraft, restoreMedia }: UseForkArgs) {
   const forkingRef = React.useRef(false);
+  // A fork ends after its calls, so it reads the text typed in the meantime.
+  const draftRef = React.useRef(draft);
+  React.useEffect(() => {
+    draftRef.current = draft;
+  });
+  // Typed text stays, and then the message's media stays out with its text.
+  const fillComposer = React.useCallback(
+    (slice: { draft: string; media: readonly MediaAttachment[] }) => {
+      if (draftRef.current.trim()) return;
+      setDraft(slice.draft);
+      restoreMedia(slice.media);
+    },
+    [setDraft, restoreMedia],
+  );
   const [forking, setForking] = React.useState(false);
   const handleFork = React.useCallback(
     async (index: number) => {
@@ -41,8 +57,7 @@ export function useFork({ agent, store, liveChatRef, setDraft, restoreMedia }: U
       if (!slice.history.length) {
         agent.newSession();
         store.setActiveId(null);
-        setDraft((typed) => (typed.trim() ? typed : slice.draft));
-        restoreMedia(slice.media);
+        fillComposer(slice);
         return;
       }
       forkingRef.current = true;
@@ -66,20 +81,19 @@ export function useFork({ agent, store, liveChatRef, setDraft, restoreMedia }: U
         // regenerate from it would not replace the stored turn. The fork stays
         // in the history; opening it there loads the right ids.
         if (!saved?.length && slice.history.some((m) => m.media?.length)) {
-          toast.error(msg("agent.fork.failed"));
+          toast.info(msg("agent.fork.in_history"));
           return;
         }
         agent.openConversation(forked.id, forkOpening(slice.history, saved));
         store.setActiveId(forked.id);
         store.markSeen(forked.id);
-        setDraft((typed) => (typed.trim() ? typed : slice.draft));
-        restoreMedia(slice.media);
+        fillComposer(slice);
       } finally {
         forkingRef.current = false;
         setForking(false);
       }
     },
-    [agent, store, liveChatRef, setDraft, restoreMedia],
+    [agent, store, liveChatRef, fillComposer],
   );
   return { forking, handleFork };
 }

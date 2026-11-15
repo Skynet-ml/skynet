@@ -1739,7 +1739,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     enforce_storage_quota(job_store, current_user.username, copied)
                 # The quota measure sweeps stale files, and another tab can
                 # delete one. Check the files again before a new chat or a
-                # discard commits, so a missing file is a 404 that loses nothing.
+                # discard commits. This makes the gap small, not zero: a file
+                # deleted after this check still fails the attach later, after
+                # those commits.
                 if media:
                     load_owned_media(engine, current_user.username, [row.id for row in media], sweep=False)
                 cid, ttl = _ensure_conversation(

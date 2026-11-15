@@ -1607,6 +1607,9 @@ async def test_attached_images_reach_the_model_in_the_new_user_message(monkeypat
         Args:
             mcp_url: Ignored.
             auth_header: Ignored.
+
+        Yields:
+            A fake session with no tools.
         """
         yield _FakeSession([])
 

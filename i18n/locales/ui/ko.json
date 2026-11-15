@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "채팅을 요약하지 못했습니다. 다시 시도하세요.",
   "agent.compact.wait_reply": "답변이 끝날 때까지 기다리세요.",
   "agent.fork.failed": "채팅을 분기하지 못했습니다. 다시 시도하세요.",
+  "agent.fork.in_history": "포크를 저장했습니다. 채팅 기록에서 여세요.",
   "agent.session.title": "채팅 통계",
   "agent.session.user_messages": "내 메시지",
   "agent.session.assistant_messages": "에이전트 답변",

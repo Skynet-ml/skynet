@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Não foi possível condensar o chat. Tente de novo.",
   "agent.compact.wait_reply": "Aguarde a resposta terminar.",
   "agent.fork.failed": "Não foi possível bifurcar o chat. Tente novamente.",
+  "agent.fork.in_history": "A ramificação foi salva. Abra-a no histórico de conversas.",
   "agent.session.title": "Estatísticas do chat",
   "agent.session.user_messages": "Suas mensagens",
   "agent.session.assistant_messages": "Respostas do agente",

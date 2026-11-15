@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Не вдалося стиснути чат. Спробуйте ще раз.",
   "agent.compact.wait_reply": "Дочекайтеся завершення відповіді.",
   "agent.fork.failed": "Не вдалося відгалузити чат. Спробуйте ще раз.",
+  "agent.fork.in_history": "Відгалуження збережено. Відкрий його з історії чатів.",
   "agent.session.title": "Статистика чату",
   "agent.session.user_messages": "Ваші повідомлення",
   "agent.session.assistant_messages": "Відповіді агента",

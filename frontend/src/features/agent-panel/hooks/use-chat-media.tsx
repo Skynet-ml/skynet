@@ -14,7 +14,7 @@ import {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_PER_MESSAGE,
   deleteChatMedia,
-  fetchOwnMediaUrl,
+  fetchChatMedia,
   freeMediaUrl,
   localMediaUrl,
   markMediaSent,
@@ -31,8 +31,6 @@ interface DraftMedia {
   serverId: string | null;
   /** The upload failed; the tile stays, marked, until the user removes it. */
   failed: boolean;
-  /** A file of a sent message, put back by a fork. Another chat holds it, so a remove keeps it. */
-  restored?: boolean;
 }
 
 export interface ChatMediaDraft {
@@ -48,7 +46,7 @@ export interface ChatMediaDraft {
   blocked: string | null;
   /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
   clear: () => void;
-  /** Put a sent message's files back into an empty draft, as a fork does with its text. */
+  /** Upload a sent message's files again into an empty draft, as a fork puts back its text. */
   restore: (media: readonly MediaAttachment[]) => void;
 }
 
@@ -68,6 +66,10 @@ export function useChatMedia(): ChatMediaDraft {
   const itemsRef = React.useRef<readonly DraftMedia[]>([]);
   // Tiles taken out whose Undo toast is still open.
   const removedRef = React.useRef(new Map<string, DraftMedia>());
+  // Restores whose files still load; Send waits for them.
+  const [restoring, setRestoring] = React.useState(0);
+  // A newer restore or a closed panel makes an older restore drop its files.
+  const restoreRef = React.useRef(0);
 
   const update = React.useCallback(
     (next: (prev: readonly DraftMedia[]) => readonly DraftMedia[]) => {
@@ -181,7 +183,7 @@ export function useChatMedia(): ChatMediaDraft {
               });
               return;
             }
-            if (held.serverId && !held.restored) void deleteChatMedia(held.serverId);
+            if (held.serverId) void deleteChatMedia(held.serverId);
             freeMediaUrl(held.url);
           },
         },
@@ -204,36 +206,52 @@ export function useChatMedia(): ChatMediaDraft {
   const restore = React.useCallback(
     (media: readonly MediaAttachment[]) => {
       if (!media.length || itemsRef.current.length) return;
-      // The sent ids go out again; the server copies each file into the chat that gets it.
-      void Promise.allSettled(media.map((m) => fetchOwnMediaUrl(m.id))).then((urls) => {
-        const restored = media.map((m, i): DraftMedia => {
-          const got = urls[i]!;
-          return {
+      const run = ++restoreRef.current;
+      setRestoring((n) => n + 1);
+      // Each file uploads again as a new draft file. A sent id is the source
+      // chat's: the server stores a copy under a new id that the client never learns.
+      void Promise.allSettled(media.map((m) => fetchChatMedia(m.id))).then((blobs) => {
+        setRestoring((n) => n - 1);
+        // The user added files while these loaded, or the panel closed: the draft is theirs now.
+        if (run !== restoreRef.current || itemsRef.current.length) return;
+        const added = media.map((m, i) => {
+          const got = blobs[i]!;
+          if (got.status === "rejected") {
+            toast.error(msg("agent.media.upload_failed", { name: m.name }));
+            // The tile stays, marked, so the user sees which file is missing.
+            const item: DraftMedia = {
+              localId: crypto.randomUUID(),
+              name: m.name,
+              kind: m.kind,
+              url: "",
+              serverId: null,
+              failed: true,
+            };
+            return { item, file: null };
+          }
+          const file = new File([got.value], m.name, { type: got.value.type });
+          const item: DraftMedia = {
             localId: crypto.randomUUID(),
             name: m.name,
             kind: m.kind,
-            url: got.status === "fulfilled" ? got.value : "",
-            serverId: m.id,
-            // A file that did not load shows as failed, so the user sees what is missing.
-            failed: got.status === "rejected",
-            restored: true,
+            url: localMediaUrl(file),
+            serverId: null,
+            failed: false,
           };
+          return { item, file };
         });
-        // The user added files while these loaded: the draft is theirs now.
-        if (itemsRef.current.length) {
-          for (const m of restored) freeMediaUrl(m.url);
-          return;
-        }
-        update(() => restored);
+        update(() => added.map((a) => a.item));
+        for (const { item, file } of added) if (file) upload(item, file);
       });
     },
-    [update],
+    [update, upload],
   );
 
   // A closed panel frees the local URLs of files still in the draft. An upload
   // that ends later then finds no tile and deletes its stored file.
   React.useEffect(
     () => () => {
+      restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
       itemsRef.current = [];
     },
@@ -253,7 +271,7 @@ export function useChatMedia(): ChatMediaDraft {
   );
   const blocked = items.some((m) => m.failed)
     ? msg("agent.media.remove_failed")
-    : items.some((m) => !m.serverId)
+    : restoring || items.some((m) => !m.serverId)
       ? msg("agent.media.uploading")
       : null;
 

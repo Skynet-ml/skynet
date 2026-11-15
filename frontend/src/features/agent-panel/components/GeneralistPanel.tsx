@@ -961,6 +961,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     agent,
     store,
     liveChatRef,
+    draft,
     setDraft,
     restoreMedia: chatMedia.restore,
   });

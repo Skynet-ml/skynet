@@ -93,16 +93,13 @@ export function resolveChatMediaUrl(media: MediaAttachment): Promise<string> {
   return pending;
 }
 
-/**
- * Fetch a stored file into a new local URL that the caller owns. The chat's
- * display cache does not hold it, so a chat switch does not free it.
- */
-export async function fetchOwnMediaUrl(id: string): Promise<string> {
+/** Fetch a stored file's bytes, to upload them again as a new draft file. */
+export async function fetchChatMedia(id: string): Promise<Blob> {
   const res = await fetchWithAuthRetry(apiUrl(`/agent/media/${encodeURIComponent(id)}`), {}).catch(
     () => null,
   );
   if (!res?.ok) throw new ChatMediaError(res?.status ?? 0);
-  return localMediaUrl(await res.blob());
+  return res.blob();
 }
 
 /**

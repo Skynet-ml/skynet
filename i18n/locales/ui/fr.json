@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Impossible de condenser le chat. Réessayez.",
   "agent.compact.wait_reply": "Attendez la fin de la réponse.",
   "agent.fork.failed": "Impossible de dupliquer la conversation. Réessayez.",
+  "agent.fork.in_history": "La bifurcation est enregistrée. Ouvre-la depuis l’historique des discussions.",
   "agent.session.title": "Statistiques du chat",
   "agent.session.user_messages": "Vos messages",
   "agent.session.assistant_messages": "Réponses de l’agent",

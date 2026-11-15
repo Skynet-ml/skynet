@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "فشرده‌سازی گفتگو انجام نشد. دوباره تلاش کنید.",
   "agent.compact.wait_reply": "صبر کنید تا پاسخ تمام شود.",
   "agent.fork.failed": "انشعاب گفتگو ممکن نشد. دوباره تلاش کنید.",
+  "agent.fork.in_history": "انشعاب ذخیره شد. آن را از تاریخچهٔ گفتگوها باز کنید.",
   "agent.session.title": "آمار گفتگو",
   "agent.session.user_messages": "پیام‌های شما",
   "agent.session.assistant_messages": "پاسخ‌های عامل",
