@@ -24,7 +24,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.orm import Session, defer
 
 from ...config import settings
@@ -245,6 +245,19 @@ def media_copy_bytes(rows: list[ChatMediaModel], conversation_id: str | None) ->
     return sum(row.byte_size for row in rows if row.conversation_id not in (None, conversation_id))
 
 
+_COPY_COLUMNS = [
+    "id",
+    "username",
+    "filename",
+    "kind",
+    "mime_type",
+    "byte_size",
+    "data",
+    "created_at",
+    "conversation_id",
+]
+
+
 def attach_media_to_chat(
     session: Session,
     job_store: Any,
@@ -281,9 +294,9 @@ def attach_media_to_chat(
     Raises:
         DomainError: ``user.storage.quota_exceeded`` (409) when the copies
             would go over the caller's storage quota; nothing changes then.
-        HTTPException: 404 when a file is deleted while the quota is checked,
-            DomainError ``agent.media.changed`` (409) when the copies come to
+        DomainError: ``agent.media.changed`` (409) when the copies come to
             more than ``copy_bytes``.
+        HTTPException: 404 when a file is deleted while the quota is checked.
     """
     if not media_ids:
         return {}
@@ -300,7 +313,7 @@ def attach_media_to_chat(
     rows = list(
         session.scalars(
             select(ChatMediaModel)
-            .options(defer(ChatMediaModel.data))
+            .options(defer(ChatMediaModel.data, raiseload=True))
             .where(*owned)
             .order_by(ChatMediaModel.id)
             .with_for_update()
@@ -318,18 +331,26 @@ def attach_media_to_chat(
         if row.conversation_id == conversation_id:
             held[row.id] = row.id
             continue
-        copy = ChatMediaModel(
-            id=str(uuid4()),
-            username=row.username,
-            filename=row.filename,
-            kind=row.kind,
-            mime_type=row.mime_type,
-            byte_size=row.byte_size,
-            data=row.data,
-            conversation_id=conversation_id,
+        copy_id = str(uuid4())
+        # The database copies the bytes, so a large file never loads into
+        # worker memory.
+        session.execute(
+            insert(ChatMediaModel).from_select(
+                _COPY_COLUMNS,
+                select(
+                    literal(copy_id),
+                    ChatMediaModel.username,
+                    ChatMediaModel.filename,
+                    ChatMediaModel.kind,
+                    ChatMediaModel.mime_type,
+                    ChatMediaModel.byte_size,
+                    ChatMediaModel.data,
+                    literal(datetime.now(UTC)),
+                    literal(conversation_id),
+                ).where(ChatMediaModel.id == row.id),
+            )
         )
-        session.add(copy)
-        held[row.id] = copy.id
+        held[row.id] = copy_id
     return held
 
 

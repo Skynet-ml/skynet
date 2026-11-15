@@ -742,9 +742,10 @@ def _persist_user_turn(
         The id of the new row.
 
     Raises:
-        DomainError: 409 when copies of the files would go over the storage quota.
-        HTTPException: 404 when an attached file is deleted before it attaches,
-            and 409 when the files changed after the caller checked the quota.
+        DomainError: 409 when copies of the files would go over the storage
+            quota, and 409 ``agent.media.changed`` when the files changed after
+            the caller checked the quota.
+        HTTPException: 404 when an attached file is deleted before it attaches.
     """
     metadata: dict[str, Any] = {"steer": True} if steer else {}
     if compaction:
@@ -1751,23 +1752,25 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             A :class:`StreamingResponse` of Server-Sent Events.
         """
 
-        def _setup_turn() -> tuple[str | None, str | None, int | None]:
+        def _setup_turn() -> tuple[str | None, str | None, int | None, dict[str, str]]:
             """Persist the user turn off the event loop.
 
             Runs the blocking conversation upsert and user-message insert in a
             worker thread so the single event loop is not stalled before the SSE
             stream starts. Auth is already enforced by the route dependency, so
             the turn is always attributed to ``current_user``. A conversation
-            ``DomainError`` (403/404), the storage quota ``DomainError`` (409)
-            and the attachment 404 and 409 ``HTTPException`` propagate.
+            ``DomainError`` (403/404), the storage quota ``DomainError`` (409),
+            the ``agent.media.changed`` ``DomainError`` (409) and the attachment
+            404 ``HTTPException`` propagate.
 
             Returns:
-                ``(conversation_id, title, user_message_id)`` — all ``None`` when
-                persistence is off (no ``job_store`` or ``persist`` is False) or
-                failed non-fatally.
+                ``(conversation_id, title, user_message_id, held)``. ``held`` maps
+                each attached file id to the id that the chat stores. All ``None``
+                and an empty map when persistence is off (no ``job_store`` or
+                ``persist`` is False) or failed non-fatally.
             """
             if job_store is None or not req.persist:
-                return None, None, None
+                return None, None, None, {}
             try:
                 # Check the quota for file copies before a new chat is created and
                 # before an edit deletes turns, so a refused copy leaves no empty
@@ -1826,13 +1829,17 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                         copy_bytes=copied,
                         session=session,
                     )
+                    # The turn names the chat's own copy of each file, in the
+                    # order of ``media``.
+                    stored = session.get(AgentMessageModel, user_message_id).router_metadata or {}
+                    held = {row.id: item["id"] for row, item in zip(media, stored.get("media", []), strict=True)}
                     session.commit()
             except (DomainError, HTTPException):
                 raise
             except Exception:
                 logger.exception("Failed to persist user turn")
-                return None, None, None
-            return cid, ttl, user_message_id
+                return None, None, None, {}
+            return cid, ttl, user_message_id, held
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
 
@@ -1852,7 +1859,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
-        conversation_id, title, user_message_id = await asyncio.to_thread(_setup_turn)
+        conversation_id, title, user_message_id, held_media = await asyncio.to_thread(_setup_turn)
         # A new chat gets a model title in parallel with the turn. The setup
         # wizard kickoff has no cut title and gets no model title either.
         title_task = (
@@ -1977,7 +1984,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 # overflow the window; the oldest turns go so the turn can run.
                 history = compaction.fit_history(history, req.user_message, summary, window)
             if media_references:
-                yield {"event": "media_notice", "data": {"reference_ids": [row.id for row in media_references]}}
+                reference_ids = [held_media.get(row.id, row.id) for row in media_references]
+                yield {"event": "media_notice", "data": {"reference_ids": reference_ids}}
             async for event in run_generalist_agent(
                 wizard_state=wizard_state,
                 chat_history=compaction.history_with_summary(summary, history),

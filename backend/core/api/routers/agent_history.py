@@ -351,7 +351,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             DomainError: 404 when unknown, 403 when the caller does not own it,
                 409 when the copies of its files would go over the storage quota,
                 and 409 ``agent.media.changed`` when its files change during the fork.
-        HTTPException: 404 when one of its files is deleted during the fork.
+            HTTPException: 404 when one of its files is deleted during the fork.
         """
         with Session(job_store.engine) as session:
             source = session.get(AgentConversationModel, conversation_id)

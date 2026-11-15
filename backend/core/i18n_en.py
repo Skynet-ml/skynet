@@ -24,7 +24,7 @@ from .brand import APP_NAME
 ENGLISH_MESSAGES: dict[str, str] = {
     "submit.preflight.scorer_model": "Set the model with llm(model=...) in the metric code.",
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
-    "agent.media.changed": "A file in this message changed. Send the message again.",
+    "agent.media.changed": "A file changed while the chat was saving. Try again.",
     "agent.steer_pending_full": "The pending message limit is full. Queue this message instead.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",

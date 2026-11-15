@@ -1626,7 +1626,10 @@ def test_turn_in_another_chat_copies_media_and_leaves_the_source_in_place(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file that another chat holds stays there; the new chat stores its own copy."""
+    """A file that another chat holds stays there; the new chat stores its own copy.
+
+    The model cannot see images, so the notice names the file by the copy's id.
+    """
     client, engine = persistence_client
     _fund(engine)
     _add_media(engine, "img-1", "image")
@@ -1641,7 +1644,7 @@ def test_turn_in_another_chat_copies_media_and_leaves_the_source_in_place(
         session.get(ChatMediaModel, "img-1").conversation_id = "src"
         session.commit()
 
-    resp, _ = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+    resp, _ = _media_turn(client, monkeypatch, ["img-1"], vision=False, persist=True)
 
     assert resp.status_code == 200
     with Session(engine) as session:
@@ -1650,7 +1653,9 @@ def test_turn_in_another_chat_copies_media_and_leaves_the_source_in_place(
         assert copy_id != "img-1"
         assert session.get(ChatMediaModel, "img-1").conversation_id == "src"
         copy = session.get(ChatMediaModel, copy_id)
-        assert (copy.conversation_id, copy.data) == (turn.conversation_id, b"abc")
+        assert (copy.conversation_id, copy.data, copy.filename) == (turn.conversation_id, b"abc", "img-1.bin")
+        assert copy.created_at is not None
+    assert f'"reference_ids": ["{copy_id}"]' in resp.text
 
 
 def test_edit_deletes_the_files_that_only_the_old_turn_named(
