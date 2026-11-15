@@ -12,15 +12,28 @@ URL.createObjectURL = () => `blob:test/${++made}`;
 URL.revokeObjectURL = (url: string) => void revoked.push(url);
 globalThis.fetch = (async () => new Response(new Blob(["x"]))) as typeof fetch;
 
-const { freeChatMediaUrls, localMediaUrl, markMediaSent, resolveChatMediaUrl } = await import("./chat-media");
+const { freeChatMediaUrls, localMediaUrl, markMediaSent, resolveChatMediaUrl } = await import(
+  "./chat-media"
+);
 
 void test("a chat switch frees fetched and sent URLs and keeps draft URLs", async () => {
   const draft = localMediaUrl(new Blob(["d"]));
   const sent = localMediaUrl(new Blob(["s"]));
   markMediaSent([sent]);
-  assert.equal(await resolveChatMediaUrl({ id: "s1", name: "s.png", kind: "image", url: sent }), sent);
-  const first = await resolveChatMediaUrl({ id: "m1", name: "a.png", kind: "image", url: "blob:old/1" });
-  assert.equal(await resolveChatMediaUrl({ id: "m1", name: "a.png", kind: "image", url: "" }), first);
+  assert.equal(
+    await resolveChatMediaUrl({ id: "s1", name: "s.png", kind: "image", url: sent }),
+    sent,
+  );
+  const first = await resolveChatMediaUrl({
+    id: "m1",
+    name: "a.png",
+    kind: "image",
+    url: "blob:old/1",
+  });
+  assert.equal(
+    await resolveChatMediaUrl({ id: "m1", name: "a.png", kind: "image", url: "" }),
+    first,
+  );
   const late = resolveChatMediaUrl({ id: "m2", name: "b.png", kind: "image", url: "" });
 
   freeChatMediaUrls();

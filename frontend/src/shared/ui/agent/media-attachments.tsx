@@ -3,17 +3,15 @@
 import * as React from "react";
 import {
   ArrowClockwise,
-  ArrowsIn,
-  ArrowsOut,
   CaretLeft,
   CaretRight,
-  Check,
-  DotsThree,
+  CircleNotch,
   DownloadSimple,
+  Headphones,
+  MagnifyingGlassMinus,
+  MagnifyingGlassPlus,
   Pause,
   Play,
-  SpeakerHigh,
-  SpeakerSlash,
   WarningCircle,
   X,
 } from "@/shared/ui/icons";
@@ -21,6 +19,11 @@ import {
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { Dialog as DialogPrimitive } from "radix-ui";
+
+import type { FilePreview } from "./file-preview";
+import { TooltipButton } from "@/shared/ui/tooltip-button";
+
+import { FilePage } from "./file-preview-body";
 
 export type MediaKind = "image" | "video" | "audio";
 
@@ -34,6 +37,17 @@ export interface MediaAttachment {
   /** The upload failed, or the stored file could not be fetched. */
   status?: "failed";
 }
+
+/** An attached file the viewer shows as a readable page: code, a table, Markdown or text. */
+export interface ViewerFile {
+  kind: "file";
+  id: string;
+  name: string;
+  preview: FilePreview;
+}
+
+/** One slide of the viewer. */
+export type ViewerItem = MediaAttachment | ViewerFile;
 
 /**
  * Whether a file is a HEIC, HEIF or AVIF photo. The server refuses these, so the chat says so
@@ -88,7 +102,7 @@ export const MediaUrlContext = React.createContext<
  * The media with URLs from the nearest MediaUrlContext. Files whose URL is not
  * ready yet drop out; files whose URL fails come back marked as failed.
  */
-function useResolvedMedia(media: readonly MediaAttachment[]): readonly MediaAttachment[] {
+export function useResolvedMedia(media: readonly MediaAttachment[]): readonly MediaAttachment[] {
   const resolve = React.useContext(MediaUrlContext);
   // An empty string marks a file whose URL could not be resolved.
   const [urls, setUrls] = React.useState<Readonly<Record<string, string>>>({});
@@ -147,10 +161,6 @@ export const TILE = "size-[7.5rem]";
 /** The small label in a tile's bottom start corner: a length or a file type. */
 export const BADGE =
   "pointer-events-none absolute bottom-2 start-2 z-[1] max-w-[calc(100%-1rem)] truncate rounded-md bg-background/90 px-1.5 py-1 text-[11px] font-medium leading-none tabular-nums text-foreground";
-
-/** The round play mark in the middle of a video poster. */
-const PLAY_MARK =
-  "flex size-9 items-center justify-center rounded-full bg-background/90 text-foreground";
 
 /** The X in a tile's top end corner. It shows on hover or focus, and always on touch screens. */
 function RemoveButton({ name, onRemove }: { name: string; onRemove: () => void }) {
@@ -275,7 +285,11 @@ export function TileRow({
   );
 }
 
-/** A video's first frame with a play mark in the middle and the length in the corner. */
+/**
+ * A video's first frame, with a play pill and the length on a bottom shade.
+ * Inside a `group/video` control, hover pushes the frame in a little and
+ * firms the pill, so the tile answers before the click.
+ */
 function VideoPoster({
   media,
   className,
@@ -287,6 +301,7 @@ function VideoPoster({
 }) {
   const PlayIcon = React.useContext(MediaIconsContext).play;
   const [duration, setDuration] = React.useState(NaN);
+  const time = Number.isFinite(duration) ? clock(duration) : "";
   return (
     <>
       {/* #t=0.1 asks the browser for the first frame as the poster. */}
@@ -297,16 +312,22 @@ function VideoPoster({
         preload="metadata"
         tabIndex={-1}
         aria-hidden
-        className={className}
+        className={cn(
+          className,
+          "motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-[var(--ease-snappy)] motion-safe:group-hover/video:scale-[1.04]",
+        )}
+        // Metadata can load before React attaches onLoadedMetadata (after a server render).
+        ref={(el) => {
+          if (el && el.readyState >= 1) setDuration(el.duration);
+        }}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
         onError={onError}
       />
-      <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <span className={PLAY_MARK}>
-          <PlayIcon className="size-4" aria-hidden />
-        </span>
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-linear-to-t from-black/55 to-transparent" />
+      <span className="pointer-events-none absolute bottom-2 start-2 z-[1] flex h-5 items-center gap-1 rounded-full bg-black/55 ps-1.5 pe-2 text-[11px] font-medium leading-none tabular-nums text-white transition-colors duration-150 group-hover/video:bg-black/75">
+        <PlayIcon className="size-3" aria-hidden />
+        {time}
       </span>
-      {Number.isFinite(duration) && <span className={BADGE}>{clock(duration)}</span>}
     </>
   );
 }
@@ -322,6 +343,8 @@ function useAudio(media: MediaAttachment) {
   const [broken, setBroken] = React.useState(false);
   React.useEffect(() => {
     const el = ref.current;
+    // Metadata can load before React attaches onLoadedMetadata (after a server render).
+    if (el && el.readyState >= 1 && Number.isFinite(el.duration)) setDuration(el.duration);
     return () => el?.pause();
   }, []);
   const toggle = () => {
@@ -370,29 +393,29 @@ function useAudio(media: MediaAttachment) {
   return { element, playing, time, duration, broken, toggle, seek };
 }
 
-/** The square play button of an audio card, or a download link when the browser cannot play the file. */
+/** The play button of an audio tile or stage, or a download link when the browser cannot play the file. */
 function AudioButton({
   media,
   audio,
-  tone = "fill",
+  className,
+  iconClassName,
 }: {
   media: MediaAttachment;
   audio: ReturnType<typeof useAudio>;
-  /** "chip" draws the file chip's tinted icon box; "fill" the solid tile button. */
-  tone?: "fill" | "chip";
+  /** The button's size, shape and colors. */
+  className: string;
+  iconClassName: string;
 }) {
   const icons = React.useContext(MediaIconsContext);
   const box = cn(
-    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-[transform,background-color] duration-75 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
-    tone === "chip"
-      ? "rounded-md bg-foreground/5 text-foreground hover:bg-foreground/10"
-      : "bg-primary-fill text-primary-foreground",
+    "flex shrink-0 cursor-pointer items-center justify-center rounded-full transition-[transform,background-color] duration-75 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2",
+    className,
   );
   if (audio.broken) {
     const label = msg("shared.agent.media_download_name", { name: media.name });
     return (
       <a href={media.url} download={media.name} aria-label={label} title={label} className={box}>
-        <icons.download className="size-4" aria-hidden />
+        <icons.download className={iconClassName} aria-hidden />
       </a>
     );
   }
@@ -402,86 +425,125 @@ function AudioButton({
   });
   return (
     <button type="button" onClick={audio.toggle} aria-label={label} title={label} className={box}>
-      <Icon className="size-4" aria-hidden />
+      {/* The new key replays the entrance, so play and pause swap with a short fade and grow. */}
+      <Icon
+        key={audio.playing ? "pause" : "play"}
+        className={cn(iconClassName, "animate-in fade-in-0 duration-150 motion-safe:zoom-in-75")}
+        aria-hidden
+      />
     </button>
   );
 }
 
-/** What an audio card shows as its time: the played time once it plays, else the length. */
+/** What an audio tile shows as its time: the played time once it plays, else the length. */
 function audioClock(audio: ReturnType<typeof useAudio>): string {
   if (audio.playing || audio.time) return clock(audio.time);
   return Number.isFinite(audio.duration) ? clock(audio.duration) : "";
 }
 
-/** Audio in the composer: a 120px tile with the name, play in the middle and the length. */
+/** A stable bar pattern for a clip's waveform, from its name: 0.25..1 per bar. */
+function waveBars(name: string, count = 20): number[] {
+  let seed = 0;
+  for (const c of name) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return Array.from({ length: count }, (_, i) => {
+    const x = Math.sin((seed % 1000) + i * 1.7) * 10000;
+    return 0.25 + 0.75 * (x - Math.floor(x));
+  });
+}
+
+/**
+ * A clip's waveform that fills as it plays; a press seeks. The bar under the
+ * playhead stands a little taller, so the eye finds the place. Hover tints the
+ * bars up to the pointer, to show where a press will seek.
+ */
+function Waveform({
+  name,
+  audio,
+  count,
+  tones,
+  className,
+}: {
+  name: string;
+  audio: ReturnType<typeof useAudio>;
+  count: number;
+  /** The color classes of played bars, bars up to the pointer, and the rest. */
+  tones: { played: string; aim: string; rest: string };
+  className: string;
+}) {
+  const bars = React.useMemo(() => waveBars(name, count), [name, count]);
+  const [aim, setAim] = React.useState<number | null>(null);
+  const progress =
+    Number.isFinite(audio.duration) && audio.duration > 0
+      ? Math.min(1, audio.time / audio.duration)
+      : 0;
+  const head = audio.playing ? Math.min(bars.length - 1, Math.floor(progress * bars.length)) : -1;
+  return (
+    <span
+      aria-hidden
+      className={cn("flex cursor-pointer items-center", className)}
+      onPointerDown={(e) => audio.seek(fractionAt(e))}
+      onPointerMove={(e) => setAim(fractionAt(e))}
+      onPointerLeave={() => setAim(null)}
+    >
+      {bars.map((h, i) => {
+        const at = (i + 0.5) / bars.length;
+        return (
+          <span
+            key={i}
+            className={cn(
+              "h-[var(--bar)] min-w-0 flex-1 rounded-full transition-colors duration-150",
+              "motion-safe:transition-[background-color,transform] motion-safe:ease-[var(--ease-snappy)]",
+              at <= progress ? tones.played : aim !== null && at <= aim ? tones.aim : tones.rest,
+              i === head && "motion-safe:scale-y-[1.25]",
+            )}
+            style={{ "--bar": `${Math.round(h * 100)}%` } as React.CSSProperties}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+/** Audio as a 120px tile: the name, a waveform that fills as the clip plays, and play with the time. */
 function AudioTile({ media }: { media: MediaAttachment }) {
   const audio = useAudio(media);
-  const time = audioClock(audio);
   return (
-    <div className={cn(CARD, TILE, "flex flex-col bg-card p-2 hover:border-border")}>
+    <div className={cn(CARD, TILE, "flex flex-col gap-1.5 bg-card p-2.5 hover:border-border")}>
       {audio.element}
       <span
         dir="auto"
         title={media.name}
-        className="line-clamp-2 break-words text-xs leading-tight text-muted-foreground"
+        className="truncate text-xs leading-tight text-foreground"
       >
         {media.name}
       </span>
-      <span className="flex flex-1 items-center justify-center">
-        <AudioButton media={media} audio={audio} />
-      </span>
-      {time && <span className={cn(BADGE, "bg-muted")}>{time}</span>}
-    </div>
-  );
-}
-
-/**
- * Audio in a sent message, in the file chip's language: the tinted play box,
- * the name over a thin seek line, and the played time against the length.
- */
-function AudioCard({ media }: { media: MediaAttachment }) {
-  const audio = useAudio(media);
-  const known = Number.isFinite(audio.duration);
-  const progress = known && audio.duration > 0 ? Math.min(1, audio.time / audio.duration) : 0;
-  return (
-    <div
-      data-audio-card=""
-      className="flex h-12 w-64 max-w-full items-center gap-2 rounded-lg bg-muted ps-1.5 pe-3 text-muted-foreground"
-    >
-      {audio.element}
-      <AudioButton media={media} audio={audio} tone="chip" />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
+      <Waveform
+        name={media.name}
+        audio={audio}
+        count={20}
+        tones={{ played: "bg-primary", aim: "bg-primary/35", rest: "bg-foreground/20" }}
+        className="min-h-0 flex-1 gap-[2px]"
+      />
+      <span className="flex items-center justify-between">
+        <AudioButton
+          media={media}
+          audio={audio}
+          className="size-7 bg-primary-fill text-primary-foreground focus-visible:ring-primary/40"
+          iconClassName="size-3.5"
+        />
         <span
-          dir="auto"
-          title={media.name}
-          className="truncate text-sm leading-tight text-foreground"
+          data-audio-time=""
+          className="text-[11px] leading-none tabular-nums text-muted-foreground"
         >
-          {media.name}
+          {audioClock(audio)}
         </span>
-        <div className="flex items-center gap-2">
-          <span
-            aria-hidden
-            className="-my-1.5 flex flex-1 cursor-pointer items-center py-1.5"
-            onPointerDown={(e) => audio.seek(fractionAt(e))}
-          >
-            <span className="relative h-0.5 w-full overflow-hidden rounded-full bg-foreground/10">
-              <span
-                className="absolute inset-y-0 start-0 rounded-full bg-foreground/60"
-                style={{ width: `${progress * 100}%` }}
-              />
-            </span>
-          </span>
-          <span data-audio-time="" className="shrink-0 text-[11px] tabular-nums">
-            {known ? `${clock(audio.time)} / ${clock(audio.duration)}` : clock(audio.time)}
-          </span>
-        </div>
-      </div>
+      </span>
     </div>
   );
 }
 
 /** A media file that did not load: a tile in the danger tint, never a broken image icon. */
-function FailedTile({ media, className }: { media: MediaAttachment; className?: string }) {
+export function FailedTile({ media, className }: { media: MediaAttachment; className?: string }) {
   const Warning = React.useContext(MediaIconsContext).failed;
   return (
     <span
@@ -534,6 +596,11 @@ function DraftImage({ media, onOpen }: { media: MediaAttachment; onOpen: OpenHan
         src={media.url}
         alt=""
         draggable={false}
+        // A cached image can finish before React attaches onLoad (after a
+        // server render), so a mounted image that is already done counts too.
+        ref={(el) => {
+          if (el?.complete) setState(el.naturalWidth ? "loaded" : "error");
+        }}
         onLoad={() => setState("loaded")}
         onError={() => setState("error")}
         className={cn(
@@ -546,10 +613,10 @@ function DraftImage({ media, onOpen }: { media: MediaAttachment; onOpen: OpenHan
 }
 
 /** Opens the viewer; the control that fires it gets the focus back when the viewer closes. */
-type OpenHandler = (e: React.MouseEvent<HTMLElement>) => void;
+export type OpenHandler = (e: React.MouseEvent<HTMLElement>) => void;
 
 /** One media file in the composer row: a 120px tile with the remove X. */
-function DraftTile({
+export function DraftTile({
   media,
   onOpen,
   onRemove,
@@ -568,7 +635,7 @@ function DraftTile({
           onClick={onOpen}
           aria-label={msg("shared.agent.media_play_video", { name: media.name })}
           title={media.name}
-          className={cn(CARD, TILE, "flex cursor-pointer")}
+          className={cn(CARD, TILE, "group/video flex cursor-pointer")}
         >
           <VideoPoster media={media} className="size-full object-cover" />
         </button>
@@ -584,79 +651,44 @@ function DraftTile({
   );
 }
 
-/**
- * One media file in a sent message, in its own shape. One image or video
- * alone may stand 320px tall; several share the line at up to 240 by 160px.
- * A file that does not load shows the failed tile.
- */
-function SentItem({
-  media,
-  alone,
-  onOpen,
-}: {
-  media: MediaAttachment;
-  alone: boolean;
-  onOpen: OpenHandler;
-}) {
-  const [broken, setBroken] = React.useState(false);
-  if (media.kind === "audio")
-    return (
-      <li className="max-w-full">
-        <AudioCard media={media} />
-      </li>
-    );
-  if (broken || media.status === "failed")
-    return (
-      <li>
-        <FailedTile media={media} />
-      </li>
-    );
-  const fit = cn(
-    "block h-auto w-auto max-w-full",
-    alone ? "max-h-80 min-h-[7.5rem] min-w-[7.5rem] object-cover" : "max-h-40",
-  );
-  return (
-    <li className={alone ? "max-w-full" : "max-w-[min(100%,240px,calc(50%-0.25rem))]"}>
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={msg(
-          media.kind === "video" ? "shared.agent.media_play_video" : "shared.agent.media_open",
-          { name: media.name },
-        )}
-        title={media.name}
-        className={cn(
-          CARD,
-          "flex max-w-full rounded-lg",
-          media.kind === "image" ? "cursor-zoom-in" : "cursor-pointer",
-        )}
-      >
-        {media.kind === "image" ? (
-          <img
-            src={media.url}
-            alt=""
-            draggable={false}
-            onError={() => setBroken(true)}
-            className={fit}
-          />
-        ) : (
-          <VideoPoster media={media} className={fit} onError={() => setBroken(true)} />
-        )}
-      </button>
-    </li>
-  );
-}
-
-const VIEWER_IMAGE = "max-h-[70vh] max-w-full select-none rounded-2xl object-contain";
+/** Images fill the viewer stage, so every item opens at the same size, as WhatsApp does. */
+const VIEWER_IMAGE = "size-full select-none object-contain";
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
 
-/** A zoomable, pannable image: Ctrl or Cmd with the wheel zooms, a pinch zooms, a drag pans, a double click resets. */
-function ZoomImage({ src, alt, onError }: { src: string; alt: string; onError: () => void }) {
-  const [view, setView] = React.useState({ zoom: 1, x: 0, y: 0 });
+/** The zoom levels the viewer's zoom buttons step through. */
+const ZOOM_STEP = 1.5;
+
+/** Clamp a zoom level to the range the viewer allows. */
+function clampZoom(zoom: number): number {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+}
+
+/**
+ * A zoomable, pannable image, as WhatsApp's viewer: a click zooms in at the
+ * pointer and a second click zooms out, a drag pans, and Ctrl or Cmd with the
+ * wheel or a pinch zooms. The viewer owns the zoom level, so its header
+ * buttons and the image agree.
+ */
+function ZoomImage({
+  src,
+  alt,
+  zoom,
+  onZoom,
+  onError,
+}: {
+  src: string;
+  alt: string;
+  zoom: number;
+  onZoom: (zoom: number) => void;
+  onError: () => void;
+}) {
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
   const [loaded, setLoaded] = React.useState(false);
-  const drag = React.useRef<{ x: number; y: number } | null>(null);
+  const drag = React.useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const ref = React.useRef<HTMLDivElement | null>(null);
+  const [panning, setPanning] = React.useState(false);
+  if (zoom === 1 && (pan.x || pan.y)) setPan({ x: 0, y: 0 });
   // React's onWheel is passive, so preventDefault (no page zoom) needs a native listener.
   React.useEffect(() => {
     const el = ref.current;
@@ -665,47 +697,71 @@ function ZoomImage({ src, alt, onError }: { src: string; alt: string; onError: (
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       // Codex's ramp: each wheel unit scales by exp(-delta / 200).
-      setView((v) => {
-        const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY / 200)));
-        return zoom === 1 ? { zoom, x: 0, y: 0 } : { ...v, zoom };
-      });
+      onZoom(clampZoom(zoom * Math.exp(-e.deltaY / 200)));
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [zoom, onZoom]);
   return (
     <div
       ref={ref}
       className={cn(
-        "flex size-full items-center justify-center overflow-hidden",
-        view.zoom > 1 && "cursor-grab active:cursor-grabbing",
+        "flex size-full touch-none items-center justify-center overflow-hidden",
+        zoom > 1 ? "cursor-grab active:cursor-grabbing" : "cursor-zoom-in",
       )}
       onPointerDown={(e) => {
-        if (view.zoom === 1) return;
+        if (e.button !== 0) return;
         e.currentTarget.setPointerCapture(e.pointerId);
-        drag.current = { x: e.clientX - view.x, y: e.clientY - view.y };
+        drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y, moved: false };
       }}
       onPointerMove={(e) => {
         const start = drag.current;
-        if (start) setView((v) => ({ ...v, x: e.clientX - start.x, y: e.clientY - start.y }));
+        if (!start || zoom === 1) return;
+        const x = e.clientX - start.x;
+        const y = e.clientY - start.y;
+        // A few pixels of jitter is still a click, not a pan.
+        if (!start.moved && Math.hypot(x - pan.x, y - pan.y) < 4) return;
+        start.moved = true;
+        setPanning(true);
+        setPan({ x, y });
       }}
-      onPointerUp={() => (drag.current = null)}
-      onDoubleClick={() =>
-        setView((v) => (v.zoom === 1 ? { zoom: 2, x: 0, y: 0 } : { zoom: 1, x: 0, y: 0 }))
-      }
+      onPointerUp={(e) => {
+        const start = drag.current;
+        drag.current = null;
+        setPanning(false);
+        if (!start || start.moved) return;
+        if (zoom > 1) return onZoom(1);
+        // Zoom in on the clicked point: move it toward the center as the image grows.
+        const box = e.currentTarget.getBoundingClientRect();
+        const next = 2.5;
+        setPan({
+          x: (box.left + box.width / 2 - e.clientX) * (next - 1),
+          y: (box.top + box.height / 2 - e.clientY) * (next - 1),
+        });
+        onZoom(next);
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
+        setPanning(false);
+      }}
     >
       <img
         src={src}
         alt={alt}
         draggable={false}
+        // The same cached-image case as the composer tile.
+        ref={(el) => {
+          if (el?.complete && el.naturalWidth) setLoaded(true);
+        }}
         onLoad={() => setLoaded(true)}
         onError={onError}
         className={cn(
           VIEWER_IMAGE,
-          "motion-safe:transition-opacity motion-safe:duration-150",
+          "motion-safe:transition-[opacity,transform] motion-safe:duration-200 motion-safe:ease-[var(--ease-snappy)]",
+          panning && "motion-safe:transition-none",
           !loaded && "opacity-0",
         )}
-        style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
+        style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
       />
     </div>
   );
@@ -783,34 +839,42 @@ function Scrub({
   );
 }
 
-const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+// WhatsApp's speed button cycles through these three rates, one step for each tap.
+const SPEEDS = [1, 1.5, 2];
 // Codex hides the overlay controls after 2.5 seconds without a pointer move, a press or a key.
 const CONTROLS_IDLE_MS = 2500;
 const SEEK_STEP_S = 5;
+// A press on the video held this long plays it at 2× until the release, as in WhatsApp.
+const HOLD_MS = 300;
+const HOLD_RATE = 2;
 
 /**
- * Codex's video player: a click or Space plays, a center play button shows while
- * paused, and a bottom bar has play, the timeline, the time, volume, speed and
- * fullscreen. The bar hides while the clip plays and the pointer rests.
+ * The viewer's video player, as WhatsApp's: a click or Space plays, a center
+ * button plays while paused and replays at the end, a press held on the clip
+ * plays it at 2×, and a spinner shows while the clip buffers. A floating glass
+ * bar holds play, the elapsed time, the timeline, the time left and a speed
+ * button that steps 1×, 1.5× and 2×. The time shows while the
+ * pointer is on the bar. The bar hides while the clip plays and the pointer rests.
  */
 function VideoPlayer({ src, name, onError }: { src: string; name: string; onError: () => void }) {
   const icons = React.useContext(MediaIconsContext);
   const box = React.useRef<HTMLDivElement | null>(null);
   const ref = React.useRef<HTMLVideoElement | null>(null);
   const grab = React.useRef<{ wasPlaying: boolean } | null>(null);
+  const hold = React.useRef<{ timer: number; on: boolean } | null>(null);
+  const skipClick = React.useRef(false);
   const [playing, setPlaying] = React.useState(false);
   const [time, setTime] = React.useState(0);
   const [duration, setDuration] = React.useState(0);
-  const [volume, setVolume] = React.useState(1);
-  const [muted, setMuted] = React.useState(false);
   const [rate, setRate] = React.useState(1);
-  const [menu, setMenu] = React.useState<"volume" | "speed" | null>(null);
   const [idle, setIdle] = React.useState(false);
-  const [full, setFull] = React.useState(false);
+  const [holding, setHolding] = React.useState(false);
+  const [ended, setEnded] = React.useState(false);
+  const [waiting, setWaiting] = React.useState(false);
 
   React.useEffect(() => {
     const el = box.current;
-    if (!el || !playing || menu) return;
+    if (!el || !playing) return;
     let timer = window.setTimeout(() => setIdle(true), CONTROLS_IDLE_MS);
     const wake = () => {
       setIdle(false);
@@ -823,22 +887,13 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
       for (const type of ["pointermove", "pointerdown", "keydown"])
         el.removeEventListener(type, wake);
     };
-  }, [playing, menu]);
+  }, [playing]);
 
-  React.useEffect(() => {
-    const onChange = () => {
-      const on = document.fullscreenElement === box.current;
-      setFull(on);
-      if (on) ref.current?.focus();
-    };
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
+  React.useEffect(() => () => window.clearTimeout(hold.current?.timer), []);
 
   const toggle = () => {
     const el = ref.current;
     if (!el) return;
-    setMenu(null);
     if (el.paused) void el.play().catch(() => undefined);
     else el.pause();
   };
@@ -848,37 +903,53 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
     el.currentTime = Math.max(0, Math.min(duration, t));
     setTime(el.currentTime);
   };
-  const toggleFull = () => {
-    const el = box.current;
-    if (!el) return;
-    void (
-      document.fullscreenElement === el ? document.exitFullscreen() : el.requestFullscreen()
-    ).catch(() => undefined);
+  const nextSpeed = () => {
+    const next = SPEEDS[(SPEEDS.indexOf(rate) + 1) % SPEEDS.length] ?? 1;
+    setRate(next);
+    if (ref.current && !hold.current?.on) ref.current.playbackRate = next;
+  };
+  const startHold = (e: React.PointerEvent<HTMLVideoElement>) => {
+    const el = e.currentTarget;
+    if (e.button !== 0 || el.paused) return;
+    window.clearTimeout(hold.current?.timer);
+    hold.current = {
+      on: false,
+      timer: window.setTimeout(() => {
+        if (!hold.current) return;
+        hold.current.on = true;
+        el.playbackRate = HOLD_RATE;
+        setHolding(true);
+      }, HOLD_MS),
+    };
+  };
+  const endHold = () => {
+    const held = hold.current;
+    if (!held) return;
+    hold.current = null;
+    window.clearTimeout(held.timer);
+    if (!held.on) return;
+    // The release of a hold is not a click: the clip keeps playing at its own speed.
+    skipClick.current = true;
+    if (ref.current) ref.current.playbackRate = rate;
+    setHolding(false);
   };
   const progress = `${clock(time)} / ${clock(duration)}`;
   const Icon = playing ? icons.pause : icons.play;
-  const Volume = muted || volume === 0 ? SpeakerSlash : SpeakerHigh;
-  const Full = full ? ArrowsIn : ArrowsOut;
   const playLabel = msg(playing ? "shared.agent.media_pause" : "shared.agent.media_play", { name });
+  const Center = ended ? ArrowClockwise : icons.play;
+  const centerLabel = ended ? msg("shared.agent.media_replay", { name }) : playLabel;
   const tool =
-    "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60";
-  const hidden = playing && idle && !menu;
+    "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-white/85 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60";
+  const label =
+    "w-10 shrink-0 text-center text-xs tabular-nums text-white/80 opacity-0 transition-opacity duration-150 group-hover/bar:opacity-100 group-focus-within/bar:opacity-100";
+  const hidden = playing && (idle || holding);
   return (
     <div
       ref={box}
       className={cn(
-        "relative flex max-w-full overflow-hidden rounded-2xl bg-black",
-        hidden && "cursor-none",
+        "relative flex h-full max-w-full overflow-hidden bg-black",
+        hidden && !holding && "cursor-none",
       )}
-      onKeyDown={(e) => {
-        // Esc leaves fullscreen first, so it does not also close the viewer.
-        if (e.key === "Escape" && (menu || document.fullscreenElement === e.currentTarget)) {
-          e.preventDefault();
-          e.stopPropagation();
-          if (menu) setMenu(null);
-          else toggleFull();
-        }
-      }}
     >
       <video
         ref={ref}
@@ -888,11 +959,16 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
         tabIndex={0}
         aria-label={name}
         onError={onError}
-        className={cn(
-          "block max-w-full cursor-pointer object-contain focus-visible:outline-none",
-          full ? "size-full" : "max-h-[70vh]",
-        )}
-        onClick={toggle}
+        className="block h-full w-auto max-w-full cursor-pointer object-contain focus-visible:outline-none"
+        onClick={() => {
+          if (skipClick.current) skipClick.current = false;
+          else toggle();
+        }}
+        onPointerDown={startHold}
+        onPointerUp={endHold}
+        onPointerCancel={endHold}
+        onPointerLeave={endHold}
+        onContextMenu={(e) => hold.current?.on && e.preventDefault()}
         onKeyDown={(e) => {
           if (e.key !== " " && e.key !== "Enter") return;
           e.preventDefault();
@@ -904,44 +980,56 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
         onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
         onPlay={() => {
           setIdle(false);
+          setEnded(false);
           setPlaying(true);
         }}
-        onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
-        onVolumeChange={(e) => {
-          setVolume(e.currentTarget.volume);
-          setMuted(e.currentTarget.muted);
+        onPause={() => {
+          endHold();
+          setPlaying(false);
         }}
-        onRateChange={(e) => setRate(e.currentTarget.playbackRate)}
+        onEnded={() => {
+          setPlaying(false);
+          setEnded(true);
+        }}
+        onWaiting={() => setWaiting(true)}
+        onPlaying={() => setWaiting(false)}
+        onCanPlay={() => setWaiting(false)}
       />
+      {playing && waiting && (
+        <span
+          role="status"
+          aria-label={msg("shared.agent.media_buffering", { name })}
+          className="pointer-events-none absolute left-1/2 top-1/2 flex size-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/55 text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:delay-300 motion-safe:fill-mode-backwards"
+        >
+          <CircleNotch className="size-7 motion-safe:animate-spin" aria-hidden />
+        </span>
+      )}
       {!playing && (
         <button
           type="button"
           onClick={toggle}
-          aria-label={playLabel}
-          title={playLabel}
-          className="absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-sm transition-transform duration-75 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+          aria-label={centerLabel}
+          className="absolute left-1/2 top-1/2 flex size-16 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white transition-[transform,background-color] duration-150 hover:bg-black/70 active:scale-[0.97] motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-90 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
         >
-          <icons.play className="size-5" aria-hidden />
+          <Center className={cn("size-7", !ended && "translate-x-px")} aria-hidden />
         </button>
       )}
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 flex items-center gap-1 bg-black/75 px-1.5 text-white transition-opacity duration-150",
+          "group/bar absolute inset-x-3 bottom-3 mx-auto flex max-w-xl items-center gap-0.5 rounded-full bg-neutral-800/70 p-1 text-white shadow-[var(--shadow-float)] ring-1 ring-white/10 backdrop-blur-md transition-opacity duration-200",
           hidden && "pointer-events-none opacity-0",
         )}
       >
-        <button
-          type="button"
-          onClick={toggle}
-          aria-label={playLabel}
-          title={playLabel}
-          className={tool}
-        >
-          <Icon className="size-4" aria-hidden />
-        </button>
+        <TooltipButton tooltip={playLabel} side="top">
+          <button type="button" onClick={toggle} aria-label={playLabel} className={tool}>
+            <Icon className="size-4" aria-hidden />
+          </button>
+        </TooltipButton>
+        <span dir="ltr" className={label}>
+          {clock(time)}
+        </span>
         <Scrub
-          className="flex-1 px-1"
+          className="flex-1"
           label={msg("shared.agent.media_seek")}
           valueText={progress}
           value={Math.min(time, duration)}
@@ -969,119 +1057,162 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
             if (held?.wasPlaying) void ref.current?.play().catch(() => undefined);
           }}
         />
-        <span
-          dir="ltr"
-          className="shrink-0 px-1 text-xs whitespace-nowrap tabular-nums text-white/70"
-        >
-          {progress}
+        <span dir="ltr" className={label}>
+          {`-${clock(Math.max(0, duration - time))}`}
         </span>
-        <div className="relative">
+        <TooltipButton tooltip={msg("shared.agent.media_speed")} side="top">
           <button
             type="button"
-            onClick={() => setMenu((m) => (m === "volume" ? null : "volume"))}
-            aria-label={msg("shared.agent.media_volume")}
-            aria-expanded={menu === "volume"}
-            title={msg("shared.agent.media_volume")}
-            className={tool}
+            onClick={nextSpeed}
+            aria-label={`${msg("shared.agent.media_speed")}: ${rate}×`}
+            className={cn(tool, "w-10 text-xs font-medium tabular-nums")}
           >
-            <Volume className="size-4" aria-hidden />
+            {`${rate}×`}
           </button>
-          {menu === "volume" && (
-            <div className="absolute end-0 bottom-full mb-2 flex w-40 items-center gap-2 rounded-xl bg-black/85 p-1.5 shadow-[var(--shadow-float)]">
-              <button
-                type="button"
-                onClick={() => ref.current && (ref.current.muted = !ref.current.muted)}
-                aria-label={msg("shared.agent.media_mute")}
-                aria-pressed={muted}
-                className={tool}
-              >
-                <Volume className="size-4" aria-hidden />
-              </button>
-              <Scrub
-                className="flex-1 pe-1"
-                label={msg("shared.agent.media_volume")}
-                valueText={`${Math.round((muted ? 0 : volume) * 100)}%`}
-                value={muted ? 0 : volume}
-                max={1}
-                onChange={(v) => {
-                  const el = ref.current;
-                  if (!el) return;
-                  el.volume = v;
-                  el.muted = false;
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const el = ref.current;
-                  if (!el) return;
-                  el.volume = Math.max(
-                    0,
-                    Math.min(1, el.volume + (e.key === "ArrowRight" ? 0.1 : -0.1)),
-                  );
-                  el.muted = false;
-                }}
-              />
-            </div>
-          )}
-        </div>
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setMenu((m) => (m === "speed" ? null : "speed"))}
-            aria-label={msg("shared.agent.media_options")}
-            aria-expanded={menu === "speed"}
-            title={msg("shared.agent.media_options")}
-            className={tool}
-          >
-            <DotsThree className="size-4" aria-hidden />
-          </button>
-          {menu === "speed" && (
-            <div
-              role="radiogroup"
-              aria-label={msg("shared.agent.media_speed")}
-              className="absolute end-0 bottom-full mb-2 flex w-36 flex-col rounded-xl bg-black/85 p-1 shadow-[var(--shadow-float)]"
-            >
-              <span className="px-2 pt-1 pb-1.5 text-[11px] text-white/60">
-                {msg("shared.agent.media_speed")}
-              </span>
-              {SPEEDS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  role="radio"
-                  aria-checked={rate === s}
-                  onClick={() => {
-                    if (ref.current) ref.current.playbackRate = s;
-                    setMenu(null);
-                  }}
-                  className="flex h-7 cursor-pointer items-center justify-between rounded-md px-2 text-xs tabular-nums hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
-                >
-                  {`${s}×`}
-                  {rate === s && <Check className="size-3.5" aria-hidden />}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={toggleFull}
-          aria-label={msg(
-            full ? "shared.agent.media_exit_fullscreen" : "shared.agent.media_fullscreen",
-          )}
-          title={msg(full ? "shared.agent.media_exit_fullscreen" : "shared.agent.media_fullscreen")}
-          className={tool}
-        >
-          <Full className="size-4" aria-hidden />
-        </button>
+        </TooltipButton>
       </div>
     </div>
   );
 }
 
-/** The open file in the viewer. A file that fails to load says so and offers Try again. */
-function CurrentSlide({ media }: { media: MediaAttachment }) {
+/** A file in the viewer, drawn the way its own app shows it. */
+function FileSlide({ file }: { file: ViewerFile }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <FilePage name={file.name} preview={file.preview} />
+    </div>
+  );
+}
+
+/**
+ * Audio in the viewer, as WhatsApp shows an audio file: a round audio mark on
+ * the dark stage, a large waveform that seeks, the played time and the length
+ * at its two ends, and one round play button.
+ */
+function AudioSlide({ media }: { media: MediaAttachment }) {
+  const audio = useAudio(media);
+  return (
+    <div className="flex h-full w-full max-w-xl flex-col items-center justify-center gap-8 text-white">
+      {audio.element}
+      <span className="flex size-28 items-center justify-center rounded-full bg-white/10 text-white/80">
+        <Headphones className="size-12" aria-hidden />
+      </span>
+      <div className="flex w-full flex-col gap-2">
+        <Waveform
+          name={media.name}
+          audio={audio}
+          count={48}
+          tones={{ played: "bg-white", aim: "bg-white/50", rest: "bg-white/25" }}
+          className="h-16 w-full gap-1"
+        />
+        <span
+          data-audio-time=""
+          dir="ltr"
+          className="flex justify-between text-xs tabular-nums text-white/70"
+        >
+          <span>{clock(audio.time)}</span>
+          <span>{Number.isFinite(audio.duration) ? clock(audio.duration) : ""}</span>
+        </span>
+      </div>
+      <AudioButton
+        media={media}
+        audio={audio}
+        className="size-14 bg-white text-black hover:bg-white/90 focus-visible:ring-white/60"
+        iconClassName="size-6"
+      />
+    </div>
+  );
+}
+
+/** A slide next to the open one: a still preview that loads nothing heavy. */
+function NeighbourSlide({ item }: { item: ViewerItem }) {
+  if (item.kind === "file") return <FileSlide file={item} />;
+  if (item.kind === "audio") return <AudioSlide media={item} />;
+  if (item.kind === "image")
+    return <img src={item.url} alt="" draggable={false} className={VIEWER_IMAGE} />;
+  return (
+    <video
+      src={`${item.url}#t=0.1`}
+      muted
+      preload="metadata"
+      className="h-full w-auto max-w-full object-contain"
+    />
+  );
+}
+
+/** A file's extension in capitals, as a label: "PY", "MP4". */
+function extLabel(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toUpperCase() : "";
+}
+
+/** A small square preview of a viewer item, for the header and the strip. */
+function Thumb({ item, className }: { item: ViewerItem; className: string }) {
+  const box = cn(
+    "relative flex shrink-0 items-center justify-center overflow-hidden rounded-md bg-white/10 text-white/80",
+    className,
+  );
+  if (item.kind === "image")
+    return (
+      <span className={box}>
+        <img
+          src={item.url}
+          alt=""
+          loading="lazy"
+          draggable={false}
+          className="size-full object-cover"
+        />
+      </span>
+    );
+  if (item.kind === "video")
+    return (
+      <span className={box}>
+        <video
+          src={`${item.url}#t=0.1`}
+          muted
+          playsInline
+          preload="metadata"
+          tabIndex={-1}
+          aria-hidden
+          className="size-full object-cover"
+        />
+        <Play
+          weight="fill"
+          className="absolute start-1 bottom-1 size-2.5 drop-shadow"
+          aria-hidden
+        />
+      </span>
+    );
+  if (item.kind === "audio")
+    return (
+      <span className={cn(box, "gap-px px-2")}>
+        {waveBars(item.name, 7).map((h, i) => (
+          <span
+            key={i}
+            className="w-0.5 rounded-full bg-current"
+            style={{ height: `${h * 50}%` }}
+          />
+        ))}
+      </span>
+    );
+  return <span className={cn(box, "text-[9px] font-semibold")}>{extLabel(item.name)}</span>;
+}
+
+/** The open item in the viewer. Media that fails to load says so and offers Try again. */
+function CurrentSlide({ item, zoom }: { item: ViewerItem; zoom: ViewerZoom }) {
+  if (item.kind === "file") return <FileSlide file={item} />;
+  if (item.kind === "audio") return <AudioSlide media={item} />;
+  return <MediaSlide media={item} zoom={zoom} />;
+}
+
+/** The open image's zoom level, which the viewer header also sets. */
+interface ViewerZoom {
+  value: number;
+  set: (zoom: number) => void;
+}
+
+/** The open image or video. A file that fails to load says so and offers Try again. */
+function MediaSlide({ media, zoom }: { media: MediaAttachment; zoom: ViewerZoom }) {
   const Retry = React.useContext(MediaIconsContext).retry;
   const [attempt, setAttempt] = React.useState(0);
   const [failed, setFailed] = React.useState(false);
@@ -1111,6 +1242,8 @@ function CurrentSlide({ media }: { media: MediaAttachment }) {
       key={`${media.id}-${attempt}`}
       src={media.url}
       alt={media.name}
+      zoom={zoom.value}
+      onZoom={zoom.set}
       onError={() => setFailed(true)}
     />
   ) : (
@@ -1123,16 +1256,16 @@ function CurrentSlide({ media }: { media: MediaAttachment }) {
   );
 }
 
-const SLIDE_GAP_PX = 32;
-const SLIDE_VW = 75;
 const VIEWER_FADE =
   "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 duration-150 motion-reduce:animate-none";
 
 /**
- * Claude's lightbox: the media floats on a dark backdrop with no card. The
- * slides sit side by side and slide into place. Close and download sit at the
- * top end; previous, "n of total" and next sit at the bottom. The arrow keys,
- * Home and End move between files, mirrored in RTL, and stop at the ends.
+ * WhatsApp's media viewer: a dark backdrop with one stage, the same size for
+ * every item; an image, a video, an audio panel or a file page fills it. The
+ * header shows the item, its type and "n of total", with download and close
+ * at the end. Previous and next sit at the sides, and a strip of thumbnails
+ * at the bottom jumps to any item. The slides slide into place. The arrow
+ * keys, Home and End move between items, mirrored in RTL, and stop at the ends.
  */
 export function MediaViewer({
   media,
@@ -1141,7 +1274,7 @@ export function MediaViewer({
   onClose,
   returnFocus,
 }: {
-  media: readonly MediaAttachment[];
+  media: readonly ViewerItem[];
   index: number | null;
   onIndex: (i: number) => void;
   onClose: () => void;
@@ -1149,7 +1282,24 @@ export function MediaViewer({
   returnFocus?: React.RefObject<HTMLElement | null>;
 }) {
   const icons = React.useContext(MediaIconsContext);
+  const strip = React.useRef<HTMLDivElement | null>(null);
+  const [zoom, setZoom] = React.useState({ index, value: 1 });
   const item = index === null ? null : media[index];
+  // Each item opens at its fitted size.
+  const zoomValue = zoom.index === index ? zoom.value : 1;
+  const setZoomValue = React.useCallback((value: number) => setZoom({ index, value }), [index]);
+  React.useEffect(() => {
+    // The strip keeps the open item's thumbnail centred as the viewer pages. It scrolls
+    // only itself: scrollIntoView would also scroll the overflow-hidden dialog sideways.
+    const row = strip.current;
+    const thumb = row?.querySelector<HTMLElement>("[aria-current]");
+    if (!row || !thumb) return;
+    const delta =
+      thumb.getBoundingClientRect().left +
+      thumb.offsetWidth / 2 -
+      (row.getBoundingClientRect().left + row.clientWidth / 2);
+    row.scrollBy?.({ left: delta, behavior: "smooth" });
+  }, [index]);
   const last = media.length - 1;
   const go = (i: number) => {
     if (index !== null && i >= 0 && i <= last && i !== index) onIndex(i);
@@ -1162,19 +1312,27 @@ export function MediaViewer({
     "pointer-events-auto flex size-8 cursor-pointer items-center justify-center rounded-full text-white/70 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60";
   const arrow = (enabled: boolean) =>
     cn(
-      "pointer-events-auto flex rounded-lg p-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
-      enabled ? "cursor-pointer text-white hover:bg-white/10" : "cursor-default text-white/30",
+      "absolute top-1/2 z-20 flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 transition-[opacity,background-color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+      enabled
+        ? "cursor-pointer text-white hover:bg-white/20"
+        : "cursor-default text-white/30 opacity-0 focus-visible:opacity-100",
     );
+  const many = media.length > 1;
   return (
     <DialogPrimitive.Root open={item !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className={cn("fixed inset-0 z-50 bg-black/80", VIEWER_FADE)} />
+        <DialogPrimitive.Overlay className={cn("fixed inset-0 z-50 bg-black/95", VIEWER_FADE)} />
         <DialogPrimitive.Content
           className={cn(
             "fixed inset-0 z-50 flex items-center overflow-hidden outline-none",
             VIEWER_FADE,
             "data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95",
           )}
+          onOpenAutoFocus={(e) => {
+            // Focus on the first tool would open its tooltip, and Escape would close only that.
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).focus();
+          }}
           onCloseAutoFocus={(e) => {
             // Safari does not focus a clicked button, so the viewer names its opener.
             const el = returnFocus?.current;
@@ -1202,9 +1360,13 @@ export function MediaViewer({
             <>
               <DialogPrimitive.Title className="sr-only">
                 {msg(
-                  item.kind === "video"
-                    ? "shared.agent.media_preview_video"
-                    : "shared.agent.media_preview_image",
+                  item.kind === "file"
+                    ? "shared.agent.media_preview_file"
+                    : item.kind === "audio"
+                      ? "shared.agent.media_preview_audio"
+                      : item.kind === "video"
+                        ? "shared.agent.media_preview_video"
+                        : "shared.agent.media_preview_image",
                 )}
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="sr-only">
@@ -1212,12 +1374,8 @@ export function MediaViewer({
               </DialogPrimitive.Description>
               <div
                 data-slide=""
-                className="flex h-full shrink-0 items-center gap-8 [transform:translateX(var(--slide))] motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-[var(--ease-snappy)] rtl:[transform:translateX(calc(-1*var(--slide)))]"
-                style={
-                  {
-                    "--slide": `calc(${(100 - SLIDE_VW) / 2}vw - ${index * SLIDE_VW}vw - ${index * SLIDE_GAP_PX}px)`,
-                  } as React.CSSProperties
-                }
+                className="flex h-full shrink-0 [transform:translateX(var(--slide))] motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-[var(--ease-snappy)] rtl:[transform:translateX(calc(-1*var(--slide)))]"
+                style={{ "--slide": `${-index * 100}vw` } as React.CSSProperties}
               >
                 {media.map((m, i) => (
                   <div
@@ -1225,85 +1383,149 @@ export function MediaViewer({
                     data-slide=""
                     inert={i !== index}
                     className={cn(
-                      "flex h-full w-[75vw] shrink-0 items-center justify-center motion-safe:transition-opacity motion-safe:duration-150",
-                      i !== index && "opacity-30",
+                      "flex h-full w-screen shrink-0 items-center justify-center px-14 pt-16 sm:px-20",
+                      many ? "pb-28" : "pb-12",
                     )}
                   >
-                    {/* Only the open file and its neighbours load. */}
+                    {/* Only the open item and its neighbours load. */}
                     {Math.abs(i - index) <= 1 &&
                       (i === index ? (
-                        <CurrentSlide key={m.id} media={m} />
-                      ) : m.kind === "image" ? (
-                        <img src={m.url} alt="" draggable={false} className={VIEWER_IMAGE} />
-                      ) : (
-                        <video
-                          src={`${m.url}#t=0.1`}
-                          muted
-                          preload="metadata"
-                          className="max-h-[70vh] max-w-full rounded-2xl"
+                        <CurrentSlide
+                          key={m.id}
+                          item={m}
+                          zoom={{ value: zoomValue, set: setZoomValue }}
                         />
+                      ) : (
+                        <NeighbourSlide item={m} />
                       ))}
                   </div>
                 ))}
               </div>
-              <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-end gap-1 bg-linear-to-b from-black/80 to-transparent p-4">
-                <a
-                  href={item.url}
-                  download={item.name}
-                  aria-label={msg("shared.agent.media_download_name", { name: item.name })}
-                  title={msg("shared.agent.media_download")}
-                  className={tool}
-                >
-                  <Download className="size-4" aria-hidden />
-                </a>
-                <DialogPrimitive.Close
-                  aria-label={msg("shared.dialog.close")}
-                  title={msg("shared.dialog.close")}
-                  className={tool}
-                >
-                  <Close className="size-4" aria-hidden />
-                </DialogPrimitive.Close>
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex h-16 items-center gap-3 bg-linear-to-b from-black/80 to-transparent px-4">
+                <Thumb item={item} className="size-9" />
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span dir="auto" className="truncate text-sm font-medium text-white">
+                    {item.name}
+                  </span>
+                  <span className="flex items-center gap-1.5 text-xs tabular-nums text-white/60">
+                    {extLabel(item.name)}
+                    {many && (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span role="status">
+                          {msg("shared.agent.media_position", {
+                            index: index + 1,
+                            count: media.length,
+                          })}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                </div>
+                {item.kind === "image" && (
+                  <>
+                    <TooltipButton tooltip={msg("shared.agent.media_zoom_out")} side="bottom">
+                      <button
+                        type="button"
+                        onClick={() => setZoomValue(clampZoom(zoomValue / ZOOM_STEP))}
+                        disabled={zoomValue <= MIN_ZOOM}
+                        aria-label={msg("shared.agent.media_zoom_out")}
+                        className={cn(
+                          tool,
+                          "disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent",
+                        )}
+                      >
+                        <MagnifyingGlassMinus className="size-4" aria-hidden />
+                      </button>
+                    </TooltipButton>
+                    <TooltipButton tooltip={msg("shared.agent.media_zoom_in")} side="bottom">
+                      <button
+                        type="button"
+                        onClick={() => setZoomValue(clampZoom(zoomValue * ZOOM_STEP))}
+                        disabled={zoomValue >= MAX_ZOOM}
+                        aria-label={msg("shared.agent.media_zoom_in")}
+                        className={cn(
+                          tool,
+                          "disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent",
+                        )}
+                      >
+                        <MagnifyingGlassPlus className="size-4" aria-hidden />
+                      </button>
+                    </TooltipButton>
+                  </>
+                )}
+                {item.kind !== "file" && (
+                  <TooltipButton tooltip={msg("shared.agent.media_download")} side="bottom">
+                    <a
+                      href={item.url}
+                      download={item.name}
+                      aria-label={msg("shared.agent.media_download_name", { name: item.name })}
+                      className={tool}
+                    >
+                      <Download className="size-4" aria-hidden />
+                    </a>
+                  </TooltipButton>
+                )}
+                <TooltipButton tooltip={msg("shared.dialog.close")} side="bottom">
+                  <DialogPrimitive.Close aria-label={msg("shared.dialog.close")} className={tool}>
+                    <Close className="size-4" aria-hidden />
+                  </DialogPrimitive.Close>
+                </TooltipButton>
               </div>
-              {media.length > 1 && (
+              {many && (
                 <>
-                  <div
-                    aria-hidden
-                    className="pointer-events-none absolute inset-x-0 bottom-0 h-[max(128px,10vh)]"
-                    style={{
-                      background:
-                        "linear-gradient(180deg, transparent 0%, rgb(0 0 0 / 0.8) 66.41%)",
-                    }}
-                  />
-                  <div className="pointer-events-none absolute inset-x-0 bottom-6 z-10 flex h-14 items-center justify-center px-6">
+                  <TooltipButton
+                    tooltip={msg("shared.agent.media_previous")}
+                    side="top"
+                    contentClassName={cn(index === 0 && "hidden")}
+                  >
                     <button
                       type="button"
                       onClick={() => go(index - 1)}
                       aria-disabled={index === 0 || undefined}
                       aria-label={msg("shared.agent.media_previous")}
-                      title={msg("shared.agent.media_previous")}
-                      className={arrow(index > 0)}
+                      className={cn(arrow(index > 0), "start-2 sm:start-5")}
                     >
                       <Previous className="size-5 rtl:-scale-x-100" aria-hidden />
                     </button>
-                    <span
-                      role="status"
-                      className="select-none px-2 text-sm tabular-nums text-white/80"
-                    >
-                      {msg("shared.agent.media_position", {
-                        index: index + 1,
-                        count: media.length,
-                      })}
-                    </span>
+                  </TooltipButton>
+                  <TooltipButton
+                    tooltip={msg("shared.agent.media_next")}
+                    side="top"
+                    contentClassName={cn(index === last && "hidden")}
+                  >
                     <button
                       type="button"
                       onClick={() => go(index + 1)}
                       aria-disabled={index === last || undefined}
                       aria-label={msg("shared.agent.media_next")}
-                      title={msg("shared.agent.media_next")}
-                      className={arrow(index < last)}
+                      className={cn(arrow(index < last), "end-2 sm:end-5")}
                     >
                       <Next className="size-5 rtl:-scale-x-100" aria-hidden />
                     </button>
+                  </TooltipButton>
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center bg-linear-to-t from-black/80 to-transparent pt-6 pb-4">
+                    <div
+                      ref={strip}
+                      className="pointer-events-auto flex max-w-full gap-2 overflow-x-auto px-4 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                    >
+                      {media.map((m, i) => (
+                        <TooltipButton key={m.id} tooltip={m.name} side="top">
+                          <button
+                            type="button"
+                            onClick={() => go(i)}
+                            aria-label={m.name}
+                            aria-current={i === index || undefined}
+                            className={cn(
+                              "shrink-0 cursor-pointer rounded-md transition-[opacity,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+                              i === index ? "ring-2 ring-white" : "opacity-50 hover:opacity-80",
+                            )}
+                          >
+                            <Thumb item={m} className="size-12" />
+                          </button>
+                        </TooltipButton>
+                      ))}
+                    </div>
                   </div>
                 </>
               )}
@@ -1316,75 +1538,49 @@ export function MediaViewer({
 }
 
 /**
- * The media of one message. In the composer it is one scrolling row of 120px
- * tiles; in a sent message it is a wrapping list of cards in their own shape.
- * Images and videos open one shared viewer; audio plays in place. Renders
- * nothing when the list is empty.
+ * The composer's media: one scrolling row of 120px tiles. Images and videos
+ * open one shared viewer; audio plays in place. Renders nothing when the list
+ * is empty.
  */
 export function MediaTiles({
   media: given,
   onRemove,
-  size = "draft",
+  bare = false,
   className,
 }: {
   media: readonly MediaAttachment[];
   onRemove?: (id: string) => void;
-  size?: "draft" | "sent";
+  /** The tiles go into a row the caller owns, next to its own tiles. */
+  bare?: boolean;
   className?: string;
 }) {
   const [open, setOpen] = React.useState<number | null>(null);
   const media = useResolvedMedia(given);
   const opener = React.useRef<HTMLElement | null>(null);
-  // A sent file marked failed has no URL to show. A draft file that failed to
-  // upload still plays from its local URL, so it stays in the viewer.
-  const visual = React.useMemo(
-    () => media.filter((m) => m.kind !== "audio" && !(size === "sent" && m.status === "failed")),
-    [media, size],
-  );
+  // A draft file that failed to upload still plays from its local URL, so it stays in the viewer.
+  const visual = React.useMemo(() => media.filter((m) => m.kind !== "audio"), [media]);
   if (!media.length) return null;
-  const openOf =
-    (m: MediaAttachment): OpenHandler =>
-    (e) => {
-      opener.current = e.currentTarget;
-      setOpen(visual.indexOf(m));
-    };
-  const viewer = (
-    <MediaViewer
-      media={visual}
-      index={open === null || !visual.length ? null : Math.min(open, visual.length - 1)}
-      onIndex={setOpen}
-      onClose={() => setOpen(null)}
-      returnFocus={opener}
+  const tiles = media.map((m) => (
+    <DraftTile
+      key={m.id}
+      media={m}
+      onOpen={(e) => {
+        opener.current = e.currentTarget;
+        setOpen(visual.indexOf(m));
+      }}
+      onRemove={onRemove && (() => onRemove(m.id))}
     />
-  );
-  if (size === "draft")
-    return (
-      <>
-        <TileRow className={className}>
-          {media.map((m) => (
-            <DraftTile
-              key={m.id}
-              media={m}
-              onOpen={openOf(m)}
-              onRemove={onRemove && (() => onRemove(m.id))}
-            />
-          ))}
-        </TileRow>
-        {viewer}
-      </>
-    );
+  ));
   return (
     <>
-      <ul
-        role="list"
-        aria-label={msg("shared.agent.media_list")}
-        className={cn("flex max-w-full flex-wrap items-end justify-end gap-2 p-px", className)}
-      >
-        {media.map((m) => (
-          <SentItem key={m.id} media={m} alone={visual.length === 1} onOpen={openOf(m)} />
-        ))}
-      </ul>
-      {viewer}
+      {bare ? tiles : <TileRow className={className}>{tiles}</TileRow>}
+      <MediaViewer
+        media={visual}
+        index={open === null || !visual.length ? null : Math.min(open, visual.length - 1)}
+        onIndex={setOpen}
+        onClose={() => setOpen(null)}
+        returnFocus={opener}
+      />
     </>
   );
 }

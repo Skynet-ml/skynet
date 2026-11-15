@@ -46,7 +46,11 @@ test("a chat with no compaction sends every message with text", () => {
 
 test("a user turn names its files, also a turn with files and no text", () => {
   const shot = { id: "m-1", name: "shot.png", kind: "image" as const, url: "" };
-  const sent = chatWindow([user("look", { media: [shot] }), agent("ok"), user("", { media: [shot] })]);
+  const sent = chatWindow([
+    user("look", { media: [shot] }),
+    agent("ok"),
+    user("", { media: [shot] }),
+  ]);
   assert.deepEqual(sent.turns, [
     { role: "user", content: "look", media: [{ name: "shot.png", kind: "image" }] },
     { role: "assistant", content: "ok" },

@@ -86,11 +86,6 @@
   "shared.agent.media_previous": "Anterior",
   "shared.agent.media_next": "Siguiente",
   "shared.agent.media_seek": "Buscar en el video",
-  "shared.agent.media_volume": "Volumen del video",
-  "shared.agent.media_mute": "Silenciar",
-  "shared.agent.media_options": "Opciones del video",
   "shared.agent.media_speed": "Velocidad de reproducción",
-  "shared.agent.media_fullscreen": "Pantalla completa",
-  "shared.agent.media_exit_fullscreen": "Salir de pantalla completa",
   "shared.agent.media_download_name": "Descargar {name}"
 }

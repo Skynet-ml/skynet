@@ -20,7 +20,11 @@ test("parseStoredMedia drops bad entries and returns undefined when nothing is l
   assert.equal(parseStoredMedia(null), undefined);
   assert.equal(parseStoredMedia("x"), undefined);
   assert.equal(
-    parseStoredMedia([null, { id: 1, name: "a", kind: "image" }, { id: "m", name: "a", kind: "pdf" }]),
+    parseStoredMedia([
+      null,
+      { id: 1, name: "a", kind: "image" },
+      { id: "m", name: "a", kind: "pdf" },
+    ]),
     undefined,
   );
 });

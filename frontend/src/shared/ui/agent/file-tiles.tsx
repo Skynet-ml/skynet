@@ -1,12 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { File, FileCode, FileDoc, FilePdf, FileXls, FileZip } from "@/shared/ui/icons";
 
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
-import { BADGE, CARD, TILE, TileFrame } from "./media-attachments";
+import { filePreview, type FilePreview } from "./file-preview";
+import { FilePreviewBody } from "./file-preview-body";
+import { BADGE, CARD, type OpenHandler, TILE, TileFrame } from "./media-attachments";
 import { TextPreviewDialog } from "./pasted-text-card";
 
 /** The file types that get their own icon; everything else is a plain file. */
@@ -47,15 +48,6 @@ const ICON_KINDS: Record<Exclude<FileIconKind, "file">, readonly string[]> = {
   archive: ["7z", "bz2", "gz", "rar", "tar", "tgz", "zip"],
 };
 
-const ICONS: Record<FileIconKind, React.ComponentType<{ className?: string }>> = {
-  pdf: FilePdf,
-  sheet: FileXls,
-  doc: FileDoc,
-  code: FileCode,
-  archive: FileZip,
-  file: File,
-};
-
 /** A file name's extension in lower case, or "" when it has none. */
 export function fileExtension(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -82,89 +74,64 @@ export function shortFileName(name: string, max = NAME_MAX): string {
   return `${chars.slice(0, max - NAME_TAIL - 1).join("")}…${chars.slice(-NAME_TAIL).join("")}`;
 }
 
+/** How an attached file's text is shown, or null when it has nothing to show. */
+export function fileTilePreview(name: string, text: string): FilePreview | null {
+  return filePreview(fileExtension(name), fileIconKind(name) === "code", text);
+}
+
 /**
- * An attached file in the composer, as Claude draws one: a 120px tile with the
- * name as a caption and the type as a badge. A click opens the file's text.
+ * An attached file, as Claude draws one: a 120px tile with the name as a
+ * caption and the type as a badge. A click opens the file's preview, or calls
+ * `onOpen` when a shared viewer shows it. A file with nothing to show is not a button.
  */
 export function FileTile({
   name,
   text,
   onRemove,
+  onOpen,
 }: {
   name: string;
   text: string;
   onRemove?: () => void;
+  onOpen?: OpenHandler;
 }) {
   const [open, setOpen] = React.useState(false);
   const ext = fileExtension(name);
+  const preview = React.useMemo(() => fileTilePreview(name, text), [name, text]);
+  const face = (
+    <>
+      <span
+        dir="auto"
+        className="line-clamp-4 break-words text-xs leading-tight text-foreground [overflow-wrap:anywhere]"
+      >
+        {shortFileName(name)}
+      </span>
+      {ext && <span className={cn(BADGE, "bg-muted uppercase")}>{ext}</span>}
+    </>
+  );
+  const frame = cn(CARD, TILE, "flex flex-col bg-card p-2.5 text-start");
   return (
     <TileFrame name={name} onRemove={onRemove}>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-label={msg("shared.agent.media_open", { name })}
-        title={name}
-        className={cn(CARD, TILE, "flex cursor-pointer flex-col bg-card p-2.5 text-start")}
-      >
-        <span
-          dir="auto"
-          className="line-clamp-4 break-words text-xs leading-tight text-foreground [overflow-wrap:anywhere]"
+      {preview ? (
+        <button
+          type="button"
+          onClick={onOpen ?? (() => setOpen(true))}
+          aria-label={msg("shared.agent.media_open", { name })}
+          title={name}
+          className={cn(frame, "cursor-pointer")}
         >
-          {shortFileName(name)}
-        </span>
-        {ext && <span className={cn(BADGE, "bg-muted uppercase")}>{ext}</span>}
-      </button>
-      <TextPreviewDialog open={open} onOpenChange={setOpen} title={name} text={text} />
+          {face}
+        </button>
+      ) : (
+        <div title={name} className={cn(frame, "hover:border-border")}>
+          {face}
+        </div>
+      )}
+      {preview && !onOpen && (
+        <TextPreviewDialog open={open} onOpenChange={setOpen} title={name} text={text}>
+          <FilePreviewBody preview={preview} />
+        </TextPreviewDialog>
+      )}
     </TileFrame>
-  );
-}
-
-/** An attached file in a sent message: a slim chip with a type icon and the name. */
-export function FileChip({ name, text }: { name: string; text: string }) {
-  const [open, setOpen] = React.useState(false);
-  const Icon = ICONS[fileIconKind(name)];
-  return (
-    <li className="max-w-full">
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-label={msg("shared.agent.media_open", { name })}
-        title={name}
-        className="flex h-8 max-w-full cursor-pointer items-center gap-1.5 rounded-lg bg-muted ps-1 pe-2.5 text-sm text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-      >
-        <span
-          aria-hidden
-          className="inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md bg-foreground/5 px-1"
-        >
-          <Icon className="size-3.5" />
-        </span>
-        <span dir="auto" className="truncate">
-          {name}
-        </span>
-      </button>
-      <TextPreviewDialog open={open} onOpenChange={setOpen} title={name} text={text} />
-    </li>
-  );
-}
-
-/** The files sent with a message, as a list of chips at the end side. */
-export function FileChips({
-  files,
-  className,
-}: {
-  files: ReadonlyArray<{ name: string; text: string }>;
-  className?: string;
-}) {
-  if (!files.length) return null;
-  return (
-    <ul
-      role="list"
-      aria-label={msg("shared.agent.media_list")}
-      className={cn("flex max-w-full flex-wrap items-center justify-end gap-2", className)}
-    >
-      {files.map((file, i) => (
-        <FileChip key={`${i}-${file.name}`} name={file.name} text={file.text} />
-      ))}
-    </ul>
   );
 }

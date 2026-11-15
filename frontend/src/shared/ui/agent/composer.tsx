@@ -18,7 +18,13 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
-import { isUnsupportedImage, mediaKind, TileRow } from "./media-attachments";
+import {
+  isUnsupportedImage,
+  type MediaAttachment,
+  mediaKind,
+  MediaTiles,
+  TileRow,
+} from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
 import { FileTile } from "./file-tiles";
@@ -115,6 +121,8 @@ interface ComposerProps {
   };
   /** Items that go with the next message, such as line comments, shown above the draft. */
   chips?: React.ReactNode;
+  /** Images, video and audio for the next message. They share one row with the attached files, as in Claude. */
+  media?: { items: readonly MediaAttachment[]; onRemove: (id: string) => void };
   /** The next message has content besides the draft, so an empty draft can still be sent. */
   sendsEmpty?: boolean;
   /** Repository file paths that "@" lists, as in Codex; a pick puts "@path " in the draft. */
@@ -270,6 +278,7 @@ export function Composer({
   dictation: showMic = true,
   slash,
   chips,
+  media,
   sendsEmpty = false,
   mentions,
 }: ComposerProps) {
@@ -974,9 +983,10 @@ export function Composer({
                   : ""}
           </p>
           {chips && !inline && <div className="flex flex-wrap gap-2 px-3 pt-3">{chips}</div>}
-          {draft.files.length > 0 && !inline && (
+          {(draft.files.length > 0 || Boolean(media?.items.length)) && !inline && (
             <div className="flex px-3 pt-3">
               <TileRow>
+                {media && <MediaTiles media={media.items} onRemove={media.onRemove} bare />}
                 {draft.files.map((file, i) => (
                   <FileTile
                     key={`file-${i}`}
@@ -1232,17 +1242,20 @@ export function Composer({
                     !streaming && sendBlocked ? (
                       sendBlocked
                     ) : (
-                    <TooltipShortcuts
-                      rows={
-                        streaming && midTurn
-                          ? [
-                              { label: msg("agent.composer.queue"), keys: ["Enter"] },
-                              { label: msg("agent.pending.steer"), keys: [commandKey(), "Enter"] },
-                              ...(onStop ? [{ label: stopAriaLabel, keys: ["Esc"] }] : []),
-                            ]
-                          : [{ label: sendAriaLabel, keys: ["Enter"] }]
-                      }
-                    />
+                      <TooltipShortcuts
+                        rows={
+                          streaming && midTurn
+                            ? [
+                                { label: msg("agent.composer.queue"), keys: ["Enter"] },
+                                {
+                                  label: msg("agent.pending.steer"),
+                                  keys: [commandKey(), "Enter"],
+                                },
+                                ...(onStop ? [{ label: stopAriaLabel, keys: ["Esc"] }] : []),
+                              ]
+                            : [{ label: sendAriaLabel, keys: ["Enter"] }]
+                        }
+                      />
                     )
                   }
                 >

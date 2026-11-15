@@ -223,11 +223,6 @@
   "shared.agent.media_previous": "Anterior",
   "shared.agent.media_next": "Próximo",
   "shared.agent.media_seek": "Procurar no vídeo",
-  "shared.agent.media_volume": "Volume do vídeo",
-  "shared.agent.media_mute": "Silenciar",
-  "shared.agent.media_options": "Opções do vídeo",
   "shared.agent.media_speed": "Velocidade de reprodução",
-  "shared.agent.media_fullscreen": "Tela cheia",
-  "shared.agent.media_exit_fullscreen": "Sair da tela cheia",
   "shared.agent.media_download_name": "Baixar {name}"
 }

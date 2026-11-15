@@ -28,15 +28,14 @@ export function ContextMeter({ used, window }: { used: number | null; window: nu
       side="top"
       align="center"
       tooltip={
-        <span className="flex w-38 flex-col gap-0.5 text-center">
+        <span className="flex flex-col gap-0.5 whitespace-nowrap text-center">
           <span className="text-muted-foreground">{msg("shared.agent.context_label")}</span>
-          <span className={full ? "text-muted-foreground" : undefined}>
-            {full
-              ? formatMsg("shared.agent.context_full", { usage: u.usage })
-              : formatMsg("shared.agent.context_left", { usage: u.usage, remaining: u.remaining })}
-          </span>
-          <span>
-            {formatMsg("shared.agent.context_tokens", { used: u.usedK, window: u.windowK })}
+          <span className={full ? "text-muted-foreground" : undefined} dir="ltr">
+            {formatMsg("shared.agent.context_summary", {
+              usage: u.usage,
+              used: u.usedK,
+              window: u.windowK,
+            })}
           </span>
         </span>
       }

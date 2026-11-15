@@ -44,7 +44,7 @@ import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
-import { MediaTiles, MediaUrlContext } from "@/shared/ui/agent/media-attachments";
+import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
   joinLineComments,
   lineCommentId,
@@ -1898,19 +1898,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )
         }
         sendsEmpty={lineComments.length > 0 || chatMedia.tiles.length > 0}
+        media={{ items: chatMedia.tiles, onRemove: chatMedia.remove }}
         chips={
-          (lineComments.length > 0 || chatMedia.tiles.length > 0) && (
-            <>
-            <MediaTiles media={chatMedia.tiles} onRemove={chatMedia.remove} />
-            {lineComments.length > 0 && (
+          lineComments.length > 0 && (
             <QueuedComments
               comments={lineComments}
               onOpen={(c) => wizardCtx?.viewChanges?.(c.path, undefined, lineCommentId(c))}
               onRemove={wizardCtx?.removeLineComment}
               onEdit={wizardCtx?.updateLineComment}
             />
-            )}
-            </>
           )
         }
         mentions={wizardCtx?.repoPaths ?? undefined}

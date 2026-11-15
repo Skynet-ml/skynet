@@ -89,6 +89,7 @@ export function TextPreviewDialog({
   title,
   text,
   onRestore,
+  children,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -96,11 +97,17 @@ export function TextPreviewDialog({
   text: string;
   /** Composer only: put the text back into the text field as plain draft. */
   onRestore?: () => void;
+  /** The body to show in place of the text drawn as Markdown. */
+  children?: React.ReactNode;
 }) {
   const lines = msg("shared.code_editor.lines_count", { count: countLines(text) });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-[min(48rem,92vw)]">
+      {/* The title names the file; the body is the whole description. */}
+      <DialogContent
+        aria-describedby={undefined}
+        className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-[min(48rem,92vw)]"
+      >
         <DialogTitle className="flex items-baseline gap-2">
           <span className="min-w-0 truncate" dir="auto">
             {title}
@@ -108,9 +115,11 @@ export function TextPreviewDialog({
           <span className="text-xs font-normal text-muted-foreground">{lines}</span>
         </DialogTitle>
         <div className="min-h-0 flex-1 overflow-y-auto text-sm" dir="auto">
-          <React.Suspense fallback={<pre className="whitespace-pre-wrap">{text}</pre>}>
-            <MessageMarkdown content={text} />
-          </React.Suspense>
+          {children ?? (
+            <React.Suspense fallback={<pre className="whitespace-pre-wrap">{text}</pre>}>
+              <MessageMarkdown content={text} />
+            </React.Suspense>
+          )}
         </div>
         {onRestore && (
           <DialogFooter>

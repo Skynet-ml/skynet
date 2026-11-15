@@ -9,6 +9,7 @@ import { after, test } from "node:test";
 import * as React from "react";
 import { JSDOM } from "jsdom";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
+import { filePreview } from "./file-preview";
 import type { MediaAttachment as Media } from "./media-attachments";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -37,6 +38,14 @@ Object.assign(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
+// Radix measures its popovers; jsdom has no ResizeObserver, and the tests need no sizes.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+Object.assign(globalThis, { ResizeObserver: ResizeObserverStub });
+Object.assign(dom.window, { ResizeObserver: ResizeObserverStub });
 dom.window.matchMedia = (query: string) =>
   ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as never;
 // jsdom has no media playback; the tests only need the calls not to throw.
@@ -48,6 +57,8 @@ dom.window.HTMLMediaElement.prototype.load = () => {};
 
 const { createRoot } = await import("react-dom/client");
 const { MediaTiles } = await import("./media-attachments");
+const { SentAttachments } = await import("./sent-attachments");
+const { FilePage } = await import("./file-preview-body");
 
 after(() => dom.window.close());
 
@@ -84,7 +95,20 @@ const fire = (el: Element, type: string) =>
     el.dispatchEvent(new dom.window.Event(type));
   });
 
-const settle = () => React.act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
+const settle = (ms = 20) =>
+  React.act(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+const click = (el: Element | null | undefined) =>
+  React.act(async () => {
+    assert.ok(el, "the element to click exists");
+    (el as HTMLElement).click();
+  });
+
+// jsdom has no PointerEvent; React reads the type and the button from a MouseEvent.
+const pointer = (el: Element, type: "pointerdown" | "pointerup") =>
+  React.act(async () => {
+    el.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, button: 0 }));
+  });
 
 const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
 
@@ -101,7 +125,7 @@ void test("a composer image shows a labelled skeleton until its preview loads", 
   const bar = container.querySelector('[role="progressbar"]');
   assert.equal(bar?.getAttribute("aria-label"), "Loading preview for photo-1.png");
   await fire(container.querySelector("img")!, "load");
-  assert.equal(container.querySelector('[role="progressbar"]'), null);
+  assert.ok(!container.querySelector('[role="progressbar"]'), "the skeleton goes away");
   await unmount();
 });
 
@@ -150,14 +174,14 @@ void test("the composer opens the viewer over the draft and gives the focus back
 
   await press(box, "Escape");
   await settle();
-  assert.equal(dialog(), null);
+  assert.ok(!dialog(), "Escape closes the viewer");
   // The click did not focus the tile, as in Safari, so only the opener ref brings the focus back.
-  assert.equal(document.activeElement, second, "the focus goes back to the tile that opened it");
+  assert.ok(document.activeElement === second, "the focus goes back to the tile that opened it");
   await unmount();
 });
 
 void test("a viewer file that fails to load says so, and Try again loads it again", async () => {
-  const { container, unmount } = await mount(<MediaTiles media={[image(1)]} size="sent" />);
+  const { container, unmount } = await mount(<SentAttachments media={[image(1)]} files={[]} />);
   await React.act(async () => container.querySelector<HTMLElement>("button")!.click());
   const box = dialog()!;
   const shown = () => box.querySelector<HTMLImageElement>('img[alt="photo-1.png"]');
@@ -168,7 +192,7 @@ void test("a viewer file that fails to load says so, and Try again loads it agai
   const retry = [...box.querySelectorAll("button")].find((b) => b.textContent === "Try again");
   assert.ok(retry, "the error offers Try again");
   await React.act(async () => retry.click());
-  assert.equal(box.querySelector('[role="alert"]'), null);
+  assert.ok(!box.querySelector('[role="alert"]'), "the error goes away");
   assert.ok(shown(), "Try again mounts the image again");
   assert.notEqual(shown(), first);
   await unmount();
@@ -176,7 +200,9 @@ void test("a viewer file that fails to load says so, and Try again loads it agai
 
 void test("a sent message lists its files and marks a file that fails to load", async () => {
   const failed: Media = { ...image(2), status: "failed" };
-  const { container, unmount } = await mount(<MediaTiles media={[image(1), failed]} size="sent" />);
+  const { container, unmount } = await mount(
+    <SentAttachments media={[image(1), failed]} files={[]} />,
+  );
   const list = container.querySelector('ul[role="list"]');
   assert.equal(list?.getAttribute("aria-label"), "Attached files");
   const marked = () =>
@@ -185,21 +211,161 @@ void test("a sent message lists its files and marks a file that fails to load", 
 
   await fire(container.querySelector("img")!, "error");
   assert.equal(marked(), 2);
-  assert.equal(container.querySelector("img"), null, "a failed file never shows a broken image");
+  assert.ok(!container.querySelector("img"), "a failed file never shows a broken image");
   await unmount();
 });
 
-void test("a sent audio card shows the played time against the length from metadata", async () => {
+void test("a sent audio card shows the length from metadata, then the played time", async () => {
   const clip: Media = {
     id: "a-1",
     name: "memo.webm",
     kind: "audio",
     url: "https://example.test/a.webm",
   };
-  const { container, unmount } = await mount(<MediaTiles media={[clip]} size="sent" />);
+  const { container, unmount } = await mount(<SentAttachments media={[clip]} files={[]} />);
   const audio = container.querySelector("audio")!;
+  const time = () => container.querySelector("[data-audio-time]")?.textContent;
   Object.defineProperty(audio, "duration", { configurable: true, value: 90 });
   await fire(audio, "loadedmetadata");
-  assert.equal(container.querySelector("[data-audio-time]")?.textContent, "0:00 / 1:30");
+  assert.equal(time(), "1:30", "before the first play the card shows the length");
+  Object.defineProperty(audio, "currentTime", { configurable: true, value: 12 });
+  await fire(audio, "timeupdate");
+  assert.equal(time(), "0:12", "once it plays the card shows the played time");
+  await unmount();
+});
+
+void test("a sent message shows four tiles, and +N opens the viewer at the fourth item", async () => {
+  const media = Array.from({ length: 6 }, (_, n) => image(n));
+  const { container, unmount } = await mount(<SentAttachments media={media} files={[]} />);
+  assert.equal(container.querySelectorAll("li").length, 4);
+  const more = container.querySelector('button[aria-label="Show 2 more"]');
+  assert.equal(more?.textContent, "+2");
+
+  await click(more);
+  const box = dialog()!;
+  assert.equal(box.querySelector('[role="status"]')?.textContent, "4 of 6");
+  const description = document.getElementById(box.getAttribute("aria-describedby")!);
+  assert.equal(description?.textContent, "photo-3.png");
+  await unmount();
+});
+
+void test("a sent file with a preview opens in the same viewer, after the media", async () => {
+  const { container, unmount } = await mount(
+    <SentAttachments media={[image(1)]} files={[{ name: "notes.csv", text: "a,b\n1,2" }]} />,
+  );
+  await click(container.querySelector('button[aria-label="Open notes.csv"]'));
+  const box = dialog()!;
+  assert.equal(box.querySelector('[role="status"]')?.textContent, "2 of 2");
+  assert.equal(
+    document.getElementById(box.getAttribute("aria-labelledby")!)?.textContent,
+    "File preview",
+  );
+  await unmount();
+});
+
+void test("the viewer zoom buttons step the image scale and stop at the fitted size", async () => {
+  const { container, unmount } = await mount(<SentAttachments media={[image(1)]} files={[]} />);
+  await click(container.querySelector('button[aria-label="Open photo-1.png"]'));
+  const box = dialog()!;
+  const zoomIn = box.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]')!;
+  const zoomOut = box.querySelector<HTMLButtonElement>('button[aria-label="Zoom out"]')!;
+  const scale = () => box.querySelector<HTMLElement>('img[alt="photo-1.png"]')!.style.transform;
+  assert.equal(zoomOut.disabled, true, "the image opens at its fitted size");
+
+  await click(zoomIn);
+  assert.match(scale(), /scale\(1\.5\)/);
+  assert.equal(zoomOut.disabled, false);
+  await click(zoomOut);
+  assert.match(scale(), /scale\(1\)/);
+  await unmount();
+});
+
+const clip: Media = {
+  id: "v-1",
+  name: "clip.mp4",
+  kind: "video",
+  url: "https://example.test/clip.mp4",
+};
+
+/** Open a sent video in the viewer and return its player element. */
+async function openVideo() {
+  const view = await mount(<SentAttachments media={[clip]} files={[]} />);
+  await click(view.container.querySelector('button[aria-label="Play video: clip.mp4"]'));
+  const video = dialog()!.querySelector<HTMLVideoElement>('video[aria-label="clip.mp4"]')!;
+  assert.ok(video, "the viewer shows the video player");
+  return { video, unmount: view.unmount };
+}
+
+const speedButton = () => dialog()!.querySelector('button[aria-label^="Playback speed"]');
+
+void test("the speed button cycles 1×, 1.5× and 2× and sets the playback rate", async () => {
+  const { video, unmount } = await openVideo();
+  assert.equal(speedButton()?.getAttribute("aria-label"), "Playback speed: 1×");
+  for (const rate of [1.5, 2, 1]) {
+    await click(speedButton());
+    assert.equal(speedButton()?.getAttribute("aria-label"), `Playback speed: ${rate}×`);
+    assert.equal(video.playbackRate, rate);
+  }
+  await unmount();
+});
+
+void test("holding the video plays it at 2×, and the release restores the speed and keeps playing", async () => {
+  const { video, unmount } = await openVideo();
+  let pauses = 0;
+  video.pause = () => {
+    pauses++;
+  };
+  Object.defineProperty(video, "paused", { configurable: true, value: false });
+  await fire(video, "play");
+  await click(speedButton());
+  assert.equal(video.playbackRate, 1.5);
+
+  await pointer(video, "pointerdown");
+  await settle(350);
+  assert.equal(video.playbackRate, 2, "a 300 ms hold plays at 2×");
+
+  await pointer(video, "pointerup");
+  await click(video);
+  assert.equal(video.playbackRate, 1.5, "the release restores the chosen speed");
+  assert.equal(pauses, 0, "the release is not a click, so the video keeps playing");
+  await unmount();
+});
+
+void test("an ended video offers Replay in the center", async () => {
+  const { video, unmount } = await openVideo();
+  await fire(video, "ended");
+  assert.ok(dialog()!.querySelector('button[aria-label="Replay clip.mp4"]'));
+  await unmount();
+});
+
+void test("a PDF file shows one paper page per Page marker, with its position", async () => {
+  const preview = filePreview("pdf", false, "Page 1\nIntro\n\nPage 2\nResults")!;
+  const { container, unmount } = await mount(<FilePage name="report.pdf" preview={preview} />);
+  const pages = [...container.querySelectorAll("figure")];
+  assert.deepEqual(
+    pages.map((p) => p.querySelector("pre")?.textContent),
+    ["Intro", "Results"],
+  );
+  assert.deepEqual(
+    pages.map((p) => p.querySelector("figcaption")?.textContent),
+    ["1 of 2", "2 of 2"],
+  );
+  await unmount();
+});
+
+void test("a workbook shows one tab per sheet, and a tab switches the grid", async () => {
+  const preview = filePreview("xlsx", false, "Sheet: Q1\na\tb\n\nSheet: Q2\nc")!;
+  const { container, unmount } = await mount(<FilePage name="book.xlsx" preview={preview} />);
+  const tabs = () => [...container.querySelectorAll('[role="tab"]')];
+  const cells = () => [...container.querySelectorAll("td")].map((td) => td.textContent);
+  assert.deepEqual(
+    tabs().map((t) => t.textContent),
+    ["Q1", "Q2"],
+  );
+  assert.deepEqual(cells(), ["a", "b"]);
+
+  await click(tabs()[1]);
+  assert.equal(tabs()[1]?.getAttribute("aria-selected"), "true");
+  assert.deepEqual(cells(), ["c"]);
   await unmount();
 });
