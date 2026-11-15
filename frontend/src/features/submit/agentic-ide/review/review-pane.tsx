@@ -347,7 +347,8 @@ function OpenTabsMenu({
             <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
               {tab.icon}
             </span>
-            <span className="min-w-0 flex-1 truncate" dir="ltr">
+            {/* Only a file tab has a hint, its path; the other labels are UI text. */}
+            <span className="min-w-0 flex-1 truncate" dir={tab.hint ? "ltr" : undefined}>
               {tab.label}
             </span>
             <Check
@@ -746,7 +747,9 @@ export function ReviewPane({
   const collapseLabel = allCollapsed
     ? msg("submit.agentic_ide.review.expand_all")
     : msg("submit.agentic_ide.review.collapse_all");
-  const commentCount = (path: string) => comments.filter((c) => c.path === path).length;
+  // "Last turn" diffs show no comments, so the list counts none there either.
+  const commentCount = (path: string) =>
+    source === "turn" ? 0 : comments.filter((c) => c.path === path).length;
   const matching = filter.trim() ? changed.filter((f) => fuzzyScore(filter, f.path) > 0) : changed;
   const newPage = isNewTab(active);
   const tabFile = active === "changes" || newPage ? null : (byPath.get(active) ?? null);

@@ -231,7 +231,10 @@ void test("under Last turn a file shows only the turn's own change, with no line
     [...pane.container.querySelectorAll<HTMLElement>("[aria-label]")].filter((el) =>
       /^Comment on line/.test(el.getAttribute("aria-label") ?? ""),
     );
+  const noteBadge = () =>
+    pane.container.querySelector<HTMLElement>('button[title="a.py"] span.text-primary');
   assert.ok(commentButtons().length > 0);
+  assert.equal(noteBadge()?.textContent, "1");
   assert.ok(pane.container.textContent?.includes("draft note"));
 
   await openMenu(sourcePill(pane.container)!);
@@ -239,6 +242,8 @@ void test("under Last turn a file shows only the turn's own change, with no line
   assert.match(sourcePill(pane.container)!.textContent ?? "", /^Last turn\s*\+1\s*−1$/);
   assert.equal(commentButtons().length, 0);
   assert.ok(!pane.container.textContent?.includes("draft note"));
+  // The file list counts no comments either.
+  assert.equal(noteBadge(), null);
   assert.ok(pane.container.textContent?.includes("Comments work in Draft changes."));
 
   // The file tab shows the turn's end text, and takes no edits there.
@@ -275,6 +280,13 @@ void test("the open tabs list shows each open tab and selects it", async () => {
     el.textContent?.trim(),
   );
   assert.deepEqual(items, ["Changes", "a.py"]);
+  // Only the file path reads left to right; "Changes" follows the UI direction.
+  assert.deepEqual(
+    [...document.querySelectorAll<HTMLElement>('[role="menuitem"] span.truncate')].map((el) =>
+      el.getAttribute("dir"),
+    ),
+    [null, "ltr"],
+  );
   await click(menuItem("Changes")!);
   const selected = pane.container.querySelector('[role="tab"][aria-selected="true"]');
   assert.equal(selected?.textContent?.trim(), "Changes");
