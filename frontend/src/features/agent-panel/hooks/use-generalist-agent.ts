@@ -27,6 +27,7 @@ import {
 } from "@/shared/lib/thinking-segments";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
+import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
@@ -49,6 +50,7 @@ import {
 } from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
 import type {
+  ApprovalChoice,
   ChatTurn,
   PendingApprovalPayload,
   ToolEndPayload,
@@ -95,7 +97,8 @@ export interface GeneralistAgentState {
   editAndResend: (messageIndex: number, content: string) => void;
   retry: () => void;
   stop: () => void;
-  confirmApproval: (approved: boolean) => Promise<void>;
+  /** Answer the pending approval; `choice` carries the chat scope or a decline note. */
+  confirmApproval: (approved: boolean, choice?: ApprovalChoice) => Promise<void>;
   /** Start a fresh empty chat; every other chat keeps streaming untouched. */
   newSession: () => void;
   /**
@@ -232,6 +235,8 @@ interface SessionRuntime {
   afterCompact?: { message: string; override?: WizardState } | null;
   /** An edit cancelled a /compact the server may still save; read its cost when the turn ends. */
   syncCostAfterTurn?: "due" | "reading";
+  /** Tools the user allowed for this chat; each turn sends them, the backend filters them. */
+  chatAllowedTools: Set<string>;
 }
 
 function blankSession(key: string): SessionView {
@@ -257,6 +262,7 @@ function blankRuntime(): SessionRuntime {
     turnStart: 0,
     unsavedEdit: null,
     source: "local",
+    chatAllowedTools: new Set(),
   };
 }
 
@@ -521,6 +527,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [patchMessages],
   );
 
+  /** Flag or clear a call the auto-review stopped, so its turn's header counts only calls that did not run. */
+  const markAutoReviewDenied = React.useCallback(
+    (key: string, id: string, denied: boolean) => {
+      patchMessages(key, (prev) => withAutoReviewDenied(prev, id, denied));
+    },
+    [patchMessages],
+  );
+
   const eventContext = React.useCallback((key: string): SessionEventContext => {
     return {
       isActive: activeKeyRef.current === key,
@@ -663,6 +677,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             fast_mode: sentFastMode(fastRef.current, sentModel) || undefined,
             steer_key: steerKey,
             compaction_summary: run.compactionSummary,
+            chat_allowed_tools: [...rt.chatAllowedTools],
           },
           {
             signal: controller.signal,
@@ -804,13 +819,18 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onPendingApproval: (ev) => {
               if (ended()) return;
+              if (ev.auto_review) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: ev,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.2"),
               });
             },
-            onApprovalResolved: () => {
+            onApprovalResolved: (ev) => {
               if (ended()) return;
+              if (ev.approved && ev.scope === "conversation") rt.chatAllowedTools.add(ev.tool);
+              // "Approve anyway" runs the call, so it no longer counts as denied.
+              if (ev.approved) markAutoReviewDenied(key, ev.id, false);
+              else if (ev.auto_review_denied) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: null,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.3"),
@@ -961,6 +981,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       eventContext,
       finishToolCall,
       getRuntime,
+      markAutoReviewDenied,
       patchMessages,
       patchSession,
       patchThinking,
@@ -1517,13 +1538,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const confirmApproval = React.useCallback(
-    async (approved: boolean) => {
+    async (approved: boolean, choice?: ApprovalChoice) => {
       const key = activeKeyRef.current;
       const pa = sessionsRef.current.get(key)?.pendingApproval;
       if (!pa) return;
       patchSession(key, { pendingApproval: null });
       const source = runtimesRef.current.get(key)?.source ?? "local";
-      const resolved = await confirmGeneralistApproval(pa.id, approved, source);
+      const resolved = await confirmGeneralistApproval(pa.id, approved, source, choice);
       if (!resolved) {
         // The confirm never reached the stream's process (network blip or a
         // different replica) — silently dropping it leaves the tool hanging

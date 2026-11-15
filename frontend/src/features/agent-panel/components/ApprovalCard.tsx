@@ -1,20 +1,21 @@
 "use client";
 
 import * as React from "react";
-import { CaretDown, CircleNotch } from "@/shared/ui/icons";
+import { CaretDown } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
-import { Button } from "@/shared/ui/primitives/button";
 import { cn } from "@/shared/lib/utils";
 
+import { ApprovalChoices } from "./ApprovalChoices";
+import { AutoReviewDeniedRow } from "./AutoReviewDeniedRow";
 import { EntryRow } from "./EntryRow";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { getToolMeta, type ApprovalSeverity } from "../lib/tool-meta";
-import type { PendingApprovalPayload } from "../lib/types";
+import type { ApprovalChoice, PendingApprovalPayload } from "../lib/types";
 
 interface ApprovalCardProps {
   payload: PendingApprovalPayload;
-  onResolve: (approved: boolean) => void | Promise<void>;
+  onResolve: (approved: boolean, choice?: ApprovalChoice) => void | Promise<void>;
   className?: string;
 }
 
@@ -30,7 +31,6 @@ const SEVERITY_STYLES: Record<
     descText: string;
     footerBg: string;
     footerBorder: string;
-    confirmVariant: "destructive" | "default";
   }
 > = {
   destructive: {
@@ -43,7 +43,6 @@ const SEVERITY_STYLES: Record<
     descText: "text-[#7A1E13]/80 dark:text-[#ffb2a0]/80",
     footerBg: "bg-white dark:bg-card",
     footerBorder: "border-[#9B2C1F]/15 dark:border-[#ec7764]/15",
-    confirmVariant: "destructive",
   },
   warning: {
     border: "border-[#A85A1A]/25",
@@ -55,7 +54,6 @@ const SEVERITY_STYLES: Record<
     descText: "text-[#7A3E12]/80 dark:text-[#fdb68c]/80",
     footerBg: "bg-white dark:bg-card",
     footerBorder: "border-[#A85A1A]/10",
-    confirmVariant: "default",
   },
   info: {
     border: "border-border/50",
@@ -67,7 +65,6 @@ const SEVERITY_STYLES: Record<
     descText: "text-muted-foreground",
     footerBg: "bg-white dark:bg-card",
     footerBorder: "border-border/40",
-    confirmVariant: "default",
   },
 };
 
@@ -81,21 +78,14 @@ export function ApprovalCard({ payload, onResolve, className }: ApprovalCardProp
   if (payload.tool === "request_secret") {
     return <SecretRequestCard payload={payload} onResolve={onResolve} className={className} />;
   }
+  if (payload.auto_review?.denied) {
+    return <AutoReviewDeniedRow payload={payload} onResolve={onResolve} />;
+  }
   return <ToolApprovalCard payload={payload} onResolve={onResolve} className={className} />;
 }
 
 function ToolApprovalCard({ payload, onResolve, className }: ApprovalCardProps) {
-  const [busy, setBusy] = React.useState<"approve" | "deny" | null>(null);
   const [showDetails, setShowDetails] = React.useState(false);
-
-  const handle = async (approved: boolean) => {
-    setBusy(approved ? "approve" : "deny");
-    try {
-      await onResolve(approved);
-    } finally {
-      setBusy(null);
-    }
-  };
 
   const meta = getToolMeta(payload.tool);
   const styles = SEVERITY_STYLES[meta.severity];
@@ -161,37 +151,12 @@ function ToolApprovalCard({ payload, onResolve, className }: ApprovalCardProps) 
         </div>
       )}
 
-      <div
-        className={cn(
-          "flex items-center gap-2 px-4 py-2.5 border-t",
-          styles.footerBg,
-          styles.footerBorder,
-        )}
-      >
-        <Button
-          variant="outline"
-          onClick={() => handle(false)}
-          disabled={busy !== null}
-          className="flex-1 justify-center"
-        >
-          {busy === "deny" ? (
-            <CircleNotch className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-          ) : (
-            msg("auto.features.agent.panel.components.approvalcard.literal.3")
-          )}
-        </Button>
-        <Button
-          variant={styles.confirmVariant}
-          onClick={() => handle(true)}
-          disabled={busy !== null}
-          className="flex-1 justify-center"
-        >
-          {busy === "approve" ? (
-            <CircleNotch className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-          ) : (
-            meta.confirmLabel
-          )}
-        </Button>
+      <div className={cn("px-2 py-2 border-t", styles.footerBg, styles.footerBorder)}>
+        <ApprovalChoices
+          allowLabel={meta.confirmLabel}
+          chatRule={payload.chat_rule === true}
+          onResolve={onResolve}
+        />
       </div>
     </div>
   );
