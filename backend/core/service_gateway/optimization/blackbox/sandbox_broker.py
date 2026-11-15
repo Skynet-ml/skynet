@@ -146,6 +146,7 @@ class ParentSandboxSession:
             box: The ``box`` usage tag that the box's model calls carry.
         """
         self._session = session
+        self.root_has_capabilities: bool = getattr(session, "root_has_capabilities", True)
         self._command_runner = command_runner
         self._box = box
         self._on_close = on_close

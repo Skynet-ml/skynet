@@ -144,12 +144,14 @@ RELAY_PORT = 47_311
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
 RUN_FLAG = "--run"
-# The Vercel provider's exec wrapper writes the command's stdout, stderr and
-# exit code to these files (``OUTPUT_PREFIX`` and ``EXIT_PREFIX`` in
-# core/sandbox/providers/vercel.py). This file runs in the box on the standard
-# library alone, so it cannot import them; a test keeps the two equal.
-WRAPPER_OUTPUT_PREFIX = "/tmp/.app-output-"
-WRAPPER_EXIT_PREFIX = "/tmp/.app-exit-"
+# The Vercel provider's root exec wrapper writes the command's stdout, stderr
+# and exit code to these files in a folder that root makes first
+# (``ROOT_OUTPUT_PREFIX`` and ``_wrapper`` in core/sandbox/providers/vercel.py).
+# This file runs in the box on the standard library alone, so it cannot import
+# them; a test keeps the two equal.
+WRAPPER_FOLDER_PREFIX = "/tmp/.app-root-output-"
+WRAPPER_OUTPUT_NAME = "output.out"
+WRAPPER_EXIT_NAME = "exit"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
@@ -1468,16 +1470,18 @@ def unsafe_output() -> str | None:
 
     The parent reads the result frame from stdout alone. A pipe, socket or
     device has its other end with the runtime, so the entry cannot replace
-    it. A file must be the Vercel exec wrapper's
-    ``/tmp/.app-output-<token>.out``. The token is a new ``uuid4``
-    (``os.urandom``) for each command, so no process can know the name
-    before the root wrapper creates the file. The file must belong to root,
-    have no group or other write bit and one link, and its own name must
-    reach it: a link that the redirect followed has another name. In sticky
-    ``/tmp`` the entry, which runs as another user, then cannot rename,
-    replace or write the file. The supervisor also creates the wrapper's
-    exit code file as root before the entry starts, so the entry cannot
-    create it first and write a forged exit code (SKY-398).
+    it. A file must be the Vercel root exec wrapper's
+    ``/tmp/.app-root-output-<token>/output.out``. A process that reads the
+    token from root's command line can plant a file, FIFO or link at a
+    ``/tmp`` name, but the wrapper's ``mkdir`` fails on any planted name and
+    the supervisor then never starts. So the folder must be a real folder
+    that root owns with no group or other write bit: in sticky ``/tmp`` the
+    entry, which runs as another user, cannot plant into it, rename it or
+    remove it (TU-1). The file must belong to root, have no group or other
+    write bit and one link, and its own name must reach it: a link that the
+    redirect followed has another name. The supervisor also creates the
+    wrapper's exit code file as root before the entry starts, so the entry
+    cannot create it first and write a forged exit code (SKY-398).
 
     Returns:
         The refusal, or ``None``.
@@ -1493,14 +1497,21 @@ def unsafe_output() -> str | None:
         named = os.lstat(path)
     except OSError:
         return "The supervisor cannot check the file behind its stdout."
-    token = path[len(WRAPPER_OUTPUT_PREFIX) : -len(".out")]
+    folder, _, name = path.rpartition("/")
+    token = folder[len(WRAPPER_FOLDER_PREFIX) :]
     if (
-        not path.startswith(WRAPPER_OUTPUT_PREFIX)
-        or not path.endswith(".out")
+        not folder.startswith(WRAPPER_FOLDER_PREFIX)
+        or name != WRAPPER_OUTPUT_NAME
         or len(token) != 32
         or token.strip("0123456789abcdef")
     ):
         return f"The supervisor's stdout {path} is not a file of the exec wrapper."
+    try:
+        parent = os.lstat(folder)
+    except OSError:
+        return "The supervisor cannot check the exec wrapper's folder."
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o022:
+        return f"The exec wrapper's folder {folder} is not a root-only folder."
     if os.geteuid() != 0 or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
         return f"The supervisor's stdout {path} is not a root-only file."
     if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
@@ -1510,7 +1521,7 @@ def unsafe_output() -> str | None:
     with _quiet():
         os.fchmod(2, 0o644)
     try:
-        sentinel = os.open(WRAPPER_EXIT_PREFIX + token, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        sentinel = os.open(f"{folder}/{WRAPPER_EXIT_NAME}", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     except OSError:
         return "The exec wrapper's exit code file exists before the entry started."
     os.fchmod(sentinel, 0o644)
