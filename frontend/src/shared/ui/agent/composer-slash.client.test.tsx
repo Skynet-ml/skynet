@@ -46,6 +46,7 @@ dom.window.__APP_MESSAGES__ = buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
 const { Composer } = await import("./composer");
+const { msg } = await import("@/shared/lib/messages");
 const { LocaleProvider } = await import("@/shared/providers/locale-provider");
 const { UserPrefsProvider } = await import("@/features/settings/hooks/use-user-prefs");
 const { ToastContainer } = await import("react-toastify");
@@ -105,6 +106,7 @@ async function mount(
   streaming: boolean,
   suggest?: React.ComponentProps<typeof Composer>["suggest"],
   mentions?: readonly string[],
+  extra?: Partial<React.ComponentProps<typeof Composer>>,
 ): Promise<Mounted> {
   const ran: string[] = [];
   const sent: string[] = [];
@@ -134,6 +136,7 @@ async function mount(
                 midTurn={midTurn}
                 suggest={suggest}
                 mentions={mentions}
+                {...extra}
                 slash={{
                   commands: liveCommands,
                   run: (c, arg, fromMenu) => {
@@ -211,6 +214,18 @@ void test("Enter during a reply queues a normal message", async () => {
     ran: [],
     sent: ["queue:/new idea for later"],
   });
+});
+
+void test("Enter during a reply refuses a message while files wait, and says why", async () => {
+  for (const draft of ["see this", ""]) {
+    const composer = await mount(draft, true, undefined, undefined, { mediaWaiting: true });
+    await composer.press("Enter");
+    await composer.press("Tab");
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    assert.deepEqual({ sent: composer.sent, drafts: composer.drafts }, { sent: [], drafts: [] });
+    assert.ok(document.body.textContent?.includes(msg("agent.media.wait_reply")), draft);
+    await composer.unmount();
+  }
 });
 
 void test("a hidden command neither runs nor goes to the agent as text", async () => {

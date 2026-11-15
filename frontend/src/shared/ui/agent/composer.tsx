@@ -84,6 +84,10 @@ interface ComposerProps {
   /** Receives picked, pasted or dropped image, video and audio files, which
    *  then go with the message as files, not as text. */
   onMediaFiles?: (files: File[]) => void;
+  /** Files wait to go with the next message. A queued or steered message
+   *  carries only text, so the composer refuses it, with a reason, until the
+   *  reply ends. */
+  mediaWaiting?: boolean;
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
@@ -255,6 +259,7 @@ export function Composer({
   claimsFile,
   onAttachFile,
   onMediaFiles,
+  mediaWaiting = false,
   suggest,
   attachments = true,
   dictation: showMic = true,
@@ -558,7 +563,12 @@ export function Composer({
   };
 
   const sendMidTurn = (mode: "steer" | "queue") => {
-    if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
+    if (!midTurn || disabled || dictating || attaching > 0) return;
+    if (mediaWaiting) {
+      toast.info(msg("agent.media.wait_reply"));
+      return;
+    }
+    if (!hasDraft) return;
     if (value.trim().length > maxLength) {
       setLengthNotice(value);
       return;

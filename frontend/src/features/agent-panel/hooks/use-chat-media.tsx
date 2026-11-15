@@ -188,6 +188,16 @@ export function useChatMedia(): ChatMediaDraft {
     update(() => []);
   }, [update]);
 
+  // A closed panel frees the local URLs of files still in the draft. An upload
+  // that ends later then finds no tile and deletes its stored file.
+  React.useEffect(
+    () => () => {
+      for (const m of itemsRef.current) freeMediaUrl(m.url);
+      itemsRef.current = [];
+    },
+    [],
+  );
+
   const tiles = React.useMemo(
     () => items.map((m) => ({ id: m.localId, name: m.name, kind: m.kind, url: m.url })),
     [items],

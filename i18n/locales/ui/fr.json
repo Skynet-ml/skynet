@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "Un message peut contenir jusqu’à {max} fichiers.",
   "agent.media.uploading": "Attendez la fin de l’envoi des fichiers.",
   "agent.media.wait_compact": "Attendez la fin de la compaction du chat, puis envoyez les fichiers.",
+  "agent.media.wait_reply": "Attendez la fin de la réponse, puis envoyez les fichiers.",
   "agent.media.reference_only": "Ce modèle ne peut pas voir certains fichiers joints. Il ne reçoit que leurs noms.",
   "agent.media.removed": "{name} retiré.",
   "agent.media.undo": "Annuler"

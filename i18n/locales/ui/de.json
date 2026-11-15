@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "Eine Nachricht kann bis zu {max} Dateien enthalten.",
   "agent.media.uploading": "Warte, bis die Dateien hochgeladen sind.",
   "agent.media.wait_compact": "Warte, bis der Chat fertig komprimiert ist, und sende dann die Dateien.",
+  "agent.media.wait_reply": "Warte, bis die Antwort fertig ist, und sende dann die Dateien.",
   "agent.media.reference_only": "Dieses Modell kann einige angehängte Dateien nicht ansehen. Es erhält nur ihre Namen.",
   "agent.media.removed": "{name} entfernt.",
   "agent.media.undo": "Rückgängig"

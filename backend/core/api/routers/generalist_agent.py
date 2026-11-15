@@ -746,7 +746,9 @@ def _free_unnamed_media(session: Session, conversation_id: str, keep: set[str]) 
         session.execute(delete(ChatMediaModel).where(ChatMediaModel.id.in_(unnamed)))
 
 
-def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> dict[str, Any] | None:
+def _discard_latest_turn(
+    job_store, conversation_id: str, only_if_text: str | None = None, only_if_media: list[str] | None = None
+) -> dict[str, Any] | None:
     """Delete the final persisted user turn and every response after it.
 
     The regenerate UI replaces the latest assistant response in memory. Remove
@@ -760,6 +762,9 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
         conversation_id: Conversation whose latest turn should be replaced.
         only_if_text: When set, delete nothing unless the latest user turn has
             exactly this text.
+        only_if_media: When set, delete nothing unless the latest user turn
+            names exactly these file ids, in order. Messages with only files
+            all have empty text, so the text alone cannot tell them apart.
 
     Returns:
         The compaction entry stored on the deleted user turn, so its
@@ -777,7 +782,10 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
         )
         if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
             return None
-        entry = (latest_user.router_metadata or {}).get("compaction")
+        metadata = latest_user.router_metadata or {}
+        if only_if_media is not None and [item.get("id") for item in metadata.get("media", [])] != only_if_media:
+            return None
+        entry = metadata.get("compaction")
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
@@ -1690,11 +1698,15 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     # turn. Replace the saved edit only when it is the latest
                     # turn, so a missing target never deletes another turn.
                     if not found and req.regenerate:
-                        carried = _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
+                        carried = _discard_latest_turn(
+                            job_store, cid, only_if_text=req.user_message, only_if_media=[row.id for row in media]
+                        )
                 elif req.regenerate:
                     # A retry of a send refused before it was stored also
-                    # sends regenerate; the text check keeps the previous turn.
-                    carried = _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
+                    # sends regenerate; the text and file check keeps the previous turn.
+                    carried = _discard_latest_turn(
+                        job_store, cid, only_if_text=req.user_message, only_if_media=[row.id for row in media]
+                    )
                 user_message_id = _persist_user_turn(
                     job_store,
                     cid,

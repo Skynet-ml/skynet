@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "אפשר לצרף עד {max} קבצים להודעה אחת.",
   "agent.media.uploading": "צריך לחכות לסיום העלאת הקבצים.",
   "agent.media.wait_compact": "צריך לחכות לסיום הדחיסה של השיחה, ואז לשלוח את הקבצים.",
+  "agent.media.wait_reply": "צריך לחכות לסיום התשובה, ואז לשלוח את הקבצים.",
   "agent.media.reference_only": "המודל הזה לא יכול לראות חלק מהקבצים המצורפים. הוא מקבל רק את השמות שלהם.",
   "agent.media.removed": "{name} הוסר.",
   "agent.media.undo": "ביטול"

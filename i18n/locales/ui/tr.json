@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "Bir mesajda en fazla {max} dosya olabilir.",
   "agent.media.uploading": "Dosyaların yüklenmesinin bitmesini bekleyin.",
   "agent.media.wait_compact": "Sohbetin sıkıştırılması bitene kadar bekleyin, sonra dosyaları gönderin.",
+  "agent.media.wait_reply": "Yanıtın bitmesini bekleyin, ardından dosyaları gönderin.",
   "agent.media.reference_only": "Bu model ekli dosyaların bazılarını göremez. Yalnızca adlarını alır.",
   "agent.media.removed": "{name} kaldırıldı.",
   "agent.media.undo": "Geri al"

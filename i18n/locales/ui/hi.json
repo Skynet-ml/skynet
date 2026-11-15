@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "एक संदेश में अधिकतम {max} फ़ाइलें हो सकती हैं।",
   "agent.media.uploading": "फ़ाइलों की अपलोड पूरी होने तक रुकें।",
   "agent.media.wait_compact": "चैट की कॉम्पैक्टिंग पूरी होने तक रुकें, फिर फ़ाइलें भेजें।",
+  "agent.media.wait_reply": "जवाब पूरा होने तक रुकें, फिर फ़ाइलें भेजें।",
   "agent.media.reference_only": "यह मॉडल कुछ संलग्न फ़ाइलें नहीं देख सकता। उसे सिर्फ़ उनके नाम मिलते हैं।",
   "agent.media.removed": "{name} हटाई गई।",
   "agent.media.undo": "पूर्ववत करें"

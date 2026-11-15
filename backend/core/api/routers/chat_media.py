@@ -166,7 +166,7 @@ def _engine(job_store: Any) -> Any:
     return engine
 
 
-def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[ChatMediaModel]:
+def load_owned_media(engine: Any, username: str, media_ids: list[str], *, sweep: bool = True) -> list[ChatMediaModel]:
     """Load the caller's media rows in the order of ``media_ids``, without their bytes.
 
     Stale unsent files are swept first, so a turn never names a file that a
@@ -178,6 +178,8 @@ def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[C
         engine: The SQLAlchemy engine.
         username: The caller. Only rows this user owns load.
         media_ids: The ids the client sent; duplicates load once.
+        sweep: Whether to sweep stale unsent files first. A read sets it
+            False, so a GET never deletes rows or commits.
 
     Returns:
         The owned rows, detached from their session, in request order. Their
@@ -189,7 +191,8 @@ def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[C
     wanted = list(dict.fromkeys(media_ids))
     if not wanted:
         return []
-    sweep_unsent_chat_media(engine, username)
+    if sweep:
+        sweep_unsent_chat_media(engine, username)
     with Session(engine, expire_on_commit=False) as session:
         rows = session.scalars(
             select(ChatMediaModel)
@@ -387,7 +390,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             HTTPException: 404 when the id is unknown or another user owns it.
         """
         engine = _engine(job_store)
-        (row,) = load_owned_media(engine, user.username, [media_id])
+        (row,) = load_owned_media(engine, user.username, [media_id], sweep=False)
         data = load_media_data(engine, [row.id]).get(row.id)
         if data is None:
             raise HTTPException(status_code=404, detail="Attachment not found.")

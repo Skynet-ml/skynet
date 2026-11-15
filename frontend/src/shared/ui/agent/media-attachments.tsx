@@ -47,14 +47,6 @@ export function mediaKind(file: { type: string }): MediaKind | null {
   return top === "image" || top === "video" || top === "audio" ? top : null;
 }
 
-/** A local attachment for a picked, pasted or dropped file. The host frees its URL. */
-export function mediaFromFile(file: File): MediaAttachment | null {
-  const kind = mediaKind(file);
-  if (!kind) return null;
-  // A pasted screenshot has a generic name ("image.png"), which is still the best label.
-  return { id: crypto.randomUUID(), name: file.name || kind, kind, url: URL.createObjectURL(file) };
-}
-
 type IconSlot = "remove" | "play" | "pause" | "previous" | "next" | "download" | "close";
 type SlotIcon = React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
 
@@ -208,6 +200,47 @@ function VideoTile({
 
 const peaksCache = new Map<string, Promise<number[]>>();
 
+/**
+ * The largest audio file whose waveform the tile draws. A decode holds the whole clip as
+ * float samples, so a 20 MB MP3 can take about 450 MB; a larger file gets a flat line.
+ */
+export const PEAKS_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Decodes an audio file into samples. */
+async function decodeAudio(
+  buffer: ArrayBuffer,
+): Promise<{ getChannelData(channel: number): Float32Array }> {
+  const context = new AudioContext();
+  try {
+    return await context.decodeAudioData(buffer);
+  } finally {
+    void context.close();
+  }
+}
+
+/**
+ * Loudness of an audio file in `count` slices, scaled to 0..1. A file over
+ * `PEAKS_MAX_BYTES` is not decoded and gets a flat line.
+ */
+export async function loadPeaks(
+  url: string,
+  count: number,
+  decode = decodeAudio,
+): Promise<number[]> {
+  const blob = await fetch(url).then((r) => r.blob());
+  if (blob.size > PEAKS_MAX_BYTES) return Array<number>(count).fill(0.3);
+  const data = (await decode(await blob.arrayBuffer())).getChannelData(0);
+  const step = Math.max(1, Math.floor(data.length / count));
+  // Every 16th sample is enough for a slice's peak and keeps long files fast.
+  const out = Array.from({ length: count }, (_, i) => {
+    let max = 0;
+    for (let j = i * step; j < (i + 1) * step; j += 16) max = Math.max(max, Math.abs(data[j] ?? 0));
+    return max;
+  });
+  const top = Math.max(...out, 0.001);
+  return out.map((v) => Math.max(0.08, v / top));
+}
+
 /** Loudness of an audio file in `count` slices, scaled to 0..1, or null while it decodes. */
 function usePeaks(url: string, count: number): number[] | null {
   const [peaks, setPeaks] = React.useState<number[] | null>(null);
@@ -215,29 +248,7 @@ function usePeaks(url: string, count: number): number[] | null {
     const key = `${url}#${count}`;
     let job = peaksCache.get(key);
     if (!job) {
-      job = fetch(url)
-        .then((r) => r.arrayBuffer())
-        .then(async (buffer) => {
-          const context = new AudioContext();
-          try {
-            return await context.decodeAudioData(buffer);
-          } finally {
-            void context.close();
-          }
-        })
-        .then((audio) => {
-          const data = audio.getChannelData(0);
-          const step = Math.max(1, Math.floor(data.length / count));
-          // Every 16th sample is enough for a slice's peak and keeps long files fast.
-          const out = Array.from({ length: count }, (_, i) => {
-            let max = 0;
-            for (let j = i * step; j < (i + 1) * step; j += 16)
-              max = Math.max(max, Math.abs(data[j] ?? 0));
-            return max;
-          });
-          const top = Math.max(...out, 0.001);
-          return out.map((v) => Math.max(0.08, v / top));
-        });
+      job = loadPeaks(url, count);
       peaksCache.set(key, job);
     }
     let live = true;

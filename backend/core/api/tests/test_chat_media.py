@@ -303,6 +303,20 @@ def test_stale_unsent_media_never_blocks_an_upload(harness: SimpleNamespace, mon
         assert session.get(ChatMediaModel, "old-a") is None
 
 
+def test_reading_a_file_sweeps_nothing(harness: SimpleNamespace) -> None:
+    """A GET only reads, so a stale unsent file stays until a storage measure sweeps it."""
+    media_id = _upload(harness.client, _PNG).json()["id"]
+    old = datetime.now(UTC) - UNSENT_MEDIA_RETENTION - timedelta(hours=1)
+    with Session(harness.store.engine) as session:
+        session.add(_media_row("old-a", _ALICE, old))
+        session.commit()
+
+    assert harness.client.get(f"/agent/media/{media_id}").status_code == 200
+
+    with Session(harness.store.engine) as session:
+        assert session.get(ChatMediaModel, "old-a") is not None
+
+
 def test_deleting_a_chat_deletes_its_media(harness: SimpleNamespace) -> None:
     """The foreign key deletes a chat's files with the chat, and keeps unsent files."""
     now = datetime.now(UTC)

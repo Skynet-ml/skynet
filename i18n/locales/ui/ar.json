@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "يمكن أن تحتوي الرسالة على {max} ملفات كحد أقصى.",
   "agent.media.uploading": "انتظر حتى ينتهي رفع الملفات.",
   "agent.media.wait_compact": "انتظر حتى ينتهي ضغط المحادثة، ثم أرسل الملفات.",
+  "agent.media.wait_reply": "انتظر حتى ينتهي الرد، ثم أرسل الملفات.",
   "agent.media.reference_only": "لا يستطيع هذا النموذج عرض بعض الملفات المرفقة. يتلقى أسماءها فقط.",
   "agent.media.removed": "تمت إزالة {name}.",
   "agent.media.undo": "تراجع"

@@ -1532,6 +1532,73 @@ def test_stored_turn_names_its_media_and_moves_it_to_the_chat(
     assert owners == {"img-1": turn.conversation_id, "vid-1": turn.conversation_id}
 
 
+@pytest.mark.parametrize("text", ["", "same"])
+def test_regenerate_retry_keeps_a_previous_turn_with_other_files(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    """A retry with equal text but other files keeps the previous turn and its file.
+
+    A refused send stores nothing, so its ``regenerate`` retry finds the
+    previous turn last. Equal text alone (empty for messages with only
+    files) must not let the retry delete that turn.
+    """
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-a", "image")
+    _add_media(engine, "img-b", "image")
+    first, _ = _media_turn(client, monkeypatch, ["img-a"], vision=True, persist=True, user_message=text)
+    assert first.status_code == 200
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+
+    retried, _ = _media_turn(
+        client,
+        monkeypatch,
+        ["img-b"],
+        vision=True,
+        persist=True,
+        user_message=text,
+        conversation_id=cid,
+        regenerate=True,
+    )
+
+    assert retried.status_code == 200
+    with Session(engine) as session:
+        turns = (
+            session.query(AgentMessageModel)
+            .filter(AgentMessageModel.role == "user")
+            .order_by(AgentMessageModel.id)
+            .all()
+        )
+        assert [[item["id"] for item in turn.router_metadata["media"]] for turn in turns] == [["img-a"], ["img-b"]]
+        assert {row.id for row in session.query(ChatMediaModel)} == {"img-a", "img-b"}
+
+
+def test_regenerate_retry_with_the_same_files_replaces_the_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry with the same text and files replaces the saved turn and keeps its file."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-a", "image")
+    first, _ = _media_turn(client, monkeypatch, ["img-a"], vision=True, persist=True, user_message="")
+    assert first.status_code == 200
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+
+    retried, _ = _media_turn(
+        client, monkeypatch, ["img-a"], vision=True, persist=True, user_message="", conversation_id=cid, regenerate=True
+    )
+
+    assert retried.status_code == 200
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").count() == 1
+        assert session.get(ChatMediaModel, "img-a").conversation_id == cid
+
+
 def test_media_only_first_turn_titles_the_chat_from_the_file_name(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,

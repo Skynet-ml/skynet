@@ -1920,6 +1920,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
+        mediaWaiting={chatMedia.tiles.length > 0}
         onAttachFile={(file) => {
           setAttachFile(file);
           setAttachOpen(true);

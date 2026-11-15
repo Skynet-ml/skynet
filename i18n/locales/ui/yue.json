@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "一個訊息最多可以有 {max} 個檔案。",
   "agent.media.uploading": "請等檔案上載完。",
   "agent.media.wait_compact": "等對話壓縮完成，再傳送檔案。",
+  "agent.media.wait_reply": "等回覆完咗先，再傳送檔案。",
   "agent.media.reference_only": "呢個模型睇唔到部分附加檔案，佢只會收到檔案名。",
   "agent.media.removed": "已經移除 {name}。",
   "agent.media.undo": "復原"

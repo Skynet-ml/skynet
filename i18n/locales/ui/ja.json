@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "1 つのメッセージに添付できるファイルは {max} 個までです。",
   "agent.media.uploading": "ファイルのアップロードが終わるまでお待ちください。",
   "agent.media.wait_compact": "チャットの圧縮が終わるまで待ってから、ファイルを送信してください。",
+  "agent.media.wait_reply": "返信が終わるまで待ってから、ファイルを送信してください。",
   "agent.media.reference_only": "このモデルは一部の添付ファイルを表示できません。ファイル名だけを受け取ります。",
   "agent.media.removed": "{name} を削除しました。",
   "agent.media.undo": "元に戻す"

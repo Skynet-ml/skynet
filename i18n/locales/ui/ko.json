@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "메시지 하나에 최대 {max}개의 파일을 첨부할 수 있습니다.",
   "agent.media.uploading": "파일 업로드가 끝날 때까지 기다리세요.",
   "agent.media.wait_compact": "채팅 압축이 끝날 때까지 기다린 다음 파일을 보내세요.",
+  "agent.media.wait_reply": "답변이 끝날 때까지 기다린 다음 파일을 보내세요.",
   "agent.media.reference_only": "이 모델은 일부 첨부 파일을 볼 수 없습니다. 파일 이름만 받습니다.",
   "agent.media.removed": "{name}을(를) 제거했습니다.",
   "agent.media.undo": "실행 취소"

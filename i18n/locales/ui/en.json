@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "A message can have up to {max} files.",
   "agent.media.uploading": "Wait for the files to finish uploading.",
   "agent.media.wait_compact": "Wait for the chat to finish compacting, then send the files.",
+  "agent.media.wait_reply": "Wait for the reply to finish, then send the files.",
   "agent.media.reference_only": "This model cannot view some of the attached files. It gets only their names.",
   "agent.media.removed": "Removed {name}.",
   "agent.media.undo": "Undo"

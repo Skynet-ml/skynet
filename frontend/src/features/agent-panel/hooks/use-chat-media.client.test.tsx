@@ -131,7 +131,9 @@ void test("a sent file's local URL is freed on the next chat switch", async () =
 
   await React.act(async () => draft().addFiles([image(1)]));
   await flush();
-  const sent = draft().ready()!.map((m) => m.url);
+  const sent = draft()
+    .ready()!
+    .map((m) => m.url);
   await React.act(async () => draft().clear());
   assert.equal(draft().tiles.length, 0);
   assert.deepEqual(revoked, []);
@@ -140,4 +142,30 @@ void test("a sent file's local URL is freed on the next chat switch", async () =
   assert.deepEqual(revoked, sent);
   URL.revokeObjectURL = revoke;
   await React.act(async () => root.unmount());
+});
+
+void test("an unmount frees the local URLs of files still in the draft", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+
+  await React.act(async () => latest!.addFiles([image(1), image(2)]));
+  await flush();
+  const drafted = latest!.tiles.map((m) => m.url);
+  assert.equal(drafted.length, 2);
+  assert.deepEqual(revoked, []);
+
+  await React.act(async () => root.unmount());
+  assert.deepEqual(revoked, drafted);
+  URL.revokeObjectURL = revoke;
 });

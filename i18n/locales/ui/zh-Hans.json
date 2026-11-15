@@ -4537,6 +4537,7 @@
   "agent.media.too_many": "一条消息最多可以有 {max} 个文件。",
   "agent.media.uploading": "请等待文件上传完成。",
   "agent.media.wait_compact": "请等待对话压缩完成，然后再发送文件。",
+  "agent.media.wait_reply": "请等待回复结束，然后再发送文件。",
   "agent.media.reference_only": "此模型无法查看部分附加文件，只会收到文件名。",
   "agent.media.removed": "已移除 {name}。",
   "agent.media.undo": "撤销"
