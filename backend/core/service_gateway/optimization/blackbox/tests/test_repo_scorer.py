@@ -25,7 +25,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
-from vercel.sandbox import SandboxApiError
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from core.api import repo_judge
 from core.billing.budgets import BudgetError, BudgetInsufficientError
@@ -40,7 +40,7 @@ from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
-from core.sandbox.errors import SandboxTransientError
+from core.sandbox.errors import SandboxTransientError, sandbox_api_error
 from core.storage.models import Base
 from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
@@ -1683,6 +1683,89 @@ def test_a_temporary_provider_error_in_the_layout_stays_raw_and_closes_every_box
     assert raised.value is error
     assert runtime.specs
     assert runtime.closed == len(runtime.specs)
+
+
+class _WriteFailingRuntime(RecordingRuntime):
+    """Open stage boxes whose file writes fail as the Vercel SDK fails them."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Set the error every write raises.
+
+        Args:
+            error: The write error.
+        """
+        super().__init__()
+        self._write_error = error
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box whose writes raise the SDK write error.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session.
+        """
+        session = super().open(spec)
+
+        def refuse(files: Mapping[str, str]) -> None:
+            """Fail every write.
+
+            Args:
+                files: The files the layout tried to write.
+
+            Raises:
+                SandboxFilesystemWriteError: Always.
+            """
+            raise self._write_error
+
+        session.write_files = refuse  # type: ignore[method-assign]
+        return session
+
+
+def _write_error(status: int) -> tuple[SandboxApiError, SandboxFilesystemWriteError]:
+    """Build the SDK's file write error over an HTTP error answer, chained as the SDK chains it.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The API error and the write error that wraps it.
+    """
+    api = _api_error(status)
+    try:
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=api) from api
+    except SandboxFilesystemWriteError as error:
+        return api, error
+
+
+@pytest.mark.parametrize(("status", "temporary"), [(429, True), (503, True), (400, False)])
+def test_a_stage_write_error_keeps_its_api_status_through_the_judge_score(
+    tmp_path: Path, status: int, temporary: bool
+) -> None:
+    """The judge's real score path keeps the API error under an SDK write error, so a 429 or 5xx is temporary.
+
+    Args:
+        tmp_path: Scratch folder.
+        status: The HTTP status of the write.
+        temporary: Whether the judge must treat the error as temporary.
+    """
+    api, error = _write_error(status)
+    runtime = _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(BaseException) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+    if temporary:
+        assert raised.value is error
+        assert sandbox_api_error(raised.value) is api
+    else:
+        assert isinstance(raised.value, ServiceError)
+        assert "could not lay out the version" in str(raised.value)
+    assert repo_judge._temporary(raised.value) is temporary
 
 
 class _Workspace:

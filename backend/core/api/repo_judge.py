@@ -543,7 +543,8 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
 
     Raises:
         Exception: The raw error of an unexpected type from the scorer, not
-            wrapped in a ``ServiceError``, so the caller shows only its type name.
+            wrapped in a ``ServiceError``, so the caller shows only its type
+            name. It keeps its own cause.
     """
     scorer = staged.scorers[0]
 
@@ -570,10 +571,11 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
         return _final_run(score, patch, cases, label=label, phase=PHASE_FINAL, concurrency=1, repo_scorer=True)
     except ServiceError as error:
         # _final_run quotes the text of any error; an unexpected type must reach the handlers raw,
-        # so they show only its type name and log it.
+        # so they show only its type name and log it. The raw error keeps its own cause: the SDK
+        # wraps a sandbox API 429 or 5xx in a write error, and _temporary reads the status there.
         cause = error.__cause__
         if isinstance(cause, Exception) and not isinstance(cause, _KNOWN_ERRORS):
-            raise cause from None
+            raise cause from cause.__cause__
         raise
 
 

@@ -25,7 +25,7 @@ import httpx
 import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
-from vercel.sandbox import SandboxApiError
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from ...billing.budgets import BudgetFencedError, BudgetInsufficientError, BudgetService
 from ...billing.runtime import UsagePendingError
@@ -47,6 +47,8 @@ from ..routers.optimizations.lifecycle import cancel_optimization
 USER = "alice@example.com"
 ADMIN = AuthenticatedUser(username="admin1", role="admin", groups=())
 BASE = "a" * 40
+# The real score, kept before the boxes fixture replaces it.
+_REAL_SCORE = repo_judge._score
 GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
 CONTRACT_PATCH = (
     "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n@@ -1 +1 @@\n-a\n+b\n"
@@ -861,6 +863,92 @@ def test_a_sandbox_api_failure_logs_the_session_status_and_code(
         f"A call of judge session {session_id} stored a temporary failure: sandbox API status 429, code rate_limited",
         f"A call of judge session {session_id} stored a lasting failure: sandbox API status 400, code bad_request",
     ]
+    assert "private provider text" not in caplog.text
+
+
+class _WriteFailingScorer:
+    """Stand in for the repository scorer when its box write fails as the Vercel SDK fails it."""
+
+    def __init__(self, status: int, code: str) -> None:
+        """Prepare the write error over an HTTP error answer.
+
+        Args:
+            status: The HTTP status.
+            code: The provider's error code.
+        """
+        self.api = _api_error(status, code)
+        self.status = status
+
+    def dispatch(self, body: dict[str, Any]) -> Any:
+        """Fail the write as the SDK does: the write error, chained from the API error.
+
+        Args:
+            body: The guest request.
+
+        Raises:
+            SandboxFilesystemWriteError: Always.
+        """
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=self.api) from self.api
+
+
+def _real_score_with(monkeypatch: pytest.MonkeyPatch, scorer: Any) -> None:
+    """Use the real ``_score`` over ``scorer`` instead of the fixture's fake score.
+
+    Args:
+        monkeypatch: The test's patcher.
+        scorer: What the staged repository scores with.
+    """
+    staging = repo_judge.judge_scorer
+
+    @contextmanager
+    def with_scorer(payload: dict[str, Any], **kwargs: Any) -> Iterator[tuple[dict[str, Any], Any, Any]]:
+        """Stage as the fixture does, and add the scorer to the staged repository.
+
+        Args:
+            payload: The session payload.
+            **kwargs: The other scorer arguments.
+
+        Yields:
+            The fixture's protected payload, staged repository and gateway.
+        """
+        with staging(payload, **kwargs) as (protected, staged, gateway):
+            staged.scorers = [scorer]
+            yield protected, staged, gateway
+
+    monkeypatch.setattr(repo_judge, "judge_scorer", with_scorer)
+    monkeypatch.setattr(repo_judge, "_score", _REAL_SCORE)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_temporary_write_error_through_the_real_score_is_temporary_and_logged(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, status: int
+) -> None:
+    """Store a box write that the provider refuses for now as temporary, and log its status and code only."""
+    caplog.set_level("WARNING", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(3))
+    _real_score_with(monkeypatch, _WriteFailingScorer(status, "busy"))
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id)
+    assert _call_rows(store, session_id) == [("pending", False)]
+    lines = [r.getMessage() for r in caplog.records if "sandbox API" in r.getMessage()]
+    assert lines == [
+        f"A call of judge session {session_id} stored a temporary failure: sandbox API status {status}, code busy"
+    ]
+    assert "private provider text" not in caplog.text
+
+
+def test_a_client_error_write_through_the_real_score_is_stored_at_once(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Store a box write that the provider refuses with a 4xx other than 429 as a lasting failure, with no provider text in the log."""
+    caplog.set_level("WARNING", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(3))
+    _real_score_with(monkeypatch, _WriteFailingScorer(400, "bad_request"))
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert failed.value.code == "judge.score_failed"
+    assert "stored a lasting failure: sandbox API status 400, code bad_request" in caplog.text
+    assert "A call of judge session" in caplog.text
     assert "private provider text" not in caplog.text
 
 
