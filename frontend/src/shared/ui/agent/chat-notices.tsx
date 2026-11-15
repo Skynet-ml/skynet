@@ -13,7 +13,11 @@ export function ModelChangedNotice({ fromModel, toModel }: { fromModel: string; 
     <div className={LINE}>
       <Cube className="size-3.5 shrink-0" aria-hidden />
       <span dir="auto" className="min-w-0 truncate">
-        {formatMsg("shared.agent.model_changed", { from: fromModel, to: toModel })}
+        {/* Isolates keep a name that ends in punctuation whole inside an RTL sentence. */}
+        {formatMsg("shared.agent.model_changed", {
+          from: `\u2068${fromModel}\u2069`,
+          to: `\u2068${toModel}\u2069`,
+        })}
       </span>
       <TooltipButton
         side="top"
