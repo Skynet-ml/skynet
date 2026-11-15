@@ -15,6 +15,8 @@ import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segment
 import { ActivityGroup } from "./activity-steps";
 import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
+import { deniedCount } from "./denied-count";
+import { DeniedCount } from "./denied-count-note";
 import {
   blockWorkMs,
   earliestStart,
@@ -221,14 +223,18 @@ export function TurnActivity({
       ? msg("shared.agent.working")
       : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });
 
+  // Codex ends the turn's row with the actions its auto-review blocked.
+  const denied = deniedCount(allSteps.map(({ call }) => call));
+
   if (!hasHistory) {
-    return start === null ? null : <Header label={label} />;
+    return start === null ? null : <Header label={label} denied={denied} />;
   }
 
   return (
     <div className="flex flex-col">
       <Header
         label={label}
+        denied={denied}
         open={foldable ? historyOpen : undefined}
         onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
       />
@@ -304,13 +310,16 @@ function ThinkingLine({ label }: { label: string }) {
 
 /**
  * The turn's "Worked for" row; with ``onToggle`` it folds the history, as in Codex.
+ * ``denied`` counts the actions the auto-review blocked, shown at the row's end.
  */
 function Header({
   label,
+  denied = 0,
   open,
   onToggle,
 }: {
   label: string;
+  denied?: number;
   open?: boolean;
   onToggle?: () => void;
 }) {
@@ -338,6 +347,7 @@ function Header({
           <span className="truncate">{label}</span>
         </span>
       )}
+      <DeniedCount count={denied} />
     </div>
   );
 }

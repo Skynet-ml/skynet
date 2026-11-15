@@ -1,4 +1,4 @@
-"""Bound final OpenRouter text and embeddings requests using live endpoint prices and routing caps."""
+"""Bound final OpenRouter text, embeddings and decisions requests using live endpoint prices and routing caps."""
 
 from __future__ import annotations
 
@@ -449,6 +449,114 @@ def price_embedding_request(
         "source": f"https://openrouter.ai/api/v1/models/{body['model']}/endpoints",
         "input_bound": "maximum endpoint context per input",
         "input_count": len(inputs),
+        "endpoints": [
+            {"tag": endpoint["tag"], "context_length": endpoint["context_length"], "pricing": endpoint["pricing"]}
+            for endpoint, _, _ in candidates
+        ],
+        "maximum_provider_usd": str(maximum),
+        "maximum_openrouter_byok_fee_fraction": "0.05",
+    }
+    return PricedRequest(body, operation_quote(body, maximum, policy, evidence))
+
+
+# Keys and part types that mark an image, audio, video or file part at any depth.
+_MEDIA_KEYS = {"image", "image_url", "input_image", "file", "file_data", "input_audio", "audio", "video", "video_url"}
+
+
+def _plain_text_state(value: Any) -> bool:
+    """Check that a decisions state is plain JSON text data at every depth.
+
+    Args:
+        value: The state, or one value inside it.
+
+    Returns:
+        True for strings, numbers, booleans, ``None``, and lists or dicts of
+        those. False for any other type, and for a dict that looks like a
+        media part (a media key, or a ``type`` that names a media key).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, list):
+        return all(_plain_text_state(item) for item in value)
+    if isinstance(value, dict):
+        if _MEDIA_KEYS.intersection(value) or value.get("type") in _MEDIA_KEYS:
+            return False
+        return all(isinstance(key, str) and _plain_text_state(item) for key, item in value.items())
+    return False
+
+
+def price_decision_request(
+    request: Mapping[str, Any], catalog: Mapping[str, Any], policy: ChargePolicy
+) -> PricedRequest:
+    """Reserve an enforceable upper bound for one text-only ``/decisions`` request.
+
+    A decision answer is a choice or a score, not generated text, so only
+    the prompt can grow the bill. The bound takes the UTF-8 size of the whole
+    body, the same bound as a text request, capped at the endpoint context.
+
+    Args:
+        request: Final Decisions API body with ``model``, ``state`` and ``questions``.
+        catalog: Fresh endpoint response for the exact routed model.
+        policy: Approved managed cent conversion.
+
+    Returns:
+        A copied request with price and endpoint caps, and its immutable quote.
+
+    Raises:
+        UnpricedOperationError: When the model is not a priced decisions model,
+            the state holds media, or an endpoint bills a category the bound
+            cannot cover.
+    """
+    body = copy.deepcopy(dict(request))
+    if body.get("model") != catalog.get("id"):
+        raise UnpricedOperationError("The resolved model differs from its verified price catalog.")
+    if "decisions" not in (catalog.get("architecture") or {}).get("output_modalities", []):
+        raise UnpricedOperationError("This model is not a decisions model.")
+    if set(body) - {"model", "state", "questions", "provider"} or not body.get("questions"):
+        raise UnpricedOperationError("This request includes a field without verified coverage.")
+    if not _plain_text_state(body.get("state")):
+        # Images and files bill tokens their bytes do not bound.
+        raise UnpricedOperationError("A decisions request must hold text state only.")
+    routing = body.get("provider") or {}
+    if not isinstance(routing, dict):
+        raise UnpricedOperationError("Unrecognized provider routing cannot authorize work.")
+    routing = copy.deepcopy(routing)
+    selected = set(routing.get("only") or [])
+    ignored = set(routing.get("ignore") or [])
+    input_bound = _input_bound({key: value for key, value in body.items() if key != "provider"}, 0)
+    candidates = []
+    for endpoint in catalog.get("endpoints") or []:
+        tag = endpoint.get("tag")
+        names = {tag, endpoint.get("provider_name"), str(tag).split("/")[0]}
+        if (selected and not names.intersection(selected)) or names.intersection(ignored):
+            continue
+        if not isinstance(tag, str) or not tag:
+            raise UnpricedOperationError("A priced endpoint is missing its routing identity.")
+        context = _positive_integer(endpoint.get("context_length"), "endpoint context bound")
+        rates = _rate_maxima(endpoint.get("pricing") or {}, input_bound)
+        if any(value != 0 for name, value in rates.items() if name not in {"prompt", "request"}):
+            raise UnpricedOperationError("A decisions endpoint bills a category without a verified bound.")
+        candidates.append((endpoint, rates, min(input_bound, context) * rates["prompt"] + rates["request"]))
+    if not candidates:
+        raise UnpricedOperationError("No selected provider has verified decisions pricing.")
+    caps = {
+        "prompt": max(rates["prompt"] for _, rates, _ in candidates) * 1_000_000,
+        "request": max(rates["request"] for _, rates, _ in candidates),
+    }
+    for name, value in (routing.get("max_price") or {}).items():
+        amount = exact_nonnegative(value)
+        caps[name] = min(caps.get(name, amount), amount)
+    routing["max_price"] = {name: float(value) for name, value in caps.items()}
+    routing["only"] = [endpoint["tag"] for endpoint, _, _ in candidates]
+    routing["allow_fallbacks"] = False
+    body["provider"] = routing
+    maximum = max(amount for _, _, amount in candidates) * Decimal("1.05")
+    evidence = {
+        "provider": "openrouter",
+        "model": body["model"],
+        "retrieved_at": time.time(),
+        "source": f"https://openrouter.ai/api/v1/models/{body['model']}/endpoints",
+        "input_bound": input_bound,
         "endpoints": [
             {"tag": endpoint["tag"], "context_length": endpoint["context_length"], "pricing": endpoint["pricing"]}
             for endpoint, _, _ in candidates

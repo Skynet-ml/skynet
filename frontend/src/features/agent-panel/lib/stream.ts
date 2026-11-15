@@ -1,4 +1,5 @@
 import type {
+  ApprovalChoice,
   ApprovalResolvedPayload,
   ChatTurn,
   PendingApprovalPayload,
@@ -48,6 +49,8 @@ export interface GeneralistAgentRequest {
   persist?: boolean;
   /** The summary that stands in for the turns before `chat_history`, after a compaction. */
   compaction_summary?: string | null;
+  /** Exact tool names the user allowed for this chat; the backend drops protected ones. */
+  chat_allowed_tools?: string[];
   /** Ids of the stored images, video and audio sent with this message. */
   media_ids?: string[];
 }
@@ -99,7 +102,74 @@ export interface GeneralistAgentHandlers {
   /** The turn's final `stats`, sent after `done` when later model calls changed its cost. */
   onTurnStats?: (stats: unknown) => void;
   onError: (message: string, code?: string) => void;
+  /** The request surely did not reach the backend and goes again; null once it connects or gives up. */
+  onReconnect?: (progress: ReconnectProgress | null) => void;
   signal?: AbortSignal;
+}
+
+/** Which reconnect the stream is on, as "attempt of maxAttempts". */
+export interface ReconnectProgress {
+  attempt: number;
+  maxAttempts: number;
+}
+
+/** Reconnects after the first connection fails, before the turn shows an error. */
+export const MAX_RECONNECTS = 5;
+// The backend stores the user turn, creates a new chat and starts its paid
+// title call before it sends the headers. So a resend is safe only when the
+// request surely did not reach the backend. Two cases prove it: the browser was
+// already offline before the send, or a 503 came from the edge. A Skynet error
+// body (with a `code` or a `detail`) means a Skynet server answered. For
+// example, the desktop hosted proxy sends 503 `hosted_link.unreachable` also
+// after the hosted backend got the turn. A reset, a 502 or such a 503 shows the
+// error and the manual retry.
+const RECONNECT_STATUS = 503;
+
+/** True when the browser knows it has no network, so a request sent now cannot leave. */
+function offline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+/** A failed response's error text and the Skynet `detail` and `code` in its body, if any. */
+interface ErrorBody {
+  detail?: string;
+  code?: string;
+}
+
+/** Read the `detail` and `code` of a Skynet JSON error body; an edge page gives neither. */
+async function readErrorBody(res: Response): Promise<ErrorBody> {
+  const text = await res.text().catch(() => "");
+  try {
+    const body = JSON.parse(text);
+    const raw = body?.detail;
+    return {
+      detail: typeof raw === "string" ? raw : raw != null ? JSON.stringify(raw) : undefined,
+      code: typeof body?.code === "string" ? body.code : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** The wait before reconnect `attempt` (1-based): 0.5 s, then twice as long each time. */
+export function reconnectDelayMs(attempt: number): number {
+  return 500 * 2 ** (attempt - 1);
+}
+
+/** Resolve after `ms`, or early with false when `signal` aborts. */
+function waitUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false);
+    const id = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(id);
+      resolve(false);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** What `/compact` sends: the chat window to condense and what to focus on. */
@@ -141,33 +211,48 @@ async function streamAgentRoute(
   source: ApiSource,
 ): Promise<void> {
   let res: Response;
-  try {
-    res = await fetchWithAuthRetry(agentUrl(path, source), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify(req),
-      signal: handlers.signal,
-    });
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.features.agent.panel.lib.stream.literal.1"));
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    let detail: string | undefined;
-    let code: string | undefined;
-    try {
-      const body = JSON.parse(text);
-      const raw = body.detail;
-      detail = typeof raw === "string" ? raw : raw != null ? JSON.stringify(raw) : undefined;
-      code = typeof body.code === "string" ? body.code : undefined;
-    } catch {
-      /* not json */
+  let error: ErrorBody | undefined;
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) {
+      handlers.onReconnect?.({ attempt, maxAttempts: MAX_RECONNECTS });
+      if (!(await waitUnlessAborted(reconnectDelayMs(attempt), handlers.signal))) {
+        handlers.onReconnect?.(null);
+        return;
+      }
     }
+    const last = attempt === MAX_RECONNECTS;
+    // Read before the send: a drop after the send can come after the backend got the turn.
+    const offlineBeforeSend = offline();
+    try {
+      res = await fetchWithAuthRetry(agentUrl(path, source), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(req),
+        signal: handlers.signal,
+      });
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") {
+        if (attempt > 0) handlers.onReconnect?.(null);
+        return;
+      }
+      if (!last && offlineBeforeSend) continue;
+      if (attempt > 0) handlers.onReconnect?.(null);
+      handlers.onError(msg("auto.features.agent.panel.lib.stream.literal.1"));
+      return;
+    }
+    if (res.status === RECONNECT_STATUS && !last) {
+      const body = await readErrorBody(res);
+      if (body.code === undefined && body.detail === undefined) continue;
+      error = body;
+    }
+    if (attempt > 0) handlers.onReconnect?.(null);
+    break;
+  }
+  if (error || !res.ok || !res.body) {
+    const { detail, code } = error ?? (await readErrorBody(res));
     handlers.onError(
       detail ?? formatMsg("auto.features.agent.panel.lib.stream.template.1", { p1: res.status }),
       code,
@@ -201,13 +286,19 @@ export async function confirmGeneralistApproval(
   callId: string,
   approved: boolean,
   source: ApiSource = "local",
+  choice: ApprovalChoice = {},
 ): Promise<boolean> {
   let res: Response;
   try {
     res = await fetchWithAuthRetry(agentUrl("/optimizations/generalist-agent/confirm", source), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ call_id: callId, approved }),
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(choice.scope === "conversation" ? { scope: "conversation" } : {}),
+        ...(choice.note ? { note: choice.note } : {}),
+      }),
     });
   } catch {
     return false;

@@ -11,7 +11,7 @@ import { GitDiff } from "@/shared/ui/icons";
 import type { RepoSource } from "../ide/repo-files";
 import { repoBaseText } from "../lib/repo-run";
 import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
-import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
+import { isChanged, keepFiles, lineMap, turnChanges, type DraftFile } from "./draft-changes";
 import type { RepoFile } from "./review/lib";
 import type { PaneComment } from "./review/parts";
 import { ReviewPane, type RepoHostLink } from "./review/review-pane";
@@ -192,6 +192,23 @@ export function AgenticIde({
   const [full, setFull] = React.useState(false);
   const [chatExpanded, setChatExpanded] = React.useState(true);
   if (full && !paneOpen) setFull(false);
+
+  // The draft when the agent's last turn started and ended, for the pane's
+  // "Last turn" source. While the turn runs, its end is the draft now. When the
+  // IDE mounts during a turn, that turn starts at the mount, so its earlier
+  // writes show only in the whole draft.
+  const [turnEdge, setTurnEdge] = React.useState<{
+    busy: boolean;
+    start: Readonly<Record<string, string>> | null;
+    end: Readonly<Record<string, string>> | null;
+  }>(() => ({ busy, start: busy ? texts : null, end: null }));
+  if (turnEdge.busy !== busy)
+    setTurnEdge(busy ? { busy, start: texts, end: null } : { ...turnEdge, busy, end: texts });
+  const turnEnd = turnEdge.start && (turnEdge.end ?? texts);
+  const turn = React.useMemo(
+    () => (turnEdge.start && turnEnd ? turnChanges(turnEdge.start, turnEnd) : null),
+    [turnEdge.start, turnEnd],
+  );
 
   const draftPaths = React.useMemo(() => Object.keys(texts).sort(), [texts]);
   const basePaths = React.useMemo(
@@ -447,6 +464,7 @@ export function AgenticIde({
       host={host}
       full={full}
       onFull={tabs ? undefined : () => setFull((f) => !f)}
+      turn={turn}
     />
   );
 

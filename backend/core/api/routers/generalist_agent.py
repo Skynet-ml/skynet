@@ -43,10 +43,13 @@ from ...constants import TOKEN_SOURCE_MANAGED, TOKEN_SOURCE_SUBSCRIPTION
 from ...local.cli_catalog import RetiredEffort
 from ...models import ModelConfig
 from ...service_gateway.agents import compaction
+from ...service_gateway.agents.approval_choices import DECLINE_NOTE_MAX_CHARS, ApprovalScope, post_approval_choice
+from ...service_gateway.agents.auto_review import send_protected_review
 from ...service_gateway.agents.chat_title import with_title_event, write_chat_title
 from ...service_gateway.agents.code import _reply_language
 from ...service_gateway.agents.feedback import FeedbackTarget
 from ...service_gateway.agents.generalist import (
+    CHAT_RULES_MAX_TOOLS,
     ThinkingTrail,
     TrustMode,
     WizardState,
@@ -196,6 +199,14 @@ class GeneralistAgentRequest(BaseModel):
         default="ask",
         description="'ask' (confirm every mutation), 'auto_safe' (confirm destructive only), 'yolo' (never confirm).",
     )
+    chat_allowed_tools: list[Annotated[str, Field(max_length=128)]] = Field(
+        default_factory=list,
+        max_length=CHAT_RULES_MAX_TOOLS,
+        description=(
+            "Exact tool names the user allowed for this chat. The server ignores every name that a chat "
+            "rule may not cover, such as the tools that spend the balance."
+        ),
+    )
     conversation_id: str | None = Field(
         default=None,
         description=(
@@ -316,6 +327,15 @@ class ConfirmApprovalRequest(BaseModel):
 
     call_id: str = Field(..., max_length=24, description="The id carried by the pending_approval event.")
     approved: bool = Field(..., description="True to proceed with the tool, False to decline.")
+    scope: ApprovalScope = Field(
+        default="once",
+        description="'conversation' also allows this tool for the rest of the chat, when a chat rule may cover it.",
+    )
+    note: str | None = Field(
+        default=None,
+        max_length=DECLINE_NOTE_MAX_CHARS,
+        description="With a decline: what the agent should do instead. The agent reads it as user text.",
+    )
 
 
 class ConfirmApprovalResponse(BaseModel):
@@ -1230,6 +1250,36 @@ def _with_media_references(user_message: str, references: list[ChatMediaModel]) 
     return "\n\n".join([user_message, *notes]) if notes else user_message
 
 
+def _auto_review_sender(
+    model_config: ModelConfig, username: str, engine: Any
+) -> Callable[[dict[str, Any]], bytes] | None:
+    """Choose whether a turn's auto-safe calls get the paid Jev review.
+
+    The review is a managed call that reserves on the wallet before it runs.
+    A BYOK, CLI or local turn has no managed wallet route, so it gets no
+    review and keeps the normal approval prompt. A CLI turn needs its own
+    check: :func:`metering_token_source` counts it as managed.
+
+    Args:
+        model_config: The turn's resolved model.
+        username: The wallet owner.
+        engine: The database engine of the wallet, or ``None``.
+
+    Returns:
+        The sender bound to the managed wallet and key, or ``None`` for no review.
+    """
+    if (
+        metering_token_source(model_config) != TOKEN_SOURCE_MANAGED
+        or model_config.token_source not in (None, TOKEN_SOURCE_MANAGED)
+        or model_config.cli_provider is not None
+        or settings.local_mode
+        or settings.openrouter_api_key is None
+        or engine is None
+    ):
+        return None
+    return partial(send_protected_review, engine, username, settings.openrouter_api_key.get_secret_value())
+
+
 def _anchor_by_text(
     turns: list[ChatTurn], cut: int, newest_id: int | None
 ) -> tuple[str, int | None, int | None, int, int]:
@@ -1757,6 +1807,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             else None
         )
         usage_sink: list = []
+        auto_review_send = _auto_review_sender(model_config, current_user.username, getattr(job_store, "engine", None))
         compaction_cents: float | None = None
         steer_ids: dict[str, int] = {}
         feedback_target = (
@@ -1880,6 +1931,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 feedback_target=feedback_target,
                 on_steer=_store_steer if conversation_id and job_store is not None else None,
                 images=images or None,
+                chat_allowed_tools=req.chat_allowed_tools,
+                auto_review_send=auto_review_send,
             ):
                 yield event
 
@@ -2044,6 +2097,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 it as a UI warning. With a store, an unmatched confirm is
                 persisted for the replica that owns the stream to pick up.
         """
+        # The extras go first, so the waiting tool finds them as soon as the decision lands.
+        post_approval_choice(current_user.username, req.call_id, req.scope, req.note if not req.approved else None)
         resolved = get_approval_registry().resolve_or_persist(
             approval_key(req.call_id, current_user.username), req.approved
         )

@@ -15,8 +15,16 @@ registerHooks({
   },
 });
 
-const { draftRows, fileStats, fitDiffCache, isChanged, keepFiles, lineMap, replaceLine } =
-  await import("./draft-changes.ts");
+const {
+  draftRows,
+  fileStats,
+  fitDiffCache,
+  isChanged,
+  keepFiles,
+  lineMap,
+  replaceLine,
+  turnChanges,
+} = await import("./draft-changes.ts");
 
 const lines = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `line ${i + from}`);
 
@@ -134,4 +142,23 @@ test("keepFiles keeps the object of each file whose texts did not change", () =>
   assert.equal(next[0], a);
   assert.deepEqual(next[1], { ...b, after: "z" });
   assert.deepEqual(keepFiles(prev, [{ ...b }]), [b]);
+});
+
+test("a turn's changes hold each changed file's texts before and after the turn", () => {
+  const start = { "a.py": "x = 1\n", "b.py": "same\n", "c.py": "y\n" };
+  const end = { "a.py": "x = 2\n", "b.py": "same", "new.py": "z\n" };
+  // b.py only lost its final newline; c.py left the draft: neither shows.
+  assert.deepEqual(
+    [...turnChanges(start, end)],
+    [
+      ["a.py", { before: "x = 1\n", after: "x = 2\n" }],
+      ["new.py", { before: null, after: "z\n" }],
+    ],
+  );
+});
+
+test("a turn that wrote nothing has no changes", () => {
+  const texts = { "a.py": "x\n" };
+  assert.equal(turnChanges(texts, texts).size, 0);
+  assert.equal(turnChanges({}, {}).size, 0);
 });

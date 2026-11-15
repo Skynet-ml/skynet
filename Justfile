@@ -67,6 +67,19 @@ test-unit:
 test-integration:
     cd backend && {{_dev}}pytest tests/test_llm_integration.py -v
 
+# Start a local AWS Emulator in Docker (docs/agents/aws-emulator.md)
+aws-emulator:
+    bash scripts/aws-emulator.sh start
+
+# Stop the local AWS Emulator
+aws-emulator-stop:
+    bash scripts/aws-emulator.sh stop
+
+# Opt-in S3, EC2 and deploy-script tests on the emulator; a skip counts as a failure
+test-aws-emulator: aws-emulator
+    cd backend && AWS_EMULATOR_REQUIRED=1 {{_dev}}pytest tests/aws_emulator -v
+    AWS_EMULATOR_REQUIRED=1 bash infra/terraform/scripts/tests/test-aws-emulator.sh
+
 # Frontend type check via build
 test-frontend:
     cd frontend && npm run test:unit && npm run build
