@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "ファイルへ移動…",
   "submit.agentic_ide.review.no_matching": "一致するファイルはありません",
   "submit.agentic_ide.review.new_tab": "新しいタブ",
+  "submit.agentic_ide.review.enter_full_view": "全体表示にする",
+  "submit.agentic_ide.review.exit_full_view": "全体表示を終了",
   "submit.agentic_ide.review.previous_change": "前の変更",
   "submit.agentic_ide.review.next_change": "次の変更",
   "submit.agentic_ide.review.no_file_changes": "変更なし",

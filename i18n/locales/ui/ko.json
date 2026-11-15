@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "파일로 이동…",
   "submit.agentic_ide.review.no_matching": "일치하는 파일 없음",
   "submit.agentic_ide.review.new_tab": "새 탭",
+  "submit.agentic_ide.review.enter_full_view": "전체 보기로 전환",
+  "submit.agentic_ide.review.exit_full_view": "전체 보기 종료",
   "submit.agentic_ide.review.previous_change": "이전 변경",
   "submit.agentic_ide.review.next_change": "다음 변경",
   "submit.agentic_ide.review.no_file_changes": "변경 없음",

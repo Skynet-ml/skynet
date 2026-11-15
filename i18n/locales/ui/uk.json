@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Перейти до файлу…",
   "submit.agentic_ide.review.no_matching": "Немає відповідних файлів",
   "submit.agentic_ide.review.new_tab": "Нова вкладка",
+  "submit.agentic_ide.review.enter_full_view": "Відкрити повний вигляд",
+  "submit.agentic_ide.review.exit_full_view": "Вийти з повного вигляду",
   "submit.agentic_ide.review.previous_change": "Попередня зміна",
   "submit.agentic_ide.review.next_change": "Наступна зміна",
   "submit.agentic_ide.review.no_file_changes": "Немає змін",

@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "رفتن به فایل…",
   "submit.agentic_ide.review.no_matching": "فایل منطبقی نیست",
   "submit.agentic_ide.review.new_tab": "زبانهٔ جدید",
+  "submit.agentic_ide.review.enter_full_view": "ورود به نمای کامل",
+  "submit.agentic_ide.review.exit_full_view": "خروج از نمای کامل",
   "submit.agentic_ide.review.previous_change": "تغییر قبلی",
   "submit.agentic_ide.review.next_change": "تغییر بعدی",
   "submit.agentic_ide.review.no_file_changes": "بدون تغییر",

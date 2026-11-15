@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Aller au fichier…",
   "submit.agentic_ide.review.no_matching": "Aucun fichier correspondant",
   "submit.agentic_ide.review.new_tab": "Nouvel onglet",
+  "submit.agentic_ide.review.enter_full_view": "Passer en vue complète",
+  "submit.agentic_ide.review.exit_full_view": "Quitter la vue complète",
   "submit.agentic_ide.review.previous_change": "Changement précédent",
   "submit.agentic_ide.review.next_change": "Changement suivant",
   "submit.agentic_ide.review.no_file_changes": "Aucun changement",

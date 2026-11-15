@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Dosyaya git…",
   "submit.agentic_ide.review.no_matching": "Eşleşen dosya yok",
   "submit.agentic_ide.review.new_tab": "Yeni sekme",
+  "submit.agentic_ide.review.enter_full_view": "Tam görünüme geç",
+  "submit.agentic_ide.review.exit_full_view": "Tam görünümden çık",
   "submit.agentic_ide.review.previous_change": "Önceki değişiklik",
   "submit.agentic_ide.review.next_change": "Sonraki değişiklik",
   "submit.agentic_ide.review.no_file_changes": "Değişiklik yok",

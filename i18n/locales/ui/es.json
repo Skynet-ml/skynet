@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Ir a un archivo…",
   "submit.agentic_ide.review.no_matching": "No hay archivos que coincidan",
   "submit.agentic_ide.review.new_tab": "Pestaña nueva",
+  "submit.agentic_ide.review.enter_full_view": "Abrir vista completa",
+  "submit.agentic_ide.review.exit_full_view": "Salir de la vista completa",
   "submit.agentic_ide.review.previous_change": "Cambio anterior",
   "submit.agentic_ide.review.next_change": "Cambio siguiente",
   "submit.agentic_ide.review.no_file_changes": "Sin cambios",

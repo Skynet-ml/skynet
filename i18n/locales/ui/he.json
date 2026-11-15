@@ -81,6 +81,8 @@
   "submit.agentic_ide.review.jump_placeholder": "מעבר לקובץ…",
   "submit.agentic_ide.review.no_matching": "אין קבצים תואמים",
   "submit.agentic_ide.review.new_tab": "כרטיסייה חדשה",
+  "submit.agentic_ide.review.enter_full_view": "מעבר לתצוגה מלאה",
+  "submit.agentic_ide.review.exit_full_view": "יציאה מתצוגה מלאה",
   "submit.agentic_ide.review.previous_change": "השינוי הקודם",
   "submit.agentic_ide.review.next_change": "השינוי הבא",
   "submit.agentic_ide.review.no_file_changes": "אין שינויים",

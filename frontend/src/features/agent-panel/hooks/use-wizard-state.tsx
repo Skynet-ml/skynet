@@ -126,8 +126,11 @@ export interface DraftFiles {
   write: (edits: readonly FileEdit[], side: "before" | "after") => boolean;
 }
 
-/** Open the Changes pane at `path`, marking `paths` (one turn's files) when given. */
-export type ViewChanges = (path?: string, paths?: readonly string[]) => void;
+/**
+ * Open the Changes pane at `path`, marking `paths` (one turn's files) when given.
+ * `comment`, a line comment's id, scrolls the diff to that comment.
+ */
+export type ViewChanges = (path?: string, paths?: readonly string[], comment?: string) => void;
 
 /** The Changes pane's open state and its toggle, for the chat header's button. */
 export interface ChangesToggle {

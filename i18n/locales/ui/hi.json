@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "फ़ाइल पर जाएँ…",
   "submit.agentic_ide.review.no_matching": "कोई मेल खाती फ़ाइल नहीं",
   "submit.agentic_ide.review.new_tab": "नया टैब",
+  "submit.agentic_ide.review.enter_full_view": "पूर्ण दृश्य खोलें",
+  "submit.agentic_ide.review.exit_full_view": "पूर्ण दृश्य से बाहर निकलें",
   "submit.agentic_ide.review.previous_change": "पिछला बदलाव",
   "submit.agentic_ide.review.next_change": "अगला बदलाव",
   "submit.agentic_ide.review.no_file_changes": "कोई बदलाव नहीं",

@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Vai al file…",
   "submit.agentic_ide.review.no_matching": "Nessun file corrispondente",
   "submit.agentic_ide.review.new_tab": "Nuova scheda",
+  "submit.agentic_ide.review.enter_full_view": "Apri vista completa",
+  "submit.agentic_ide.review.exit_full_view": "Esci dalla vista completa",
   "submit.agentic_ide.review.previous_change": "Modifica precedente",
   "submit.agentic_ide.review.next_change": "Modifica successiva",
   "submit.agentic_ide.review.no_file_changes": "Nessuna modifica",

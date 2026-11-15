@@ -179,9 +179,11 @@ export function AgenticIde({
   const [tab, setTab] = React.useState<"chat" | "changes">("chat");
   const [paneOpen, setPaneOpen] = React.useState(false);
   const [chatShare, setChatShare] = React.useState(0.45);
-  const [focus, setFocus] = React.useState<{ path: string; paths?: readonly string[] } | null>(
-    null,
-  );
+  const [focus, setFocus] = React.useState<{
+    path: string;
+    paths?: readonly string[];
+    comment?: string;
+  } | null>(null);
   // The chat's width follows the divider at once while it is dragged, and eases otherwise.
   const [dragging, setDragging] = React.useState(false);
   // Where the divider snaps while it is dragged; the release applies it.
@@ -279,10 +281,10 @@ export function AgenticIde({
   }, [anyChange]);
 
   const showChanges = React.useCallback(
-    (path?: string, paths?: readonly string[]) => {
+    (path?: string, paths?: readonly string[], comment?: string) => {
       setPaneOpen(true);
       setTab("changes");
-      if (path) setFocus({ path, paths });
+      if (path) setFocus({ path, paths, comment });
     },
     [setTab],
   );
@@ -420,10 +422,11 @@ export function AgenticIde({
         : undefined,
     [updateLineComment, byId],
   );
-  const hidePane = React.useCallback(
-    () => (tabs ? setTab("chat") : setPaneOpen(false)),
-    [tabs, setTab],
-  );
+  const hidePane = React.useCallback(() => {
+    setFull(false);
+    if (tabs) setTab("chat");
+    else setPaneOpen(false);
+  }, [tabs, setTab]);
 
   const pane = (
     <ReviewPane
@@ -438,6 +441,8 @@ export function AgenticIde({
       onEditComment={editComment}
       onHide={hidePane}
       host={host}
+      full={full}
+      onFull={tabs ? undefined : () => setFull((f) => !f)}
     />
   );
 

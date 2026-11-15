@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "跳去檔案…",
   "submit.agentic_ide.review.no_matching": "冇相符嘅檔案",
   "submit.agentic_ide.review.new_tab": "新分頁",
+  "submit.agentic_ide.review.enter_full_view": "進入全版面檢視",
+  "submit.agentic_ide.review.exit_full_view": "離開全版面檢視",
   "submit.agentic_ide.review.previous_change": "上一個改動",
   "submit.agentic_ide.review.next_change": "下一個改動",
   "submit.agentic_ide.review.no_file_changes": "冇改動",

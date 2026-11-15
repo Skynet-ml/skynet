@@ -81,6 +81,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Jump to file…",
   "submit.agentic_ide.review.no_matching": "No matching files",
   "submit.agentic_ide.review.new_tab": "New tab",
+  "submit.agentic_ide.review.enter_full_view": "Enter full view",
+  "submit.agentic_ide.review.exit_full_view": "Exit full view",
   "submit.agentic_ide.review.previous_change": "Previous change",
   "submit.agentic_ide.review.next_change": "Next change",
   "submit.agentic_ide.review.no_file_changes": "No changes",

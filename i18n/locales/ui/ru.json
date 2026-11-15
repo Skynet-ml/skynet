@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "Перейти к файлу…",
   "submit.agentic_ide.review.no_matching": "Нет подходящих файлов",
   "submit.agentic_ide.review.new_tab": "Новая вкладка",
+  "submit.agentic_ide.review.enter_full_view": "Открыть полный вид",
+  "submit.agentic_ide.review.exit_full_view": "Выйти из полного вида",
   "submit.agentic_ide.review.previous_change": "Предыдущее изменение",
   "submit.agentic_ide.review.next_change": "Следующее изменение",
   "submit.agentic_ide.review.no_file_changes": "Нет изменений",

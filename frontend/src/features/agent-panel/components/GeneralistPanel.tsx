@@ -41,7 +41,12 @@ import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
-import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
+import {
+  joinLineComments,
+  lineCommentId,
+  withLineComments,
+  type LineComment,
+} from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu, type ModelMenuHandle } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
@@ -1845,7 +1850,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           lineComments.length > 0 && (
             <QueuedComments
               comments={lineComments}
-              onOpen={(c) => wizardCtx?.viewChanges?.(c.path)}
+              onOpen={(c) => wizardCtx?.viewChanges?.(c.path, undefined, lineCommentId(c))}
               onRemove={wizardCtx?.removeLineComment}
               onEdit={wizardCtx?.updateLineComment}
             />

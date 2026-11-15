@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "跳转到文件…",
   "submit.agentic_ide.review.no_matching": "没有匹配的文件",
   "submit.agentic_ide.review.new_tab": "新标签页",
+  "submit.agentic_ide.review.enter_full_view": "进入全屏视图",
+  "submit.agentic_ide.review.exit_full_view": "退出全屏视图",
   "submit.agentic_ide.review.previous_change": "上一处更改",
   "submit.agentic_ide.review.next_change": "下一处更改",
   "submit.agentic_ide.review.no_file_changes": "没有更改",

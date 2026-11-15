@@ -4351,6 +4351,8 @@
   "submit.agentic_ide.review.jump_placeholder": "الانتقال إلى ملف…",
   "submit.agentic_ide.review.no_matching": "لا توجد ملفات مطابقة",
   "submit.agentic_ide.review.new_tab": "علامة تبويب جديدة",
+  "submit.agentic_ide.review.enter_full_view": "الدخول إلى العرض الكامل",
+  "submit.agentic_ide.review.exit_full_view": "الخروج من العرض الكامل",
   "submit.agentic_ide.review.previous_change": "التغيير السابق",
   "submit.agentic_ide.review.next_change": "التغيير التالي",
   "submit.agentic_ide.review.no_file_changes": "لا تغييرات",
