@@ -22,7 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 
@@ -505,6 +507,69 @@ def test_a_box_call_error_on_the_answer_write_goes_up_raw(tmp_path: Path, monkey
         box.close()
     finally:
         space.close()
+
+
+def _write_error(status: int) -> SandboxFilesystemWriteError:
+    """Build the SDK's file write error over an HTTP error answer, chained as the SDK chains it.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The write error; its cause is the API error.
+    """
+    api = SandboxApiError(httpx.Response(status), f"HTTP {status}: provider text")
+    try:
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=api) from api
+    except SandboxFilesystemWriteError as error:
+        return error
+
+
+class _RefusingSession:
+    """A box whose every file write raises one error."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each write raises.
+        """
+        self.error = error
+
+    def write_files(self, files: Any) -> None:
+        """Fail the write.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_temporary_answer_file_write_error_goes_up_raw(status: int) -> None:
+    """Let a 429 or 5xx on an answer file write go up as the same error, so the relay can tell it is temporary.
+
+    Args:
+        status: The HTTP status of the write.
+    """
+    error = _write_error(status)
+    with pytest.raises(SandboxFilesystemWriteError) as raised:
+        repo_workspace._deliver(_RefusingSession(error), "a.json", "{}")  # type: ignore[arg-type]
+    assert raised.value is error
+
+
+def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_reports_a_lasting_one() -> None:
+    """With no protected files, a 429 on the answer write goes up raw; a 404 still gives an unchecked answer."""
+    session = _RefusingSession(_write_error(429))
+    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace")  # type: ignore[arg-type]
+    with pytest.raises(SandboxFilesystemWriteError) as raised:
+        box.answer("calls/000001/stages/a.json", "{}")
+    assert raised.value is session.error
+    session.error = _write_error(404)
+    assert box.answer("calls/000001/stages/a.json", "{}") is None
 
 
 def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:

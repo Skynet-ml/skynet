@@ -43,6 +43,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -613,10 +614,15 @@ def _deliver(session: SandboxSession, path: str, text: str) -> bool:
 
     Returns:
         Whether the write succeeded.
+
+    Raises:
+        Exception: A temporary provider error (429 or 5xx), raw, so the judge can retry the score.
     """
     try:
         session.write_files({path: text})
     except Exception as error:
+        if is_temporary_provider_error(error):
+            raise
         logger.warning("A relay answer could not reach the box: %s", error)
         return False
     return True

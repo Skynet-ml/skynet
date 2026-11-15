@@ -531,8 +531,10 @@ class RepoScorer:
             ``{"score": ..., **side_info}``, secrets redacted.
 
         Raises:
-            RepoScoreError: When the metric files cannot be installed, or the
-                scorer fails or returns no score.
+            RepoScoreError: When the metric files cannot be installed, a stage
+                answer could not be delivered, or the scorer fails or returns no score.
+            Exception: A temporary provider error from a stage answer, raw,
+                only when ``raw_provider_errors`` is set.
             BudgetReached: And the other budget errors, from a stage box or a relayed call.
         """
         try:
@@ -569,10 +571,13 @@ class RepoScorer:
                     timeout_seconds=self._timeout_seconds,
                     on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                 )
+        # Before the timeout: a lost answer leaves the scorer waiting until its timeout.
+        if relay is not None and relay.unchecked:
+            if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
+                raise relay.failure
+            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
         if result.timed_out:
             raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-        if relay is not None and relay.unchecked:
-            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
         text = session.read_file(f"{folder}/{runner.OUTPUT_FILE}")
         # The metric's errors can print or quote its source, so the guest
         # gets only a fixed message; the details stay in the server log (SKY-353).
@@ -715,7 +720,9 @@ class RepoScorer:
             candidate: The candidate box the version ran in.
 
         Raises:
-            RepoScoreError: When a file changed, or a check could not run.
+            RepoScoreError: When a file changed, or a check or an answer could not run.
+            Exception: A temporary provider error from a relay answer, raw, only
+                when ``raw_provider_errors`` is set and no file changed.
         """
         judge = self._rule_judge
         unchecked = relay is not None and relay.unchecked
@@ -729,6 +736,8 @@ class RepoScorer:
             reason = redact(" ".join(changes), secrets)
             raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
         if unchecked:
+            if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
+                raise relay.failure
             raise RepoScoreError("A relay answer could not be checked or delivered, so the version has no score.")
 
     def _model_env(self) -> dict[str, str]:
@@ -1398,6 +1407,8 @@ class _StageRelay:
         self.changes: list[str] = []
         # A failed check is not tampering, so it never reaches the rule judge.
         self.unchecked = False
+        # The first error an answer raised; the judge needs it raw to tell a temporary fault apart.
+        self.failure: BaseException | None = None
         # The first budget stop of a service or MCP call: the parent raises it after the call,
         # whatever the box does with its 503.
         self.control: dict[str, str] | None = None
@@ -2096,18 +2107,27 @@ class _StageRelay:
                 service's ``{"status", ...}``.
 
         Returns:
-            False when the relay is closed and wrote nothing, so a stream stops.
+            False when the relay is closed and wrote nothing, or when the
+            answer raised, so a stream stops.
         """
         with self._answer_lock:
             if self._closed:
                 return False
-            if self._box is not None or self._candidate is None:
-                # The protected-file check covers the candidate box; the metric
-                # box holds no repository and a stage box only runs the version.
-                if self._box is not None:
-                    self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
-                return True
-            changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            try:
+                if self._box is not None or self._candidate is None:
+                    # The protected-file check covers the candidate box; the metric
+                    # box holds no repository and a stage box only runs the version.
+                    if self._box is not None:
+                        self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+                    return True
+                changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            except Exception as error:
+                # This runs on a pool thread, where a raised error is lost. Only the
+                # type is logged: the message is provider text.
+                logger.warning("A relay answer could not reach the box: %s", type(error).__name__)
+                self.failure = self.failure or error
+                self.unchecked = True
+                return False
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
                 self.unchecked = True
