@@ -2747,7 +2747,9 @@ async def test_the_proxy_start_launches_the_proxy_when_every_tool_is_present(
     await env.start()
     [start] = client.boxes[env.name].current_session.scripts
     await env.stop()
-    python = f"#!/bin/sh\necho {egress_record.READY_MARKER}\n"
+    # A real proxy keeps running after its ready line. A stub that exits right after the line
+    # can end between the script's `grep` and its `kill -0`, and the script then answers 1.
+    python = f"#!/bin/sh\necho {egress_record.READY_MARKER}\nsleep 5\n"
     code, _ = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", python)
     assert code == 0
     assert (tmp_path / "launched").read_text().split() == ["setsid", "nohup"]
