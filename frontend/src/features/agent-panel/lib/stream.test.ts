@@ -95,24 +95,38 @@ test("the reconnect wait doubles from half a second", () => {
   assert.deepEqual([1, 2, 3, 4, 5].map(reconnectDelayMs), [500, 1000, 2000, 4000, 8000]);
 });
 
-test("a failed connection reconnects with attempt n of max, then clears the notice", async () => {
+/** Run `body` while the browser reports `onLine`. */
+async function withOnline(onLine: boolean, body: () => Promise<void>): Promise<void> {
+  const before = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: { onLine }, configurable: true });
+  try {
+    await body();
+  } finally {
+    if (before) Object.defineProperty(globalThis, "navigator", before);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+}
+
+test("a failed connection while offline reconnects with attempt n of max, then clears the notice", async () => {
   let calls = 0;
   const progress: unknown[] = [];
   let done = false;
-  await withFetch(
-    async () => {
-      calls += 1;
-      if (calls <= 2) throw new TypeError("Failed to fetch");
-      return doneResponse();
-    },
-    () =>
-      streamGeneralistAgent({} as never, {
-        onReconnect: (p) => progress.push(p),
-        onDone: () => {
-          done = true;
-        },
-        onError: () => assert.fail("no error expected"),
-      } as never),
+  await withOnline(false, () =>
+    withFetch(
+      async () => {
+        calls += 1;
+        if (calls <= 2) throw new TypeError("Failed to fetch");
+        return doneResponse();
+      },
+      () =>
+        streamGeneralistAgent({} as never, {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => {
+            done = true;
+          },
+          onError: () => assert.fail("no error expected"),
+        } as never),
+    ),
   );
   assert.equal(calls, 3);
   assert.deepEqual(progress, [
@@ -145,8 +159,8 @@ test("a gateway 503 reconnects, and the last failure shows the error", async () 
   assert.equal(errors.length, 1);
 });
 
-test("a 504 or a backend error does not reconnect", async () => {
-  for (const status of [500, 504]) {
+test("a 502, a 504 or a backend error does not resend the turn", async () => {
+  for (const status of [500, 502, 504]) {
     let calls = 0;
     const progress: unknown[] = [];
     await withFetch(
@@ -166,22 +180,47 @@ test("a 504 or a backend error does not reconnect", async () => {
   }
 });
 
+test("a failed connection while online does not resend the turn", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  const errors: string[] = [];
+  await withOnline(true, () =>
+    withFetch(
+      async () => {
+        calls += 1;
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent({} as never, {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string) => errors.push(message),
+        } as never),
+    ),
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(progress, []);
+  assert.equal(errors.length, 1);
+});
+
 test("a stop during the reconnect wait ends quietly and clears the notice", async () => {
   const controller = new AbortController();
   const progress: unknown[] = [];
   const errors: string[] = [];
-  await withFetch(
-    async () => {
-      controller.abort();
-      throw new TypeError("Failed to fetch");
-    },
-    () =>
-      streamGeneralistAgent({} as never, {
-        signal: controller.signal,
-        onReconnect: (p) => progress.push(p),
-        onDone: () => {},
-        onError: (message: string) => errors.push(message),
-      } as never),
+  await withOnline(false, () =>
+    withFetch(
+      async () => {
+        controller.abort();
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent({} as never, {
+          signal: controller.signal,
+          onReconnect: (p) => progress.push(p),
+          onDone: () => {},
+          onError: (message: string) => errors.push(message),
+        } as never),
+    ),
   );
   assert.deepEqual(progress, [{ attempt: 1, maxAttempts: MAX_RECONNECTS }, null]);
   assert.deepEqual(errors, []);

@@ -95,7 +95,7 @@ export interface GeneralistAgentHandlers {
   /** The turn's final `stats`, sent after `done` when later model calls changed its cost. */
   onTurnStats?: (stats: unknown) => void;
   onError: (message: string, code?: string) => void;
-  /** The stream could not connect and tries again; null once it connects or gives up. */
+  /** The request surely did not reach the backend and goes again; null once it connects or gives up. */
   onReconnect?: (progress: ReconnectProgress | null) => void;
   signal?: AbortSignal;
 }
@@ -108,10 +108,18 @@ export interface ReconnectProgress {
 
 /** Reconnects after the first connection fails, before the turn shows an error. */
 export const MAX_RECONNECTS = 5;
-// The request never reached the turn: no connection, or a gateway with no
-// server behind it. A resend then cannot run the turn twice. A 504 can hide a
-// turn that runs, so it is not here.
-const RECONNECT_STATUSES = new Set([502, 503]);
+// The backend stores the user turn, creates a new chat and starts its paid
+// title call before it sends the headers. So a resend is safe only when the
+// request surely did not reach the backend: the browser was offline, or the
+// edge answered 503 (the turn routes never send 503). A reset or a 502 can come
+// after the backend got the request, so those show the error and the manual
+// retry.
+const RECONNECT_STATUS = 503;
+
+/** True when the browser knows it has no network, so the request never left. */
+function offline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
 
 /** The wait before reconnect `attempt` (1-based): 0.5 s, then twice as long each time. */
 export function reconnectDelayMs(attempt: number): number {
@@ -197,12 +205,12 @@ async function streamAgentRoute(
         if (attempt > 0) handlers.onReconnect?.(null);
         return;
       }
-      if (!last) continue;
-      handlers.onReconnect?.(null);
+      if (!last && offline()) continue;
+      if (attempt > 0) handlers.onReconnect?.(null);
       handlers.onError(msg("auto.features.agent.panel.lib.stream.literal.1"));
       return;
     }
-    if (!RECONNECT_STATUSES.has(res.status) || last) {
+    if (res.status !== RECONNECT_STATUS || last) {
       if (attempt > 0) handlers.onReconnect?.(null);
       break;
     }
