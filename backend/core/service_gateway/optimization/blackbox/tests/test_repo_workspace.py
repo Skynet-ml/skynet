@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import base64
 import builtins
-import io
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import tarfile
@@ -28,6 +28,8 @@ import pytest
 from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.sandbox.providers.docker import DockerEnvironment
+from core.sandbox.providers.vercel import VercelEnvironment
 
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
@@ -46,6 +48,8 @@ from ..repo_workspace import (
     redact,
 )
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox_broker import ParentSandboxSession
+from ..sandbox_runtime import AsyncBridgeSession
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -449,7 +453,10 @@ def test_a_stage_answer_after_a_protected_change_names_it_and_is_still_written(
 
 
 def test_a_stage_answer_that_cannot_be_written_is_unchecked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return ``None`` when the box-user write fails after a clean check, so the version gets no score."""
+    """Return ``None`` when the box-user write fails after a clean check, and still deliver the answer with a file write.
+
+    The version gets no score, but its call ends now and not at its timeout.
+    """
     space, archive = _guarded(tmp_path)
     try:
         box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
@@ -466,7 +473,7 @@ def test_a_stage_answer_that_cannot_be_written_is_unchecked(tmp_path: Path, monk
             ),
         )
         assert box.answer("calls/000001/stages/a.json", '{"output": 1}') is None
-        assert session.read_file("calls/000001/stages/a.json") is None
+        assert session.read_file("calls/000001/stages/a.json") == '{"output": 1}'
         box.close()
     finally:
         space.close()
@@ -731,7 +738,6 @@ def _run_check_as(
     *,
     euid: int,
     fault: str | None = None,
-    status: str | None = "CapEff:\t000001ffffffffff\n",
 ) -> tuple[list[tuple[str, int]], dict[str, Any]]:
     """Run the protected-file check in this process, with a fake effective user and no real switch.
 
@@ -743,8 +749,6 @@ def _run_check_as(
         fault: ``"refuse"`` makes the switch fail as for a root with no
             capabilities, ``"stay"`` makes ``setuid`` keep root, and
             ``"root-tree"`` makes root own the tree.
-        status: The text of ``/proc/self/status``, or ``None`` when it
-            cannot be read. The default holds every capability.
 
     Returns:
         Each user switch and tree access with the effective user at that moment,
@@ -800,7 +804,17 @@ def _run_check_as(
             return os.stat_result((found.st_mode, found.st_ino, found.st_dev, found.st_nlink, 0, 0, *found[6:10]))
         return found
 
+    real_fstat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        """Report the check's output as a pipe, because pytest puts a file there."""
+        found = real_fstat(fd)
+        if fd != 1:
+            return found
+        return os.stat_result((stat_module.S_IFIFO | 0o600, *found[1:10]))
+
     monkeypatch.setattr(os, "geteuid", lambda: state["euid"])
+    monkeypatch.setattr(os, "fstat", fstat)
     for name in ("setgroups", "setgid", "setuid"):
         monkeypatch.setattr(os, name, switch(name))
     monkeypatch.setattr(os, "stat", stat)
@@ -808,17 +822,7 @@ def _run_check_as(
         monkeypatch.setattr(os, name, watch(name, getattr(os, name)))
     monkeypatch.chdir(tree)
     monkeypatch.setattr(sys, "argv", ["-c", "eval"])
-    read = watch("read", open)
-
-    def reader(path: Any, *args: Any, **kwargs: Any) -> Any:
-        """Answer the capability check from ``status``, and watch every other read."""
-        if path != "/proc/self/status":
-            return read(path, *args, **kwargs)
-        if status is None:
-            raise PermissionError(path)
-        return io.StringIO(status)
-
-    names = {**vars(builtins), "open": reader}
+    names = {**vars(builtins), "open": watch("read", open)}
     exec(compile(repo_workspace._HASH_PROTECTED, "<check>", "exec"), {"__builtins__": names})
     return events, json.loads(capsys.readouterr().out)
 
@@ -877,6 +881,38 @@ def test_the_answer_write_replaces_a_planted_link_and_never_follows_it(
     assert (tmp_path / "root-only").read_text() == "secret\n"
 
 
+def test_a_link_that_comes_back_after_the_unlink_stops_the_answer_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail the write and keep the link's target when a link comes back between the unlink and the open."""
+    target = tmp_path / "other"
+    target.write_text("secret\n")
+    answer = tmp_path / "calls" / "a.json"
+    answer.parent.mkdir()
+    real_unlink = os.unlink
+
+    def unlink_then_plant(path: str, *args: Any, **kwargs: Any) -> None:
+        """Run the real unlink, then put a link to another file at the same path.
+
+        Args:
+            path: The temporary file the write removes.
+            *args: Unlink arguments.
+            **kwargs: Unlink options.
+        """
+        try:
+            real_unlink(path, *args, **kwargs)
+        finally:
+            Path(path).symlink_to(target)
+
+    monkeypatch.setattr(os, "unlink", unlink_then_plant)
+    monkeypatch.setattr(sys, "argv", ["-c", str(answer)])
+    monkeypatch.setenv("APP_ANSWER", '{"output": 1}')
+    with pytest.raises(FileExistsError):
+        exec(compile(repo_workspace._WRITE_ANSWER, "<write>", "exec"), {"__builtins__": builtins})
+    assert target.read_text() == "secret\n"
+    assert not answer.exists()
+
+
 @pytest.mark.parametrize("fault", ["root-tree", "refuse", "stay"])
 def test_a_root_check_that_cannot_leave_root_stops_before_the_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str
@@ -892,30 +928,19 @@ def test_a_root_check_that_cannot_leave_root_stops_before_the_tree(
     assert (tmp_path / "root-only").read_text() == "secret\n"
 
 
-def test_a_root_without_capabilities_hashes_as_itself(
+def test_a_root_without_capabilities_fails_closed_and_reads_no_tree_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Run as a root with no capability, as runner._entry_user does in a local Docker box (PRE-1)."""
-    tree = _planted_tree(tmp_path)
-    events, result = _run_check_as(monkeypatch, capsys, tree, euid=0, status="CapEff:\t0000000000000000\n")
-    assert not [name for name, _ in events if name.startswith("set")]
-    assert {user for _, user in events} == {0}
-    assert set(result["files"]) == {"eval/labels.csv"}
-    assert not (tree / "calls" / "a.json").exists()
-    assert (tmp_path / "root-only").read_text() == "secret\n"
+    """Stop a root that cannot switch users, as in a local Docker box, before it reads the tree (TS-1).
 
-
-@pytest.mark.parametrize("status", [None, "Name:\tpython3\n"], ids=["unreadable", "no-CapEff-line"])
-def test_a_root_whose_capabilities_are_unknown_still_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str | None
-) -> None:
-    """Count an unreadable or incomplete ``/proc/self/status`` as holding capabilities."""
+    That root cannot read the box user's private files, so its fingerprint
+    could leave files out. The parent runs the check as the box user there.
+    """
     tree = _planted_tree(tmp_path)
     with pytest.raises(SystemExit) as stopped:
-        _run_check_as(monkeypatch, capsys, tree, euid=0, fault="refuse", status=status)
+        _run_check_as(monkeypatch, capsys, tree, euid=0, fault="refuse")
     assert stopped.value.code not in (0, None)
     assert capsys.readouterr().out == ""
-    assert not (tree / "calls" / "a.json").exists()
 
 
 def test_a_box_user_check_needs_no_switch(
@@ -930,6 +955,147 @@ def test_a_box_user_check_needs_no_switch(
     assert set(result["files"]) == {"eval/labels.csv"}
     assert not (tree / "calls" / "a.json").exists()
     assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+# Makes the check see a root start and an output file that the box user owns,
+# as when a version plants the wrapper's output file before root's redirect.
+_FOREIGN_OUTPUT = """
+import os
+real_fstat = os.fstat
+def fstat(fd):
+    found = real_fstat(fd)
+    if fd != 1:
+        return found
+    return os.stat_result((found.st_mode, found.st_ino, found.st_dev, found.st_nlink, 1000, 1000, *found[6:10]))
+os.fstat = fstat
+os.geteuid = lambda: 0
+"""
+
+
+def _run_check_process(
+    tree: Path, stdout: Any, prelude: str = "", paths: tuple[str, ...] = ("eval",)
+) -> subprocess.CompletedProcess[str]:
+    """Run the protected-file check as its own process, as the box does.
+
+    Args:
+        tree: The checkout the check runs in.
+        stdout: Where the check's output goes: a file or ``subprocess.PIPE``.
+        prelude: Code that runs before the check, to fake the process state.
+        paths: The protected paths.
+
+    Returns:
+        The finished process.
+    """
+    return subprocess.run(
+        [sys.executable, "-I", "-S", "-c", prelude + repo_workspace._HASH_PROTECTED, *paths],
+        cwd=tree,
+        stdout=stdout,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
+def test_a_root_check_whose_output_file_the_box_user_owns_prints_nothing(tmp_path: Path) -> None:
+    """Fail closed when root's output file belongs to another user, who could rewrite a clean result (TR-1)."""
+    tree = _planted_tree(tmp_path)
+    output = tmp_path / "check.out"
+    with output.open("w") as handle:
+        done = _run_check_process(tree, handle, _FOREIGN_OUTPUT)
+    assert done.returncode != 0
+    assert "output" in done.stderr
+    assert output.read_text() == ""
+
+
+def test_a_box_user_check_with_an_output_file_prints_nothing(tmp_path: Path) -> None:
+    """Fail closed when a check that does not start as root writes to a file, which its own user can rewrite."""
+    tree = _planted_tree(tmp_path)
+    output = tmp_path / "check.out"
+    with output.open("w") as handle:
+        done = _run_check_process(tree, handle)
+    assert done.returncode != 0
+    assert "output" in done.stderr
+    assert output.read_text() == ""
+
+
+def test_a_check_with_a_pipe_output_prints_the_fingerprint(tmp_path: Path) -> None:
+    """Skip the output file check for a pipe, as the local runtimes give."""
+    tree = _planted_tree(tmp_path)
+    done = _run_check_process(tree, subprocess.PIPE)
+    assert done.returncode == 0, done.stderr
+    assert set(json.loads(done.stdout)["files"]) == {"eval/labels.csv"}
+
+
+class _SudoRecordingSession:
+    """A box that records whether each command asks for root, and prints an empty fingerprint."""
+
+    def __init__(self, **attributes: Any) -> None:
+        """Start with no command, and set the given attributes.
+
+        Args:
+            **attributes: Attributes such as ``root_has_capabilities``.
+        """
+        self.sudo: list[bool] = []
+        vars(self).update(attributes)
+
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record ``sudo`` and print an empty fingerprint.
+
+        Args:
+            command: Shell command line.
+            sudo: The command asks for root.
+            **options: Other run options.
+
+        Returns:
+            A clean result with an empty fingerprint.
+        """
+        self.sudo.append(sudo)
+        return CommandResult(exit_code=0, stdout='{"files": {}, "stamps": {}}')
+
+
+@pytest.mark.parametrize(
+    ("attributes", "sudo"),
+    [({"root_has_capabilities": False}, False), ({"root_has_capabilities": True}, True), ({}, True)],
+    ids=["capless-root", "root", "unknown"],
+)
+def test_the_check_runs_as_root_unless_the_provider_root_has_no_capability(
+    tmp_path: Path, attributes: dict[str, bool], sudo: bool
+) -> None:
+    """Run the check as the box user only where the provider's root has no capability; else keep root (TS-1)."""
+    space, _ = _guarded(tmp_path)
+    try:
+        session = _SudoRecordingSession(**attributes)
+        assert space.fingerprint(session, WORK_DIR) == ({}, {})  # type: ignore[arg-type]
+        assert session.sudo == [sudo]
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize(("provider", "capable"), [(DockerEnvironment, False), (VercelEnvironment, True)])
+def test_the_session_takes_the_root_kind_from_the_provider_class(provider: type, capable: bool) -> None:
+    """Read the root's kind from the provider class, never from the box, through each session wrapper (TS-1)."""
+    environment = object.__new__(provider)
+    environment.spec = SimpleNamespace(env={}, tags={})
+    session = AsyncBridgeSession(SimpleNamespace(environment=environment))  # type: ignore[arg-type]
+    assert session.root_has_capabilities is capable
+    assert ParentSandboxSession(session, None).root_has_capabilities is capable
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a folder without permission")
+@pytest.mark.parametrize("protected", ["eval", "eval/private/labels.csv"], ids=["walk", "path"])
+def test_a_protected_folder_the_check_cannot_read_stops_it(tmp_path: Path, protected: str) -> None:
+    """Fail closed on a protected folder that the check cannot read, so no file in it is left out (TS-1)."""
+    tree = _planted_tree(tmp_path)
+    private = tree / "eval" / "private"
+    private.mkdir()
+    (private / "labels.csv").write_text("a,1\n")
+    private.chmod(0)
+    try:
+        done = _run_check_process(tree, subprocess.PIPE, paths=(protected,))
+    finally:
+        private.chmod(0o700)
+    assert done.returncode != 0
+    assert done.stdout == ""
 
 
 def test_a_failed_answer_check_is_told_apart_from_a_protected_change(
@@ -1396,6 +1562,26 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
         assert box.stamp_before_run() is None
         assert box.answer(f"{call}/stages/x.json", '{"output": 1}') == ()
         assert session.read_file(f"{call}/stages/x.json") == '{"output": 1}'
+    finally:
+        session.close()
+    assert _containers(tag) == []
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(not _DOCKER_UP, reason=f"Docker or the local {_IMAGE} image is missing.")
+def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> None:
+    """Fingerprint a 0600 file and a 0700 folder of the box user, as a local Docker root cannot read them (TS-1)."""
+    tag = uuid.uuid4().hex
+    session = AsyncBridgeRuntime("docker", image=_IMAGE).open(
+        SandboxSpec(lifetime_seconds=300, network_disabled=True, tags={"skynet_test": tag})
+    )
+    try:
+        space = SimpleNamespace(_protected=("eval",), watched=True)
+        session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{WORK_DIR}/eval/hidden/data.py": "y = 2\n"})
+        made = session.run(f"chmod 0600 {WORK_DIR}/eval/metric.py && chmod 0700 {WORK_DIR}/eval/hidden")
+        assert made.exit_code == 0
+        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR)  # type: ignore[arg-type]
+        assert sorted(files) == ["eval/hidden/data.py", "eval/metric.py"]
     finally:
         session.close()
     assert _containers(tag) == []

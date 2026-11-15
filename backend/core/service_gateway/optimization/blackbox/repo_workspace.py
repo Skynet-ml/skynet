@@ -142,35 +142,46 @@ _ANSWER_ENV_BYTES = 100_000
 # and special files are recorded rather than followed or opened. Besides the
 # contents it records each file's and folder's inode and change times: any
 # write, rename or link moves the change time, so a file rewritten and then
-# restored while the ``[run]`` entry runs still shows.
-# The parent starts it as root, so its output file is root's own in sticky
-# /tmp and the version's processes cannot rewrite it. It becomes the tree's
-# owner before it reads anything in the tree, and it writes nothing there. So
-# no root read follows a link that the version plants, and the kernel marks it
-# not dumpable, so the version's processes cannot trace it or open its fds.
-# The tree owner is the user that runner._entry_user starts the entry as. The
-# version can point the tree at a root-owned folder, so a check that stays
-# root stops before it reads the tree, and the parent gives no score. The
-# check mirrors runner._entry_user, which this standalone ``-I -S`` script
-# cannot import: a root with no effective capability, as in a local Docker
-# box, cannot switch users and runs the entry as itself. That root has no
-# power above the entry, and Docker hands the parent a pipe, not a file, so
-# the check runs as that root. A missing CapEff line counts as capabilities.
+# restored while the ``[run]`` entry runs still shows. A path or folder that
+# it cannot read stops it with no output, so no protected file is left out.
+# A version process can read the output file's name from a root command line
+# and create the file first. So the check prints nothing unless its output is
+# a pipe, or a regular file that a root start owns, that only root can write,
+# with one link, and that its name still opens (model: runner.unsafe_output).
+# A check that does not start as root and writes to a file stops too, because
+# its own user could rewrite that file.
+# On a provider whose root has capabilities, the parent starts it as root. It
+# becomes the tree's owner before it reads anything in the tree, and it writes
+# nothing there. So no root read follows a link that the version plants, and
+# the kernel marks it not dumpable, so the version's processes cannot trace
+# it or open its fds. The version can point the tree at a root-owned folder,
+# so a check that stays root stops before it reads the tree, and the parent
+# gives no score. A root that cannot switch users, as a local Docker root with
+# no capability, also stops: it cannot read the box user's private files, so
+# its fingerprint could leave files out. The parent runs the check as the box
+# user there (``root_has_capabilities`` on the provider class).
 _HASH_PROTECTED = r"""
-import hashlib, json, os, sys
+import hashlib, json, os, stat, sys
 
-def has_capabilities():
+def unsafe_output():
     try:
-        with open("/proc/self/status", encoding="utf-8") as status:
-            lines = status.read().splitlines()
+        info = os.fstat(1)
     except OSError:
         return True
-    for line in lines:
-        if line.startswith("CapEff:"):
-            return int(line.split()[1], 16) != 0
-    return True
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.geteuid() != 0 or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+        return True
+    try:
+        named = os.lstat(os.readlink("/proc/self/fd/1"))
+    except OSError:
+        return True
+    return (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
 
-if os.geteuid() == 0 and has_capabilities():
+if unsafe_output():
+    sys.exit("the check's output file is not root's own, so another user could rewrite it")
+
+if os.geteuid() == 0:
     owner = os.stat(".")
     if owner.st_uid == 0:
         sys.exit("root owns the tree, so the check has no other user to run as")
@@ -183,10 +194,14 @@ if os.geteuid() == 0 and has_capabilities():
     if os.geteuid() == 0:
         sys.exit("the check is still root after the switch")
 
+def fail(error):
+    raise error
+
 def digest(path):
-    if os.path.islink(path):
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode):
         return "link:" + os.readlink(path)
-    if not os.path.isfile(path):
+    if not stat.S_ISREG(info.st_mode):
         return "special"
     sha = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -200,16 +215,20 @@ def stamp(path):
 
 found, stamps = {}, {}
 for top in sys.argv[1:]:
-    if os.path.isdir(top) and not os.path.islink(top):
-        for folder, folders, files in os.walk(top):
+    try:
+        info = os.lstat(top)
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+    if stat.S_ISDIR(info.st_mode):
+        for folder, folders, files in os.walk(top, onerror=fail):
             folders[:] = [name for name in folders if name != ".git"]
             stamps[os.path.normpath(folder)] = stamp(folder)
-            linked = [name for name in folders if os.path.islink(os.path.join(folder, name))]
+            linked = [name for name in folders if stat.S_ISLNK(os.lstat(os.path.join(folder, name)).st_mode)]
             for name in files + linked:
                 path = os.path.normpath(os.path.join(folder, name))
                 found[path] = digest(path)
                 stamps[path] = stamp(path)
-    elif os.path.lexists(top):
+    else:
         found[os.path.normpath(top)] = digest(top)
         stamps[os.path.normpath(top)] = stamp(top)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
@@ -536,6 +555,15 @@ class CandidateBox:
                     if changes:
                         return changes
                     raise
+                if not written:
+                    # The answer stays unchecked, but the call ends now, not at its timeout.
+                    self._unstamped = True
+                    try:
+                        _deliver(self.session, path, text)
+                    except Exception:
+                        if changes:
+                            return changes
+                        raise
                 return changes if changes or written else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
             changes = workspace.changes(current, before) if current is not None and before is not None else ()
@@ -1261,7 +1289,10 @@ class RepoWorkspace:
             # A box-user command's output files belong to the box user, so a
             # process that the version leaves running could replace a clean
             # result there. The script itself drops root before it reads the tree.
-            sudo=True,
+            # Only a provider whose root has no capability, local Docker, runs
+            # it as the box user: there the output is a pipe. An unknown
+            # session keeps root.
+            sudo=getattr(session, "root_has_capabilities", True),
         )
         if not result.ok:
             return None
