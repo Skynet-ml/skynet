@@ -13,6 +13,7 @@ the matching file below when the task needs it:
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
 | Install a worktree or run maintenance | `docs/agents/install-and-maintain.md` |
 | Move code between files or add a router or feature slice | `docs/agents/refactoring.md` |
+| Test AWS code without real AWS (local AWS Emulator) | `docs/agents/aws-emulator.md` |
 
 Put personal, machine-specific rules in `CLAUDE.local.md` (Claude Code) or
 `AGENTS.local.md` (Devin). Both are gitignored; never commit them.
