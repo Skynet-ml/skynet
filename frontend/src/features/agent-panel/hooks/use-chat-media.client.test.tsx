@@ -201,3 +201,85 @@ void test("Send waits with a reason while an upload runs, and a failed upload st
   assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
   await React.act(async () => root.unmount());
 });
+
+void test("a restore puts sent files back by their stored ids, and a remove keeps the stored file", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  deleted.length = 0;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await React.act(async () =>
+    root.render(
+      <>
+        <Harness onDraft={keep} />
+        <ToastContainer transition={Instant} autoClose={false} />
+      </>,
+    ),
+  );
+  const sent = [
+    { id: "sent-1", name: "a.png", kind: "image" as const, url: "blob:old-1" },
+    { id: "sent-2", name: "b.png", kind: "image" as const, url: "blob:old-2" },
+  ];
+
+  nextUpload = Promise.resolve(new Response(new Uint8Array(3)));
+  await React.act(async () => latest!.restore(sent));
+  await flush();
+  assert.deepEqual(
+    latest!.ready()?.map((m) => m.id),
+    ["sent-1", "sent-2"],
+  );
+  assert.equal(latest!.tiles[0]!.status, undefined);
+  assert.ok(latest!.tiles[0]!.url.startsWith("blob:"));
+
+  // A chat switch frees the chat's display URLs, not the draft's own.
+  freeChatMediaUrls();
+  assert.deepEqual(revoked, []);
+
+  // A second restore into a draft that has files changes nothing.
+  await React.act(async () => latest!.restore([sent[0]!]));
+  await flush();
+  assert.equal(latest!.tiles.length, 2);
+
+  const url = latest!.tiles[0]!.url;
+  await React.act(async () => latest!.remove(latest!.tiles[0]!.id));
+  await React.act(async () => toast.dismiss());
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.deepEqual(deleted, [], "another chat holds the restored file");
+  assert.deepEqual(revoked, [url]);
+  URL.revokeObjectURL = revoke;
+  await React.act(async () => root.unmount());
+});
+
+void test("a restored file that does not load shows as failed and blocks Send", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+
+  nextUpload = Promise.resolve(new Response(null, { status: 404 }));
+  await React.act(async () =>
+    latest!.restore([{ id: "gone", name: "a.png", kind: "image", url: "" }]),
+  );
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.equal(latest!.tiles[0]!.status, "failed");
+  assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
+  await React.act(async () => root.unmount());
+});

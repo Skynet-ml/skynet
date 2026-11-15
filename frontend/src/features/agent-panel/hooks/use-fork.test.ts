@@ -54,8 +54,8 @@ const chat = [
   { role: "user" as const, content: "two" },
 ];
 
-// Mounts useFork on the chat above, with `typed` already in the composer.
-async function mountFork(typed: string): Promise<Harness> {
+// Mounts useFork on `messages`, with `typed` already in the composer.
+async function mountFork(typed: string, messages: unknown[] = chat): Promise<Harness> {
   const dom = new JSDOM("<div id='root'></div>", { url: "https://desktop.test" });
   const forks: Harness["forks"] = [];
   const toasts: string[] = [];
@@ -69,7 +69,7 @@ async function mountFork(typed: string): Promise<Harness> {
   const calls: string[] = [];
   const agent = {
     conversationId: "src",
-    messages: chat,
+    messages,
     newSession: () => void calls.push("newSession"),
     openConversation: (id: string, messages: unknown[]) =>
       void calls.push(`open:${id}:${messages.length}`),
@@ -80,7 +80,7 @@ async function mountFork(typed: string): Promise<Harness> {
     markSeen: (id: string) => void calls.push(`seen:${id}`),
   };
   const liveChatRef = {
-    current: { id: "src" as string | null, messages: chat as unknown[], busy: false },
+    current: { id: "src" as string | null, messages, busy: false },
   };
   const state: { fork: ReturnType<typeof useFork> | null; draft: string } = {
     fork: null,
@@ -89,7 +89,13 @@ async function mountFork(typed: string): Promise<Harness> {
   function Probe() {
     const [draft, setDraft] = React.useState(typed);
     state.draft = draft;
-    state.fork = useFork({ agent, store, liveChatRef, setDraft });
+    state.fork = useFork({
+      agent,
+      store,
+      liveChatRef,
+      setDraft,
+      restoreMedia: (media) => void calls.push(`media:${media.map((m) => m.id).join(",")}`),
+    });
     return null;
   }
   const root = createRoot(document.getElementById("root")!);
@@ -142,7 +148,7 @@ test("a fork at the first message opens a new chat with that message in the comp
   try {
     await forkAt(h, 0, null);
     assert.equal(h.forks.length, 0);
-    assert.deepEqual(h.calls, ["newSession", "active:null"]);
+    assert.deepEqual(h.calls, ["newSession", "active:null", "media:"]);
     assert.equal(h.draft(), "one");
   } finally {
     await h.unmount();
@@ -153,7 +159,7 @@ test("a fork at the first message keeps text the user typed in the composer", as
   const h = await mountFork("my own words");
   try {
     await forkAt(h, 0, null);
-    assert.deepEqual(h.calls, ["newSession", "active:null"]);
+    assert.deepEqual(h.calls, ["newSession", "active:null", "media:"]);
     assert.equal(h.draft(), "my own words");
   } finally {
     await h.unmount();
@@ -185,7 +191,13 @@ test("a fork opens the saved copy and restores the forked message into an empty 
       h.forks.map((f) => [f.id, f.turns]),
       [["src", 1]],
     );
-    assert.deepEqual(h.calls, ["list:forked", "open:forked:2", "active:forked", "seen:forked"]);
+    assert.deepEqual(h.calls, [
+      "list:forked",
+      "open:forked:2",
+      "active:forked",
+      "seen:forked",
+      "media:",
+    ]);
     assert.equal(h.draft(), "two");
     assert.equal(h.fork().forking, false);
   } finally {
@@ -198,6 +210,51 @@ test("a fork keeps text the user typed in the composer", async () => {
   try {
     await forkAt(h, 2, { id: "forked", title: "Fork" });
     assert.equal(h.draft(), "my own words");
+  } finally {
+    await h.unmount();
+  }
+});
+
+test("a fork at a message with media puts its media back into the composer", async () => {
+  const withMedia = [
+    ...chat.slice(0, 2),
+    { ...chat[2], media: [{ id: "m2", kind: "image", name: "b.png", url: "" }] },
+  ];
+  const h = await mountFork("", withMedia);
+  try {
+    await forkAt(h, 2, { id: "forked", title: "Fork" });
+    assert.equal(h.calls.at(-1), "media:m2");
+    assert.equal(h.draft(), "two");
+  } finally {
+    await h.unmount();
+  }
+});
+
+test("a fork at the first message with media opens a new chat with its media in the composer", async () => {
+  const withMedia = [{ ...chat[0], media: [{ id: "m1", kind: "image", name: "a.png", url: "" }] }];
+  const h = await mountFork("", withMedia);
+  try {
+    await React.act(async () => {
+      await h.fork().handleFork(0);
+    });
+    assert.deepEqual(h.calls, ["newSession", "active:null", "media:m1"]);
+    assert.equal(h.forks.length, 0);
+  } finally {
+    await h.unmount();
+  }
+});
+
+test("a fork of media with no saved copy shows a toast and opens nothing", async () => {
+  const withMedia = [
+    { ...chat[0], media: [{ id: "m1", kind: "image", name: "a.png" }] },
+    ...chat.slice(1),
+  ];
+  const h = await mountFork("", withMedia);
+  try {
+    await forkAt(h, 2, { id: "forked", title: "Fork" });
+    assert.deepEqual(h.toasts, ["agent.fork.failed"]);
+    assert.deepEqual(h.calls, ["list:forked"]);
+    assert.equal(h.fork().forking, false);
   } finally {
     await h.unmount();
   }

@@ -1592,6 +1592,45 @@ class _ThinkingOnlyLM(_ScriptedLM):
 
 
 @pytest.mark.asyncio
+async def test_attached_images_reach_the_model_in_the_new_user_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image attached to a turn reaches the model as part of the new user message."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    png = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    )
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield a fake session with no MCP tools.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    lm = _ScriptedLM([("submit", {"assistant_message": "ok"})])
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="what is this?",
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda event: None,
+        lm=lm,
+        reply_language="English",
+        images=[png],
+    )
+
+    assert reply == "ok"
+    assert png in json.dumps(lm.requests[0]["messages"][-1])
+
+
+@pytest.mark.asyncio
 async def test_turn_that_never_answers_raises_instead_of_an_empty_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     """A model that only thinks fails the turn, so the chat shows an error rather than a blank message."""
     monkeypatch.setattr(settings, "firecrawl_api_key", None)

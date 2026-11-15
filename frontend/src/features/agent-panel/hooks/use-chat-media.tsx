@@ -14,6 +14,7 @@ import {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_PER_MESSAGE,
   deleteChatMedia,
+  fetchOwnMediaUrl,
   freeMediaUrl,
   localMediaUrl,
   markMediaSent,
@@ -30,6 +31,8 @@ interface DraftMedia {
   serverId: string | null;
   /** The upload failed; the tile stays, marked, until the user removes it. */
   failed: boolean;
+  /** A file of a sent message, put back by a fork. Another chat holds it, so a remove keeps it. */
+  restored?: boolean;
 }
 
 export interface ChatMediaDraft {
@@ -45,6 +48,8 @@ export interface ChatMediaDraft {
   blocked: string | null;
   /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
   clear: () => void;
+  /** Put a sent message's files back into an empty draft, as a fork does with its text. */
+  restore: (media: readonly MediaAttachment[]) => void;
 }
 
 /** The toast for a failed upload, from the server's status. */
@@ -176,7 +181,7 @@ export function useChatMedia(): ChatMediaDraft {
               });
               return;
             }
-            if (held.serverId) void deleteChatMedia(held.serverId);
+            if (held.serverId && !held.restored) void deleteChatMedia(held.serverId);
             freeMediaUrl(held.url);
           },
         },
@@ -195,6 +200,35 @@ export function useChatMedia(): ChatMediaDraft {
     markMediaSent(itemsRef.current.map((m) => m.url));
     update(() => []);
   }, [update]);
+
+  const restore = React.useCallback(
+    (media: readonly MediaAttachment[]) => {
+      if (!media.length || itemsRef.current.length) return;
+      // The sent ids go out again; the server copies each file into the chat that gets it.
+      void Promise.allSettled(media.map((m) => fetchOwnMediaUrl(m.id))).then((urls) => {
+        const restored = media.map((m, i): DraftMedia => {
+          const got = urls[i]!;
+          return {
+            localId: crypto.randomUUID(),
+            name: m.name,
+            kind: m.kind,
+            url: got.status === "fulfilled" ? got.value : "",
+            serverId: m.id,
+            // A file that did not load shows as failed, so the user sees what is missing.
+            failed: got.status === "rejected",
+            restored: true,
+          };
+        });
+        // The user added files while these loaded: the draft is theirs now.
+        if (itemsRef.current.length) {
+          for (const m of restored) freeMediaUrl(m.url);
+          return;
+        }
+        update(() => restored);
+      });
+    },
+    [update],
+  );
 
   // A closed panel frees the local URLs of files still in the draft. An upload
   // that ends later then finds no tile and deletes its stored file.
@@ -223,5 +257,5 @@ export function useChatMedia(): ChatMediaDraft {
       ? msg("agent.media.uploading")
       : null;
 
-  return { tiles, addFiles, remove, ready, blocked, clear };
+  return { tiles, addFiles, remove, ready, blocked, clear, restore };
 }

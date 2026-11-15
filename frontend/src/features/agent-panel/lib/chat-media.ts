@@ -94,6 +94,18 @@ export function resolveChatMediaUrl(media: MediaAttachment): Promise<string> {
 }
 
 /**
+ * Fetch a stored file into a new local URL that the caller owns. The chat's
+ * display cache does not hold it, so a chat switch does not free it.
+ */
+export async function fetchOwnMediaUrl(id: string): Promise<string> {
+  const res = await fetchWithAuthRetry(apiUrl(`/agent/media/${encodeURIComponent(id)}`), {}).catch(
+    () => null,
+  );
+  if (!res?.ok) throw new ChatMediaError(res?.status ?? 0);
+  return localMediaUrl(await res.blob());
+}
+
+/**
  * Free the object URLs of the files a chat shows: the stored files fetched for display and
  * the local URLs of sent files. The panel calls it when it shows another chat, so these URLs
  * never outlive one chat. A chat shown again fetches its files by id.

@@ -280,7 +280,7 @@ def attach_media_to_chat(
     copied = sum(size for _, held_by, size in sizes if held_by not in (None, conversation_id))
     # The quota measure sweeps stale unsent files in its own transaction. It
     # runs before this session loads the rows, so no loaded row is deleted
-    # under it, and a file it deletes is a visible 404, not a lost turn.
+    # under it. The send checks its files again before it commits anything.
     if copied:
         enforce_storage_quota(job_store, username, copied)
     rows = list(session.scalars(select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned)).all())
