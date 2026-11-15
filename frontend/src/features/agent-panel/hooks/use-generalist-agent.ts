@@ -27,6 +27,8 @@ import {
 } from "@/shared/lib/thinking-segments";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
+import { keptOriginals } from "@/shared/ui/agent/file-originals";
+import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { CAPACITY_ERROR_CODE } from "@/shared/ui/agent/capacity-retry";
@@ -256,6 +258,18 @@ interface SessionRuntime {
   syncCostAfterTurn?: "due" | "reading";
   /** Tools the user allowed for this chat; each turn sends them, the backend filters them. */
   chatAllowedTools: Set<string>;
+}
+
+/**
+ * The media a turn sends: all of it, but only the originals (SKY-735) whose
+ * files are in the turn's text.
+ */
+function messageMedia(media: AgentMessage["media"], content: string): AgentMessage["media"] {
+  if (!media) return media;
+  const files = splitPastes(content).files;
+  const kept = new Set(keptOriginals(files, media.filter((m) => m.kind === "document")));
+  const next = media.filter((m) => m.kind !== "document" || kept.has(m));
+  return next.length ? next : undefined;
 }
 
 function blankSession(key: string): SessionView {
@@ -1093,8 +1107,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       hidden = false,
       editUserTurn: { text: string; occurrence: number } | null = null,
       compaction: AgentMessage["compaction"] = undefined,
-      media: AgentMessage["media"] = undefined,
+      sentMedia: AgentMessage["media"] = undefined,
     ) => {
+      // An edit may take a file out of the message; its original stays out too.
+      const media = messageMedia(sentMedia, userMessage);
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
       abortSession(key);
@@ -1187,8 +1203,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // runs as the next turn when the compaction ends (Gilad, 2026-11-12).
       if (sessionsRef.current.get(key)?.compacting?.reason === "manual") {
         // The chat's queue holds text only. A turn with files waits in the
-        // composer until the compaction ends, so no file is lost.
-        if (options?.media?.length) return false;
+        // composer until the compaction ends, so no file is lost. An original
+        // (SKY-735) can stay behind: its file goes as text in the queued turn.
+        if (options?.media?.some((m) => m.kind !== "document")) return false;
         // A hidden send (a wizard Back, a screen kickoff) is not the user's
         // to edit, so it waits on the runtime instead of in the queue.
         if (options?.hidden) {

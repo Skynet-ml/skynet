@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
+import { keptOriginals } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
   type MediaAttachment,
@@ -32,14 +33,26 @@ interface DraftMedia {
   failed: boolean;
 }
 
+/** The stored original of a PDF, DOCX or XLSX in the draft (SKY-735). It has no tile. */
+interface DraftOriginal {
+  localId: string;
+  name: string;
+  /** The stored file's id; null while the upload runs. */
+  serverId: string | null;
+}
+
 export interface ChatMediaDraft {
   /** The tiles to show in the composer, keyed by local id. */
   tiles: readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
+  /** Keep the originals of attached PDF, DOCX and XLSX files, which the viewer shows. */
+  addOriginals: (files: File[]) => void;
+  /** Drop the originals whose files left the draft; ``files`` are the draft's files. */
+  keepOriginals: (files: ReadonlyArray<{ name: string }>) => void;
   /** Take a tile out of the draft, with Undo; the stored file goes when the toast closes. */
   remove: (localId: string) => void;
-  /** The files to send, by stored id; null while an upload still runs. */
+  /** The files to send, by stored id, originals last; null while an upload still runs. */
   ready: () => MediaAttachment[] | null;
   /** Why Send must wait: an upload runs or failed. Null when the files can go. */
   blocked: string | null;
@@ -63,6 +76,12 @@ export function useChatMedia(): ChatMediaDraft {
   const itemsRef = React.useRef<readonly DraftMedia[]>([]);
   // Tiles taken out whose Undo toast is still open.
   const removedRef = React.useRef(new Map<string, DraftMedia>());
+  const originalsRef = React.useRef<DraftOriginal[]>([]);
+  const [originalsUploading, setOriginalsUploading] = React.useState(false);
+  const syncOriginals = React.useCallback((next: DraftOriginal[]) => {
+    originalsRef.current = next;
+    setOriginalsUploading(next.some((o) => !o.serverId));
+  }, []);
 
   const update = React.useCallback(
     (next: (prev: readonly DraftMedia[]) => readonly DraftMedia[]) => {
@@ -132,6 +151,50 @@ export function useChatMedia(): ChatMediaDraft {
     [update, upload],
   );
 
+  const addOriginals = React.useCallback(
+    (files: File[]) => {
+      const added = files.map((file) => ({
+        localId: crypto.randomUUID(),
+        name: file.name,
+        serverId: null,
+      }));
+      syncOriginals([...originalsRef.current, ...added]);
+      added.forEach((item, i) => {
+        // A failed upload is silent: the file still goes as text, and its slide shows the text.
+        const drop = () =>
+          syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
+        uploadChatMedia(files[i]!).then((stored) => {
+          if (!originalsRef.current.some((o) => o.localId === item.localId)) {
+            void deleteChatMedia(stored.id);
+            return;
+          }
+          if (stored.kind !== "document") {
+            void deleteChatMedia(stored.id);
+            drop();
+            return;
+          }
+          syncOriginals(
+            originalsRef.current.map((o) =>
+              o.localId === item.localId ? { ...o, serverId: stored.id } : o,
+            ),
+          );
+        }, drop);
+      });
+    },
+    [syncOriginals],
+  );
+
+  const keepOriginals = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>) => {
+      const kept = new Set(keptOriginals(files, originalsRef.current));
+      if (kept.size === originalsRef.current.length) return;
+      for (const o of originalsRef.current)
+        if (!kept.has(o) && o.serverId) void deleteChatMedia(o.serverId);
+      syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
+    },
+    [syncOriginals],
+  );
+
   const remove = React.useCallback(
     (localId: string) => {
       const index = itemsRef.current.findIndex((m) => m.localId === localId);
@@ -187,14 +250,25 @@ export function useChatMedia(): ChatMediaDraft {
 
   const ready = React.useCallback((): MediaAttachment[] | null => {
     const current = itemsRef.current;
-    if (current.some((m) => !m.serverId)) return null;
-    return current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
+    if (current.some((m) => !m.serverId) || originalsRef.current.some((o) => !o.serverId))
+      return null;
+    const media = current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
+    // Past the message limit an original stays out; its file still goes as text.
+    const originals = originalsRef.current
+      .slice(0, Math.max(0, MAX_MEDIA_PER_MESSAGE - media.length))
+      .map((o) => ({ id: o.serverId!, name: o.name, kind: "document" as const, url: "" }));
+    return [...media, ...originals];
   }, []);
 
   const clear = React.useCallback(() => {
+    // The originals past the limit did not go with the message, so they go now.
+    const room = Math.max(0, MAX_MEDIA_PER_MESSAGE - itemsRef.current.length);
     markMediaSent(itemsRef.current.map((m) => m.url));
     update(() => []);
-  }, [update]);
+    for (const o of originalsRef.current.slice(room))
+      if (o.serverId) void deleteChatMedia(o.serverId);
+    syncOriginals([]);
+  }, [update, syncOriginals]);
 
   // A closed panel frees the local URLs of files still in the draft. An upload
   // that ends later then finds no tile and deletes its stored file.
@@ -219,9 +293,9 @@ export function useChatMedia(): ChatMediaDraft {
   );
   const blocked = items.some((m) => m.failed)
     ? msg("agent.media.remove_failed")
-    : items.some((m) => !m.serverId)
+    : items.some((m) => !m.serverId) || originalsUploading
       ? msg("agent.media.uploading")
       : null;
 
-  return { tiles, addFiles, remove, ready, blocked, clear };
+  return { tiles, addFiles, addOriginals, keepOriginals, remove, ready, blocked, clear };
 }

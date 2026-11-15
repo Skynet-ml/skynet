@@ -21,7 +21,7 @@ export const MAX_MEDIA_PER_MESSAGE = 10;
 export interface StoredMedia {
   id: string;
   name: string;
-  kind: MediaKind;
+  kind: MediaAttachment["kind"];
 }
 
 /** A failed media request; ``status`` is the HTTP status, 0 for a network failure. */
@@ -39,7 +39,7 @@ export async function uploadChatMedia(file: File): Promise<StoredMedia> {
     () => null,
   );
   if (!res?.ok) throw new ChatMediaError(res?.status ?? 0);
-  const data = (await res.json()) as { id: string; name: string; kind: MediaKind };
+  const data = (await res.json()) as StoredMedia;
   return { id: data.id, name: data.name, kind: data.kind };
 }
 

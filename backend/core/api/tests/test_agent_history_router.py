@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -86,10 +87,7 @@ def _seed(store: _MemStore, *conversations: tuple[str, str]) -> None:
         conversations: ``(id, username)`` pairs to insert.
     """
     with store._session_factory() as session:
-        session.add_all(
-            AgentConversationModel(id=cid, username=username, title=cid)
-            for cid, username in conversations
-        )
+        session.add_all(AgentConversationModel(id=cid, username=username, title=cid) for cid, username in conversations)
         session.commit()
 
 
@@ -245,8 +243,12 @@ def test_fork_saves_a_copy_that_loads_again() -> None:
     assert len(client.get("/agent/conversations/c-1").json()["messages"]) == 4
 
 
-def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
-    """A fork holds its own copies of the files, so deleting the source keeps them."""
+@pytest.mark.parametrize(
+    ("name", "kind", "mime"),
+    [("shot.png", "image", "image/png"), ("brief.pdf", "document", "application/pdf")],
+)
+def test_fork_keeps_its_media_after_the_source_chat_is_deleted(name: str, kind: str, mime: str) -> None:
+    """A fork holds its own copies of the files, documents too, so deleting the source keeps them."""
     client, store = _client(_ALICE)
     _seed(store, ("c-1", "alice"))
     with store._session_factory() as session:
@@ -255,9 +257,9 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
                 ChatMediaModel(
                     id="m-1",
                     username="alice",
-                    filename="shot.png",
-                    kind="image",
-                    mime_type="image/png",
+                    filename=name,
+                    kind=kind,
+                    mime_type=mime,
                     byte_size=3,
                     data=b"abc",
                     conversation_id="c-1",
@@ -266,7 +268,7 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
                     conversation_id="c-1",
                     role="user",
                     content="look",
-                    router_metadata={"media": [{"id": "m-1", "name": "shot.png", "kind": "image"}]},
+                    router_metadata={"media": [{"id": "m-1", "name": name, "kind": kind}]},
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 ),
             ]
@@ -277,7 +279,7 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
     assert client.delete("/agent/conversations/c-1").status_code < 300
 
     media = client.get(f"/agent/conversations/{fork['id']}").json()["messages"][0]["media"]
-    assert [(m["name"], m["kind"]) for m in media] == [("shot.png", "image")]
+    assert [(m["name"], m["kind"]) for m in media] == [(name, kind)]
     assert media[0]["id"] != "m-1"
     with store._session_factory() as session:
         assert session.get(ChatMediaModel, "m-1") is None

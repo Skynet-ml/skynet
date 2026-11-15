@@ -1,6 +1,7 @@
 import type { MediaAttachment } from "@/shared/ui/agent/media-attachments";
 
-const KINDS = new Set(["image", "video", "audio"]);
+// A `document` is the original of an attached PDF, DOCX or XLSX (SKY-735).
+const KINDS = new Set(["image", "video", "audio", "document"]);
 
 /**
  * Read the files a stored user turn names (SKY-707). A reload has no local

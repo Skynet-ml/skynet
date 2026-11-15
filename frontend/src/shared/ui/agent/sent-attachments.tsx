@@ -5,6 +5,7 @@ import * as React from "react";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
+import { pairOriginals } from "./file-originals";
 import { FileTile, fileTilePreview } from "./file-tiles";
 import {
   DraftTile,
@@ -46,7 +47,15 @@ export function SentAttachments({
   media?: readonly MediaAttachment[];
   files: readonly AttachedFile[];
 }) {
-  const resolved = useResolvedMedia(given);
+  // An original shows only in its file's slide, so it is not fetched until that slide opens.
+  const { shown: tiled, originals } = React.useMemo(
+    () => ({
+      shown: given.filter((m) => m.kind !== "document"),
+      originals: given.filter((m) => m.kind === "document"),
+    }),
+    [given],
+  );
+  const resolved = useResolvedMedia(tiled);
   // The open item's id: an index would move to another item as late URLs add slides.
   const [open, setOpen] = React.useState<string | null>(null);
   const opener = React.useRef<HTMLElement | null>(null);
@@ -54,7 +63,7 @@ export function SentAttachments({
     const slides: ViewerItem[] = [];
     const entries: Entry[] = [];
     const ready = new Map(resolved.map((m) => [m.id, m]));
-    for (const g of given) {
+    for (const g of tiled) {
       const m = ready.get(g.id);
       if (!m) {
         // A placeholder keeps the tile's place, so nothing moves when the URL arrives.
@@ -71,17 +80,22 @@ export function SentAttachments({
         media: m,
       });
     }
+    const paired = pairOriginals(files, originals);
     files.forEach((file, i) => {
       const preview = fileTilePreview(file.name, file.text);
+      const original = paired[i] ?? undefined;
       const id = `file-${i}-${file.name}`;
       entries.push({
         key: id,
-        slide: preview ? slides.push({ kind: "file", id, name: file.name, preview }) - 1 : null,
+        slide:
+          preview || original
+            ? slides.push({ kind: "file", id, name: file.name, preview, original }) - 1
+            : null,
         file,
       });
     });
     return { slides, entries };
-  }, [given, resolved, files]);
+  }, [tiled, resolved, files, originals]);
   if (!entries.length) return null;
   const hidden = entries.length > SENT_LIMIT ? entries.length - SENT_LIMIT : 0;
   const shown = hidden ? entries.slice(0, SENT_LIMIT) : entries;

@@ -18,6 +18,7 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
+import { originalFormat } from "./file-originals";
 import {
   isUnsupportedImage,
   type MediaAttachment,
@@ -91,6 +92,9 @@ interface ComposerProps {
   /** Receives picked, pasted or dropped image, video and audio files, which
    *  then go with the message as files, not as text. */
   onMediaFiles?: (files: File[]) => void;
+  /** Receives the attached PDF, DOCX and XLSX files whose text was read, so
+   *  their originals can show in the viewer. */
+  onOriginalFiles?: (files: File[]) => void;
   /** Files wait to go with the next message. A queued or steered message
    *  carries only text, so the composer refuses it, with a reason, until the
    *  reply ends. */
@@ -271,6 +275,7 @@ export function Composer({
   claimsFile,
   onAttachFile,
   onMediaFiles,
+  onOriginalFiles,
   mediaWaiting = false,
   sendBlocked = null,
   suggest,
@@ -469,6 +474,9 @@ export function Composer({
         const latest = splitPastes(valueRef.current);
         const added = read.attached.map((file) => attachedFile(file.name, file.text));
         onChange(joinPastes({ ...latest, files: [...latest.files, ...added] }));
+        const skipped = new Set([...read.failed, ...read.tooLarge]);
+        const originals = files.filter((f) => originalFormat(f.name) && !skipped.has(f.name));
+        if (originals.length) onOriginalFiles?.(originals);
       }
     } finally {
       setAttaching((n) => n - 1);

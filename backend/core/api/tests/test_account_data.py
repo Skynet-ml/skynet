@@ -290,17 +290,23 @@ def test_delete_removes_and_counts_the_feedback_reports(harness: SimpleNamespace
     assert owners == [_OTHER]
 
 
-def test_export_lists_and_delete_removes_the_chat_media(harness: SimpleNamespace) -> None:
-    """Export lists only the account's chat media without bytes; deletion removes only that media."""
+@pytest.mark.parametrize(
+    ("filename", "kind", "mime"),
+    [("shot.png", "image", "image/png"), ("brief.pdf", "document", "application/pdf")],
+)
+def test_export_lists_and_delete_removes_the_chat_media(
+    harness: SimpleNamespace, filename: str, kind: str, mime: str
+) -> None:
+    """Export lists only the account's chat media, documents too, without bytes; deletion removes only that media."""
     with Session(harness.engine) as session:
         for owner in (_EMAIL, _OTHER):
             session.add(
                 ChatMediaModel(
                     id=str(uuid4()),
                     username=owner,
-                    filename="shot.png",
-                    kind="image",
-                    mime_type="image/png",
+                    filename=filename,
+                    kind=kind,
+                    mime_type=mime,
                     byte_size=4,
                     data=b"\x89PNG",
                 )
@@ -308,7 +314,7 @@ def test_export_lists_and_delete_removes_the_chat_media(harness: SimpleNamespace
         session.commit()
 
     exported = harness.client.get("/account/export").json()["chat_media"]
-    assert [(m["filename"], m["kind"], m["byte_size"]) for m in exported] == [("shot.png", "image", 4)]
+    assert [(m["filename"], m["kind"], m["byte_size"]) for m in exported] == [(filename, kind, 4)]
     assert "data" not in exported[0]
 
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})

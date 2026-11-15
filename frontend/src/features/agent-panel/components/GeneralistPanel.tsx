@@ -43,6 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
@@ -1087,6 +1088,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
   const chatMedia = useChatMedia();
+  // A file taken out of the draft takes its stored original with it.
+  const keepOriginals = chatMedia.keepOriginals;
+  React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
     const media = chatMedia.ready();
@@ -1931,6 +1935,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
+        onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
         mediaWaiting={chatMedia.tiles.length > 0}
         sendBlocked={chatMedia.blocked}
         onAttachFile={(file) => {
