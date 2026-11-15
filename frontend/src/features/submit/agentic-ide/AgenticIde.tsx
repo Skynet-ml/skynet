@@ -15,7 +15,7 @@ import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
 import type { RepoFile } from "./review/lib";
 import type { PaneComment } from "./review/parts";
 import { ReviewPane, type RepoHostLink } from "./review/review-pane";
-import { MIN_PANE, snapAt, type Snap } from "./split";
+import { clampShare, shareRange, snapAt, type Snap } from "./split";
 
 const OPTIMIZE_TOML = "optimize.toml";
 // The entry files are new in the draft; the repository never holds them.
@@ -482,14 +482,16 @@ export function AgenticIde({
   };
 
   // The keys move the divider only between the two snap edges.
-  const chatMin = width > 0 ? Math.min(0.5, MIN_PANE / width) : 0.25;
-  const chatMax = 1 - chatMin;
+  const range = shareRange(width);
+  const { min: chatMin, max: chatMax } = range;
+  // A window resize can leave the stored share outside the range.
+  const share = clampShare(chatShare, range);
   const nudge = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const rtl = getComputedStyle(event.currentTarget).direction === "rtl";
     const grow = (event.key === "ArrowRight") !== rtl;
-    setChatShare((share) => Math.min(chatMax, Math.max(chatMin, share + (grow ? 0.02 : -0.02))));
+    setChatShare(clampShare(share + (grow ? 0.02 : -0.02), range));
   };
 
   const tabClass = (active: boolean) =>
@@ -512,14 +514,9 @@ export function AgenticIde({
   }, [setChatFloat, floating, chatExpanded]);
   React.useEffect(() => () => setChatFloat?.(null), [setChatFloat]);
   // The chat's width in percent; null when the tabs or the full view set it.
-  const chatPct =
-    tabs || floating
-      ? null
-      : !showPane || snap === "end"
-        ? 100
-        : snap === "start"
-          ? 0
-          : chatShare * 100;
+  const pctAt = (s: number) =>
+    tabs || floating ? null : !showPane || snap === "end" ? 100 : snap === "start" ? 0 : s * 100;
+  const chatPct = pctAt(share);
   const ease = "duration-[340ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:duration-150";
   // The pane's content keeps its open width, so it slides out from the edge
   // while the chat narrows, and does not reflow on every frame.
@@ -528,7 +525,7 @@ export function AgenticIde({
     !tabs && width > 0
       ? floating || snap === "start"
         ? Math.round(width)
-        : Math.round(width * (1 - chatShare)) - 1
+        : Math.round(width * (1 - share)) - 1
       : undefined;
   // After the close fade, the content leaves the layout, so a clipped pane
   // does not keep drawing the open file.
@@ -538,7 +535,8 @@ export function AgenticIde({
   if (!showPane && tabs && !paneGone) setPaneGone(true);
   // Widths ease only when the pane opens, closes or is nudged. A window
   // resize moves the percent-wide chat at once, so the content must too.
-  const layout = String(chatPct);
+  // The stored share keys the ease, so a resize that clamps the share does not ease.
+  const layout = String(pctAt(chatShare));
   const [easedLayout, setEasedLayout] = React.useState(layout);
   const [easing, setEasing] = React.useState(false);
   if (easedLayout !== layout) {
@@ -620,7 +618,7 @@ export function AgenticIde({
             aria-label={msg("submit.agentic_ide.resize")}
             aria-valuemin={Math.round(chatMin * 100)}
             aria-valuemax={Math.round(chatMax * 100)}
-            aria-valuenow={Math.round(chatShare * 100)}
+            aria-valuenow={Math.round(share * 100)}
             tabIndex={0}
             onPointerDown={startDrag}
             onKeyDown={nudge}
