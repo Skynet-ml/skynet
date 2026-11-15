@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# image-key.sh does not parse in an older Bash. Bash 3.2 then exits 0 through
+# the EXIT trap and runs no test, so check before it loads (SKY-730).
+if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1))); then
+  printf 'FAIL: Bash 5.1 or newer is required; %s is %s\n' "$BASH" "$BASH_VERSION" >&2
+  exit 1
+fi
+
 for command in awk find grep git jq sed stat chmod; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing test command: %s\n' "$command" >&2
