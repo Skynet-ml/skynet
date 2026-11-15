@@ -413,19 +413,32 @@ def test_a_stage_answer_is_checked_as_root_then_written_as_the_box_user(tmp_path
         space.close()
 
 
-def test_a_stage_answer_after_a_protected_change_names_it_and_writes_nothing(tmp_path: Path) -> None:
-    """Return the change and write no answer: the version gets no score, so it needs no answer."""
+def test_a_stage_answer_after_a_protected_change_names_it_and_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return the change and still write the answer, so the version ends now instead of at its timeout."""
     space, archive = _guarded(tmp_path)
     try:
         box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
         box.stamp_before_run()
         session = box.session
         session.run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv")
-        runs = len(session.commands)
         changes = box.answer("calls/000001/stages/b.json", '{"output": 2}')
         assert [problem.split("'")[1] for problem in changes or ()] == ["eval/labels.csv"]
-        assert session.read_file("calls/000001/stages/b.json") is None
-        assert [command for command, _ in session.commands[runs:]] == session.root_commands[-1:]
+        assert session.read_file("calls/000001/stages/b.json") == '{"output": 2}'
+
+        run = session.run
+        monkeypatch.setattr(
+            session,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._WRITE_ANSWER) in command
+                else run(command, **options)
+            ),
+        )
+        changes = box.answer("calls/000001/stages/c.json", '{"output": 3}')
+        assert [problem.split("'")[1] for problem in changes or ()] == ["eval/labels.csv"]
         box.close()
     finally:
         space.close()

@@ -213,8 +213,8 @@ for top in sys.argv[1:]:
         stamps[os.path.normpath(top)] = stamp(top)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
 """
-# Writes APP_ANSWER to the path in its argument from inside the box, after a
-# clean check. Unlike a Vercel file write, a box command moves the change time
+# Writes APP_ANSWER to the path in its argument from inside the box, after the
+# check. Unlike a Vercel file write, a box command moves the change time
 # only of the files it writes, so the stamps from before the run stay valid.
 # It runs as the box user, not with the root check: the parent's file write
 # makes each call folder as the box user with mode 0755, and a local Docker
@@ -487,10 +487,11 @@ class CandidateBox:
     def answer(self, path: str, text: str) -> tuple[str, ...] | None:
         """Check the protected files while the version runs, then write one relay answer into the box.
 
-        A root check runs first, then a box-user command writes the answer
-        only when the check finds no change. Box commands keep the stamps
-        taken before the run valid. An answer too large for the environment
-        is written with a file write, and the files are stamped again after it.
+        A root check runs first, then a box-user command writes the answer,
+        also after a change, so the version ends now and not at its timeout.
+        Box commands keep the stamps taken before the run valid. An answer
+        too large for the environment is written with a file write, and the
+        files are stamped again after it.
 
         Args:
             path: Where the waiting client reads the answer, relative to the box.
@@ -498,7 +499,8 @@ class CandidateBox:
 
         Returns:
             Like :meth:`protected_changes`, or ``None`` when the files could
-            not be checked or the answer could not be written.
+            not be checked, or when nothing changed and the answer could not
+            be written.
         """
         workspace = self._workspace
         with self._lock:
@@ -511,9 +513,8 @@ class CandidateBox:
                     _deliver(self.session, path, text)
                     return None
                 changes = workspace.changes(current, before)
-                if changes:
-                    return changes
-                return changes if _write_answer(self.session, path, text) else None
+                written = _write_answer(self.session, path, text)
+                return changes if changes or written else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
             if not _deliver(self.session, path, text) or current is None or before is None:
                 return None
