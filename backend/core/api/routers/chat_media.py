@@ -31,6 +31,7 @@ from ...config import settings
 from ...storage.models import ChatMediaModel
 from ...storage.usage import sweep_unsent_chat_media
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..errors import DomainError
 from ..rate_limit import RateLimiter, shared_redis_client
 from ._helpers import enforce_storage_quota
 
@@ -281,7 +282,8 @@ def attach_media_to_chat(
         DomainError: ``user.storage.quota_exceeded`` (409) when the copies
             would go over the caller's storage quota; nothing changes then.
         HTTPException: 404 when a file is deleted while the quota is checked,
-            and 409 when the copies come to more than ``copy_bytes``.
+            DomainError ``agent.media.changed`` (409) when the copies come to
+            more than ``copy_bytes``.
     """
     if not media_ids:
         return {}
@@ -294,16 +296,21 @@ def attach_media_to_chat(
     # runs before this session locks the rows, so it never waits on them.
     if copy_bytes is None and copied:
         enforce_storage_quota(job_store, username, copied)
+    # Locks in id order, so two sends of the same files never deadlock.
     rows = list(
         session.scalars(
-            select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned).with_for_update()
+            select(ChatMediaModel)
+            .options(defer(ChatMediaModel.data))
+            .where(*owned)
+            .order_by(ChatMediaModel.id)
+            .with_for_update()
         ).all()
     )
     if len(rows) != len(sizes):
         raise HTTPException(status_code=404, detail="Attachment not found.")
     if copy_bytes is not None and media_copy_bytes(rows, conversation_id) > copy_bytes:
         # Another chat took an unsent file after the caller checked the quota.
-        raise HTTPException(status_code=409, detail="Attachment changed. Send again.")
+        raise DomainError("agent.media.changed", status=409)
     held: dict[str, str] = {}
     for row in rows:
         if row.conversation_id is None:

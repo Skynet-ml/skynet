@@ -393,9 +393,9 @@ def test_attach_refuses_copies_over_the_checked_bytes(harness: SimpleNamespace) 
         session.flush()
         attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
         session.commit()
-    with Session(harness.store.engine) as session, pytest.raises(HTTPException) as caught:
+    with Session(harness.store.engine) as session, pytest.raises(DomainError) as caught:
         attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b", 0)
-    assert caught.value.status_code == 409
+    assert (caught.value.status_code, caught.value.code) == (409, "agent.media.changed")
     with Session(harness.store.engine) as session:
         held = attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b", len(_PNG))
         assert held[media_id] != media_id

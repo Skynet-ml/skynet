@@ -191,6 +191,7 @@
     "admin.quota_save_failed": "Не удалось сохранить переопределение квоты.",
     "admin.user_not_found": "Аккаунт для '{email}' не найден.",
     "agent.approval.unknown_call_id": "Нет ожидающего подтверждения для указанного call_id.",
+    "agent.media.changed": "Файл в этом сообщении изменился. Отправьте сообщение ещё раз.",
     "agent.steer_pending_full": "Достигнут лимит ожидающих сообщений. Добавьте это сообщение в очередь.",
     "agent.status.tool_end": "Инструмент завершил работу.",
     "agent.status.tool_start": "Агент вызывает инструмент…",

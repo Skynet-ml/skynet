@@ -41,6 +41,7 @@ class I18nKey(StrEnum):
     ADMIN_QUOTA_SAVE_FAILED = 'admin.quota_save_failed'
     ADMIN_USER_NOT_FOUND = 'admin.user_not_found'
     AGENT_APPROVAL_UNKNOWN_CALL_ID = 'agent.approval.unknown_call_id'
+    AGENT_MEDIA_CHANGED = 'agent.media.changed'
     AGENT_STATUS_TOOL_END = 'agent.status.tool_end'
     AGENT_STATUS_TOOL_START = 'agent.status.tool_start'
     AGENT_STEER_PENDING_FULL = 'agent.steer_pending_full'
