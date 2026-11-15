@@ -128,6 +128,11 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
     else:
         archive.extractall(".", filter=data_filter)
 """
+# The base image's root-owned interpreter. The box PATH puts the box-writable
+# /app/.venv/bin first, so a `python3` that the [setup] or [run] code plants
+# there could print a clean hash. ``-S`` skips site-packages, which the image
+# leaves group-writable; the hash scripts need only the standard library.
+BASE_PYTHON = "/usr/local/bin/python3"
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -202,6 +207,20 @@ for folder, folders, files in os.walk(".", followlinks=False):
         sha.update(b"\0")
 print(sha.hexdigest())
 """
+
+
+def _pick_base_python() -> str:
+    """Set ``p`` in a box command to the base interpreter.
+
+    It falls back to ``python3`` from PATH only where no base interpreter
+    exists, such as the local test runtime. The box user cannot remove the
+    root-owned one in the image, so the fallback never runs there.
+
+    Returns:
+        A shell prefix that sets ``p`` and ends in ``&& ``. It keeps one
+        ``&&`` chain, so a failed ``cd`` before it still stops the hash.
+    """
+    return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
 class RepoSetupError(RuntimeError):
@@ -1100,7 +1119,8 @@ class RepoWorkspace:
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f"cd {PREPARED_DIR} && python3 -I -c {shlex.quote(_HASH_PREPARED)}", timeout_seconds=_HASH_TIMEOUT_SECONDS
+            f'cd {PREPARED_DIR} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
+            timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         lines = result.stdout.strip().splitlines() if result.ok else []
         digest = lines[-1] if lines else ""
@@ -1125,7 +1145,7 @@ class RepoWorkspace:
         paths = " ".join(shlex.quote(path) for path in self._protected)
         target = f'export APP_ANSWER_PATH="$PWD"/{shlex.quote(answer[0])} && ' if answer is not None else ""
         result = session.run(
-            f"{target}cd {shlex.quote(directory)} && python3 -I -c {shlex.quote(_HASH_PROTECTED)} {paths}",
+            f'{target}cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
             env={"APP_ANSWER": answer[1]} if answer is not None else None,
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )

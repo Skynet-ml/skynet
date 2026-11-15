@@ -162,7 +162,10 @@ OUTPUT_POLL_TIMEOUT = 10.0
 OUTPUT_POLL_MAX_BYTES = 1 << 20
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
+# It runs as the box user while the [run] entry runs, and its output becomes the
+# trusted frames. ROOT_PATH keeps a tool planted in /app/.venv/bin from forging them.
 TAIL_SCRIPT = (
+    f"export PATH={ROOT_PATH}; "
     'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null'
     f' | head -c {OUTPUT_POLL_MAX_BYTES} | base64 | tr -d "\\n"; echo; shift 2; done'
 )
@@ -1081,10 +1084,13 @@ class VercelEnvironment(SandboxEnvironment):
             sentinel = f"{EXIT_PREFIX}{token}"
             out_path = f"{OUTPUT_PREFIX}{token}.out"
             err_path = f"{OUTPUT_PREFIX}{token}.err"
-            inner = f"bash {' '.join(SHELL_FLAGS)} {shlex.quote(command)}"
+            # A non-root wrapper starts with the box PATH, which holds the
+            # box-writable /app/.venv/bin. Absolute paths keep a planted `bash`
+            # or `timeout` from replacing a trusted helper's command.
+            inner = f"/bin/bash {' '.join(SHELL_FLAGS)} {shlex.quote(command)}"
             kill_after = None
             if timeout_sec is not None:
-                inner = f"timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
+                inner = f"/usr/bin/timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)

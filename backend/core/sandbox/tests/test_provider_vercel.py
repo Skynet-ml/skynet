@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -734,7 +735,7 @@ async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeC
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
     assert [call["command"], *call["args"][:5]] == [*vercel.NO_NEW_PRIVS, "/bin/bash", "--noprofile", "--norc", "-c"]
-    assert call["args"][-1].startswith("bash --noprofile --norc -c ")
+    assert call["args"][-1].startswith("/bin/bash --noprofile --norc -c ")
     await env.stop()
 
 
@@ -763,11 +764,76 @@ async def test_a_sudo_command_starts_without_no_new_privs(client: FakeClient, lo
     assert call["command"] == "/bin/bash"
     assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
     assert len(call["args"]) == 4
-    assert call["args"][-1].startswith(f"export PATH={vercel.ROOT_PATH}; timeout --signal=KILL 30s bash ")
+    assert call["args"][-1].startswith(f"export PATH={vercel.ROOT_PATH}; /usr/bin/timeout --signal=KILL 30s /bin/bash ")
     assert "/app/.venv" not in vercel.ROOT_PATH
     assert "setpriv" not in call["args"][-1]
     assert call["sudo"] is True
     await env.stop()
+
+
+def _planted_tools(folder: Path, marker: Path, *names: str) -> None:
+    """Write fake tools that print a forged line, like a ``[run]`` entry that writes into ``/app/.venv/bin``.
+
+    Args:
+        folder: A new folder under the test's tmp_path that goes first on PATH.
+        marker: A file under the test's tmp_path that each fake tool creates.
+        names: The tool names to plant.
+    """
+    folder.mkdir()
+    for name in names:
+        tool = folder / name
+        tool.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\necho forged\n")
+        tool.chmod(0o755)
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+async def test_the_command_wrapper_names_its_programs_by_absolute_path(
+    client: FakeClient, log: list[str], sudo: bool
+) -> None:
+    """Check that the timeout wrapper and the inner shell never come from a PATH lookup (PRE-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=30, sudo=sudo)
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    assert re.search(r"(^|; )/usr/bin/timeout --signal=KILL 30s /bin/bash --noprofile --norc -c ", script)
+    await env.stop()
+
+
+async def test_a_non_root_command_wrapper_ignores_a_bash_planted_on_path(
+    client: FakeClient, log: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run the real wrapper script in a local shell with a planted ``bash`` first on PATH (PRE-1).
+
+    The box user can write ``/app/.venv/bin``, which is on the box PATH, so a
+    wrapper that finds ``bash`` there would let a ``[run]`` entry forge the
+    output of the parent's later checks.
+    """
+    monkeypatch.setattr(vercel, "OUTPUT_PREFIX", f"{tmp_path}/output-")
+    monkeypatch.setattr(vercel, "EXIT_PREFIX", f"{tmp_path}/exit-")
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    call = client.boxes[env.name].create_calls[0]
+    await env.stop()
+    assert call["args"][1] == "/bin/bash"
+    _run_with_planted_tools(call["args"][1:], tmp_path)
+
+
+def _run_with_planted_tools(args: list[str], tmp_path: Path) -> None:
+    """Run one wrapper with a planted ``bash`` and ``timeout`` first on PATH, and check that the real ones ran.
+
+    Args:
+        args: The wrapper's command line, from ``/bin/bash`` on.
+        tmp_path: The test's scratch folder; the wrapper's files are under it.
+    """
+    marker = tmp_path / "planted-tool-ran"
+    _planted_tools(tmp_path / "planted", marker, "bash", "timeout")
+    subprocess.run(args, env={"PATH": f"{tmp_path / 'planted'}:/usr/bin:/bin"}, check=True, timeout=30)
+    found = _PATHS.search(args[-1])
+    assert found
+    assert Path(found.group(1)).read_text() == "hello\n"
+    assert Path(found.group(3)).read_text() == "0\n"
+    assert not marker.exists()
 
 
 async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: FakeClient, log: list[str]) -> None:
@@ -2349,6 +2415,28 @@ def test_tail_script_reads_at_most_the_cap_per_poll(tmp_path: Path) -> None:
     args[-2] = str(vercel.OUTPUT_POLL_MAX_BYTES + 1)
     completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
     assert base64.b64decode(completed.stdout.split("\n")[0]) == b"xxxxx"
+
+
+def test_tail_script_ignores_tools_planted_on_path(tmp_path: Path) -> None:
+    """Read the real bytes when fake ``tail``, ``head``, ``base64`` and ``tr`` come first on PATH (PRE-1).
+
+    The tail read runs as the box user while the ``[run]`` entry runs, and the
+    parent takes the supervisor's result frame from what it prints.
+    """
+    out = tmp_path / "out"
+    out.write_bytes(b"real frame\n")
+    marker = tmp_path / "planted-tool-ran"
+    _planted_tools(tmp_path / "planted", marker, "tail", "head", "base64", "tr")
+    completed = subprocess.run(
+        ["/bin/bash", *vercel.SHELL_FLAGS, vercel.TAIL_SCRIPT, "tail", "1", str(out)],
+        env={"PATH": f"{tmp_path / 'planted'}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert base64.b64decode(completed.stdout.split("\n")[0]) == b"real frame\n"
+    assert not marker.exists()
 
 
 def test_model_mailbox_round_trip_through_the_vercel_provider(client: FakeClient, log: list[str]) -> None:

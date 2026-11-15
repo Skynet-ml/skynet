@@ -6,10 +6,13 @@ import base64
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -464,6 +467,56 @@ def test_a_box_whose_prepared_tree_does_not_match_the_digest_is_refused(
             space.open_candidate("")
         assert runtime.boxes[-1].closed
         assert all("version.patch" not in command for command, _ in runtime.boxes[-1].commands)
+    finally:
+        space.close()
+
+
+def test_a_python3_that_the_version_plants_on_path_never_hashes_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hash with the base interpreter, so a planted ``python3`` cannot hide a protected change (PRE-1).
+
+    The box user can write ``/app/.venv/bin``, which is on the box PATH. The
+    planted ``python3`` replays a clean fingerprint and the prepared digest.
+    """
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable, raising=False)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    spec = replace(_ONLINE, env={"PATH": os.pathsep.join([str(planted), os.environ.get("PATH", "/usr/bin:/bin")])})
+    space = RepoWorkspace(
+        runtime=_Runtime(),
+        spec=spec,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        protected_paths=["eval"],
+    )
+    try:
+        box = _open(space, "")
+        clean = space.fingerprint(box.session, WORK_DIR)
+        box.close()
+        assert clean is not None
+        marker = tmp_path / "planted-python3-ran"
+        forged = json.dumps({"files": clean[0], "stamps": clean[1]})
+        tool = planted / "python3"
+        tool.write_text(
+            "#!/bin/sh\n"
+            f"touch {shlex.quote(str(marker))}\n"
+            f'case "$*" in *"def digest(path)"*) echo {shlex.quote(forged)};;'
+            f" *) echo {space._prepared_digest};; esac\n"
+        )
+        tool.chmod(0o755)
+        box = _open(space, "")
+        try:
+            assert box.stamp_before_run() is None
+            box.session.run(f"printf 'a,0\\n' > {WORK_DIR}/eval/labels.csv")
+            assert [problem.split("'")[1] for problem in box.protected_changes()] == ["eval/labels.csv"]
+        finally:
+            box.close()
+        assert not marker.exists()
     finally:
         space.close()
 
