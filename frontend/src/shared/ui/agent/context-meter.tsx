@@ -30,7 +30,7 @@ export function ContextMeter({ used, window }: { used: number | null; window: nu
       tooltip={
         <span className="flex flex-col gap-0.5 whitespace-nowrap text-center">
           <span className="text-muted-foreground">{msg("shared.agent.context_label")}</span>
-          <span className={full ? "text-muted-foreground" : undefined} dir="ltr">
+          <span className={full ? "text-muted-foreground" : undefined}>
             {formatMsg("shared.agent.context_summary", {
               usage: u.usage,
               used: u.usedK,

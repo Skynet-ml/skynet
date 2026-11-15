@@ -100,9 +100,13 @@ export function UserBubble({
   media,
 }: UserBubbleProps) {
   const automatic = automaticTurnBody(content);
+  // Memoized so the sent file tiles do not parse their text again on every render.
+  const parts = React.useMemo(() => {
+    const { rest, comments } = splitLineComments(content);
+    return { comments, ...splitSent(rest) };
+  }, [content]);
   if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
-  const { rest, comments } = splitLineComments(content);
-  const { text, pastes, files } = splitSent(rest);
+  const { comments, text, pastes, files } = parts;
 
   return (
     <div className="flex justify-end group/user">

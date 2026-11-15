@@ -20,6 +20,8 @@ import type { AttachedFile } from "./pasted-text";
 /** The most tiles a sent message shows; the last one then carries "+N" for the rest. */
 export const SENT_LIMIT = 4;
 
+const NO_MEDIA: readonly MediaAttachment[] = [];
+
 /** One tile of a sent message, and its slide in the viewer (null when it has none). */
 interface Entry {
   key: string;
@@ -38,7 +40,7 @@ interface Entry {
  * that did not upload open nothing.
  */
 export function SentAttachments({
-  media: given = [],
+  media: given = NO_MEDIA,
   files,
 }: {
   media?: readonly MediaAttachment[];

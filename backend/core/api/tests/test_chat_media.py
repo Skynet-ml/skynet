@@ -157,11 +157,12 @@ def test_sniff_media_reads_the_type_from_the_bytes(head: bytes, declared: str, e
         b"\x00\x00\x00\x1cftypavif" + b"\x00" * 8,
         b"%PDF-1.7\n",
         b"<html><body>hi</body></html>",
+        "Hello".encode("utf-16"),
         b"",
     ],
 )
 def test_sniff_media_rejects_types_off_the_allow_list(head: bytes) -> None:
-    """SVG, HEIC, AVIF, documents, HTML and empty files are not media."""
+    """SVG, HEIC, AVIF, documents, HTML, UTF-16 text and empty files are not media."""
     assert sniff_media(head, "image/png") is None
 
 
@@ -414,4 +415,17 @@ def test_file_deleted_during_the_copy_quota_check_is_a_404(
     monkeypatch.setattr(chat_media, "enforce_storage_quota", sweeping_quota)
     with Session(engine) as session, pytest.raises(HTTPException) as caught:
         attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b")
+    assert caught.value.status_code == 404
+
+
+def test_file_deleted_before_the_attach_is_a_404(harness: SimpleNamespace) -> None:
+    """A file deleted after the send loaded it fails the attach; the turn names no dead id."""
+    media_id = _upload(harness.client, _PNG).json()["id"]
+    engine = harness.store.engine
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id="chat-a", username=_ALICE, title="a"))
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id == media_id))
+        session.commit()
+        with pytest.raises(HTTPException) as caught:
+            attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
     assert caught.value.status_code == 404

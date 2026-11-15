@@ -765,7 +765,10 @@ function ZoomImage({
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         e.currentTarget.setPointerCapture(e.pointerId);
-        drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y, moved: false };
+        // A zoom-out leaves the stored pan past the new edge; start from the clamped one.
+        const p = clampPan(pan, e.currentTarget.getBoundingClientRect(), zoom);
+        setPan(p);
+        drag.current = { x: e.clientX - p.x, y: e.clientY - p.y, moved: false };
       }}
       onPointerMove={(e) => {
         const start = drag.current;

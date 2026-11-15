@@ -1715,8 +1715,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             Runs the blocking conversation upsert and user-message insert in a
             worker thread so the single event loop is not stalled before the SSE
             stream starts. Auth is already enforced by the route dependency, so
-            the turn is always attributed to ``current_user``; a conversation
-            ``DomainError`` (403/404) is allowed to propagate.
+            the turn is always attributed to ``current_user``. A conversation
+            ``DomainError`` (403/404), the storage quota ``DomainError`` (409)
+            and the attachment 404 ``HTTPException`` propagate.
 
             Returns:
                 ``(conversation_id, title, user_message_id)`` — all ``None`` when

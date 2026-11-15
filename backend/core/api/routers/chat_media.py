@@ -126,11 +126,15 @@ def sniff_media(head: bytes, declared: str = "") -> SniffedMedia | None:
         return SniffedMedia("audio", "audio/flac")
     if head.startswith(b"ID3"):
         return SniffedMedia("audio", "audio/mpeg")
-    if len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0:
-        # An MPEG frame sync. Layer bits 00 mark an ADTS AAC stream.
-        if head[1] & 0x06 == 0:
+    if len(head) >= 2 and head[0] == 0xFF:
+        b1 = head[1]
+        # ADTS AAC: a 12-bit sync and layer bits 00.
+        if b1 & 0xF6 == 0xF0:
             return SniffedMedia("audio", "audio/aac")
-        return SniffedMedia("audio", "audio/mpeg")
+        # An MPEG frame sync with a known version and Layer III or II only, so
+        # a UTF-16 LE byte order mark (FF FE, Layer I) is not taken for audio.
+        if b1 & 0xE0 == 0xE0 and b1 & 0x18 != 0x08 and b1 & 0x06 in (0x02, 0x04):
+            return SniffedMedia("audio", "audio/mpeg")
     return None
 
 
@@ -278,7 +282,7 @@ def attach_media_to_chat(
     if copied:
         enforce_storage_quota(job_store, username, copied)
     rows = list(session.scalars(select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned)).all())
-    if len(rows) != len(sizes):
+    if len(rows) != len(sizes) or len(sizes) != len(set(media_ids)):
         raise HTTPException(status_code=404, detail="Attachment not found.")
     held: dict[str, str] = {}
     for row in rows:
