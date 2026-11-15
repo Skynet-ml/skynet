@@ -101,6 +101,7 @@ from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
 from .routers.agent_attachments import create_agent_attachments_router
 from .routers.agent_history import create_agent_history_router
+from .routers.agent_ide_completion import create_agent_ide_completion_router
 from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
 from .routers.api_tokens import create_api_tokens_router
@@ -1346,6 +1347,7 @@ def create_app(
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_agent_history_router(job_store=job_store), tags=["Optimizations"])
+    app.include_router(create_agent_ide_completion_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_api_tokens_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_desktop_link_router(job_store=job_store), tags=["Desktop link"])
     app.include_router(create_mcp_oauth_router(job_store=job_store), tags=["MCP connection"])
