@@ -2432,6 +2432,48 @@ def test_a_lost_budget_stop_answer_still_stops_the_evaluation(
         _score_or_error(scorer, {"input": 1})
 
 
+def _stop_the_stage(*_: Any) -> dict[str, Any]:
+    """Raise the budget stop as a metered stage call does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+def test_a_lost_stage_budget_stop_answer_keeps_the_stop() -> None:
+    """Keep the budget stop of a stage answer that the metric box refused, so the scorer can still stop the run."""
+    relay = _StageRelay(
+        {}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, box=_RefusingBox(_write_error(503)[1])
+    )  # type: ignore[arg-type]
+    relay._run = _stop_the_stage  # type: ignore[method-assign]
+    relay._call("double", "a" * 32, 1)
+    relay.close()
+    assert relay.unchecked
+    assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_lost_stage_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A 503 on the metric box answer of a stage call's budget stop never hides the stop.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(_StageRelay, "_run", _stop_the_stage)
+    _refuse_answer_writes(monkeypatch, _write_error(503)[1])
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v']\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"double": STAGES["double"]})
+    scorer._timeout_seconds = 3
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
 def test_a_temporary_answer_write_error_reaches_the_judge_as_temporary(
     tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:

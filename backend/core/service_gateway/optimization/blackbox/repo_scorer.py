@@ -2134,6 +2134,8 @@ class _StageRelay:
                 logger.warning("A relay answer could not reach the box: %s", type(error).__name__)
                 self.failure = self.failure or error
                 self.unchecked = True
+                # The lost answer may carry a stage call's budget stop, which must still stop the run.
+                self.control = self.control or response.get("control")
                 return False
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.

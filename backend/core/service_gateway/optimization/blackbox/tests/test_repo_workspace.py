@@ -730,6 +730,117 @@ def test_a_raised_answer_file_write_never_reports_no_change(
         space.close()
 
 
+def _unstamp_first_answer(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, *, edit: str = "") -> None:
+    """Make the box's first answer command exit 1, so its fallback file write leaves the box unstamped.
+
+    The fallback write does the write, moves the change time of every
+    protected file as a Vercel file write does, and then gets a 503.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        box: The candidate box.
+        edit: A shell command that the version's code runs during the write, or nothing.
+    """
+    session = box.session
+    run, write = session.run, session.write_files
+    failed: list[bool] = []
+
+    def answer_fails_once(command: str, **options: Any) -> CommandResult:
+        """Fail the first answer command, and run every other command.
+
+        Args:
+            command: The shell command.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        if not failed and shlex.quote(repo_workspace._WRITE_ANSWER) in command:
+            failed.append(True)
+            return CommandResult(exit_code=1)
+        return run(command, **options)
+
+    def write_moves_ctimes(files: Any) -> None:
+        """Write the files, move every change time under ``eval``, and then fail.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            SandboxFilesystemWriteError: Always, a 503 after the write.
+        """
+        write(files)
+        run(f"cd {WORK_DIR} && find eval -type f -exec chmod u+x {{}} + -exec chmod u-x {{}} + {edit}")
+        monkeypatch.setattr(session, "write_files", write)
+        raise _write_error(503)
+
+    monkeypatch.setattr(session, "run", answer_fails_once)
+    monkeypatch.setattr(session, "write_files", write_moves_ctimes)
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_an_answer_after_an_unstamped_write_names_no_untouched_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """Compare only file contents after an unstamped answer write, so moved change times name no file.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _unstamp_first_answer(patched, box)
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            assert relay._answer("a" * 32, {"output": 1}) is False
+            assert relay._answer("b" * 32, {"output": 2}) is True
+            relay.close()
+        assert relay.changes == []
+        assert box.session.read_file("calls/000001/stages/" + "b" * 32 + ".json") == '{"output": 2}'
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(Exception) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        if judge:
+            assert raised.value is relay.failure
+        else:
+            assert str(raised.value) == "A relay answer could not be checked or delivered, so the version has no score."
+        assert box.unstamped
+        box.close()
+    finally:
+        space.close()
+
+
+def test_an_answer_after_an_unstamped_write_still_names_a_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Name a protected file whose content changed, also when the stamps are stale after an unstamped write.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _unstamp_first_answer(patched, box, edit="&& printf 'a,0\\n' > eval/labels.csv")
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            relay._answer("a" * 32, {"output": 1})
+            relay._answer("b" * 32, {"output": 2})
+            relay.close()
+        assert [change.split("'")[1] for change in relay.changes] == ["eval/labels.csv"]
+        with pytest.raises(RepoScoreError, match=r"eval/labels\.csv"):
+            RepoScorer._check_changes(SimpleNamespace(_rule_judge=None, raw_provider_errors=True), relay, [], box)  # type: ignore[arg-type]
+        box.close()
+    finally:
+        space.close()
+
+
 def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:
     """Start each check as root, so a process that the version leaves running cannot rewrite its output (PRE-1)."""
     space, archive = _guarded(tmp_path)

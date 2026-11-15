@@ -547,7 +547,9 @@ class CandidateBox:
                     self._unstamped = True
                     _deliver(self.session, path, text)
                     return None
-                changes = workspace.changes(current, before)
+                # After an unstamped file write the stamps are stale, so only the
+                # contents can name a change.
+                changes = workspace.changes(current, current[1] if self._unstamped else before)
                 try:
                     written = _write_answer(self.session, path, text)
                 except Exception:
@@ -566,7 +568,11 @@ class CandidateBox:
                         raise
                 return changes if changes or written else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
-            changes = workspace.changes(current, before) if current is not None and before is not None else ()
+            changes = (
+                workspace.changes(current, current[1] if self._unstamped else before)
+                if current is not None and before is not None
+                else ()
+            )
             self._unstamped = True
             try:
                 delivered = _deliver(self.session, path, text)
