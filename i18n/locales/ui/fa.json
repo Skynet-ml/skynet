@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "نمایش در کادر متن",
   "shared.agent.pasted_text_open": "باز کردن متن جای‌گذاری‌شده",
   "shared.agent.line_comments.count": "{count, plural, one {# نظر} other {# نظر}}",
-  "shared.agent.line_comments.remove": "حذف نظرها",
   "shared.agent.activity.edit": "{count, plural, one {یک فایل را ویرایش کرد} other {فایل‌ها را ویرایش کرد}}",
   "shared.agent.activity.act": "{count, plural, one {یک تغییر داد} other {تغییراتی داد}}",
   "shared.agent.activity.check": "{count, plural, one {یک بررسی اجرا کرد} other {بررسی‌هایی اجرا کرد}}",

@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "टेक्स्ट फ़ील्ड में दिखाएँ",
   "shared.agent.pasted_text_open": "चिपकाया गया टेक्स्ट खोलें",
   "shared.agent.line_comments.count": "{count, plural, one {# टिप्पणी} other {# टिप्पणियाँ}}",
-  "shared.agent.line_comments.remove": "टिप्पणियाँ हटाएँ",
   "shared.agent.activity.edit": "{count, plural, one {एक फ़ाइल संपादित की} other {फ़ाइलें संपादित कीं}}",
   "shared.agent.activity.act": "{count, plural, one {एक बदलाव किया} other {बदलाव किए}}",
   "shared.agent.activity.check": "{count, plural, one {एक जाँच चलाई} other {जाँचें चलाईं}}",

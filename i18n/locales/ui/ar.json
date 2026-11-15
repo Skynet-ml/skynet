@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "إظهار في حقل النص",
   "shared.agent.pasted_text_open": "فتح النص الملصق",
   "shared.agent.line_comments.count": "{count, plural, zero {لا تعليقات} one {تعليق واحد} two {تعليقان} few {# تعليقات} many {# تعليقًا} other {# تعليق}}",
-  "shared.agent.line_comments.remove": "إزالة التعليقات",
   "shared.agent.activity.edit": "{count, plural, one {عدّل ملفًا} other {عدّل ملفات}}",
   "shared.agent.activity.act": "{count, plural, one {أجرى تغييرًا} other {أجرى تغييرات}}",
   "shared.agent.activity.check": "{count, plural, one {شغّل فحصًا} other {شغّل فحوصات}}",

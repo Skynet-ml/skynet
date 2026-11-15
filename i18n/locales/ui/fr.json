@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "Afficher dans le champ de texte",
   "shared.agent.pasted_text_open": "Ouvrir le texte collé",
   "shared.agent.line_comments.count": "{count, plural, one {# commentaire} other {# commentaires}}",
-  "shared.agent.line_comments.remove": "Supprimer les commentaires",
   "shared.agent.activity.edit": "{count, plural, one {a modifié un fichier} other {a modifié des fichiers}}",
   "shared.agent.activity.act": "{count, plural, one {a effectué une modification} other {a effectué des modifications}}",
   "shared.agent.activity.check": "{count, plural, one {a lancé une vérification} other {a lancé des vérifications}}",

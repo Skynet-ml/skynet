@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "喺文字欄顯示",
   "shared.agent.pasted_text_open": "打開貼上嘅文字",
   "shared.agent.line_comments.count": "{count, plural, other {# 條留言}}",
-  "shared.agent.line_comments.remove": "移除留言",
   "shared.agent.activity.edit": "{count, plural, other {編輯咗檔案}}",
   "shared.agent.activity.act": "{count, plural, other {做咗更改}}",
   "shared.agent.activity.check": "{count, plural, other {執行咗檢查}}",

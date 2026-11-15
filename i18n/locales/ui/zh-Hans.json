@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "在文本框中显示",
   "shared.agent.pasted_text_open": "打开粘贴的文本",
   "shared.agent.line_comments.count": "{count, plural, other {# 条评论}}",
-  "shared.agent.line_comments.remove": "移除评论",
   "shared.agent.activity.edit": "{count, plural, other {编辑了文件}}",
   "shared.agent.activity.act": "{count, plural, other {做了更改}}",
   "shared.agent.activity.check": "{count, plural, other {运行了检查}}",

@@ -4095,7 +4095,6 @@
   "shared.agent.pasted_text_restore": "Show in text field",
   "shared.agent.pasted_text_open": "Open pasted text",
   "shared.agent.line_comments.count": "{count, plural, one {1 comment} other {# comments}}",
-  "shared.agent.line_comments.remove": "Remove comments",
   "shared.agent.activity.edit": "{count, plural, one {edited a file} other {edited files}}",
   "shared.agent.activity.act": "{count, plural, one {made a change} other {made changes}}",
   "shared.agent.activity.check": "{count, plural, one {ran a check} other {ran checks}}",

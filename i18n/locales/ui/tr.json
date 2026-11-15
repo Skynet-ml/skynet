@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "Metin alanında göster",
   "shared.agent.pasted_text_open": "Yapıştırılan metni aç",
   "shared.agent.line_comments.count": "{count, plural, one {# yorum} other {# yorum}}",
-  "shared.agent.line_comments.remove": "Yorumları kaldır",
   "shared.agent.activity.edit": "{count, plural, one {bir dosya düzenledi} other {dosyalar düzenledi}}",
   "shared.agent.activity.act": "{count, plural, one {bir değişiklik yaptı} other {değişiklikler yaptı}}",
   "shared.agent.activity.check": "{count, plural, one {bir kontrol çalıştırdı} other {kontroller çalıştırdı}}",

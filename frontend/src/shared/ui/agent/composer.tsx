@@ -172,12 +172,15 @@ const hasMention = (text: string) => MENTION_TOKEN.test(text);
 function SlashTokenLayer({
   text,
   length,
+  mentions,
   layerRef,
   sourceRef,
   className,
 }: {
   text: string;
   length: number;
+  /** Paint "@path" mentions; a chat without file mentions shows "@word" as text. */
+  mentions: boolean;
   /** The layer itself; the textarea's scroll handler moves it with no re-render. */
   layerRef: React.RefObject<HTMLDivElement | null>;
   /** The textarea the layer sits under. */
@@ -203,18 +206,15 @@ function SlashTokenLayer({
     >
       {/* Color only: a weight or padding change would move the glyphs off the caret. */}
       <span className="text-primary">{text.slice(0, length)}</span>
-      {text
-        .slice(length)
-        .split(MENTION_TOKEN)
-        .map((part, i) =>
-          i % 2 ? (
-            <span key={i} className="text-primary">
-              {part}
-            </span>
-          ) : (
-            part
-          ),
-        )}
+      {(mentions ? text.slice(length).split(MENTION_TOKEN) : [text.slice(length)]).map((part, i) =>
+        i % 2 ? (
+          <span key={i} className="text-primary">
+            {part}
+          </span>
+        ) : (
+          part
+        ),
+      )}
       {/* A trailing newline in a textarea opens a line; the extra space keeps it here too. */}
       {text.endsWith("\n") ? " " : null}
     </div>
@@ -348,6 +348,7 @@ export function Composer({
       !locked &&
       !composing &&
       !looksLikeMarkdown(draft.text) &&
+      !!mentions?.length &&
       hasMention(draft.text));
   const tokenLayerRef = React.useRef<HTMLDivElement>(null);
   const pickingCommand = picking
@@ -978,6 +979,7 @@ export function Composer({
                 <SlashTokenLayer
                   text={draft.text}
                   length={tokenLength}
+                  mentions={!!mentions?.length}
                   layerRef={tokenLayerRef}
                   sourceRef={textareaRef}
                   className={inline ? "px-3 py-2" : "px-4 py-[11px]"}

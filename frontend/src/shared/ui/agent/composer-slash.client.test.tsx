@@ -104,6 +104,7 @@ async function mount(
   draft: string,
   streaming: boolean,
   suggest?: React.ComponentProps<typeof Composer>["suggest"],
+  mentions?: readonly string[],
 ): Promise<Mounted> {
   const ran: string[] = [];
   const sent: string[] = [];
@@ -132,6 +133,7 @@ async function mount(
                 streaming={streaming}
                 midTurn={midTurn}
                 suggest={suggest}
+                mentions={mentions}
                 slash={{
                   commands: liveCommands,
                   run: (c, arg, fromMenu) => {
@@ -358,6 +360,29 @@ void test("a completed command shows as a token, and plain text shows no token",
   assert.equal(document.querySelector(".text-primary"), null);
   assert.doesNotMatch(composer.textarea.className, /text-transparent/);
   await composer.unmount();
+});
+
+void test("an @word shows as a token only in a chat with file mentions", async () => {
+  // The side chat has no file mentions, so "@alice" stays plain text.
+  const plain = await mount("", false);
+  await plain.type("ask @alice");
+  assert.equal(document.querySelector(".text-primary"), null);
+  assert.doesNotMatch(plain.textarea.className, /text-transparent/);
+  // A slash token paints the draft, and the @word after it stays plain.
+  await plain.type("/name @alice");
+  assert.deepEqual(
+    [...document.querySelectorAll(".text-primary")].map((el) => el.textContent),
+    ["/name"],
+  );
+  await plain.unmount();
+
+  const files = await mount("", false, undefined, ["src/a.py"]);
+  await files.type("ask @src/a.py");
+  assert.deepEqual(
+    [...document.querySelectorAll(".text-primary")].map((el) => el.textContent),
+    ["", "@src/a.py"],
+  );
+  await files.unmount();
 });
 
 void test("a reply without mid-turn input locks the draft, so the token does not show", async () => {

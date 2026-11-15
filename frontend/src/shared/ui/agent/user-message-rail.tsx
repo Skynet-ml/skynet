@@ -75,6 +75,7 @@ export function UserMessageRail({
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
+          if (!entry.target.isConnected) continue;
           const index = Number((entry.target as HTMLElement).dataset.userMessage);
           if (entry.isIntersecting) visible.add(index);
           else visible.delete(index);
@@ -83,8 +84,29 @@ export function UserMessageRail({
       },
       { root, rootMargin: "-16px 0px 0px 0px" },
     );
-    root.querySelectorAll<HTMLElement>("[data-user-message]").forEach((el) => observer.observe(el));
-    return () => observer.disconnect();
+    // An edit unmounts the later turns, and a cancel mounts them again as new nodes with
+    // the same order, so the observer follows the thread's nodes, not only `order`.
+    const observed = new Set<HTMLElement>();
+    const sync = () => {
+      for (const el of observed) {
+        if (el.isConnected) continue;
+        observer.unobserve(el);
+        observed.delete(el);
+        visible.delete(Number(el.dataset.userMessage));
+      }
+      root.querySelectorAll<HTMLElement>("[data-user-message]").forEach((el) => {
+        if (observed.has(el)) return;
+        observed.add(el);
+        observer.observe(el);
+      });
+    };
+    sync();
+    const mutations = new MutationObserver(sync);
+    mutations.observe(root, { childList: true, subtree: true });
+    return () => {
+      mutations.disconnect();
+      observer.disconnect();
+    };
   }, [scrollBox, order, shown]);
 
   // A long rail scrolls itself to keep the first current mark in view.

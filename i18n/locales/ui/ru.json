@@ -3990,7 +3990,6 @@
   "shared.agent.pasted_text_restore": "Показать в текстовом поле",
   "shared.agent.pasted_text_open": "Открыть вставленный текст",
   "shared.agent.line_comments.count": "{count, plural, one {# комментарий} few {# комментария} many {# комментариев} other {# комментария}}",
-  "shared.agent.line_comments.remove": "Удалить комментарии",
   "shared.agent.activity.edit": "{count, plural, one {отредактировал файл} other {отредактировал файлы}}",
   "shared.agent.activity.act": "{count, plural, one {внёс изменение} other {внёс изменения}}",
   "shared.agent.activity.check": "{count, plural, one {запустил проверку} other {запустил проверки}}",
