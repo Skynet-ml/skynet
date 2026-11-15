@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import base64
+import builtins
+import io
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
+import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,7 +41,7 @@ from ..repo_workspace import (
     read_metric_requirements,
     redact,
 )
-from ..sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -95,6 +104,7 @@ class _Box:
         self.spec = spec
         self.online = not spec.network_disabled
         self.commands: list[tuple[str, dict[str, str] | None]] = []
+        self.root_commands: list[str] = []
         self.writes: dict[str, str] = {}
         self.closed = False
 
@@ -112,9 +122,23 @@ class _Box:
         """Read from the wrapped box."""
         return self._inner.read_file(path)
 
-    def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, and answer the metric setup's pip install without the network."""
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record the command, and answer the metric setup's pip install without the network.
+
+        A local box refuses root on the developer's machine, so a root
+        command is recorded and then runs as the test's user.
+
+        Args:
+            command: The shell command.
+            sudo: The command asks for root.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
         self.commands.append((command, options.get("env")))
+        if sudo:
+            self.root_commands.append(command)
         return self._inner.run(_PIP_INSTALL.sub("true", command), **options)
 
     def close(self) -> None:
@@ -366,26 +390,347 @@ def test_a_protected_file_rewritten_and_restored_while_the_version_runs_is_caugh
         space.close()
 
 
-def test_a_stage_answer_checks_the_protected_files_and_is_written_in_one_run(tmp_path: Path) -> None:
-    """Write each answer in the check's own run, so the stamps before the run stay valid and a change still shows."""
+def test_a_stage_answer_is_checked_as_root_then_written_as_the_box_user(tmp_path: Path) -> None:
+    """Check as root without the answer, then write it in a box-user command, so the stamps before the run stay valid."""
     space, archive = _guarded(tmp_path)
     try:
         box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
         box.stamp_before_run()
         session = box.session
-        runs = len(session.commands)
+        runs, roots = len(session.commands), len(session.root_commands)
         assert box.answer("calls/000001/stages/a.json", '{"output": 1}') == ()
-        assert len(session.commands) == runs + 1
+        (check, check_env), (write, write_env) = session.commands[runs:]
+        assert session.root_commands[roots:] == [check]
+        assert shlex.quote(repo_workspace._HASH_PROTECTED) in check
+        assert "APP_ANSWER" not in check
+        assert not check_env
+        assert shlex.quote(repo_workspace._WRITE_ANSWER) in write
+        assert write_env == {"APP_ANSWER": '{"output": 1}'}
         assert session.read_file("calls/000001/stages/a.json") == '{"output": 1}'
         assert box.protected_changes() == ()
+        box.close()
+    finally:
+        space.close()
 
+
+def test_a_stage_answer_after_a_protected_change_names_it_and_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return the change and still write the answer, so the version ends now instead of at its timeout."""
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        session = box.session
         session.run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv")
         changes = box.answer("calls/000001/stages/b.json", '{"output": 2}')
         assert [problem.split("'")[1] for problem in changes or ()] == ["eval/labels.csv"]
         assert session.read_file("calls/000001/stages/b.json") == '{"output": 2}'
+
+        run = session.run
+        monkeypatch.setattr(
+            session,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._WRITE_ANSWER) in command
+                else run(command, **options)
+            ),
+        )
+        changes = box.answer("calls/000001/stages/c.json", '{"output": 3}')
+        assert [problem.split("'")[1] for problem in changes or ()] == ["eval/labels.csv"]
         box.close()
     finally:
         space.close()
+
+
+def test_a_stage_answer_that_cannot_be_written_is_unchecked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return ``None`` when the box-user write fails after a clean check, so the version gets no score."""
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        session = box.session
+        run = session.run
+        monkeypatch.setattr(
+            session,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._WRITE_ANSWER) in command
+                else run(command, **options)
+            ),
+        )
+        assert box.answer("calls/000001/stages/a.json", '{"output": 1}') is None
+        assert session.read_file("calls/000001/stages/a.json") is None
+        box.close()
+    finally:
+        space.close()
+
+
+class _BoxCallError(RuntimeError):
+    """A box call that fails before the command runs, as a sandbox API 429 or 5xx does."""
+
+
+def test_a_box_call_error_on_the_answer_write_goes_up_raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a box call error from the answer write go up raw, so a later retry can tell a temporary fault apart."""
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        session = box.session
+        run = session.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Raise for the answer write, and run every other command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+
+            Raises:
+                _BoxCallError: The command is the answer write.
+            """
+            if shlex.quote(repo_workspace._WRITE_ANSWER) in command:
+                raise _BoxCallError("429")
+            return run(command, **options)
+
+        monkeypatch.setattr(session, "run", failing)
+        with pytest.raises(_BoxCallError, match="429"):
+            box.answer("calls/000001/stages/a.json", '{"output": 1}')
+        assert session.read_file("calls/000001/stages/a.json") is None
+        box.close()
+    finally:
+        space.close()
+
+
+def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:
+    """Start each check as root, so a process that the version leaves running cannot rewrite its output (PRE-1)."""
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        session = box.session
+        session.root_commands.clear()
+        box.stamp_before_run()
+        box.protected_changes()
+        box.answer("calls/000001/stages/a.json", '{"output": 1}')
+        checks = [command for command, _ in session.commands if shlex.quote(repo_workspace._HASH_PROTECTED) in command]
+        assert len(checks) == 3
+        assert session.root_commands == checks
+        box.close()
+    finally:
+        space.close()
+
+
+def _run_check_as(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tree: Path,
+    *,
+    euid: int,
+    fault: str | None = None,
+    status: str | None = "CapEff:\t000001ffffffffff\n",
+) -> tuple[list[tuple[str, int]], dict[str, Any]]:
+    """Run the protected-file check in this process, with a fake effective user and no real switch.
+
+    Args:
+        monkeypatch: Patches ``os`` and the process state.
+        capsys: Captures the check's output.
+        tree: The checkout the check runs in.
+        euid: The effective user that the check starts as.
+        fault: ``"refuse"`` makes the switch fail as for a root with no
+            capabilities, ``"stay"`` makes ``setuid`` keep root, and
+            ``"root-tree"`` makes root own the tree.
+        status: The text of ``/proc/self/status``, or ``None`` when it
+            cannot be read. The default holds every capability.
+
+    Returns:
+        Each user switch and tree access with the effective user at that moment,
+        and the check's printed result.
+    """
+    state = {"euid": euid}
+    events: list[tuple[str, int]] = []
+
+    def switch(name: str) -> Any:
+        """Make a fake ``os`` user switch.
+
+        Args:
+            name: The ``os`` function name.
+
+        Returns:
+            The fake function.
+        """
+
+        def call(value: Any) -> None:
+            """Record the switch, and change the fake effective user on ``setuid``."""
+            if fault == "refuse":
+                raise PermissionError(name)
+            events.append((name, state["euid"]))
+            if name == "setuid" and fault != "stay":
+                state["euid"] = value
+
+        return call
+
+    def watch(name: str, real: Any) -> Any:
+        """Wrap a tree access so that it records the effective user.
+
+        Args:
+            name: The event name.
+            real: The real function.
+
+        Returns:
+            The wrapper.
+        """
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            """Record the access, then do it."""
+            events.append((f"{name} {args[0]}", state["euid"]))
+            return real(*args, **kwargs)
+
+        return call
+
+    real_stat = os.stat
+
+    def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        """Report root as the tree's owner when the fault asks for it."""
+        found = real_stat(path, *args, **kwargs)
+        if fault == "root-tree" and path == ".":
+            return os.stat_result((found.st_mode, found.st_ino, found.st_dev, found.st_nlink, 0, 0, *found[6:10]))
+        return found
+
+    monkeypatch.setattr(os, "geteuid", lambda: state["euid"])
+    for name in ("setgroups", "setgid", "setuid"):
+        monkeypatch.setattr(os, name, switch(name))
+    monkeypatch.setattr(os, "stat", stat)
+    for name in ("walk", "open", "unlink", "replace"):
+        monkeypatch.setattr(os, name, watch(name, getattr(os, name)))
+    monkeypatch.chdir(tree)
+    monkeypatch.setattr(sys, "argv", ["-c", "eval"])
+    read = watch("read", open)
+
+    def reader(path: Any, *args: Any, **kwargs: Any) -> Any:
+        """Answer the capability check from ``status``, and watch every other read."""
+        if path != "/proc/self/status":
+            return read(path, *args, **kwargs)
+        if status is None:
+            raise PermissionError(path)
+        return io.StringIO(status)
+
+    names = {**vars(builtins), "open": reader}
+    exec(compile(repo_workspace._HASH_PROTECTED, "<check>", "exec"), {"__builtins__": names})
+    return events, json.loads(capsys.readouterr().out)
+
+
+def _planted_tree(tmp_path: Path) -> Path:
+    """Build a checkout whose answer's temporary path is a link that the version planted into another file.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The checkout.
+    """
+    tree = tmp_path / "tree"
+    (tree / "eval").mkdir(parents=True)
+    (tree / "eval" / "labels.csv").write_text("a,1\n")
+    (tree / "calls").mkdir()
+    target = tmp_path / "root-only"
+    target.write_text("secret\n")
+    (tree / "calls" / "a.json.tmp").symlink_to(target)
+    return tree
+
+
+def test_the_check_becomes_the_tree_owner_before_it_reads_or_writes_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drop root before the first tree access, and write nothing into the tree (PRE-1)."""
+    tree = _planted_tree(tmp_path)
+    owner = tree.stat().st_uid
+    assert owner != 0
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=0)
+    assert [name for name, _ in events[:3]] == ["setgroups", "setgid", "setuid"]
+    accesses = events[3:]
+    assert [name for name, _ in accesses] == ["walk eval", "read eval/labels.csv"]
+    assert {user for _, user in accesses} == {owner}
+    assert set(result["files"]) == {"eval/labels.csv"}
+    assert not (tree / "calls" / "a.json").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+def test_the_answer_write_replaces_a_planted_link_and_never_follows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove a leftover temporary file and open the new one without following a link."""
+    tree = _planted_tree(tmp_path)
+    monkeypatch.chdir(tree)
+    monkeypatch.setattr(sys, "argv", ["-c", str(tree / "calls" / "000001" / "a.json")])
+    monkeypatch.setenv("APP_ANSWER", '{"output": 1}')
+    (tree / "calls" / "000001").mkdir()
+    (tree / "calls" / "000001" / "a.json.tmp").symlink_to(tmp_path / "root-only")
+    exec(compile(repo_workspace._WRITE_ANSWER, "<write>", "exec"), {"__builtins__": builtins})
+    written = tree / "calls" / "000001" / "a.json"
+    assert written.read_text() == '{"output": 1}'
+    assert not written.is_symlink()
+    assert not (tree / "calls" / "000001" / "a.json.tmp").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+@pytest.mark.parametrize("fault", ["root-tree", "refuse", "stay"])
+def test_a_root_check_that_cannot_leave_root_stops_before_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str
+) -> None:
+    """Fail closed when root owns the tree, the switch fails, or the check is still root after it (PRE-1)."""
+    tree = _planted_tree(tmp_path)
+    with pytest.raises(SystemExit) as stopped:
+        _run_check_as(monkeypatch, capsys, tree, euid=0, fault=fault)
+    assert stopped.value.code not in (0, None)
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert not (tree / "calls" / "a.json").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+def test_a_root_without_capabilities_hashes_as_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Run as a root with no capability, as runner._entry_user does in a local Docker box (PRE-1)."""
+    tree = _planted_tree(tmp_path)
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=0, status="CapEff:\t0000000000000000\n")
+    assert not [name for name, _ in events if name.startswith("set")]
+    assert {user for _, user in events} == {0}
+    assert set(result["files"]) == {"eval/labels.csv"}
+    assert not (tree / "calls" / "a.json").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+@pytest.mark.parametrize("status", [None, "Name:\tpython3\n"], ids=["unreadable", "no-CapEff-line"])
+def test_a_root_whose_capabilities_are_unknown_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str | None
+) -> None:
+    """Count an unreadable or incomplete ``/proc/self/status`` as holding capabilities."""
+    tree = _planted_tree(tmp_path)
+    with pytest.raises(SystemExit) as stopped:
+        _run_check_as(monkeypatch, capsys, tree, euid=0, fault="refuse", status=status)
+    assert stopped.value.code not in (0, None)
+    assert capsys.readouterr().out == ""
+    assert not (tree / "calls" / "a.json").exists()
+
+
+def test_a_box_user_check_needs_no_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skip the switch for a non-root check, as in the local test runtime."""
+    tree = _planted_tree(tmp_path)
+    start = os.geteuid()
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=start)
+    assert not [name for name, _ in events if name.startswith("set")]
+    assert {user for _, user in events} == {start}
+    assert set(result["files"]) == {"eval/labels.csv"}
+    assert not (tree / "calls" / "a.json").exists()
+    assert (tmp_path / "root-only").read_text() == "secret\n"
 
 
 def test_a_failed_answer_check_is_told_apart_from_a_protected_change(
@@ -402,11 +747,15 @@ def test_a_failed_answer_check_is_told_apart_from_a_protected_change(
             session,
             "run",
             lambda command, **options: (
-                CommandResult(exit_code=1) if command.startswith("export APP_ANSWER_PATH") else run(command, **options)
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._HASH_PROTECTED) in command
+                else run(command, **options)
             ),
         )
         assert box.answer("calls/000001/stages/a.json", '{"output": 1}') is None
         assert session.read_file("calls/000001/stages/a.json") == '{"output": 1}'
+        assert all(shlex.quote(repo_workspace._WRITE_ANSWER) not in command for command, _ in session.commands)
+        monkeypatch.undo()
         assert box.protected_changes() == ()
         box.close()
     finally:
@@ -425,7 +774,7 @@ def test_a_large_stage_answer_is_written_by_file_and_stamped_again(
         text = json.dumps({"output": "x" * 50})
         assert box.answer("calls/000001/stages/a.json", text) == ()
         assert box.session.read_file("calls/000001/stages/a.json") == text
-        assert all(not command.startswith("export APP_ANSWER_PATH") for command, _ in box.session.commands)
+        assert all(shlex.quote(repo_workspace._WRITE_ANSWER) not in command for command, _ in box.session.commands)
         assert box.protected_changes() == ()
         box.close()
     finally:
@@ -464,6 +813,56 @@ def test_a_box_whose_prepared_tree_does_not_match_the_digest_is_refused(
             space.open_candidate("")
         assert runtime.boxes[-1].closed
         assert all("version.patch" not in command for command, _ in runtime.boxes[-1].commands)
+    finally:
+        space.close()
+
+
+def test_a_python3_that_the_version_plants_on_path_never_hashes_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hash with the base interpreter, so a planted ``python3`` cannot hide a protected change (PRE-1).
+
+    The box user can write ``/app/.venv/bin``, which is on the box PATH. The
+    planted ``python3`` replays a clean fingerprint and the prepared digest.
+    """
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable, raising=False)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    spec = replace(_ONLINE, env={"PATH": os.pathsep.join([str(planted), os.environ.get("PATH", "/usr/bin:/bin")])})
+    space = RepoWorkspace(
+        runtime=_Runtime(),
+        spec=spec,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        protected_paths=["eval"],
+    )
+    try:
+        box = _open(space, "")
+        clean = space.fingerprint(box.session, WORK_DIR)
+        box.close()
+        assert clean is not None
+        marker = tmp_path / "planted-python3-ran"
+        forged = json.dumps({"files": clean[0], "stamps": clean[1]})
+        tool = planted / "python3"
+        tool.write_text(
+            "#!/bin/sh\n"
+            f"touch {shlex.quote(str(marker))}\n"
+            f'case "$*" in *"def digest(path)"*) echo {shlex.quote(forged)};;'
+            f" *) echo {space._prepared_digest};; esac\n"
+        )
+        tool.chmod(0o755)
+        box = _open(space, "")
+        try:
+            assert box.stamp_before_run() is None
+            box.session.run(f"printf 'a,0\\n' > {WORK_DIR}/eval/labels.csv")
+            assert [problem.split("'")[1] for problem in box.protected_changes()] == ["eval/labels.csv"]
+        finally:
+            box.close()
+        assert not marker.exists()
     finally:
         space.close()
 
@@ -742,3 +1141,62 @@ def test_a_failed_snapshot_keeps_the_state_as_a_tar(tmp_path: Path, caplog: pyte
         space.close()
     assert runtime.boxes[-1].spec.snapshot_archive
     assert "provider text" not in caplog.text
+
+
+# --- Local Docker boxes (``pytest -m docker``) ---
+
+_IMAGE = "skynet-local-sandbox:0.1.0-fa7455ae46e8-1794372282390"
+_DOCKER_UP = (
+    shutil.which("docker") is not None
+    and subprocess.run(["docker", "image", "inspect", _IMAGE], capture_output=True, check=False).returncode == 0
+)
+
+
+def _containers(tag: str) -> list[str]:
+    """Return the ids of the containers labelled with ``tag`` that are still there after up to 60 s.
+
+    Args:
+        tag: The ``skynet_test`` label.
+
+    Returns:
+        The container ids.
+    """
+    deadline = time.monotonic() + 60
+    while True:
+        listed = subprocess.run(
+            ["docker", "ps", "-a", "-q", "--filter", f"label=skynet_test={tag}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        if not listed or time.monotonic() > deadline:
+            return listed
+        time.sleep(1)
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(not _DOCKER_UP, reason=f"Docker or the local {_IMAGE} image is missing.")
+def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker() -> None:
+    """Write the answer where a root with no capability cannot, as the call folder is in a local Docker box.
+
+    The parent's file write makes the call folder as the box user with mode
+    0755, and a local Docker root holds no capability to write into it.
+    """
+    tag = uuid.uuid4().hex
+    session = AsyncBridgeRuntime("docker", image=_IMAGE).open(
+        SandboxSpec(lifetime_seconds=300, network_disabled=True, tags={"skynet_test": tag})
+    )
+    try:
+        space = SimpleNamespace(_protected=("eval/metric.py",), watched=True, changes=lambda current, before: ())
+        space.fingerprint = lambda box, directory, **options: RepoWorkspace.fingerprint(
+            space, box, directory, **options
+        )
+        call = ".app-repo/calls/000001/candidate"
+        session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
+        box = CandidateBox(space, session, "/workspace")
+        assert box.stamp_before_run() is None
+        assert box.answer(f"{call}/stages/x.json", '{"output": 1}') == ()
+        assert session.read_file(f"{call}/stages/x.json") == '{"output": 1}'
+    finally:
+        session.close()
+    assert _containers(tag) == []

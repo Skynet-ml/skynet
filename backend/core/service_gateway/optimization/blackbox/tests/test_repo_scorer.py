@@ -73,7 +73,7 @@ from ..rule_judge import (
     WATCH_EVERY_ACTIONS,
     RuleJudge,
 )
-from ..sandbox import CommandResult, LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
+from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
 from ..service import run_blackbox_optimization
 from .test_repo_workspace import _archive, _patch
@@ -1552,54 +1552,44 @@ def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_pat
     assert runtime.sessions == []
 
 
-class _AnswerCheckFailingSession(_WriteTouchingSession):
-    """Local box whose joined answer check fails, as when the box stops answering."""
+def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The metric box holds no repository file, so its stage answers run no protected-file check (SKY-398).
 
-    def run(self, command: str, **options: Any) -> Any:
-        """Fail the answer check and run every other command.
+    ``CandidateBox.answer`` runs every check and write of a relay answer in
+    the candidate box, so the test watches it and not the command text.
+    """
+    answered: list[str] = []
+    real = CandidateBox.answer
 
-        Args:
-            command: Shell command line.
-            **options: Run options.
-
-        Returns:
-            A failed result for the answer check, else the local result.
-        """
-        if command.startswith("export APP_ANSWER_PATH"):
-            return CommandResult(exit_code=1)
-        return self._session.run(command, **options)
-
-
-class _AnswerCheckFailingRuntime(LocalSubprocessRuntime):
-    """Local runtime whose boxes fail the answer check."""
-
-    def open(self, spec: SandboxSpec) -> Any:
-        """Open a local box wrapped so the answer check fails.
+    def answer(self: CandidateBox, path: str, text: str) -> tuple[str, ...] | None:
+        """Record a candidate-box answer, then give it.
 
         Args:
-            spec: The box's spec.
+            self: The candidate box.
+            path: Where the answer goes.
+            text: The answer.
 
         Returns:
-            The wrapped box.
+            The real answer's result.
         """
-        return _AnswerCheckFailingSession(super().open(spec))
+        answered.append(path)
+        return real(self, path, text)
 
-
-def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path) -> None:
-    """The metric box holds no repository file, so its stage answers run no protected-file check (SKY-398)."""
+    monkeypatch.setattr(CandidateBox, "answer", answer)
     code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
         RecordingRuntime(),
         {"double": STAGES["double"]},
-        scorer_runtime=_AnswerCheckFailingRuntime(),
+        scorer_runtime=_WriteTouchingRuntime(),
         protected_paths=("judge",),
     )
     try:
         assert scorer.score("")["score"] == pytest.approx(0.6)
     finally:
         scorer.close()
+    assert answered == []
 
 
 class _LayoutFailingRuntime(RecordingRuntime):

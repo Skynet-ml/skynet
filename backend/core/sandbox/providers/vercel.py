@@ -92,6 +92,7 @@ try:
         SandboxApiError,
         SandboxClient,
         SandboxCredentials,
+        SandboxPathNotFoundError,
         SandboxQueryByCreatedAt,
         SandboxResources,
         SandboxResponseError,
@@ -108,6 +109,7 @@ except ImportError:
     SandboxApiError = None
     SandboxClient = None
     SandboxCredentials = None
+    SandboxPathNotFoundError = None
     SandboxQueryByCreatedAt = None
     SandboxResources = None
     SandboxResponseError = None
@@ -162,7 +164,11 @@ OUTPUT_POLL_TIMEOUT = 10.0
 OUTPUT_POLL_MAX_BYTES = 1 << 20
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
+# Its output becomes the trusted frames of a command, so it runs as that
+# command's user. A non-root read starts with the box PATH, and ROOT_PATH keeps
+# a tool planted in /app/.venv/bin from forging the frames.
 TAIL_SCRIPT = (
+    f"export PATH={ROOT_PATH}; "
     'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null'
     f' | head -c {OUTPUT_POLL_MAX_BYTES} | base64 | tr -d "\\n"; echo; shift 2; done'
 )
@@ -1081,10 +1087,13 @@ class VercelEnvironment(SandboxEnvironment):
             sentinel = f"{EXIT_PREFIX}{token}"
             out_path = f"{OUTPUT_PREFIX}{token}.out"
             err_path = f"{OUTPUT_PREFIX}{token}.err"
-            inner = f"bash {' '.join(SHELL_FLAGS)} {shlex.quote(command)}"
+            # A non-root wrapper starts with the box PATH, which holds the
+            # box-writable /app/.venv/bin. Absolute paths keep a planted `bash`
+            # or `timeout` from replacing a trusted helper's command.
+            inner = f"/bin/bash {' '.join(SHELL_FLAGS)} {shlex.quote(command)}"
             kill_after = None
             if timeout_sec is not None:
-                inner = f"timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
+                inner = f"/usr/bin/timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
@@ -1092,7 +1101,11 @@ class VercelEnvironment(SandboxEnvironment):
             tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))
             # A model mailbox answers frames only while the command runs, so
             # output that arrives after the exit would hang the guest (SKY-529).
-            poller = asyncio.ensure_future(self._stream_output(session, tails, sink)) if sink is not None else None
+            poller = (
+                asyncio.ensure_future(self._stream_output(session, tails, sink, sudo=sudo))
+                if sink is not None
+                else None
+            )
             try:
                 try:
                     if kill_after is None:
@@ -1174,13 +1187,18 @@ class VercelEnvironment(SandboxEnvironment):
                 raise
         raise AssertionError("unreachable")
 
-    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink) -> None:
+    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink, *, sudo: bool) -> None:
         """Send new command output to the sink until the caller cancels this task.
 
         Args:
             session: The SDK runtime session.
             tails: The read state of each output file.
             sink: Receives each new ``(stream, text)`` chunk.
+            sudo: The command runs as root, so its output files are root's
+                own and the reads run as root too. A box-user read could be
+                traced by the version's code and forge a frame. A non-root
+                command's files belong to the box user, so a root read there
+                could follow a planted link into a root-only file.
         """
         failures = 0
         while True:
@@ -1193,7 +1211,8 @@ class VercelEnvironment(SandboxEnvironment):
                 # read ends, and then ``_stop_poller`` waits forever.
                 async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
                     completed = await session.run_process(
-                        *_bash([TAIL_SCRIPT, "tail", *pairs]),
+                        *_bash([TAIL_SCRIPT, "tail", *pairs], sudo=sudo),
+                        sudo=sudo,
                         capture_output=True,
                         kill_after=OUTPUT_POLL_TIMEOUT,
                     )
@@ -1343,10 +1362,13 @@ class VercelEnvironment(SandboxEnvironment):
             SandboxInfraError: The session stopped.
         """
         cwd = self._cwd(session)
+        # The SDK runs ``fs.exists`` as a bare ``sh`` box command, found by a PATH
+        # the version can control; ``read_text`` is an HTTP read with no box command.
         with self._stop_guard():
-            if not await session.fs.exists(path, cwd=cwd):
+            try:
+                return await session.fs.read_text(path, cwd=cwd, errors=errors)
+            except SandboxPathNotFoundError:
                 return None
-            return await session.fs.read_text(path, cwd=cwd, errors=errors)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.
