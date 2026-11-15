@@ -37,8 +37,10 @@ jobs:
       # nightly concern and is intentionally not gated here.
       - name: Core test suite
         run: dagger check skynet-ci/backend-core-${{ matrix.shard }}
-      # dagger check hides the pytest output. Print the pass and skip counts.
+      # dagger check hides the pytest output. Print the counts, the skip
+      # reasons and, after a failed check, the failed test names.
       - name: Show test summary
+        if: ${{ !cancelled() }}
         run: dagger call skynet-ci summary --shard ${{ matrix.shard }}
       # Same pipeline as the check, so the engine serves the file from cache.
       - name: Export dispatched nodeids

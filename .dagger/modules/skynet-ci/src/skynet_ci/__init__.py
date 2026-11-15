@@ -7,7 +7,14 @@ calls ``dagger check <name>``; developers run the same command locally.
 from __future__ import annotations
 
 from dagger import check, function, object_type
-from dagger_clients.core import Container, Directory, File, Workspace, core
+from dagger_clients.core import (
+    Container,
+    Directory,
+    File,
+    ReturnType,
+    Workspace,
+    core,
+)
 
 PYTHON_IMAGE = "ghcr.io/astral-sh/uv:0.9.13-python3.12-bookworm-slim"
 NODE_IMAGE = "node:22-bookworm-slim"
@@ -141,8 +148,37 @@ class SkynetCi:
             .with_env_variable("UV_NO_SYNC", "1")
             .with_env_variable("SKYNET_TEST_SHARD", f"{shard}/{CORE_SHARD_COUNT}")
             .with_env_variable("SKYNET_TEST_DISPATCHED_OUT", f"dispatched-{shard}.txt")
-            .with_exec(["uv", "run", "pytest", "core/", "-q", "-rs", "-n", "auto"])
+            # A failed exec has no output to read and is not cached. ANY accepts
+            # exit codes 0-127 and 192-255, so summary reads the failed tests
+            # from the same cached exec and _check_core_shard fails the check.
+            # A signal exit (128-191, for example 137) still fails the exec.
+            # The local engine also caches a pytest failure: a rerun with no
+            # source change returns it again. Change a file in backend/ or run
+            # `dagger -c 'engine | local-cache | prune'` to run the shard again.
+            .with_exec(
+                ["uv", "run", "pytest", "core/", "-q", "-rfEs", "-n", "auto"],
+                expect=ReturnType.ANY,
+            )
         )
+
+    async def _check_core_shard(self, shard: int) -> None:
+        """Fail when pytest failed in one core shard.
+
+        Args:
+            shard: The zero-based shard index.
+
+        Raises:
+            RuntimeError: pytest exited with a non-zero code.
+        """
+        exit_code = await self._core_shard(shard).exit_code()
+        if exit_code != 0:
+            raise RuntimeError(
+                f"core shard {shard} failed: pytest exit code {exit_code}."
+                f" Run `dagger call skynet-ci summary --shard {shard}` for the failed tests."
+                " The local engine caches this result. To run the shard again,"
+                " change a file in backend/ or run"
+                " `dagger -c 'engine | local-cache | prune'`."
+            )
 
     @function
     def dispatched(self, shard: int) -> File:
@@ -161,54 +197,62 @@ class SkynetCi:
 
     @function
     async def summary(self, shard: int) -> str:
-        """Return the pytest output of one core shard, with the skip reasons.
+        """Return the pytest output of one core shard, also when tests failed.
 
         CI prints this after ``dagger check`` ran the same shard, so the
-        engine serves it from cache and the log shows the pass and skip counts.
+        engine serves it from cache. The log shows the failed tests, the
+        counts and the skip reasons.
 
         Args:
             shard: The zero-based shard index.
 
         Returns:
-            The pytest stdout of the shard.
+            The stdout of the shard, then its stderr when it is not empty.
+            A failure before collection (for example a conftest import
+            error) writes its cause only to stderr.
         """
-        return await self._core_shard(shard).stdout()
+        shard_run = self._core_shard(shard)
+        stdout = await shard_run.stdout()
+        stderr = await shard_run.stderr()
+        if not stderr.strip():
+            return stdout
+        return f"{stdout}\n--- stderr ---\n{stderr}"
 
     @function
     @check
     async def backend_core_0(self) -> None:
         """Run core test shard 0 of 6."""
-        await self._core_shard(0).sync()
+        await self._check_core_shard(0)
 
     @function
     @check
     async def backend_core_1(self) -> None:
         """Run core test shard 1 of 6."""
-        await self._core_shard(1).sync()
+        await self._check_core_shard(1)
 
     @function
     @check
     async def backend_core_2(self) -> None:
         """Run core test shard 2 of 6."""
-        await self._core_shard(2).sync()
+        await self._check_core_shard(2)
 
     @function
     @check
     async def backend_core_3(self) -> None:
         """Run core test shard 3 of 6."""
-        await self._core_shard(3).sync()
+        await self._check_core_shard(3)
 
     @function
     @check
     async def backend_core_4(self) -> None:
         """Run core test shard 4 of 6."""
-        await self._core_shard(4).sync()
+        await self._check_core_shard(4)
 
     @function
     @check
     async def backend_core_5(self) -> None:
         """Run core test shard 5 of 6."""
-        await self._core_shard(5).sync()
+        await self._check_core_shard(5)
 
     @function
     @check
