@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import io
 import json
 import os
 import re
@@ -432,6 +433,7 @@ def _run_check_as(
     *,
     euid: int,
     fault: str | None = None,
+    status: str | None = "CapEff:\t000001ffffffffff\n",
 ) -> tuple[list[tuple[str, int]], dict[str, Any]]:
     """Run the protected-file check in this process, with a fake effective user and no real switch.
 
@@ -443,6 +445,8 @@ def _run_check_as(
         fault: ``"refuse"`` makes the switch fail as for a root with no
             capabilities, ``"stay"`` makes ``setuid`` keep root, and
             ``"root-tree"`` makes root own the tree.
+        status: The text of ``/proc/self/status``, or ``None`` when it
+            cannot be read. The default holds every capability.
 
     Returns:
         Each user switch and tree access with the effective user at that moment,
@@ -508,7 +512,17 @@ def _run_check_as(
     monkeypatch.setattr(sys, "argv", ["-c", "eval"])
     monkeypatch.setenv("APP_ANSWER_PATH", "calls/a.json")
     monkeypatch.setenv("APP_ANSWER", '{"output": 1}')
-    names = {**vars(builtins), "open": watch("read", open)}
+    read = watch("read", open)
+
+    def reader(path: Any, *args: Any, **kwargs: Any) -> Any:
+        """Answer the capability check from ``status``, and watch every other read."""
+        if path != "/proc/self/status":
+            return read(path, *args, **kwargs)
+        if status is None:
+            raise PermissionError(path)
+        return io.StringIO(status)
+
+    names = {**vars(builtins), "open": reader}
     exec(compile(repo_workspace._HASH_PROTECTED, "<check>", "exec"), {"__builtins__": names})
     return events, json.loads(capsys.readouterr().out)
 
@@ -569,6 +583,32 @@ def test_a_root_check_that_cannot_leave_root_stops_before_the_tree(
     assert output.out == ""
     assert not (tree / "calls" / "a.json").exists()
     assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+def test_a_root_without_capabilities_hashes_and_answers_as_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Run as a root with no capability, as runner._entry_user does in a local Docker box (PRE-1)."""
+    tree = _planted_tree(tmp_path)
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=0, status="CapEff:\t0000000000000000\n")
+    assert not [name for name, _ in events if name.startswith("set")]
+    assert {user for _, user in events} == {0}
+    assert set(result["files"]) == {"eval/labels.csv"}
+    assert (tree / "calls" / "a.json").read_text() == '{"output": 1}'
+    assert (tmp_path / "root-only").read_text() == "secret\n"
+
+
+@pytest.mark.parametrize("status", [None, "Name:\tpython3\n"], ids=["unreadable", "no-CapEff-line"])
+def test_a_root_whose_capabilities_are_unknown_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str | None
+) -> None:
+    """Count an unreadable or incomplete ``/proc/self/status`` as holding capabilities."""
+    tree = _planted_tree(tmp_path)
+    with pytest.raises(SystemExit) as stopped:
+        _run_check_as(monkeypatch, capsys, tree, euid=0, fault="refuse", status=status)
+    assert stopped.value.code not in (0, None)
+    assert capsys.readouterr().out == ""
+    assert not (tree / "calls" / "a.json").exists()
 
 
 def test_a_box_user_check_needs_no_switch(

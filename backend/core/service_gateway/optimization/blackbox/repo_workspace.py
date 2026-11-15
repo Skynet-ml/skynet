@@ -151,15 +151,30 @@ _ANSWER_ENV_BYTES = 100_000
 # write follows a link that the version plants, and the kernel then marks it
 # not dumpable, so the version's processes cannot trace it or open its fds.
 # The tree owner is the user that runner._entry_user starts the entry as. The
-# version can point the tree at a root-owned folder, and a root with no
-# capabilities cannot switch, so a check that stays root stops before it reads
-# the tree. The parent then counts the check as failed and gives no score.
+# version can point the tree at a root-owned folder, so a check that stays
+# root stops before it reads the tree, and the parent gives no score. The
+# check mirrors runner._entry_user, which this standalone ``-I -S`` script
+# cannot import: a root with no effective capability, as in a local Docker
+# box, cannot switch users and runs the entry as itself. That root has no
+# power above the entry, and Docker hands the parent a pipe, not a file, so
+# the check runs as that root. A missing CapEff line counts as capabilities.
 # The answer's temporary file is opened without following a link, and a
 # leftover one is removed first, so a planted file blocks only this answer.
 _HASH_PROTECTED = r"""
 import hashlib, json, os, sys
 
-if os.geteuid() == 0:
+def has_capabilities():
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status:
+            lines = status.read().splitlines()
+    except OSError:
+        return True
+    for line in lines:
+        if line.startswith("CapEff:"):
+            return int(line.split()[1], 16) != 0
+    return True
+
+if os.geteuid() == 0 and has_capabilities():
     owner = os.stat(".")
     if owner.st_uid == 0:
         sys.exit("root owns the tree, so the check has no other user to run as")
