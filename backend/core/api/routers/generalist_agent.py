@@ -21,7 +21,8 @@ import asyncio
 import base64
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import partial
 from typing import Annotated, Any, Literal, cast
@@ -522,8 +523,37 @@ def _derive_title(user_message: str, media_name: str = "") -> str:
     return collapsed[: TITLE_MAX_CHARS - 1].rstrip() + "…"
 
 
+@contextmanager
+def _write_session(job_store, session: Session | None) -> Iterator[Session]:
+    """Yield the caller's session, or a new one that commits when the block ends.
+
+    A send passes one session to every step, so a failed step rolls back the
+    new chat and the deleted turns with it.
+
+    Args:
+        job_store: Job-store instance whose engine backs a new session.
+        session: The caller's open session, or None for a new one.
+
+    Yields:
+        The session to write in. The caller's session is flushed, not
+        committed, so a later step in it sees these rows.
+    """
+    if session is not None:
+        yield session
+        session.flush()
+        return
+    with Session(job_store.engine) as own:
+        yield own
+        own.commit()
+
+
 def _ensure_conversation(
-    job_store, conversation_id: str | None, username: str, user_message: str, media_name: str = ""
+    job_store,
+    conversation_id: str | None,
+    username: str,
+    user_message: str,
+    media_name: str = "",
+    session: Session | None = None,
 ) -> tuple[str, str]:
     """Create a new conversation row when one isn't supplied; touch existing rows.
 
@@ -537,6 +567,7 @@ def _ensure_conversation(
         username: Authenticated principal that owns the row.
         user_message: First user message (used for auto-title on creation).
         media_name: The first media file's name; it titles a message with no text.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
         ``(conversation_id, title)`` — the id is freshly generated when input
@@ -547,7 +578,7 @@ def _ensure_conversation(
             different user; 404 when an explicit id is unknown.
     """
     now = datetime.now(UTC)
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         if conversation_id:
             row = session.get(AgentConversationModel, conversation_id)
             if row is None:
@@ -555,7 +586,6 @@ def _ensure_conversation(
             if row.username != username:
                 raise DomainError("agent.conversation.forbidden", status=403)
             row.updated_at = cast(Any, now)
-            session.commit()
             return cast(str, row.id), cast(str, row.title)
         new_id = str(uuid4())
         title = _derive_title(user_message, media_name)
@@ -569,7 +599,6 @@ def _ensure_conversation(
             updated_at=now,
         )
         session.add(row)
-        session.commit()
         return new_id, title
 
 
@@ -690,6 +719,8 @@ def _persist_user_turn(
     compaction: dict[str, Any] | None = None,
     media: list[ChatMediaModel] | None = None,
     replaced: bool = False,
+    copy_bytes: int | None = None,
+    session: Session | None = None,
 ) -> int:
     """Insert the user's message into ``agent_messages``.
 
@@ -705,21 +736,26 @@ def _persist_user_turn(
             deleting the chat deletes them and never touches another chat.
         replaced: True when this message replaces stored turns (an edit or a
             regenerate). The files that only those turns named are deleted.
+        copy_bytes: The file copy bytes that the caller already checked
+            against the storage quota; None checks the quota here.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
         The id of the new row.
 
     Raises:
-        DomainError: 409 when copies of the files would go over the storage quota.
+        DomainError: 409 when copies of the files would go over the storage
+            quota, and 409 ``agent.media.changed`` when the files changed after
+            the caller checked the quota.
         HTTPException: 404 when an attached file is deleted before it attaches.
     """
     metadata: dict[str, Any] = {"steer": True} if steer else {}
     if compaction:
         metadata["compaction"] = compaction
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         if media:
             held = attach_media_to_chat(
-                session, job_store, media[0].username, [row.id for row in media], conversation_id
+                session, job_store, media[0].username, [row.id for row in media], conversation_id, copy_bytes
             )
             # A file deleted after the send loaded it must fail the send, not
             # store a turn that names a missing file.
@@ -738,7 +774,7 @@ def _persist_user_turn(
             created_at=datetime.now(UTC),
         )
         session.add(message)
-        session.commit()
+        session.flush()
         return message.id
 
 
@@ -772,7 +808,11 @@ def _free_unnamed_media(session: Session, conversation_id: str, keep: set[str]) 
 
 
 def _discard_latest_turn(
-    job_store, conversation_id: str, only_if_text: str | None = None, only_if_media: list[str] | None = None
+    job_store,
+    conversation_id: str,
+    only_if_text: str | None = None,
+    only_if_media: list[str] | None = None,
+    session: Session | None = None,
 ) -> dict[str, Any] | None:
     """Delete the final persisted user turn and every response after it.
 
@@ -790,12 +830,13 @@ def _discard_latest_turn(
         only_if_media: When set, delete nothing unless the latest user turn
             names exactly these file ids, in order. Messages with only files
             all have empty text, so the text alone cannot tell them apart.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
         The compaction entry stored on the deleted user turn, so its
         replacement keeps the summary and its cost; ``None`` when it had none.
     """
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         latest_user = (
             session.query(AgentMessageModel)
             .filter(
@@ -815,12 +856,11 @@ def _discard_latest_turn(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
         ).delete(synchronize_session=False)
-        session.commit()
         return entry
 
 
 def _discard_from_user_turn(
-    job_store, conversation_id: str, user_text: str, occurrence: int
+    job_store, conversation_id: str, user_text: str, occurrence: int, session: Session | None = None
 ) -> tuple[bool, dict[str, Any] | None]:
     """Delete the stored copy of the edited user turn and every message after it.
 
@@ -837,13 +877,14 @@ def _discard_from_user_turn(
         conversation_id: Conversation whose history is cut.
         user_text: Original text of the edited turn.
         occurrence: How many earlier chat user turns have the same text.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
         Whether a stored turn matched and was deleted with its suffix, and the
         compaction entry stored on that turn: its summary covers only earlier
         turns, so the edited copy keeps it.
     """
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         edited = (
             session.query(AgentMessageModel.id, AgentMessageModel.router_metadata)
             .filter(
@@ -861,7 +902,6 @@ def _discard_from_user_turn(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= edited.id,
         ).delete(synchronize_session=False)
-        session.commit()
         return True, (edited.router_metadata or {}).get("compaction")
 
 
@@ -1717,23 +1757,25 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             A :class:`StreamingResponse` of Server-Sent Events.
         """
 
-        def _setup_turn() -> tuple[str | None, str | None, int | None]:
+        def _setup_turn() -> tuple[str | None, str | None, int | None, dict[str, str]]:
             """Persist the user turn off the event loop.
 
             Runs the blocking conversation upsert and user-message insert in a
             worker thread so the single event loop is not stalled before the SSE
             stream starts. Auth is already enforced by the route dependency, so
             the turn is always attributed to ``current_user``. A conversation
-            ``DomainError`` (403/404), the storage quota ``DomainError`` (409)
-            and the attachment 404 ``HTTPException`` propagate.
+            ``DomainError`` (403/404), the storage quota ``DomainError`` (409),
+            the ``agent.media.changed`` ``DomainError`` (409) and the attachment
+            404 ``HTTPException`` propagate.
 
             Returns:
-                ``(conversation_id, title, user_message_id)`` — all ``None`` when
-                persistence is off (no ``job_store`` or ``persist`` is False) or
-                failed non-fatally.
+                ``(conversation_id, title, user_message_id, held)``. ``held`` maps
+                each attached file id to the id that the chat stores. All ``None``
+                and an empty map when persistence is off (no ``job_store`` or
+                ``persist`` is False) or failed non-fatally.
             """
             if job_store is None or not req.persist:
-                return None, None, None
+                return None, None, None, {}
             try:
                 # Check the quota for file copies before a new chat is created and
                 # before an edit deletes turns, so a refused copy leaves no empty
@@ -1742,46 +1784,67 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 copied = media_copy_bytes(media, req.conversation_id)
                 if copied:
                     enforce_storage_quota(job_store, current_user.username, copied)
-                cid, ttl = _ensure_conversation(
-                    job_store,
-                    req.conversation_id,
-                    current_user.username,
-                    req.user_message,
-                    media[0].filename if media else "",
-                )
-                carried = None
-                if req.edit_user_text is not None:
-                    found, carried = _discard_from_user_turn(
-                        job_store, cid, req.edit_user_text, req.edit_user_occurrence
+                # One transaction holds the new chat, the deleted turns and the
+                # new turn. A file deleted before the attach locks it fails the
+                # send and rolls back all of them. The quota measure above
+                # sweeps in its own transaction, so it must run before this one.
+                with Session(job_store.engine) as session:
+                    cid, ttl = _ensure_conversation(
+                        job_store,
+                        req.conversation_id,
+                        current_user.username,
+                        req.user_message,
+                        media[0].filename if media else "",
+                        session=session,
                     )
-                    # A retry of an edit the server saved, but whose
-                    # conversation_meta never reached the client, finds no old
-                    # turn. Replace the saved edit only when it is the latest
-                    # turn, so a missing target never deletes another turn.
-                    if not found and req.regenerate:
-                        carried = _discard_latest_turn(
-                            job_store, cid, only_if_text=req.user_message, only_if_media=[row.id for row in media]
+                    carried = None
+                    if req.edit_user_text is not None:
+                        found, carried = _discard_from_user_turn(
+                            job_store, cid, req.edit_user_text, req.edit_user_occurrence, session=session
                         )
-                elif req.regenerate:
-                    # A retry of a send refused before it was stored also
-                    # sends regenerate; the text and file check keeps the previous turn.
-                    carried = _discard_latest_turn(
-                        job_store, cid, only_if_text=req.user_message, only_if_media=[row.id for row in media]
+                        # A retry of an edit the server saved, but whose
+                        # conversation_meta never reached the client, finds no old
+                        # turn. Replace the saved edit only when it is the latest
+                        # turn, so a missing target never deletes another turn.
+                        if not found and req.regenerate:
+                            carried = _discard_latest_turn(
+                                job_store,
+                                cid,
+                                only_if_text=req.user_message,
+                                only_if_media=[row.id for row in media],
+                                session=session,
+                            )
+                    elif req.regenerate:
+                        # A retry of a send refused before it was stored also
+                        # sends regenerate; the text and file check keeps the previous turn.
+                        carried = _discard_latest_turn(
+                            job_store,
+                            cid,
+                            only_if_text=req.user_message,
+                            only_if_media=[row.id for row in media],
+                            session=session,
+                        )
+                    user_message_id = _persist_user_turn(
+                        job_store,
+                        cid,
+                        req.user_message,
+                        compaction=carried,
+                        media=media,
+                        replaced=req.edit_user_text is not None or req.regenerate,
+                        copy_bytes=copied,
+                        session=session,
                     )
-                user_message_id = _persist_user_turn(
-                    job_store,
-                    cid,
-                    req.user_message,
-                    compaction=carried,
-                    media=media,
-                    replaced=req.edit_user_text is not None or req.regenerate,
-                )
+                    # The turn names the chat's own copy of each file, in the
+                    # order of ``media``.
+                    stored = session.get(AgentMessageModel, user_message_id).router_metadata or {}
+                    held = {row.id: item["id"] for row, item in zip(media, stored.get("media", []), strict=True)}
+                    session.commit()
             except (DomainError, HTTPException):
                 raise
             except Exception:
                 logger.exception("Failed to persist user turn")
-                return None, None, None
-            return cid, ttl, user_message_id
+                return None, None, None, {}
+            return cid, ttl, user_message_id, held
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
 
@@ -1801,7 +1864,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
-        conversation_id, title, user_message_id = await asyncio.to_thread(_setup_turn)
+        conversation_id, title, user_message_id, held_media = await asyncio.to_thread(_setup_turn)
         # A new chat gets a model title in parallel with the turn. The setup
         # wizard kickoff has no cut title and gets no model title either.
         title_task = (
@@ -1926,7 +1989,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 # overflow the window; the oldest turns go so the turn can run.
                 history = compaction.fit_history(history, req.user_message, summary, window)
             if media_references:
-                yield {"event": "media_notice", "data": {"reference_ids": [row.id for row in media_references]}}
+                reference_ids = [held_media.get(row.id, row.id) for row in media_references]
+                yield {"event": "media_notice", "data": {"reference_ids": reference_ids}}
             async for event in run_generalist_agent(
                 wizard_state=wizard_state,
                 chat_history=compaction.history_with_summary(summary, history),

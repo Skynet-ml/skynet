@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only
 
@@ -37,10 +37,12 @@ from ...service_gateway.embedding_pipeline.embeddings import get_embedder
 from ...storage.models import (
     AgentConversationModel,
     AgentMessageModel,
+    ChatMediaModel,
     JobModel,
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ._helpers import enforce_storage_quota
 from .chat_media import attach_media_to_chat
 
 logger = logging.getLogger(__name__)
@@ -347,7 +349,9 @@ def create_agent_history_router(*, job_store) -> APIRouter:
 
         Raises:
             DomainError: 404 when unknown, 403 when the caller does not own it,
-                409 when the copies of its files would go over the storage quota.
+                409 when the copies of its files would go over the storage quota,
+                and 409 ``agent.media.changed`` when its files change during the fork.
+            HTTPException: 404 when one of its files is deleted during the fork.
         """
         with Session(job_store.engine) as session:
             source = session.get(AgentConversationModel, conversation_id)
@@ -374,11 +378,24 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             )
             # The fork gets its own copies of the files, so deleting either
             # chat never removes a file that the other chat still shows. The
-            # copies pass the quota check before the fork writes anything.
-            held = attach_media_to_chat(
-                session, job_store, user.username, [media_id for m in kept for media_id in _media_ids(m)], row.id
+            # quota measure sweeps in its own transaction, so it runs before
+            # the fork writes anything. The fork row is flushed before the
+            # copies, because each copy names it.
+            media_ids = [media_id for m in kept for media_id in _media_ids(m)]
+            copied = sum(
+                session.scalars(
+                    select(ChatMediaModel.byte_size).where(
+                        ChatMediaModel.id.in_(media_ids),
+                        ChatMediaModel.username == user.username,
+                        ChatMediaModel.conversation_id.is_not(None),
+                    )
+                )
             )
+            if copied:
+                enforce_storage_quota(job_store, user.username, copied)
             session.add(row)
+            session.flush()
+            held = attach_media_to_chat(session, job_store, user.username, media_ids, row.id, copied)
             # The wizard state stays on the source rows, so one turn never
             # counts twice in the training-ground export. The source chat paid
             # for its turns, so the copies carry no cost.

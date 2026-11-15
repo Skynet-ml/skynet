@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Der Chat konnte nicht verdichtet werden. Versuche es erneut.",
   "agent.compact.wait_reply": "Warte, bis die Antwort fertig ist.",
   "agent.fork.failed": "Der Chat konnte nicht abgezweigt werden. Versuche es erneut.",
+  "agent.fork.in_history": "Die Abzweigung ist gespeichert. Öffne sie im Chatverlauf.",
   "agent.session.title": "Chat-Statistik",
   "agent.session.user_messages": "Deine Nachrichten",
   "agent.session.assistant_messages": "Antworten des Agenten",

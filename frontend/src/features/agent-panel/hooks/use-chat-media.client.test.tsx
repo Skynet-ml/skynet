@@ -35,10 +35,18 @@ let uploads = 0;
 const deleted: string[] = [];
 // A test sets this to hold the next upload until it settles the promise.
 let nextUpload: Promise<Response> | null = null;
+// A test sets this to hold every restore read until it settles the promise.
+let heldReads: Promise<void> | null = null;
 globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   if (init?.method === "DELETE") {
     deleted.push(String(_url).split("/").pop() ?? "");
     return new Response(null, { status: 204 });
+  }
+  // A restore reads a stored file's bytes; "gone" is a file the server no longer has.
+  if (!init?.method) {
+    if (heldReads) await heldReads;
+    if (String(_url).endsWith("/gone")) return new Response(null, { status: 404 });
+    return new Response(new Uint8Array(3), { headers: { "content-type": "image/png" } });
   }
   const held = nextUpload;
   nextUpload = null;
@@ -201,7 +209,138 @@ void test("Send waits with a reason while an upload runs, and a failed upload st
   await flush();
   assert.equal(latest!.tiles.length, 1, "the failed file keeps its tile");
   assert.equal(latest!.tiles[0]!.status, "failed");
-  assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
+  assert.equal(latest!.blocked, "Remove the files that failed to attach, then send.");
+  await React.act(async () => root.unmount());
+});
+
+void test("a restore uploads sent files again as new draft files, and a remove deletes them", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  deleted.length = 0;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await React.act(async () =>
+    root.render(
+      <>
+        <Harness onDraft={keep} />
+        <ToastContainer transition={Instant} autoClose={false} />
+      </>,
+    ),
+  );
+  const sent = [
+    { id: "sent-1", name: "a.png", kind: "image" as const, url: "blob:old-1" },
+    { id: "sent-2", name: "b.png", kind: "image" as const, url: "blob:old-2" },
+  ];
+
+  // Send waits from the restore call, before any tile shows.
+  let hold!: (r: Response) => void;
+  nextUpload = new Promise<Response>((resolve) => (hold = resolve));
+  await React.act(async () => latest!.restore(sent));
+  assert.equal(latest!.blocked, "Wait for the files to finish uploading.");
+  await flush();
+  assert.equal(latest!.tiles.length, 2);
+  assert.equal(latest!.ready(), null, "the first upload still runs");
+  assert.equal(latest!.blocked, "Wait for the files to finish uploading.");
+  hold(Response.json({ id: "new-1", name: "a.png", kind: "image" }));
+  await flush();
+  const ids = latest!.ready()?.map((m) => m.id) ?? [];
+  assert.equal(ids.length, 2);
+  assert.ok(!ids.includes("sent-1") && !ids.includes("sent-2"), "the draft gets new ids");
+  assert.equal(latest!.blocked, null);
+  assert.ok(latest!.tiles[0]!.url.startsWith("blob:"));
+
+  // A chat switch frees the chat's display URLs, not the draft's own.
+  freeChatMediaUrls();
+  assert.deepEqual(revoked, []);
+
+  // A second restore into a draft that has files changes nothing.
+  await React.act(async () => latest!.restore([sent[0]!]));
+  await flush();
+  assert.equal(latest!.tiles.length, 2);
+
+  const url = latest!.tiles[0]!.url;
+  await React.act(async () => latest!.remove(latest!.tiles[0]!.id));
+  await React.act(async () => toast.dismiss());
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.deepEqual(deleted, ["new-1"], "the draft's own copy goes");
+  assert.deepEqual(revoked, [url]);
+  URL.revokeObjectURL = revoke;
+  await React.act(async () => root.unmount());
+});
+
+void test("a restored file that does not load shows as failed and blocks Send", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+
+  await React.act(async () =>
+    latest!.restore([{ id: "gone", name: "a.png", kind: "image", url: "" }]),
+  );
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.equal(latest!.tiles[0]!.status, "failed");
+  assert.equal(latest!.blocked, "Remove the files that failed to attach, then send.");
+  await React.act(async () => root.unmount());
+});
+
+void test("a restore drops its files when a newer restore starts or the user adds files", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+  const sent = (id: string) => [{ id, name: `${id}.png`, kind: "image" as const, url: "" }];
+  let release!: () => void;
+
+  // The user adds a file while the restore loads: only the user's file stays.
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () => latest!.restore(sent("old")));
+  await React.act(async () => latest!.addFiles([image(1)]));
+  await flush();
+  const before = uploads;
+  heldReads = null;
+  release();
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.equal(latest!.tiles[0]!.name, "f-1.png");
+  assert.equal(uploads, before, "the dropped restore uploads nothing");
+  await React.act(async () => latest!.clear());
+
+  // A newer restore starts while the first loads: only the newer one fills the draft.
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () => latest!.restore(sent("first")));
+  await React.act(async () => latest!.restore([...sent("second"), ...sent("third")]));
+  heldReads = null;
+  release();
+  await flush();
+  assert.deepEqual(
+    latest!.tiles.map((t) => t.name),
+    ["second.png", "third.png"],
+  );
+  assert.equal(latest!.blocked, null);
   await React.act(async () => root.unmount());
 });
 
@@ -296,5 +435,30 @@ void test("two same-name originals that do not both fit stay out together and go
   const before = deleted.length;
   await React.act(async () => draft().clear());
   assert.deepEqual(deleted.slice(before), [`s-${uploads - 2}`, `s-${uploads - 1}`]);
+  await unmount();
+});
+
+void test("a restore sends a document again as an original, not a tile", async () => {
+  const { draft, unmount } = await mountDraft();
+  const errorsBefore = errors.length;
+  await React.act(async () =>
+    draft().restore([
+      { id: "sent-img", name: "a.png", kind: "image", url: "" },
+      { id: "sent-doc", name: "r.pdf", kind: "document", url: "" },
+      { id: "gone", name: "lost.pdf", kind: "document", url: "" },
+    ]),
+  );
+  await flush();
+  assert.deepEqual(
+    draft().tiles.map((t) => t.name),
+    ["a.png"],
+  );
+  // A document that does not load stays out with no error: its file still goes as text.
+  assert.equal(errors.length, errorsBefore);
+  await React.act(async () => draft().keepOriginals([{ name: "r.pdf" }]));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["r.pdf"],
+  );
   await unmount();
 });

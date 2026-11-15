@@ -1899,6 +1899,94 @@ def test_an_answer_whose_check_fails_is_not_counted_as_a_protected_change() -> N
     assert relay.changes == []
 
 
+class _RaisingWorkspace(_Workspace):
+    """A fake candidate box whose answer raises, as a sandbox API 429 on its check or write does."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each answer raises.
+        """
+        super().__init__()
+        self.error = error
+
+    def answer(self, path: str, text: str) -> tuple[str, ...] | None:
+        """Fail the answer.
+
+        Args:
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+class _RefusingBox:
+    """A fake metric box whose every file write raises one error."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each write raises.
+        """
+        self.error = error
+
+    def write_files(self, files: Mapping[str, str]) -> None:
+        """Fail the write.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+def test_a_raised_candidate_answer_marks_the_relay_and_keeps_the_first_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An answer that raises is not lost on the pool thread: the relay keeps the first error and logs only its type.
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    _, first = _write_error(429)
+    workspace = _RaisingWorkspace(first)
+    relay = _relay(workspace)
+    with caplog.at_level(logging.WARNING):
+        assert relay._answer("a" * 32, {"output": 1}) is False
+        workspace.error = _api_error(404)
+        assert relay._answer("b" * 32, {"output": 2}) is False
+    relay.close()
+    assert relay.unchecked
+    assert relay.failure is first
+    assert relay.changes == []
+    assert "SandboxFilesystemWriteError" in caplog.text
+    assert "provider text" not in caplog.text
+
+
+def test_a_raised_metric_box_answer_marks_the_relay_and_keeps_the_error() -> None:
+    """A metric box answer write that raises marks the relay unchecked and keeps the error for the score."""
+    _, error = _write_error(503)
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        box=_RefusingBox(error),  # type: ignore[arg-type]
+    )
+    assert relay._answer("a" * 32, {"output": 1}) is False
+    relay.close()
+    assert relay.unchecked
+    assert relay.failure is error
+
+
 def test_the_relay_finds_a_frame_that_does_not_start_its_line() -> None:
     """Text before the frame on one line is kept as log output, and the frame still gets its answer."""
     workspace = _Workspace()
@@ -2004,6 +2092,8 @@ def _service_scorer(
     run_entry: str | None = None,
     code: str = SERVICE_SCORER,
     recorder: CallRecorder | None = None,
+    timeout: float = 60,
+    run_timeout: float = 60.0,
 ) -> RepoScorer:
     """Open a scorer whose run declares one url service with a key.
 
@@ -2014,6 +2104,8 @@ def _service_scorer(
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
         recorder: Writes each relayed call into the run record, if given.
+        timeout: The scorer's limit in seconds.
+        run_timeout: The ``[run]`` call's limit in seconds.
 
     Returns:
         The scorer.
@@ -2030,10 +2122,11 @@ def _service_scorer(
             secrets={"JUDGE_KEY": "judge-secret-value", "OTHER_KEY": "other-value"},
         ),
         code,
-        timeout_seconds=60,
+        timeout_seconds=timeout,
         services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
         service_roles=roles,
         run_entry=run_entry,
+        run_timeout=run_timeout,
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
         recorder=recorder,
@@ -2141,6 +2234,268 @@ def test_a_run_role_reaches_its_listed_service_through_the_relay(
     assert json.loads(result["feedback"]) == {"grade": 7, "key_in_env": False, "service_url": True}
     [request] = upstream.requests
     assert request["headers"]["Authorization"] == "Bearer judge-secret-value"
+
+
+def _refuse_answer_writes(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make every relay answer file write in a local box raise the error; other writes go through.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        error: The write error.
+    """
+    write = LocalSubprocessSession.write_files
+
+    def refuse(self: LocalSubprocessSession, files: Mapping[str, Any], *args: Any, **kwargs: Any) -> None:
+        """Fail only the relay answer files.
+
+        Args:
+            self: The session.
+            files: The files to write.
+            *args: Passed through.
+            **kwargs: Passed through.
+
+        Raises:
+            BaseException: For a relay answer file.
+        """
+        if any("/stages/" in path for path in files):
+            raise error
+        write(self, files, *args, **kwargs)
+
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", refuse)
+
+
+def _refuse_candidate_answers(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make ``CandidateBox.answer`` raise, as it does when its protected-file check gets a sandbox API error.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        error: The error.
+    """
+
+    def refuse(self: CandidateBox, path: str, text: str) -> tuple[str, ...] | None:
+        """Fail the answer.
+
+        Args:
+            self: The candidate box.
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            BaseException: Always.
+        """
+        raise error
+
+    monkeypatch.setattr(CandidateBox, "answer", refuse)
+
+
+def _score_or_error(scorer: RepoScorer, case: Any = None) -> Any:
+    """Score the version once, then close the scorer.
+
+    Args:
+        scorer: The scorer.
+        case: The case.
+
+    Returns:
+        The result, or the error the score raised.
+    """
+    try:
+        return scorer.score("", case)
+    except Exception as error:
+        return error
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(("judge", "status"), [(False, 429), (True, 404)], ids=["run-429", "judge-404"])
+def test_a_lost_metric_answer_names_the_answer_not_the_timeout(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, judge: bool, status: int
+) -> None:
+    """A metric answer that never reaches the box fails the version with the answer message, not a timeout.
+
+    In a run even a 429 gives this fixed no-score error; in judge use a lasting 404 gives it too.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+        status: The HTTP status of the answer write.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    _refuse_answer_writes(monkeypatch, _write_error(status)[1])
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=6)
+    scorer.raw_provider_errors = judge
+    outcome = _score_or_error(scorer)
+    assert isinstance(outcome, RepoScoreError), outcome
+    assert str(outcome) == "A stage answer could not be delivered, so the version has no score."
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_raised_candidate_answer_gets_no_score_not_a_false_zero(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A candidate answer whose check raises a 429 never scores 0.0 as a failed run.
+
+    In a run the version gets the fixed no-score error; in judge use the raw 429 leaves the scorer.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    error = _api_error(429)
+    _refuse_candidate_answers(monkeypatch, error)
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": ("judge-api",), "metric": ()},
+        run_entry="src/cand.py:run",
+        code=_OUTPUT_SCORER,
+        run_timeout=4,
+    )
+    scorer.raw_provider_errors = judge
+    outcome = _score_or_error(scorer, {"input": 1})
+    if judge:
+        assert outcome is error
+    else:
+        assert isinstance(outcome, RepoScoreError), outcome
+        assert str(outcome) == "A relay answer could not be checked or delivered, so the version has no score."
+
+
+def test_a_temporary_unwatched_candidate_answer_write_stays_raw_in_judge_use(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In judge use, a 429 on a candidate answer file write leaves the scorer raw, not as a lasting no-score error.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    _, error = _write_error(429)
+    _refuse_answer_writes(monkeypatch, error)
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": ("judge-api",), "metric": ()},
+        run_entry="src/cand.py:run",
+        code=_OUTPUT_SCORER,
+        run_timeout=4,
+    )
+    scorer.raw_provider_errors = True
+    assert _score_or_error(scorer, {"input": 1}) is error
+
+
+def _stop_every_call(*_: Any, **__: Any) -> bytes:
+    """Raise the budget stop as the metered relay does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_lost_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, role: str, judge: bool
+) -> None:
+    """A 429 on the answer that carries a budget stop never hides the stop behind a no-score or raw error.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        role: The role whose service call hits the stop.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    monkeypatch.setattr(repo_scorer, "relay_request", _stop_every_call)
+    if role == "run":
+        _refuse_candidate_answers(monkeypatch, _api_error(429))
+        scorer = _service_scorer(
+            tmp_path,
+            upstream.port,
+            {"run": ("judge-api",), "metric": ()},
+            run_entry="src/cand.py:run",
+            code=_OUTPUT_SCORER,
+            run_timeout=2,
+        )
+    else:
+        _refuse_answer_writes(monkeypatch, _write_error(429)[1])
+        scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=3)
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
+def _stop_the_stage(*_: Any) -> dict[str, Any]:
+    """Raise the budget stop as a metered stage call does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+def test_a_lost_stage_budget_stop_answer_keeps_the_stop() -> None:
+    """Keep the budget stop of a stage answer that the metric box refused, so the scorer can still stop the run."""
+    relay = _StageRelay(
+        {}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, box=_RefusingBox(_write_error(503)[1])
+    )  # type: ignore[arg-type]
+    relay._run = _stop_the_stage  # type: ignore[method-assign]
+    relay._call("double", "a" * 32, 1)
+    relay.close()
+    assert relay.unchecked
+    assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_lost_stage_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A 503 on the metric box answer of a stage call's budget stop never hides the stop.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(_StageRelay, "_run", _stop_the_stage)
+    _refuse_answer_writes(monkeypatch, _write_error(503)[1])
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v']\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"double": STAGES["double"]})
+    scorer._timeout_seconds = 3
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
+def test_a_temporary_answer_write_error_reaches_the_judge_as_temporary(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge's real score path gets the raw 429 of a metric answer write, so the judge stores a temporary failure.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    api, error = _write_error(429)
+    _refuse_answer_writes(monkeypatch, error)
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=6)
+    try:
+        with pytest.raises(SandboxFilesystemWriteError) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert sandbox_api_error(raised.value) is api
+    assert repo_judge._temporary(raised.value)
 
 
 def _service_relay(

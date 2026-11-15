@@ -957,7 +957,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     show: showSessionCard,
     close: closeSessionCard,
   } = useSessionCard(chatView.key);
-  const { forking, handleFork } = useFork({ agent, store, liveChatRef, setDraft });
+  const chatMedia = useChatMedia();
+  const { forking, handleFork } = useFork({
+    agent,
+    store,
+    liveChatRef,
+    draft,
+    setDraft,
+    restoreMedia: chatMedia.restore,
+  });
   // A fork during a manual /compact would copy the rows without the summary.
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const [attachOpen, setAttachOpen] = React.useState(false);
@@ -1087,7 +1095,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
-  const chatMedia = useChatMedia();
   // A file taken out of the draft takes its stored original with it.
   const keepOriginals = chatMedia.keepOriginals;
   React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);

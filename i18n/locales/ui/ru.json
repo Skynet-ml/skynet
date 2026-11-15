@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "Не удалось сжать чат. Попробуйте ещё раз.",
   "agent.compact.wait_reply": "Дождитесь окончания ответа.",
   "agent.fork.failed": "Не удалось ответвить чат. Попробуйте ещё раз.",
+  "agent.fork.in_history": "Ответвление сохранено. Открой его из истории чатов.",
   "agent.session.title": "Статистика чата",
   "agent.session.user_messages": "Ваши сообщения",
   "agent.session.assistant_messages": "Ответы агента",

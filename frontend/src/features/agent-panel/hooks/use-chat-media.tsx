@@ -15,6 +15,7 @@ import {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_PER_MESSAGE,
   deleteChatMedia,
+  fetchChatMedia,
   freeMediaUrl,
   localMediaUrl,
   markMediaSent,
@@ -58,6 +59,8 @@ export interface ChatMediaDraft {
   blocked: string | null;
   /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
   clear: () => void;
+  /** Upload a sent message's files again into an empty draft, as a fork puts back its text. */
+  restore: (media: readonly MediaAttachment[]) => void;
 }
 
 /** The toast for a failed upload, from the server's status. */
@@ -82,6 +85,10 @@ export function useChatMedia(): ChatMediaDraft {
     originalsRef.current = next;
     setOriginalsUploading(next.some((o) => !o.serverId));
   }, []);
+  // Restores whose files still load; Send waits for them.
+  const [restoring, setRestoring] = React.useState(0);
+  // A newer restore or a closed panel makes an older restore drop its files.
+  const restoreRef = React.useRef(0);
 
   const update = React.useCallback(
     (next: (prev: readonly DraftMedia[]) => readonly DraftMedia[]) => {
@@ -272,10 +279,65 @@ export function useChatMedia(): ChatMediaDraft {
     syncOriginals([]);
   }, [update, syncOriginals]);
 
+  const restore = React.useCallback(
+    (media: readonly MediaAttachment[]) => {
+      if (!media.length || itemsRef.current.length) return;
+      const run = ++restoreRef.current;
+      setRestoring((n) => n + 1);
+      // Each file uploads again as a new draft file. A sent id is the source
+      // chat's: the server stores a copy under a new id that the client never learns.
+      void Promise.allSettled(media.map((m) => fetchChatMedia(m.id))).then((blobs) => {
+        setRestoring((n) => n - 1);
+        // The user added files while these loaded, or the panel closed: the draft is theirs now.
+        if (run !== restoreRef.current || itemsRef.current.length) return;
+        // A document is a file's stored original (SKY-735), not a tile. One that
+        // does not load stays out: its file still goes as text.
+        const originals = media.flatMap((m, i) => {
+          const got = blobs[i]!;
+          return m.kind === "document" && got.status === "fulfilled"
+            ? [new File([got.value], m.name, { type: got.value.type })]
+            : [];
+        });
+        const added = media.flatMap((m, i) => {
+          const got = blobs[i]!;
+          if (m.kind === "document") return [];
+          if (got.status === "rejected") {
+            toast.error(msg("agent.media.upload_failed", { name: m.name }));
+            // The tile stays, marked, so the user sees which file is missing.
+            const item: DraftMedia = {
+              localId: crypto.randomUUID(),
+              name: m.name,
+              kind: m.kind,
+              url: "",
+              serverId: null,
+              failed: true,
+            };
+            return [{ item, file: null }];
+          }
+          const file = new File([got.value], m.name, { type: got.value.type });
+          const item: DraftMedia = {
+            localId: crypto.randomUUID(),
+            name: m.name,
+            kind: m.kind,
+            url: localMediaUrl(file),
+            serverId: null,
+            failed: false,
+          };
+          return [{ item, file }];
+        });
+        update(() => added.map((a) => a.item));
+        for (const { item, file } of added) if (file) upload(item, file);
+        if (originals.length) addOriginals(originals);
+      });
+    },
+    [update, upload, addOriginals],
+  );
+
   // A closed panel frees the local URLs of files still in the draft. An upload
   // that ends later then finds no tile or original and deletes its stored file.
   React.useEffect(
     () => () => {
+      restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
       itemsRef.current = [];
       originalsRef.current = [];
@@ -296,9 +358,9 @@ export function useChatMedia(): ChatMediaDraft {
   );
   const blocked = items.some((m) => m.failed)
     ? msg("agent.media.remove_failed")
-    : items.some((m) => !m.serverId) || originalsUploading
+    : restoring || items.some((m) => !m.serverId) || originalsUploading
       ? msg("agent.media.uploading")
       : null;
 
-  return { tiles, addFiles, addOriginals, keepOriginals, remove, ready, blocked, clear };
+  return { tiles, addFiles, addOriginals, keepOriginals, remove, ready, blocked, clear, restore };
 }

@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "チャットを要約できませんでした。もう一度お試しください。",
   "agent.compact.wait_reply": "返信が終わるまでお待ちください。",
   "agent.fork.failed": "チャットを分岐できませんでした。もう一度お試しください。",
+  "agent.fork.in_history": "フォークを保存しました。チャット履歴から開いてください。",
   "agent.session.title": "チャットの統計",
   "agent.session.user_messages": "あなたのメッセージ",
   "agent.session.assistant_messages": "エージェントの返信",

@@ -29,7 +29,13 @@ const agent = (content: string): AgentMessage => ({ role: "assistant", content }
 const chat = [user("first"), agent("one"), user("second"), agent("two")];
 
 test("a user message forks before itself and refills the composer", () => {
-  assert.deepEqual(forkSlice(chat, 2), { history: chat.slice(0, 2), draft: "second" });
+  assert.deepEqual(forkSlice(chat, 2), { history: chat.slice(0, 2), draft: "second", media: [] });
+});
+
+test("a user message with media puts its media back into the composer", () => {
+  const media = [{ id: "m1", name: "a.png", kind: "image" as const, url: "" }];
+  const withMedia = [user("first"), agent("one"), user("second", { media })];
+  assert.deepEqual(forkSlice(withMedia, 2)?.media, media);
 });
 
 test("a user message with line comments refills the composer with its text only", () => {
@@ -38,8 +44,8 @@ test("a user message with line comments refills the composer with its text only"
 });
 
 test("an assistant message forks after itself with an empty composer", () => {
-  assert.deepEqual(forkSlice(chat, 1), { history: chat.slice(0, 2), draft: "" });
-  assert.deepEqual(forkSlice(chat, 3), { history: chat, draft: "" });
+  assert.deepEqual(forkSlice(chat, 1), { history: chat.slice(0, 2), draft: "", media: [] });
+  assert.deepEqual(forkSlice(chat, 3), { history: chat, draft: "", media: [] });
 });
 
 test("an index that names no message gives no fork", () => {

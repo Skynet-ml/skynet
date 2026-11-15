@@ -43,6 +43,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -463,8 +464,17 @@ class CandidateBox:
         self.root = root
         self.path = WORK_DIR
         self._stamps: dict[str, str] | None = None
+        # Set before each answer file write and cleared once the files are stamped
+        # again: a write, even one that raised after the server did it, moves every ctime.
+        self._unstamped = False
         self._lock = threading.Lock()
         self._closed = False
+
+    @property
+    def unstamped(self) -> bool:
+        """Whether an answer file write may have moved the change times since the last stamp."""
+        with self._lock:
+            return self._unstamped
 
     def stamp_before_run(self) -> str | None:
         """Record the protected files' inodes and change times just before the version runs.
@@ -520,31 +530,65 @@ class CandidateBox:
             Like :meth:`protected_changes`, or ``None`` when the files could
             not be checked, or when nothing changed and the answer could not
             be written.
+
+        Raises:
+            Exception: A box call error of the check or the write, raw, when
+                no change was found before it.
         """
         workspace = self._workspace
         with self._lock:
             before = self._stamps
             if not workspace.watched:
+                self._unstamped = True
                 return () if _deliver(self.session, path, text) else None
             if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
                 current = workspace.fingerprint(self.session, WORK_DIR)
                 if current is None:
+                    self._unstamped = True
                     _deliver(self.session, path, text)
                     return None
-                changes = workspace.changes(current, before)
-                written = _write_answer(self.session, path, text)
+                # After an unstamped file write the stamps are stale, so only the
+                # contents can name a change.
+                changes = workspace.changes(current, current[1] if self._unstamped else before)
+                try:
+                    written = _write_answer(self.session, path, text)
+                except Exception:
+                    # A found change must still reach the rule judge.
+                    if changes:
+                        return changes
+                    raise
                 if not written:
                     # The answer stays unchecked, but the call ends now, not at its timeout.
-                    _deliver(self.session, path, text)
+                    self._unstamped = True
+                    try:
+                        _deliver(self.session, path, text)
+                    except Exception:
+                        if changes:
+                            return changes
+                        raise
                 return changes if changes or written else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
-            if not _deliver(self.session, path, text) or current is None or before is None:
-                return None
+            changes = (
+                workspace.changes(current, current[1] if self._unstamped else before)
+                if current is not None and before is not None
+                else ()
+            )
+            self._unstamped = True
+            try:
+                delivered = _deliver(self.session, path, text)
+            except Exception:
+                # The write may have moved the change times, so only this check can name the change.
+                if changes:
+                    return changes
+                raise
+            if not delivered or current is None or before is None:
+                return changes or None
             after = workspace.fingerprint(self.session, WORK_DIR)
             if after is None:
-                return None
+                return changes or None
             self._stamps = after[1]
-            return workspace.changes(current, before)
+            self._unstamped = False
+            return changes
 
     def close(self) -> None:
         """End the box; every process the version started ends with it."""
@@ -635,11 +679,17 @@ def _deliver(session: SandboxSession, path: str, text: str) -> bool:
 
     Returns:
         Whether the write succeeded.
+
+    Raises:
+        Exception: A temporary provider error (429 or 5xx), raw, so the judge can retry the score.
     """
     try:
         session.write_files({path: text})
     except Exception as error:
-        logger.warning("A relay answer could not reach the box: %s", error)
+        if is_temporary_provider_error(error):
+            raise
+        # The run log shows this logger, and the message is provider text.
+        logger.warning("A relay answer could not reach the box: %s", type(error).__name__)
         return False
     return True
 

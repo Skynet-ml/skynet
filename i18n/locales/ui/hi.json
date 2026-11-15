@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "चैट संक्षिप्त नहीं हो सकी। फिर से कोशिश करें।",
   "agent.compact.wait_reply": "जवाब पूरा होने तक रुकें।",
   "agent.fork.failed": "चैट को फ़ोर्क नहीं किया जा सका। फिर से कोशिश करें।",
+  "agent.fork.in_history": "फ़ोर्क सहेज लिया गया है। इसे चैट इतिहास से खोलें।",
   "agent.session.title": "चैट के आँकड़े",
   "agent.session.user_messages": "आपके संदेश",
   "agent.session.assistant_messages": "एजेंट के जवाब",

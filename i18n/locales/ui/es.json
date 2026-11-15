@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "No se pudo condensar el chat. Inténtalo de nuevo.",
   "agent.compact.wait_reply": "Espera a que termine la respuesta.",
   "agent.fork.failed": "No se pudo bifurcar el chat. Inténtalo de nuevo.",
+  "agent.fork.in_history": "La bifurcación se guardó. Ábrela desde el historial de chats.",
   "agent.session.title": "Estadísticas del chat",
   "agent.session.user_messages": "Tus mensajes",
   "agent.session.assistant_messages": "Respuestas del agente",

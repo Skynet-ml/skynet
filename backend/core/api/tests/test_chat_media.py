@@ -447,6 +447,35 @@ def test_owner_deletes_the_file(harness: SimpleNamespace) -> None:
     assert harness.client.delete(f"/agent/media/{media_id}").status_code == 404
 
 
+def test_delete_leaves_a_file_that_a_chat_holds(harness: SimpleNamespace) -> None:
+    """A delete removes only unsent files, so it never takes a file from a stored turn."""
+    media_id = _upload(harness.client, _PNG).json()["id"]
+    with Session(harness.store.engine) as session:
+        session.add(_conversation("chat-a", _ALICE))
+        session.flush()
+        attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
+        session.commit()
+
+    assert harness.client.delete(f"/agent/media/{media_id}").status_code == 404
+    assert harness.client.get(f"/agent/media/{media_id}").status_code == 200
+
+
+def test_attach_refuses_copies_over_the_checked_bytes(harness: SimpleNamespace) -> None:
+    """A file that another chat took after the quota check fails the attach with a 409."""
+    media_id = _upload(harness.client, _PNG).json()["id"]
+    with Session(harness.store.engine) as session:
+        session.add_all([_conversation("chat-a", _ALICE), _conversation("chat-b", _ALICE)])
+        session.flush()
+        attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
+        session.commit()
+    with Session(harness.store.engine) as session, pytest.raises(DomainError) as caught:
+        attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b", 0)
+    assert (caught.value.status_code, caught.value.code) == (409, "agent.media.changed")
+    with Session(harness.store.engine) as session:
+        held = attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b", len(_PNG))
+        assert held[media_id] != media_id
+
+
 def test_load_owned_media_keeps_order_and_checks_every_id(harness: SimpleNamespace) -> None:
     """The loader returns rows in request order, once each, and refuses any id the caller does not own."""
     first = _upload(harness.client, _PNG).json()["id"]

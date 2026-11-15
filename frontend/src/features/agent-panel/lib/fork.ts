@@ -2,18 +2,20 @@
 // this one. The tests map its two `@/` imports, so `node --test` loads it.
 
 import { splitLineComments } from "@/shared/ui/agent/line-comments";
+import type { MediaAttachment } from "@/shared/ui/agent/media-attachments";
 import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import type { AgentMessage } from "@/shared/ui/agent/types";
 
-/** What a fork opens: the new chat's messages and the composer's text. */
+/** What a fork opens: the new chat's messages, and the composer's text and media. */
 export interface ForkSlice {
   history: AgentMessage[];
   draft: string;
+  media: readonly MediaAttachment[];
 }
 
 /**
  * The fork at `index`. A user message forks before itself: the new chat
- * gets every message before it, and its text goes back into the composer.
+ * gets every message before it, and its text and media go back into the composer.
  * Its line comments do not: they name lines that may have changed since, and
  * the composer has no place for their markup. An assistant message forks
  * after itself, with an empty composer. `null` when `index` names no message.
@@ -25,8 +27,9 @@ export function forkSlice(messages: readonly AgentMessage[], index: number): For
     return {
       history: messages.slice(0, index).map(withoutCost),
       draft: splitLineComments(target.content).rest,
+      media: target.media ?? [],
     };
-  return { history: messages.slice(0, index + 1).map(withoutCost), draft: "" };
+  return { history: messages.slice(0, index + 1).map(withoutCost), draft: "", media: [] };
 }
 
 /**

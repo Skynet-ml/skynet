@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "تعذّر تكثيف المحادثة. حاول مرة أخرى.",
   "agent.compact.wait_reply": "انتظر حتى ينتهي الرد.",
   "agent.fork.failed": "تعذر تفريع المحادثة. حاول مرة أخرى.",
+  "agent.fork.in_history": "تم حفظ التفرّع. افتحه من سجل المحادثات.",
   "agent.session.title": "إحصاءات المحادثة",
   "agent.session.user_messages": "رسائلك",
   "agent.session.assistant_messages": "ردود الوكيل",

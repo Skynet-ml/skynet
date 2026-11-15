@@ -1818,6 +1818,7 @@
   "agent.compact.failed": "无法压缩对话，请重试。",
   "agent.compact.wait_reply": "请等待回复完成。",
   "agent.fork.failed": "无法分支此对话。请重试。",
+  "agent.fork.in_history": "分支已保存。请从聊天记录中打开它。",
   "agent.session.title": "对话统计",
   "agent.session.user_messages": "你的消息",
   "agent.session.assistant_messages": "代理的回复",

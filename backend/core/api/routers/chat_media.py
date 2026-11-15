@@ -30,7 +30,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.orm import Session, defer
 
 from ...config import settings
@@ -38,6 +38,7 @@ from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import ChatMediaModel
 from ...storage.usage import sweep_unsent_chat_media
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..errors import DomainError
 from ..rate_limit import RateLimiter, shared_redis_client
 from ._helpers import enforce_storage_quota
 
@@ -284,8 +285,26 @@ def media_copy_bytes(rows: list[ChatMediaModel], conversation_id: str | None) ->
     return sum(row.byte_size for row in rows if row.conversation_id not in (None, conversation_id))
 
 
+_COPY_COLUMNS = [
+    "id",
+    "username",
+    "filename",
+    "kind",
+    "mime_type",
+    "byte_size",
+    "data",
+    "created_at",
+    "conversation_id",
+]
+
+
 def attach_media_to_chat(
-    session: Session, job_store: Any, username: str, media_ids: list[str], conversation_id: str
+    session: Session,
+    job_store: Any,
+    username: str,
+    media_ids: list[str],
+    conversation_id: str,
+    copy_bytes: int | None = None,
 ) -> dict[str, str]:
     """Give a chat its own rows for the caller's files, and return their ids.
 
@@ -294,6 +313,8 @@ def attach_media_to_chat(
     file that the other chat still shows. A copy is new stored data, so it
     passes the same storage quota check as an upload. An id with no owned row
     is left out of the map, so a fork keeps a turn that names a deleted file.
+    The rows stay locked until the caller commits, so a delete or a sweep
+    waits, and then finds a file that a chat holds and leaves it.
 
     Args:
         session: The open session; the caller commits it.
@@ -301,6 +322,10 @@ def attach_media_to_chat(
         username: The caller. Only rows this user owns attach.
         media_ids: The ids of the files to attach.
         conversation_id: The chat that gets the files.
+        copy_bytes: The copy bytes that the caller already checked against the
+            quota, before it wrote in ``session``. None checks the quota here.
+            The quota measure sweeps in its own transaction, which must not
+            wait on rows that this session wrote or locked.
 
     Returns:
         A map from each attached id to the id that the chat now holds. Ids that
@@ -309,6 +334,8 @@ def attach_media_to_chat(
     Raises:
         DomainError: ``user.storage.quota_exceeded`` (409) when the copies
             would go over the caller's storage quota; nothing changes then.
+        DomainError: ``agent.media.changed`` (409) when the copies come to
+            more than ``copy_bytes``.
         HTTPException: 404 when a file is deleted while the quota is checked.
     """
     if not media_ids:
@@ -319,13 +346,24 @@ def attach_media_to_chat(
     ).all()
     copied = sum(size for _, held_by, size in sizes if held_by not in (None, conversation_id))
     # The quota measure sweeps stale unsent files in its own transaction. It
-    # runs before this session loads the rows, so no loaded row is deleted
-    # under it, and a file it deletes is a visible 404, not a lost turn.
-    if copied:
+    # runs before this session locks the rows, so it never waits on them.
+    if copy_bytes is None and copied:
         enforce_storage_quota(job_store, username, copied)
-    rows = list(session.scalars(select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned)).all())
+    # Locks in id order, so two sends of the same files never deadlock.
+    rows = list(
+        session.scalars(
+            select(ChatMediaModel)
+            .options(defer(ChatMediaModel.data, raiseload=True))
+            .where(*owned)
+            .order_by(ChatMediaModel.id)
+            .with_for_update()
+        ).all()
+    )
     if len(rows) != len(sizes):
         raise HTTPException(status_code=404, detail="Attachment not found.")
+    if copy_bytes is not None and media_copy_bytes(rows, conversation_id) > copy_bytes:
+        # Another chat took an unsent file after the caller checked the quota.
+        raise DomainError("agent.media.changed", status=409)
     held: dict[str, str] = {}
     for row in rows:
         if row.conversation_id is None:
@@ -333,18 +371,26 @@ def attach_media_to_chat(
         if row.conversation_id == conversation_id:
             held[row.id] = row.id
             continue
-        copy = ChatMediaModel(
-            id=str(uuid4()),
-            username=row.username,
-            filename=row.filename,
-            kind=row.kind,
-            mime_type=row.mime_type,
-            byte_size=row.byte_size,
-            data=row.data,
-            conversation_id=conversation_id,
+        copy_id = str(uuid4())
+        # The database copies the bytes, so a large file never loads into
+        # worker memory.
+        session.execute(
+            insert(ChatMediaModel).from_select(
+                _COPY_COLUMNS,
+                select(
+                    literal(copy_id),
+                    ChatMediaModel.username,
+                    ChatMediaModel.filename,
+                    ChatMediaModel.kind,
+                    ChatMediaModel.mime_type,
+                    ChatMediaModel.byte_size,
+                    ChatMediaModel.data,
+                    literal(datetime.now(UTC)),
+                    literal(conversation_id),
+                ).where(ChatMediaModel.id == row.id),
+            )
         )
-        session.add(copy)
-        held[row.id] = copy.id
+        held[row.id] = copy_id
     return held
 
 
@@ -469,7 +515,11 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         media_id: str,
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
     ) -> Response:
-        """Delete one of the caller's media files.
+        """Delete one of the caller's unsent media files.
+
+        A sent file belongs to its chat and goes when the chat goes. A delete
+        that waits on a send's lock then finds the file sent and leaves it, so
+        a stored turn never names a missing file.
 
         Args:
             media_id: The media id.
@@ -479,11 +529,16 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             An empty 204 response.
 
         Raises:
-            HTTPException: 404 when the id is unknown or another user owns it.
+            HTTPException: 404 when the id is unknown, another user owns it,
+                or a chat holds it.
         """
         with Session(_engine(job_store)) as session:
             deleted = session.execute(
-                delete(ChatMediaModel).where(ChatMediaModel.id == media_id, ChatMediaModel.username == user.username)
+                delete(ChatMediaModel).where(
+                    ChatMediaModel.id == media_id,
+                    ChatMediaModel.username == user.username,
+                    ChatMediaModel.conversation_id.is_(None),
+                )
             ).rowcount
             session.commit()
         if not deleted:

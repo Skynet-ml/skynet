@@ -1075,6 +1075,7 @@
   "agent.compact.failed": "濃縮唔到對話，請再試一次。",
   "agent.compact.wait_reply": "等回覆完成先。",
   "agent.fork.failed": "無法分支呢個對話。請再試一次。",
+  "agent.fork.in_history": "分支已經儲存。喺對話記錄度打開佢。",
   "agent.session.title": "對話統計",
   "agent.session.user_messages": "你嘅訊息",
   "agent.session.assistant_messages": "代理嘅回覆",
