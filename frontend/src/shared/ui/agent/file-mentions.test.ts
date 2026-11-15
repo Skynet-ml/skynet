@@ -38,3 +38,9 @@ test("insertMention replaces the query and puts the caret after one space", () =
     caret: 30,
   });
 });
+
+test("matchMentions leaves out paths that a mention token cannot hold", () => {
+  const paths = ["docs/my notes.md", "node_modules/@types/x.d.ts", "docs/notes.md"];
+  assert.deepEqual(matchMentions(paths, "notes"), ["docs/notes.md"]);
+  assert.deepEqual(matchMentions(paths, "x.d"), []);
+});

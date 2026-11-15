@@ -4066,7 +4066,6 @@
   "submit.modelpicker.score_tip": "Artificial Analysis Intelligence Index, a blend of reasoning, knowledge, math and coding benchmarks. Higher is smarter.",
   "submit.modelpicker.score_tip_link": "Click to see every benchmark on Artificial Analysis.",
   "shared.agent.worked_for": "Worked for {duration}",
-  "shared.agent.stopped_after": "Stopped after {duration}",
   "shared.agent.context_label": "Context window:",
   "shared.agent.context_left": "{usage}% used ({remaining}% left)",
   "shared.agent.context_full": "{usage}% full",

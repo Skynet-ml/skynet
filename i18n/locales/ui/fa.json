@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "رنگ",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "بازنشانی به پیش‌فرض",
-  "shared.agent.stopped_after": "پس از {duration} متوقف کردید",
   "shared.agent.context_label": "پنجره زمینه:",
   "shared.agent.context_left": "{usage}٪ استفاده‌شده ({remaining}٪ باقی‌مانده)",
   "shared.agent.context_full": "{usage}٪ پر",

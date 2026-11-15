@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "色",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "デフォルトに戻す",
-  "shared.agent.stopped_after": "{duration}後に停止しました",
   "shared.agent.context_label": "コンテキストウィンドウ:",
   "shared.agent.context_left": "{usage}% 使用中 (残り {remaining}%)",
   "shared.agent.context_full": "{usage}% 使用済み",

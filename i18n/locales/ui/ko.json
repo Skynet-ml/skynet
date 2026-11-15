@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "색상",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "기본값으로 재설정",
-  "shared.agent.stopped_after": "{duration} 후에 중지했습니다",
   "shared.agent.context_label": "컨텍스트 창:",
   "shared.agent.context_left": "{usage}% 사용 ({remaining}% 남음)",
   "shared.agent.context_full": "{usage}% 참",

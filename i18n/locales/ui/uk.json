@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "Колір",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Скинути до типових",
-  "shared.agent.stopped_after": "Ви зупинили через {duration}",
   "shared.agent.context_label": "Вікно контексту:",
   "shared.agent.context_left": "Зайнято {usage}% (вільно {remaining}%)",
   "shared.agent.context_full": "Заповнено на {usage}%",

@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "रंग",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "डिफ़ॉल्ट पर रीसेट करें",
-  "shared.agent.stopped_after": "आपने {duration} बाद रोका",
   "shared.agent.context_label": "कॉन्टेक्स्ट विंडो:",
   "shared.agent.context_left": "{usage}% उपयोग हुआ ({remaining}% बाकी)",
   "shared.agent.context_full": "{usage}% भरा",

@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "لون",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "إعادة التعيين إلى الافتراضي",
-  "shared.agent.stopped_after": "أوقفت بعد {duration}",
   "shared.agent.context_label": "نافذة السياق:",
   "shared.agent.context_left": "مستخدم {usage}% (متبقٍ {remaining}%)",
   "shared.agent.context_full": "ممتلئة بنسبة {usage}%",

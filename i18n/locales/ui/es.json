@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "Color",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Restablecer valores predeterminados",
-  "shared.agent.stopped_after": "Lo detuviste tras {duration}",
   "shared.agent.context_label": "Ventana de contexto:",
   "shared.agent.context_left": "{usage} % usado (queda un {remaining} %)",
   "shared.agent.context_full": "{usage} % lleno",

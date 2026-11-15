@@ -9,7 +9,10 @@ export function mentionAt(text: string, caret: number): { start: number; query: 
   return { start: caret - m[2]!.length - 1, query: m[2]! };
 }
 
-/** Paths that contain the query, file-name matches first, at most `limit`. */
+/**
+ * Paths that contain the query, file-name matches first, at most `limit`.
+ * A mention ends at whitespace or "@", so a path with either is left out.
+ */
 export function matchMentions(paths: readonly string[], query: string, limit = 8): string[] {
   const q = query.toLowerCase();
   const rank = (path: string) => {
@@ -20,6 +23,7 @@ export function matchMentions(paths: readonly string[], query: string, limit = 8
     return p.includes(q) ? 2 : -1;
   };
   return paths
+    .filter((path) => !/[\s@]/.test(path))
     .map((path) => ({ path, r: rank(path) }))
     .filter((x) => x.r >= 0)
     .sort((a, b) => a.r - b.r)

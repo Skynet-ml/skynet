@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "颜色",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "恢复默认设置",
-  "shared.agent.stopped_after": "你在 {duration} 后停止了",
   "shared.agent.context_label": "上下文窗口：",
   "shared.agent.context_left": "已用 {usage}%（剩余 {remaining}%）",
   "shared.agent.context_full": "已满 {usage}%",

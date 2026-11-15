@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "Renk",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Varsayılana sıfırla",
-  "shared.agent.stopped_after": "{duration} sonra durdurdunuz",
   "shared.agent.context_label": "Bağlam penceresi:",
   "shared.agent.context_left": "%{usage} kullanıldı (%{remaining} kaldı)",
   "shared.agent.context_full": "%{usage} dolu",

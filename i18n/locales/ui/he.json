@@ -4066,7 +4066,6 @@
   "submit.modelpicker.score_tip": "מדד האינטליגנציה של Artificial Analysis, שילוב של מבחני הסקה, ידע, מתמטיקה וקוד. גבוה יותר = חכם יותר.",
   "submit.modelpicker.score_tip_link": "לחיצה פותחת את כל המבחנים ב-Artificial Analysis.",
   "shared.agent.worked_for": "עבודה: {duration}",
-  "shared.agent.stopped_after": "נעצר אחרי {duration}",
   "shared.agent.context_label": "חלון הקשר:",
   "shared.agent.context_left": "{usage}% בשימוש (נותרו {remaining}%)",
   "shared.agent.context_full": "{usage}% מלא",

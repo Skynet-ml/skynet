@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "Cor",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Repor predefinições",
-  "shared.agent.stopped_after": "Interrompeste após {duration}",
   "shared.agent.context_label": "Janela de contexto:",
   "shared.agent.context_left": "{usage}% usado ({remaining}% livre)",
   "shared.agent.context_full": "{usage}% cheio",

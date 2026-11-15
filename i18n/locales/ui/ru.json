@@ -4483,7 +4483,6 @@
   "settings.code.markers.color": "Цвет",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Сбросить по умолчанию",
-  "shared.agent.stopped_after": "Вы остановили через {duration}",
   "shared.agent.context_label": "Окно контекста:",
   "shared.agent.context_left": "Занято {usage}% (свободно {remaining}%)",
   "shared.agent.context_full": "Заполнено на {usage}%",

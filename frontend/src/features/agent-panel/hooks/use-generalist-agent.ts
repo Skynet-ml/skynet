@@ -1220,24 +1220,17 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
   const stopSession = React.useCallback((key: string) => {
     steerQueueFor(key).pause();
-    const status = sessionsRef.current.get(key)?.status;
-    const wasQueued = status === "queued";
+    const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "", compacting: null });
     patchThinking(key, (segments) => closeThinking(segments, Date.now()));
-    // A turn that was streaming says "Stopped after Xs", not "Worked for Xs".
-    const stopped = status === "streaming";
     patchMessages(key, (prev) => {
       const last = prev[prev.length - 1];
-      if (!last || last.role !== "assistant") return prev;
-      const running = last.toolCalls?.some((t) => t.status === "running");
-      if (!running && !stopped) return prev;
+      if (!last || last.role !== "assistant" || !last.toolCalls?.some((t) => t.status === "running")) {
+        return prev;
+      }
       const next = prev.slice();
-      next[next.length - 1] = {
-        ...last,
-        ...(running && { toolCalls: stopToolCalls(last.toolCalls ?? [], Date.now()) }),
-        ...(stopped && { stopped: true }),
-      };
+      next[next.length - 1] = { ...last, toolCalls: stopToolCalls(last.toolCalls, Date.now()) };
       return next;
     });
     if (wasQueued) {

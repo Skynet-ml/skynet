@@ -115,34 +115,6 @@ test("an error after done leaves the next turn untouched", async () => {
   }
 });
 
-test("a stop during a streaming turn marks the reply stopped", async () => {
-  const { agent, calls, act, unmount } = await mount();
-  try {
-    await act(() => agent().send("one"));
-    await act(() => calls[0]!.handlers.onToolStart!({ id: "t1", tool: "list_jobs", arguments: {} }));
-    await act(() => agent().stop());
-    const last = agent().messages[agent().messages.length - 1];
-    assert.equal(last?.role, "assistant");
-    assert.equal(last?.stopped, true);
-    assert.equal(last?.toolCalls?.[0]?.status, "error");
-  } finally {
-    await unmount();
-  }
-});
-
-test("a finished turn is not marked stopped", async () => {
-  const { agent, calls, act, unmount } = await mount();
-  try {
-    await act(() => agent().send("one"));
-    await act(() => calls[0]!.handlers.onDone!(done));
-    await act(() => agent().stop());
-    const last = agent().messages[agent().messages.length - 1];
-    assert.equal(last?.stopped, undefined);
-  } finally {
-    await unmount();
-  }
-});
-
 test("a late title event renames the row and leaves the next turn's edit, status and id alone", async () => {
   const { agent, calls, titles, act, unmount } = await mount();
   try {

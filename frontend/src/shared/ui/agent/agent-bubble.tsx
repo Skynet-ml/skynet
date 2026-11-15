@@ -165,7 +165,6 @@ export function AgentBubble({
           plan={plan}
           renderStep={renderToolCall}
           stepKind={stepKind}
-          stopped={msg.stopped}
           durationMs={msg.stats?.durationMs}
           startedAt={turnStart(allThinking, [])}
           earlier={earlierTurns}
