@@ -11,6 +11,7 @@ import httpx
 import pytest
 from vercel.sandbox import SandboxApiError
 
+from core.exceptions import ServiceError
 from core.service_gateway.optimization.blackbox import sandbox_log
 from core.service_gateway.optimization.blackbox.runner import EVENT_PREFIX
 from core.service_gateway.optimization.blackbox.sandbox import (
@@ -251,8 +252,8 @@ def test_a_command_that_raises_logs_what_it_wrote_first(captured: _Capture) -> N
     assert warning.endswith("partial before the drop")
 
 
-def test_a_provider_api_error_logs_its_status_code_and_a_scrubbed_capped_message(captured: _Capture) -> None:
-    """A Vercel API error names its HTTP status, provider code and message, never a secret or a long body."""
+def test_a_provider_api_error_logs_its_status_and_code_and_no_provider_text(captured: _Capture) -> None:
+    """A Vercel API error names its HTTP status and provider code, and no record holds the provider's text."""
     secret = "sk-session-secret-123"
     error = SandboxApiError(
         httpx.Response(503),
@@ -277,12 +278,32 @@ def test_a_provider_api_error_logs_its_status_code_and_a_scrubbed_capped_message
     with pytest.raises(SandboxApiError):
         _Refused("", env={"A": secret}).run("cmd")
     [warning] = captured.messages(logging.WARNING)
-    headline = warning.splitlines()[0]
-    assert headline.startswith("[sandbox] command raised SandboxApiError (status 503, code rate_limited, message ")
-    assert "HTTP 503: upstream busy [redacted] retry later x" in headline
-    assert headline.endswith("…): cmd")
-    assert secret not in warning
-    assert len(headline) < 400
+    assert warning.splitlines()[0] == "[sandbox] command raised SandboxApiError (status 503, code rate_limited): cmd"
+    assert not any("upstream busy" in message or secret in message for message in captured.messages())
+
+
+def test_a_service_error_logs_only_its_type(captured: _Capture) -> None:
+    """A ``ServiceError`` has a default ``status_code`` that no provider sent, so its headline names only its type."""
+
+    class _Refused(_FakeSession):
+        @sandbox_log.logged_command
+        def run(
+            self,
+            command: str,
+            *,
+            env: Any = None,
+            timeout_seconds: Any = None,
+            on_output: Any = None,
+            sudo: Any = False,
+        ) -> Any:
+            """Fail the way the sandbox bridge reports a refused request."""
+            raise ServiceError("The sandbox refused the request: provider text")
+
+    with pytest.raises(ServiceError):
+        _Refused("").run("cmd")
+    [warning] = captured.messages(logging.WARNING)
+    assert warning.splitlines()[0] == "[sandbox] command raised ServiceError: cmd"
+    assert not any("status" in message or "provider text" in message for message in captured.messages())
 
 
 def test_an_error_without_a_status_logs_only_its_type(captured: _Capture) -> None:
