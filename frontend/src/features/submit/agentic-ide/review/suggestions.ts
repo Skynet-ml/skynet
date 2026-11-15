@@ -45,18 +45,21 @@ const CLOSERS = new Set(Object.values(OPENERS));
 const QUOTES = new Set(['"', "'", "`"]);
 
 /**
- * Whether every bracket and string in `text` closes inside it. The scan
- * starts outside any string. In a string, brackets and the other quote kinds
- * are plain text, a backslash escapes the next character, and a string that
- * opens with three quotes closes only with the same three.
+ * Whether `text` has an excess closer: a closer that no open bracket before
+ * it matches, or a string still open at the end. The scan starts outside any
+ * string. In a string, brackets and the other quote kinds are plain text, a
+ * backslash escapes the next character, and a string that opens with three
+ * quotes closes only with the same three. A one-quote string ends at a line
+ * break, so a stray apostrophe on an earlier line does not spoil the scan.
  */
-export function balanced(text: string): boolean {
+export function hasExcess(text: string): boolean {
   const stack: string[] = [];
   let quote = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
     if (quote) {
       if (ch === "\\") i++;
+      else if (ch === "\n" && quote.length === 1 && quote !== "`") quote = "";
       else if (text.startsWith(quote, i)) {
         i += quote.length - 1;
         quote = "";
@@ -65,43 +68,9 @@ export function balanced(text: string): boolean {
       quote = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
       i += quote.length - 1;
     } else if (OPENERS[ch]) stack.push(OPENERS[ch]);
-    else if (CLOSERS.has(ch) && stack.pop() !== ch) return false;
+    else if (CLOSERS.has(ch) && stack.pop() !== ch) return true;
   }
-  return !quote && stack.length === 0;
-}
-
-/**
- * Whether a closer or a closing quote in the last `k` characters of the
- * answer closes something that the answer itself opened. The scan runs over
- * `before` + `answer` from the line start, so a string that `before` opens
- * belongs to `before`. Such an end is part of the answer, not an echo.
- */
-function closesOwnOpener(before: string, answer: string, k: number): boolean {
-  const text = before + answer;
-  const own = before.length;
-  const echo = text.length - k;
-  const stack: Array<{ ch: string; at: number }> = [];
-  let quote: { q: string; at: number } | null = null;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    if (quote) {
-      if (ch === "\\") i++;
-      else if (text.startsWith(quote.q, i)) {
-        if (i >= echo && quote.at >= own) return true;
-        i += quote.q.length - 1;
-        quote = null;
-      }
-    } else if (QUOTES.has(ch)) {
-      const q = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
-      quote = { q, at: i };
-      i += q.length - 1;
-    } else if (OPENERS[ch]) stack.push({ ch: OPENERS[ch], at: i });
-    else if (CLOSERS.has(ch)) {
-      const opener = stack.pop();
-      if (opener?.ch === ch && i >= echo && opener.at >= own) return true;
-    }
-  }
-  return false;
+  return quote !== "";
 }
 
 /** The longest end of `text` that is also the start of `after`. */
@@ -115,20 +84,20 @@ function overlap(text: string, after: string): number {
 /**
  * Make the model's text safe to show: drop trailing blank space, and drop the
  * end when it echoes the start of the text after the caret (an echoed closing
- * bracket would show twice). It scores the whole line, `before` + text +
- * `after`, with and without that end. It cuts only when the line is balanced
- * without the end and is not balanced with it, and when the end closes
- * nothing that the answer itself opened. In all other cases the text
- * stays whole, because a doubled character is easy to see and a dropped one
- * is not. Returns "" when nothing is left.
+ * bracket would show twice). `before` is the whole window before the caret
+ * that the model saw, and `after` is the rest of the caret's line. The end is
+ * cut only when the window with the full text has an excess closer and the
+ * window with the cut text has none: openers before the caret take the
+ * correct closers, so only an echo can make an excess. In all other cases the
+ * text stays whole, because a doubled character is easy to see and a dropped
+ * one is not. Returns "" when nothing is left.
  */
 export function cleanCompletion(text: string, before: string, after: string): string {
   const out = text.trimEnd();
   const k = overlap(out, after);
   if (!k) return out;
-  const cut = out.slice(0, -k).trimEnd();
-  if (closesOwnOpener(before, out, k)) return out;
-  return balanced(before + cut + after) && !balanced(before + out + after) ? cut : out;
+  const cut = out.slice(0, -k);
+  return hasExcess(before + out + after) && !hasExcess(before + cut + after) ? cut : out;
 }
 
 /**
@@ -146,14 +115,32 @@ export function nextWord(text: string): string {
   return /^\s*(\w+|[^\w\s]+)/.exec(text)?.[0] ?? text;
 }
 
-/** The 1-based line whose text, trimmed, is `text`; 0 when there is none. */
-export function findLine(doc: string, text: string): number {
-  return doc.split("\n").findIndex((l) => l.trim() === text.trim()) + 1;
+/**
+ * The 1-based line whose text, trimmed, is `text`, nearest the caret at
+ * `caret` and inside the window the model saw; 0 when there is none.
+ */
+export function findLine(doc: string, text: string, caret: number): number {
+  const want = text.trim();
+  const from = Math.max(0, caret - PREFIX_CHARS);
+  const to = caret + SUFFIX_CHARS;
+  const caretLine = doc.slice(0, caret).split("\n").length;
+  let best = 0;
+  let start = 0;
+  doc.split("\n").forEach((line, i) => {
+    const end = start + line.length;
+    if (end >= from && start <= to && line.trim() === want) {
+      if (!best || Math.abs(i + 1 - caretLine) < Math.abs(best - caretLine)) best = i + 1;
+    }
+    start = end + 1;
+  });
+  return best;
 }
 
-/** Where the next edit goes, or 0 when the file has no anchor or already has the edit. */
-export function nextEditLine(doc: string, next: NextEdit | null): number {
+/** Where the next edit goes, or 0 when the window has no anchor or the anchor is already followed by the edit. */
+export function nextEditLine(doc: string, next: NextEdit | null, caret: number): number {
   if (!next || !next.lines.length || !next.after.trim()) return 0;
-  if (doc.split("\n").some((l) => l.trim() && l.trim() === next.lines[0]!.trim())) return 0;
-  return findLine(doc, next.after);
+  const line = findLine(doc, next.after, caret);
+  if (!line) return 0;
+  const following = doc.split("\n")[line];
+  return following !== undefined && following.trim() === next.lines[0]!.trim() ? 0 : line;
 }

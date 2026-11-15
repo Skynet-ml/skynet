@@ -143,12 +143,13 @@ export function agentComplete(path: string): Extension {
         if (!shouldSuggest(line.text.slice(0, head - line.from), line.text.slice(head - line.from))) return;
         const controller = new AbortController();
         this.inflight = controller;
-        const answer = await fetchCompletion({ path, ...completionWindow(state.doc.toString(), head) }, controller.signal);
+        const around = completionWindow(state.doc.toString(), head);
+        const answer = await fetchCompletion({ path, ...around }, controller.signal);
         if (controller.signal.aborted || this.inflight !== controller) return;
         this.inflight = null;
         // The answer is for this exact text and caret; anything else already cancelled it.
         if (!answer || this.view.state.doc !== state.doc || this.view.state.selection.main.head !== head) return;
-        const text = cleanCompletion(answer.text, line.text.slice(0, head - line.from), line.text.slice(head - line.from));
+        const text = cleanCompletion(answer.text, around.prefix, line.text.slice(head - line.from));
         if (!text || this.view.state.field(field)) return;
         closeCompletion(this.view);
         this.view.dispatch({ effects: setSuggest.of({ kind: "ghost", pos: head, text, next: answer.next }) });

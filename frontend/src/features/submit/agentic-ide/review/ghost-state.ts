@@ -47,7 +47,7 @@ export const suggestField = StateField.define<Suggest | null>({
 
 /** After a full accept at `at`, offer the next edit if the file still needs it. */
 function afterAccept(doc: string, at: number, next: NextEdit | null): Suggest | null {
-  const line = nextEditLine(doc, next);
+  const line = nextEditLine(doc, next, at);
   return line && next ? { kind: "jump", at, line, next } : null;
 }
 
