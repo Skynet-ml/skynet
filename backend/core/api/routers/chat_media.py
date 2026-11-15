@@ -381,18 +381,23 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         Raises:
             HTTPException: 415 for a type that is not allowed, 413 for a file
                 over its kind's limit.
-            DomainError: 429 over the hourly attachment cap, which file text
-                reads share, 409 over the storage quota.
+            DomainError: 429 over the hourly cap (file text reads share it,
+                and document originals have their own), 409 over the storage
+                quota.
         """
-        # The same key as the file text route, so media and files share one hourly cap.
-        RateLimiter(shared_redis_client()).enforce(
-            f"attachments:{user.username}",
-            limit=settings.rate_limit_attachments_per_hour,
-            window_seconds=3600,
-        )
         engine = _engine(job_store)
         head = file.file.read(_SNIFF_BYTES)
         sniffed = sniff_media(head, file.content_type or "")
+        # Media shares the file text route's hourly cap. A document original
+        # (SKY-735) gets its own: its file's text read already counted there.
+        # So a direct caller can store more files an hour, but the storage quota
+        # still caps the total bytes.
+        bucket = "chat-originals" if sniffed and sniffed.kind == "document" else "attachments"
+        RateLimiter(shared_redis_client()).enforce(
+            f"{bucket}:{user.username}",
+            limit=settings.rate_limit_attachments_per_hour,
+            window_seconds=3600,
+        )
         if sniffed is None:
             raise HTTPException(status_code=415, detail="This file type is not supported.")
         limit = MAX_MEDIA_BYTES[sniffed.kind]

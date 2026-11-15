@@ -49,6 +49,7 @@ import {
   withServerCost,
   withSideCents,
 } from "../lib/compaction";
+import { deleteChatMedia } from "../lib/chat-media";
 import { loadConversation } from "../lib/conversation-api";
 import {
   dropPendingToolCalls,
@@ -1204,8 +1205,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       if (sessionsRef.current.get(key)?.compacting?.reason === "manual") {
         // The chat's queue holds text only. A turn with files waits in the
         // composer until the compaction ends, so no file is lost. An original
-        // (SKY-735) can stay behind: its file goes as text in the queued turn.
+        // (SKY-735) can stay behind: its file goes as text in the queued turn,
+        // and its stored copy goes now, as no message names it.
         if (options?.media?.some((m) => m.kind !== "document")) return false;
+        for (const m of options?.media ?? []) void deleteChatMedia(m.id);
         // A hidden send (a wizard Back, a screen kickoff) is not the user's
         // to edit, so it waits on the runtime instead of in the queue.
         if (options?.hidden) {

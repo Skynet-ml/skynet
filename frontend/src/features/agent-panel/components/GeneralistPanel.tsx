@@ -1093,6 +1093,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
+    // An upload that failed since the last edit can leave a name with fewer
+    // originals than files; this drops them before they go.
+    keepOriginals(splitPastes(draft).files);
     const media = chatMedia.ready();
     if (media === null) {
       toast.info(chatMedia.blocked ?? msg("agent.media.uploading"));
@@ -1111,7 +1114,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     setDraft("");
     chatMedia.clear();
     clearLineComments?.();
-  }, [agent, draft, lineComments, clearLineComments, chatMedia]);
+  }, [agent, draft, lineComments, clearLineComments, chatMedia, keepOriginals]);
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],

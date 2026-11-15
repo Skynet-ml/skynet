@@ -48,10 +48,46 @@ export function pairOriginals<T extends { name: string }>(
   });
 }
 
-/** The originals that still pair with a file, so a removed file's original does not go out. */
+/**
+ * The originals that can go out with ``files``. Pairing by name is sure only
+ * when a name has one original for each of its files. When the counts differ
+ * (a file left, or an upload failed), no one can tell which file lost its
+ * original, so all the files with that name fall back to their text.
+ */
 export function keptOriginals<T extends { name: string }>(
   files: ReadonlyArray<{ name: string }>,
   originals: readonly T[],
 ): T[] {
-  return pairOriginals(files, originals).filter((o): o is T => o !== null);
+  const count = new Map<string, number>();
+  for (const file of files)
+    if (originalFormat(file.name)) {
+      const key = nameKey(file.name);
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+  for (const o of originals) {
+    const key = nameKey(o.name);
+    count.set(key, (count.get(key) ?? 0) - 1);
+  }
+  return originals.filter((o) => originalFormat(o.name) && count.get(nameKey(o.name)) === 0);
+}
+
+/**
+ * The originals that fit in ``room`` places of a message. A name's originals
+ * go together or not at all: half a group would leave its counts unequal, so
+ * keptOriginals would drop the half that went too.
+ */
+export function fitOriginals<T extends { name: string }>(
+  originals: readonly T[],
+  room: number,
+): T[] {
+  const groups = new Map<string, number>();
+  for (const o of originals) groups.set(nameKey(o.name), (groups.get(nameKey(o.name)) ?? 0) + 1);
+  const fits = new Set<string>();
+  let left = room;
+  for (const [key, size] of groups)
+    if (size <= left) {
+      fits.add(key);
+      left -= size;
+    }
+  return originals.filter((o) => fits.has(nameKey(o.name)));
 }

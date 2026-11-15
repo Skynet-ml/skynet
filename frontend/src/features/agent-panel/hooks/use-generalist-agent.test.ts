@@ -29,6 +29,7 @@ const stubs: Record<string, string> = {
     "export const streamCompaction = async () => {};" +
     "export const confirmGeneralistApproval = async () => true;",
   "../lib/conversation-api": "export const loadConversation = async () => ({ detail: null });",
+  "../lib/chat-media": "export const deleteChatMedia = async () => {};",
 };
 const src = new URL("../../../", import.meta.url);
 registerHooks({

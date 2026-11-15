@@ -244,6 +244,16 @@ def test_upload_rejects_a_zip_that_is_not_docx_or_xlsx(harness: SimpleNamespace,
         assert session.scalars(select(ChatMediaModel)).all() == []
 
 
+def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document original does not use the cap that its file's text read already counted against."""
+    monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
+
+    assert _upload(harness.client, _PNG).status_code == 201
+    assert _upload(harness.client, _PNG).status_code == 429
+    assert _upload(harness.client, _PDF, name="a.pdf", content_type="application/pdf").status_code == 201
+    assert _upload(harness.client, _PDF, name="b.pdf", content_type="application/pdf").status_code == 429
+
+
 def test_document_limit_matches_the_file_text_limit() -> None:
     """Every file whose text the chat can read can keep its original."""
     assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES

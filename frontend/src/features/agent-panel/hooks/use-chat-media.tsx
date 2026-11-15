@@ -4,7 +4,7 @@ import * as React from "react";
 import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
-import { keptOriginals } from "@/shared/ui/agent/file-originals";
+import { fitOriginals, keptOriginals } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
   type MediaAttachment,
@@ -254,28 +254,31 @@ export function useChatMedia(): ChatMediaDraft {
       return null;
     const media = current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
     // Past the message limit an original stays out; its file still goes as text.
-    const originals = originalsRef.current
-      .slice(0, Math.max(0, MAX_MEDIA_PER_MESSAGE - media.length))
-      .map((o) => ({ id: o.serverId!, name: o.name, kind: "document" as const, url: "" }));
+    const originals = fitOriginals(originalsRef.current, MAX_MEDIA_PER_MESSAGE - media.length).map(
+      (o) => ({ id: o.serverId!, name: o.name, kind: "document" as const, url: "" }),
+    );
     return [...media, ...originals];
   }, []);
 
   const clear = React.useCallback(() => {
     // The originals past the limit did not go with the message, so they go now.
-    const room = Math.max(0, MAX_MEDIA_PER_MESSAGE - itemsRef.current.length);
+    const sent = new Set(
+      fitOriginals(originalsRef.current, MAX_MEDIA_PER_MESSAGE - itemsRef.current.length),
+    );
     markMediaSent(itemsRef.current.map((m) => m.url));
     update(() => []);
-    for (const o of originalsRef.current.slice(room))
-      if (o.serverId) void deleteChatMedia(o.serverId);
+    for (const o of originalsRef.current)
+      if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
     syncOriginals([]);
   }, [update, syncOriginals]);
 
   // A closed panel frees the local URLs of files still in the draft. An upload
-  // that ends later then finds no tile and deletes its stored file.
+  // that ends later then finds no tile or original and deletes its stored file.
   React.useEffect(
     () => () => {
       for (const m of itemsRef.current) freeMediaUrl(m.url);
       itemsRef.current = [];
+      originalsRef.current = [];
     },
     [],
   );

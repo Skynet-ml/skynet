@@ -1,0 +1,28 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { it } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+// node --test only loads .ts, so the .tsx viewer test runs in a jiti child.
+// The time limit stops a hung child, so it cannot stay and hold memory.
+void it("OriginalFile client tests pass", () => {
+  const result = spawnSync(
+    path.join(frontend, "node_modules/.bin/jiti"),
+    ["src/shared/ui/agent/original-file.client.test.tsx"],
+    {
+      cwd: frontend,
+      encoding: "utf8",
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        NODE_TEST_CONTEXT: undefined,
+        JITI_JSX: "1",
+        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
+      },
+    },
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+});

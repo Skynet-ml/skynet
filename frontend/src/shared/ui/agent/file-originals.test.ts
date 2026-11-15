@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { keptOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
+import { fitOriginals, keptOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
 
 test("only pdf, docx and xlsx keep an original", () => {
   assert.equal(originalFormat("Brief.PDF"), "pdf");
@@ -47,4 +47,32 @@ test("a file with no original falls back to its text", () => {
 test("an original whose file left the message is dropped", () => {
   const kept = { name: "keep.docx" };
   assert.deepEqual(keptOriginals([{ name: "keep.docx" }], [{ name: "gone.pdf" }, kept]), [kept]);
+});
+
+test("a name whose file and original counts differ keeps no original", () => {
+  const first = { name: "report.pdf", id: "1" };
+  const second = { name: "report.pdf", id: "2" };
+  const other = { name: "plan.docx", id: "3" };
+  // One of two same-name files left: no one can tell whose original stays.
+  assert.deepEqual(
+    keptOriginals([{ name: "report.pdf" }, { name: "plan.docx" }], [first, second, other]),
+    [other],
+  );
+  // The first file's upload failed: the second original must not pair with the first file.
+  assert.deepEqual(keptOriginals([{ name: "report.pdf" }, { name: "report.pdf" }], [second]), []);
+  assert.deepEqual(
+    keptOriginals([{ name: "report.pdf" }, { name: "report.pdf" }], [first, second]),
+    [first, second],
+  );
+});
+
+test("a name's originals fit in a message together or not at all", () => {
+  const a1 = { name: "a.pdf" };
+  const a2 = { name: "a.pdf" };
+  const c = { name: "c.pdf" };
+  assert.deepEqual(fitOriginals([a1, a2, c], 3), [a1, a2, c]);
+  assert.deepEqual(fitOriginals([a1, a2, c], 2), [a1, a2]);
+  assert.deepEqual(fitOriginals([a1, c, a2], 1), [c]);
+  assert.deepEqual(fitOriginals([a1, a2, c], 0), []);
+  assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
 });
