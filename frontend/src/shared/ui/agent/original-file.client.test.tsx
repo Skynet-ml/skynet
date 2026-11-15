@@ -29,7 +29,7 @@ after(() => dom.window.close());
 
 const { createRoot } = await import("react-dom/client");
 const { utils, write } = await import("xlsx");
-const { OriginalFile } = await import("./original-file");
+const { OriginalFile, frameMarkup } = await import("./original-file");
 
 const flush = () => React.act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
 const original = (id: string, name: string) => ({ id, name, kind: "document" as const, url: "" });
@@ -134,6 +134,22 @@ void test("an XLSX cell link does not draw, so the frame cannot leave the file",
   assert.ok(!html.includes("example.test/away"), "the outside link goes");
   assert.match(html, />out</);
   await view.unmount();
+});
+
+void test("frame markup keeps style text in its tag and drops links that leave the file", () => {
+  const styles = document.createElement("div");
+  const style = document.createElement("style");
+  style.textContent = 'p{}</STYLE><a href="https://example.test/away">x</a><style>';
+  styles.append(style);
+  const body = document.createElement("div");
+  body.innerHTML = '<a href="https://example.test/out">out</a><a href="#part">in</a>';
+  const html = frameMarkup(styles, body);
+  assert.equal((html.match(/<\/style/gi) ?? []).length, 1, "only the real end tag");
+  const parsed = new dom.window.DOMParser().parseFromString(html, "text/html");
+  assert.deepEqual(
+    Array.from(parsed.querySelectorAll("a[href]"), (a) => a.getAttribute("href")),
+    ["#part"],
+  );
 });
 
 void test("an original that does not load shows the file's text page", async () => {

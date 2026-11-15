@@ -462,3 +462,19 @@ void test("a restore sends a document again as an original, not a tile", async (
   );
   await unmount();
 });
+
+void test("a media file the server stores as a document fails and its copy goes", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  const errorsBefore = errors.length;
+  // An image name and type, but the fake server sees a PDF.
+  nextUpload = Promise.resolve(Response.json({ id: "doc-1", name: "scan.png", kind: "document" }));
+  await React.act(async () =>
+    draft().addFiles([new File([new Uint8Array(3)], "scan.png", { type: "image/png" })]),
+  );
+  await flush();
+  assert.equal(draft().tiles[0]!.status, "failed");
+  assert.deepEqual(deleted.slice(before), ["doc-1"]);
+  assert.equal(errors.length, errorsBefore + 1);
+  await unmount();
+});

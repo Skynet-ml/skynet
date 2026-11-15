@@ -27,10 +27,19 @@ function page(body: string, style = ""): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${CSP}"><style>${style}</style></head><body>${body}</body></html>`;
 }
 
-/** Drop each link that leaves the file: a sandboxed frame still follows a link in itself. */
-function keepLinksInFile(root: ParentNode): void {
-  for (const a of root.querySelectorAll("a[href]"))
-    if (!a.getAttribute("href")?.startsWith("#")) a.removeAttribute("href");
+/**
+ * The HTML of drawn file nodes for the sandboxed frame. The frame still follows
+ * a link in itself, so only links inside the file stay. Style text comes from
+ * the file and is written raw, so it must not close its tag early.
+ */
+export function frameMarkup(...roots: HTMLElement[]): string {
+  for (const root of roots) {
+    for (const a of root.querySelectorAll("a[href]"))
+      if (!a.getAttribute("href")?.startsWith("#")) a.removeAttribute("href");
+    for (const el of root.querySelectorAll("style"))
+      el.textContent = (el.textContent ?? "").replace(/<\/style/gi, "<\\/style");
+  }
+  return roots.map((root) => root.innerHTML).join("");
 }
 
 /** Draw a DOCX as HTML with docx-preview, which loads only when a DOCX opens. */
@@ -44,8 +53,7 @@ async function docxPage(data: ArrayBuffer): Promise<string> {
     renderAltChunks: false,
     ignoreLastRenderedPageBreak: true,
   });
-  keepLinksInFile(body);
-  return page(`${style.innerHTML}${body.innerHTML}`, "body{margin:0}");
+  return page(frameMarkup(style, body), "body{margin:0}");
 }
 
 /** Draw each XLSX sheet as an HTML table with SheetJS, which loads only when an XLSX opens. */

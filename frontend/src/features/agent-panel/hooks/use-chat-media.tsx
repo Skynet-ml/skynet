@@ -100,30 +100,38 @@ export function useChatMedia(): ChatMediaDraft {
 
   const upload = React.useCallback(
     (item: DraftMedia, file: File) => {
-      uploadChatMedia(file).then(
-        (stored) => {
-          const removed = removedRef.current.get(item.localId);
-          if (itemsRef.current.some((m) => m.localId === item.localId)) {
+      uploadChatMedia(file)
+        .then((stored) => {
+          // The server takes a PDF or Office file from any upload as a document,
+          // which the agent never sees. A media tile holding one has no file to send.
+          if (stored.kind !== "document") return stored;
+          void deleteChatMedia(stored.id);
+          throw new ChatMediaError(415);
+        })
+        .then(
+          (stored) => {
+            const removed = removedRef.current.get(item.localId);
+            if (itemsRef.current.some((m) => m.localId === item.localId)) {
+              update((prev) =>
+                prev.map((m) => (m.localId === item.localId ? { ...m, serverId: stored.id } : m)),
+              );
+            } else if (removed) {
+              removed.serverId = stored.id;
+            } else {
+              // The tile was removed for good while it uploaded.
+              void deleteChatMedia(stored.id);
+            }
+          },
+          (err: unknown) => {
+            // The tile stays with a failed mark, so the user sees which file did not go.
+            const removed = removedRef.current.get(item.localId);
+            if (removed) removed.failed = true;
             update((prev) =>
-              prev.map((m) => (m.localId === item.localId ? { ...m, serverId: stored.id } : m)),
+              prev.map((m) => (m.localId === item.localId ? { ...m, failed: true } : m)),
             );
-          } else if (removed) {
-            removed.serverId = stored.id;
-          } else {
-            // The tile was removed for good while it uploaded.
-            void deleteChatMedia(stored.id);
-          }
-        },
-        (err: unknown) => {
-          // The tile stays with a failed mark, so the user sees which file did not go.
-          const removed = removedRef.current.get(item.localId);
-          if (removed) removed.failed = true;
-          update((prev) =>
-            prev.map((m) => (m.localId === item.localId ? { ...m, failed: true } : m)),
-          );
-          toast.error(uploadError(item.name, err));
-        },
-      );
+            toast.error(uploadError(item.name, err));
+          },
+        );
     },
     [update],
   );
