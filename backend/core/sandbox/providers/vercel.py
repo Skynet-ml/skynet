@@ -39,7 +39,6 @@ import base64
 import codecs
 import contextlib
 import dataclasses
-import functools
 import logging
 import math
 import posixpath
@@ -57,6 +56,7 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.vercel_reconciliation import SessionNotFoundError, VercelSessionUsageClient, VercelUsageReconciler
 from core.billing.vercel_usage import (
     SANDBOX_NETWORK_BYTES_CAP,
     SessionNotStoppedError,
@@ -1572,12 +1572,11 @@ class VercelEnvironment(SandboxEnvironment):
             await _close_client(client)
 
     @staticmethod
-    async def _settle_builder(built: BuiltSnapshot, client: Any) -> bool:
-        """Read the builder session until its receipt is final, then settle its hold.
+    async def _settle_builder(built: BuiltSnapshot) -> bool:
+        """Read the builder session by its id until its receipt is final, then settle its hold.
 
         Args:
             built: The snapshot whose builder hold to settle.
-            client: An SDK client that passes responses to ``built.builder_usage``.
 
         Returns:
             True when the builder box may be destroyed.
@@ -1586,29 +1585,21 @@ class VercelEnvironment(SandboxEnvironment):
         if usage is None:
             return True
         try:
-            if await asyncio.to_thread(usage.settled):
-                return True
+            operation_id = usage.operation.id
+            reader = VercelSessionUsageClient(settings.vercel_token.get_secret_value(), str(settings.vercel_team_id))
+            reconciler = VercelUsageReconciler(usage.runtime.service, reader)
             async with asyncio.timeout(BUILDER_RECEIPT_WAIT):
-                session = None
-                async for found in client.query_sessions(name=built.builder_name):
-                    if found.id == usage.session_id:
-                        session = found
-                        break
-                if session is None:
-                    logger.info("Snapshot builder %s has no session to read.", built.builder_name)
-                    return True
                 while True:
-                    # The read hands the raw receipt to the hold before the settle reads it.
-                    await session.refresh()
                     try:
-                        await asyncio.to_thread(usage.settle)
-                        return True
+                        operation = await asyncio.to_thread(reconciler.reconcile, operation_id, usage.runtime.username)
+                        break
                     except SessionNotStoppedError:
                         await asyncio.sleep(BUILDER_RECEIPT_POLL)
+        except SessionNotFoundError:
+            # Vercel has no record of the session, so no later read can settle it.
+            logger.info("Snapshot builder %s has no session to read.", built.builder_name)
+            return True
         except Exception as error:
-            if _is_not_found(error):
-                logger.info("Snapshot builder %s has no session to read.", built.builder_name)
-                return True
             # A kept builder costs nothing once stopped, and the reconciler can
             # still read its receipt. A destroyed builder loses that receipt
             # forever, so keep it on every doubt.
@@ -1618,6 +1609,11 @@ class VercelEnvironment(SandboxEnvironment):
                 type(error).__name__,
             )
             return False
+        if operation.state != "settled":
+            logger.warning("Snapshot builder %s is kept: its usage is %s.", built.builder_name, operation.state)
+            return False
+        usage.runtime.unpin(operation_id)
+        return True
 
     @classmethod
     async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
@@ -1628,18 +1624,13 @@ class VercelEnvironment(SandboxEnvironment):
 
         Args:
             built: The snapshot to delete.
-            client: The SDK client, or ``None`` for one from the settings. A
-                given client must already pass responses to ``built.builder_usage``.
+            client: The SDK client, or ``None`` for one from the settings.
 
         Raises:
             Exception: The provider delete failed; the hold stays pending.
         """
         owned = client is None
-        if client is None:
-            usage = built.builder_usage
-            client = cls._make_client(
-                None if usage is None else functools.partial(asyncio.to_thread, usage.capture_response)
-            )
+        client = client or cls._make_client(None)
         try:
             try:
                 handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
@@ -1662,7 +1653,7 @@ class VercelEnvironment(SandboxEnvironment):
                 }
                 state["deleted_at"] = deleted_at
                 await asyncio.to_thread(built.reservation.settle, state)
-            if not await cls._settle_builder(built, client):
+            if not await cls._settle_builder(built):
                 return
             try:
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)

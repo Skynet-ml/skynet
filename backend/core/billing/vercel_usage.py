@@ -586,14 +586,6 @@ class VercelUsageReservation:
         ):
             raise UsagePendingError("The cloud sandbox extended the session beyond its funded lifetime.")
 
-    def settled(self) -> bool:
-        """Tell whether the hold already settled, here or in the reconciler.
-
-        Returns:
-            True when the ledger shows the operation as settled.
-        """
-        return self.runtime.service.get_operation(self.operation.id, self.runtime.username).state == "settled"
-
     def pending(self) -> None:
         """Retain covered funding when creation, shutdown, or billing evidence is uncertain."""
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)

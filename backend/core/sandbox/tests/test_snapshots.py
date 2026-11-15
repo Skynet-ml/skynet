@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 from vercel.sandbox import SandboxApiError, SnapshotSource
@@ -21,9 +23,12 @@ from core.billing.budget_amounts import cent_units
 from core.billing.budgets import BudgetError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.billing.tests.test_vercel_usage import CREATE, RECEIPT
+from core.billing.vercel_reconciliation import SessionNotFoundError
 from core.billing.vercel_usage import (
     SessionNotStoppedError,
     VercelSnapshotReservation,
+    VercelUsageReservation,
     vercel_charge_policy,
     vercel_snapshot_actual_usd,
 )
@@ -720,12 +725,13 @@ async def test_failed_bind_deletes_the_snapshot_and_removes_the_builder() -> Non
     assert client.boxes[env.name].destroys >= 1
 
 
-def _log_destroys(box: FakeBox, log: list[str]) -> None:
+def _log_destroys(box: FakeBox, log: list[str], state: Callable[[], str] | None = None) -> None:
     """Log each destroy of a fake box, so a test can check the call order.
 
     Args:
         box: The fake box.
         log: The shared call log.
+        state: Reads the builder hold's ledger state, which the log entry then holds.
     """
 
     async def destroy(*, delete_orphan_snapshots: bool = False) -> None:
@@ -734,14 +740,105 @@ def _log_destroys(box: FakeBox, log: list[str]) -> None:
         Args:
             delete_orphan_snapshots: Unused.
         """
-        log.append("builder-destroy")
+        log.append("builder-destroy" if state is None else f"builder-destroy:{state()}")
         box.destroys += 1
 
     box.destroy = destroy
 
 
-async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_removed() -> None:
-    """Check that the orphan delete reads the builder receipt and settles its hold before the destroy."""
+class FakeReader:
+    """Stand in for the exact-id Vercel session reader; answer each read from a list."""
+
+    def __init__(self, log: list[str], answers: list[Any]) -> None:
+        """Keep the planned answers; the last one repeats.
+
+        Args:
+            log: The shared call log; each read adds ``session-read``.
+            answers: Receipts to return or errors to raise, in order.
+        """
+        self.log = log
+        self.answers = answers
+        self.reads: list[str] = []
+        self.made_with: tuple[str, str] | None = None
+
+    def make(self, token: str, team_id: str) -> FakeReader:
+        """Act as the reader class, and keep the settings it was built from.
+
+        Args:
+            token: The Vercel token.
+            team_id: The Vercel team id.
+
+        Returns:
+            This reader.
+        """
+        self.made_with = (token, team_id)
+        return self
+
+    def __call__(self, session_id: str) -> Mapping[str, Any]:
+        """Answer one exact-id read.
+
+        Args:
+            session_id: The session id.
+
+        Returns:
+            The next planned receipt.
+
+        Raises:
+            Exception: The next planned error.
+        """
+        self.log.append("session-read")
+        self.reads.append(session_id)
+        answer = self.answers[min(len(self.reads), len(self.answers)) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def _use_reader(monkeypatch: pytest.MonkeyPatch, reader: FakeReader) -> None:
+    """Route the builder read to a fake reader with test settings, so no test calls Vercel.
+
+    Args:
+        monkeypatch: Replaces the reader class and the Vercel settings.
+        reader: The fake reader.
+    """
+    monkeypatch.setattr(settings, "vercel_token", SecretStr("test-token"))
+    monkeypatch.setattr(settings, "vercel_team_id", "team-test")
+    monkeypatch.setattr(vercel, "VercelSessionUsageClient", reader.make)
+
+
+def _builder_hold(database: Engine) -> VercelUsageReservation:
+    """Make a real builder hold whose create answer showed the session running.
+
+    Args:
+        database: The SQLite engine.
+
+    Returns:
+        The dispatched hold for ``session-one``.
+    """
+    usage = VercelUsageReservation(_runtime(database), CREATE, operation_key="builder")
+    created = {"session": {**RECEIPT, "status": "running"}}
+    usage.capture_response(
+        httpx.Response(200, json=created, request=httpx.Request("POST", "https://vercel.com/api/v3/sandboxes"))
+    )
+    return usage
+
+
+def _hold_state(usage: VercelUsageReservation) -> str:
+    """Read the ledger state of a hold.
+
+    Args:
+        usage: The hold.
+
+    Returns:
+        The operation state.
+    """
+    return usage.runtime.service.get_operation(usage.operation.id, usage.runtime.username).state
+
+
+async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_removed(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the orphan delete reads the builder session by id and settles its hold before the destroy."""
     log: list[str] = []
     client = SnapshotClient(log, FakeSnapshotHandle("snap-9", 1_000))
     env = _snapshotting_env(log, client)
@@ -761,9 +858,11 @@ async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_remove
 
     env._snapshot_usage_factory = factory
     await env.start()
+    usage = env._usage = _builder_hold(database)
+    reader = FakeReader(log, [RECEIPT])
+    _use_reader(monkeypatch, reader)
     box = client.boxes[env.name]
-    box.current_session.log = log
-    _log_destroys(box, log)
+    _log_destroys(box, log, lambda: _hold_state(usage))
 
     async def snapshot(*, expiration: Any = None) -> Any:
         """Return a created snapshot.
@@ -779,73 +878,30 @@ async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_remove
     box.current_session.snapshot = snapshot
     with pytest.raises(RuntimeError):
         await env.snapshot(run_deadline=DEADLINE, now=NOW)
-    assert log.index("session-read") < log.index("settle") < log.index("builder-destroy")
-    await env.stop()
+    assert reader.reads == ["session-one"]
+    assert log.index("snapshot-settle:deleted") < log.index("session-read") < log.index("builder-destroy:settled")
+    assert usage.operation.id not in usage.runtime._pinned
+    with contextlib.suppress(Exception):
+        await env.stop()
 
 
-class FakeBuilderUsage:
-    """Stand in for the builder session's usage hold; its receipt turns final after some reads."""
-
-    def __init__(
-        self, log: list[str], *, final_after: int | None = 1, settled: bool = False, error: Exception | None = None
-    ) -> None:
-        """Make a hold that is not settled yet.
-
-        Args:
-            log: The shared call log; ``session-read`` entries count the reads.
-            final_after: The number of session reads after which the receipt is final, or ``None`` for never.
-            settled: Whether the hold already settled.
-            error: An error that every settle raises once the receipt is final.
-        """
-        self.log = log
-        self.final_after = final_after
-        self.is_settled = settled
-        self.error = error
-        self.session_id = "session-1"
-        self.settles = 0
-
-    def settled(self) -> bool:
-        """Tell whether the hold settled.
-
-        Returns:
-            True after a settle.
-        """
-        return self.is_settled
-
-    def settle(self) -> None:
-        """Settle when the stored receipt is final.
-
-        Raises:
-            SessionNotStoppedError: The receipt does not show the session as stopped yet.
-            Exception: The planned error.
-        """
-        self.settles += 1
-        if self.final_after is None or self.log.count("session-read") < self.final_after:
-            raise SessionNotStoppedError("The receipt is not stopped.")
-        if self.error is not None:
-            raise self.error
-        self.log.append("builder-settle")
-        self.is_settled = True
-
-
-def _builder_client(log: list[str]) -> tuple[SnapshotClient, FakeBox]:
+def _builder_client(log: list[str], usage: VercelUsageReservation | None = None) -> tuple[SnapshotClient, FakeBox]:
     """Make a client with one snapshot and its builder box, both logging their calls.
 
     Args:
         log: The shared call log.
+        usage: The builder hold whose ledger state each destroy logs, or ``None``.
 
     Returns:
         The client and the builder box.
     """
     client = SnapshotClient(log, FakeSnapshotHandle("snap-1", 1_000))
-    session = FakeSession()
-    session.log = log
-    builder = client.boxes["builder"] = FakeBox("builder", session)
-    _log_destroys(builder, log)
+    builder = client.boxes["builder"] = FakeBox("builder", FakeSession())
+    _log_destroys(builder, log, None if usage is None else lambda: _hold_state(usage))
     return client, builder
 
 
-def _built(log: list[str], usage: FakeBuilderUsage | None) -> BuiltSnapshot:
+def _built(log: list[str], usage: VercelUsageReservation | None) -> BuiltSnapshot:
     """Make an owned snapshot with a fake storage hold and an optional builder hold.
 
     Args:
@@ -860,88 +916,125 @@ def _built(log: list[str], usage: FakeBuilderUsage | None) -> BuiltSnapshot:
 
 
 async def test_delete_settles_the_builder_hold_before_the_builder_is_destroyed(
-    monkeypatch: pytest.MonkeyPatch,
+    database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Check that a receipt that turns final at delete time settles the hold, then the builder goes."""
     monkeypatch.setattr(vercel, "BUILDER_RECEIPT_POLL", 0)
     log: list[str] = []
-    client, builder = _builder_client(log)
-    usage = FakeBuilderUsage(log, final_after=2)
+    usage = _builder_hold(database)
+    client, builder = _builder_client(log, usage)
+    reader = FakeReader(log, [{**RECEIPT, "status": "running"}, RECEIPT])
+    _use_reader(monkeypatch, reader)
     await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
-    assert log.count("session-read") == 2
-    assert log.index("snapshot-settle:deleted") < log.index("builder-settle") < log.index("builder-destroy")
-    assert usage.is_settled
+    assert reader.made_with == ("test-token", "team-test")
+    assert reader.reads == ["session-one", "session-one"]
+    assert log == [
+        "snapshot-reserve",
+        "snapshot-settle:deleted",
+        "session-read",
+        "session-read",
+        "builder-destroy:settled",
+    ]
+    assert usage.operation.id not in usage.runtime._pinned
+    assert builder.destroys == 1
+
+
+async def test_delete_does_not_read_an_already_settled_builder_hold(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a settled builder hold is not read or charged again, and the builder goes."""
+    log: list[str] = []
+    usage = _builder_hold(database)
+    url = "https://vercel.com/api/v2/sandboxes/sessions/session-one"
+    usage.capture_response(httpx.Response(200, json={"session": RECEIPT}, request=httpx.Request("GET", url)))
+    usage.settle()
+    billed = usage.runtime.service.get(usage.runtime.budget_id, "alice").billed_cents
+    client, builder = _builder_client(log, usage)
+    reader = FakeReader(log, [AssertionError("no read is expected")])
+    _use_reader(monkeypatch, reader)
+    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert reader.reads == []
+    assert usage.runtime.service.get(usage.runtime.budget_id, "alice").billed_cents == billed
     assert builder.destroys == 1
 
 
 async def test_delete_keeps_the_builder_when_its_receipt_never_turns_final(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Check that a receipt that stays unfinal keeps the builder for the reconciler and warns."""
+    """Check that a receipt that stays unfinal keeps the builder and its hold for the reconciler, and warns."""
     monkeypatch.setattr(vercel, "BUILDER_RECEIPT_WAIT", 0.05)
     monkeypatch.setattr(vercel, "BUILDER_RECEIPT_POLL", 0.01)
     log: list[str] = []
-    client, builder = _builder_client(log)
-    usage = FakeBuilderUsage(log, final_after=None)
+    usage = _builder_hold(database)
+    client, builder = _builder_client(log, usage)
+    reader = FakeReader(log, [{**RECEIPT, "status": "running"}])
+    _use_reader(monkeypatch, reader)
     with caplog.at_level(logging.WARNING, logger="core.sandbox.providers.vercel"):
         await asyncio.wait_for(VercelEnvironment.delete_snapshot(_built(log, usage), client=client), 5)
     assert "snapshot-settle:deleted" in log
-    assert log.count("session-read") >= 1
-    assert not usage.is_settled
+    assert len(reader.reads) >= 2
+    assert _hold_state(usage) == "pending"
+    assert usage.operation.id in usage.runtime._pinned
     assert builder.destroys == 0
-    assert any("builder" in record.getMessage() for record in caplog.records if record.levelno == logging.WARNING)
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == ["Snapshot builder builder is kept: its usage did not settle (TimeoutError)."]
 
 
-async def test_delete_keeps_the_builder_when_its_settle_fails(caplog: pytest.LogCaptureFixture) -> None:
-    """Check that a settle failure other than a late receipt keeps the builder and warns."""
+async def test_delete_removes_the_builder_when_its_session_is_not_found(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a 404 session read leaves nothing to learn, so the builder goes and the hold stays."""
     log: list[str] = []
-    client, builder = _builder_client(log)
-    usage = FakeBuilderUsage(log, error=RuntimeError("database down"))
+    usage = _builder_hold(database)
+    before = _hold_state(usage)
+    client, builder = _builder_client(log, usage)
+    missing = SessionNotFoundError("Vercel final usage remains unavailable (HTTP 404); its reservation is retained.")
+    reader = FakeReader(log, [missing])
+    _use_reader(monkeypatch, reader)
+    with caplog.at_level(logging.INFO, logger="core.sandbox.providers.vercel"):
+        await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert reader.reads == ["session-one"]
+    assert _hold_state(usage) == before
+    assert usage.operation.id in usage.runtime._pinned
+    assert builder.destroys == 1
+    assert "Snapshot builder builder has no session to read." in caplog.messages
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        UsagePendingError("Vercel final usage remains unavailable (HTTP 500); its reservation is retained."),
+        RuntimeError("database down"),
+    ],
+)
+async def test_delete_keeps_the_builder_when_its_read_fails(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """Check that any read failure other than a 404 keeps the builder and names only the error type."""
+    log: list[str] = []
+    usage = _builder_hold(database)
+    client, builder = _builder_client(log, usage)
+    reader = FakeReader(log, [error])
+    _use_reader(monkeypatch, reader)
     with caplog.at_level(logging.WARNING, logger="core.sandbox.providers.vercel"):
         await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert reader.reads == ["session-one"]
+    assert _hold_state(usage) != "settled"
     assert builder.destroys == 0
-    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == [f"Snapshot builder builder is kept: its usage did not settle ({type(error).__name__})."]
 
 
-async def test_delete_does_not_settle_an_already_settled_builder_hold() -> None:
-    """Check that a settled builder hold is not read or settled again, and the builder goes."""
-    log: list[str] = []
-    client, builder = _builder_client(log)
-    usage = FakeBuilderUsage(log, settled=True)
-    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
-    assert usage.settles == 0
-    assert "session-read" not in log
-    assert builder.destroys == 1
-
-
-async def test_delete_without_a_builder_hold_removes_the_builder_as_before() -> None:
+async def test_delete_without_a_builder_hold_removes_the_builder_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a snapshot with no builder hold reads no session and removes the builder."""
     log: list[str] = []
     client, builder = _builder_client(log)
+    reader = FakeReader(log, [AssertionError("no read is expected")])
+    _use_reader(monkeypatch, reader)
     await VercelEnvironment.delete_snapshot(_built(log, None), client=client)
     assert log == ["snapshot-reserve", "snapshot-settle:deleted", "builder-destroy"]
-    assert builder.destroys == 1
-
-
-async def test_delete_removes_the_builder_when_its_session_is_not_found() -> None:
-    """Check that a 404 session read leaves nothing to learn, so the builder is removed."""
-    log: list[str] = []
-    client, builder = _builder_client(log)
-
-    async def refresh() -> Any:
-        """Answer like Vercel for a session with no record.
-
-        Raises:
-            SandboxApiError: Always, with a 404 answer.
-        """
-        log.append("session-read")
-        raise SandboxApiError(httpx.Response(404), "not found", data={"error": {"code": "not_found"}})
-
-    builder.current_session.refresh = refresh
-    usage = FakeBuilderUsage(log)
-    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
-    assert usage.settles == 0
-    assert not usage.is_settled
+    assert reader.made_with is None
     assert builder.destroys == 1
 
 

@@ -32,6 +32,10 @@ class ReconciliationPage:
     next_cursor: str | None
 
 
+class SessionNotFoundError(UsagePendingError):
+    """Report that Vercel answered 404 for the session, so no receipt can be read later."""
+
+
 class VercelSessionUsageClient:
     """Read exact provider sessions with credentials held exclusively by the parent."""
 
@@ -73,7 +77,8 @@ class VercelSessionUsageClient:
             Provider session fields required for settlement.
 
         Raises:
-            UsagePendingError: On network failure, missing resource, or malformed evidence.
+            SessionNotFoundError: When Vercel answers 404 for the session.
+            UsagePendingError: On network failure or malformed evidence.
         """
         try:
             response = client.get(
@@ -98,7 +103,8 @@ class VercelSessionUsageClient:
                 if isinstance(error, httpx.HTTPStatusError)
                 else type(error).__name__
             )
-            raise UsagePendingError(
+            missing = isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 404
+            raise (SessionNotFoundError if missing else UsagePendingError)(
                 f"Vercel final usage remains unavailable ({kind}); its reservation is retained."
             ) from error
 
