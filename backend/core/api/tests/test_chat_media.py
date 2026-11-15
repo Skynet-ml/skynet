@@ -552,3 +552,9 @@ def test_send_with_a_file_deleted_after_the_load_is_a_404(harness: SimpleNamespa
     assert caught.value.status_code == 404
     with Session(engine) as session:
         assert session.scalars(select(AgentMessageModel)).all() == []
+
+
+def test_the_content_type_column_holds_every_office_type() -> None:
+    """Check that Postgres can store the DOCX and XLSX types, which SQLite never checks."""
+    width = ChatMediaModel.__table__.c.mime_type.type.length
+    assert width >= max(len(_DOCX_MIME), len(_XLSX_MIME))
