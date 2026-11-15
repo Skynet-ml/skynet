@@ -145,7 +145,8 @@ OUTPUT_PREFIX = "/tmp/.app-output-"
 # or link at a /tmp name before root's redirect opens it. In sticky /tmp it
 # cannot plant into, rename or remove root's own 0755 folder (TU-1).
 ROOT_OUTPUT_PREFIX = "/tmp/.app-root-output-"
-TIMEOUT_CODES = frozenset({124, 137})
+# ``timeout --signal=KILL`` gives only 137. A command's own 124 is its real code.
+TIMEOUT_CODE = 137
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # The sandbox image ships a NOPASSWD sudo for the parent's own `sudo: true`
 # commands. Every other command starts under no_new_privs: its descendants
@@ -320,13 +321,28 @@ def _wrapper(inner: str, token: str, *, sudo: bool) -> tuple[str, str, str, str]
             f"{OUTPUT_PREFIX}{token}.err",
             f"{EXIT_PREFIX}{token}",
         )
-        return f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}", out_path, err_path, sentinel
+        return f"{inner} > {out_path} 2> {err_path}; {_exit_with_code(sentinel)}", out_path, err_path, sentinel
     folder = f"{ROOT_OUTPUT_PREFIX}{token}"
     out_path, err_path, sentinel = f"{folder}/output.out", f"{folder}/output.err", f"{folder}/exit"
     # No ``-p``: mkdir fails on anything already at the name, a dangling link
     # too, and the command then never runs.
-    script = f"/bin/mkdir -m 0755 {folder} || exit 1; {inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
+    script = f"/bin/mkdir -m 0755 {folder} || exit 1; {inner} > {out_path} 2> {err_path}; {_exit_with_code(sentinel)}"
     return script, out_path, err_path, sentinel
+
+
+def _exit_with_code(sentinel: str) -> str:
+    """Make the wrapper's end: write the command's exit code, then exit with it.
+
+    ``process.wait()`` gives the wrapper shell's own status. A wrapper that
+    ends with its ``echo`` exits 0, so every failed command looked successful.
+
+    Args:
+        sentinel: The path of the exit code file.
+
+    Returns:
+        The shell text that follows the command.
+    """
+    return f"code=$?; echo $code > {sentinel}; exit $code"
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
@@ -1124,6 +1140,7 @@ class VercelEnvironment(SandboxEnvironment):
                 inner = f"/usr/bin/timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script, out_path, err_path, sentinel = _wrapper(inner, token, sudo=sudo)
+            started = self._clock.monotonic()
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
             sink = on_output or current_output_sink()
             tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))
@@ -1141,6 +1158,7 @@ class VercelEnvironment(SandboxEnvironment):
                     else:
                         async with asyncio.timeout(kill_after + POLL_SLACK):
                             code = await self._wait_unless_sink_fails(session, process, sentinel, poller)
+                    elapsed = self._clock.monotonic() - started
                 except TimeoutError as error:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(process.kill(), CANCEL_GRACE)
@@ -1163,7 +1181,9 @@ class VercelEnvironment(SandboxEnvironment):
                 for tail, text in zip(tails, (stdout, stderr), strict=True):
                     if text[tail.emitted :]:
                         sink(tail.stream, text[tail.emitted :])
-            timed_out = timeout_sec is not None and code in TIMEOUT_CODES
+            # An OOM kill also gives 137, but before the limit. The host clock
+            # starts before the box one, so a real timeout always passes this test.
+            timed_out = timeout_sec is not None and code == TIMEOUT_CODE and elapsed >= math.ceil(timeout_sec)
             return ExecResult(exit_code=code, stdout=stdout, stderr=stderr, timed_out=timed_out)
 
     async def _create_process(
