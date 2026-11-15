@@ -29,6 +29,7 @@ from core.billing.vercel_usage import (
 )
 from core.config import app_env, settings
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
+from core.sandbox.providers import vercel
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.resources import SandboxSpec
 from core.sandbox.snapshots import (
@@ -717,6 +718,231 @@ async def test_failed_bind_deletes_the_snapshot_and_removes_the_builder() -> Non
     assert env._snapshotted is False
     await env.stop()
     assert client.boxes[env.name].destroys >= 1
+
+
+def _log_destroys(box: FakeBox, log: list[str]) -> None:
+    """Log each destroy of a fake box, so a test can check the call order.
+
+    Args:
+        box: The fake box.
+        log: The shared call log.
+    """
+
+    async def destroy(*, delete_orphan_snapshots: bool = False) -> None:
+        """Log and count the destroy call.
+
+        Args:
+            delete_orphan_snapshots: Unused.
+        """
+        log.append("builder-destroy")
+        box.destroys += 1
+
+    box.destroy = destroy
+
+
+async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_removed() -> None:
+    """Check that the orphan delete reads the builder receipt and settles its hold before the destroy."""
+    log: list[str] = []
+    client = SnapshotClient(log, FakeSnapshotHandle("snap-9", 1_000))
+    env = _snapshotting_env(log, client)
+
+    def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FailingBindUsage:
+        """Make a reservation whose bind fails.
+
+        Args:
+            budget: Unused.
+            request: The snapshot request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        return FailingBindUsage(log, request, operation_key)
+
+    env._snapshot_usage_factory = factory
+    await env.start()
+    box = client.boxes[env.name]
+    box.current_session.log = log
+    _log_destroys(box, log)
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Return a created snapshot.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        return SimpleNamespace(id="snap-9", status="created", expires_at=1_000)
+
+    box.current_session.snapshot = snapshot
+    with pytest.raises(RuntimeError):
+        await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    assert log.index("session-read") < log.index("settle") < log.index("builder-destroy")
+    await env.stop()
+
+
+class FakeBuilderUsage:
+    """Stand in for the builder session's usage hold; its receipt turns final after some reads."""
+
+    def __init__(
+        self, log: list[str], *, final_after: int | None = 1, settled: bool = False, error: Exception | None = None
+    ) -> None:
+        """Make a hold that is not settled yet.
+
+        Args:
+            log: The shared call log; ``session-read`` entries count the reads.
+            final_after: The number of session reads after which the receipt is final, or ``None`` for never.
+            settled: Whether the hold already settled.
+            error: An error that every settle raises once the receipt is final.
+        """
+        self.log = log
+        self.final_after = final_after
+        self.is_settled = settled
+        self.error = error
+        self.session_id = "session-1"
+        self.settles = 0
+
+    def settled(self) -> bool:
+        """Tell whether the hold settled.
+
+        Returns:
+            True after a settle.
+        """
+        return self.is_settled
+
+    def settle(self) -> None:
+        """Settle when the stored receipt is final.
+
+        Raises:
+            SessionNotStoppedError: The receipt does not show the session as stopped yet.
+            Exception: The planned error.
+        """
+        self.settles += 1
+        if self.final_after is None or self.log.count("session-read") < self.final_after:
+            raise SessionNotStoppedError("The receipt is not stopped.")
+        if self.error is not None:
+            raise self.error
+        self.log.append("builder-settle")
+        self.is_settled = True
+
+
+def _builder_client(log: list[str]) -> tuple[SnapshotClient, FakeBox]:
+    """Make a client with one snapshot and its builder box, both logging their calls.
+
+    Args:
+        log: The shared call log.
+
+    Returns:
+        The client and the builder box.
+    """
+    client = SnapshotClient(log, FakeSnapshotHandle("snap-1", 1_000))
+    session = FakeSession()
+    session.log = log
+    builder = client.boxes["builder"] = FakeBox("builder", session)
+    _log_destroys(builder, log)
+    return client, builder
+
+
+def _built(log: list[str], usage: FakeBuilderUsage | None) -> BuiltSnapshot:
+    """Make an owned snapshot with a fake storage hold and an optional builder hold.
+
+    Args:
+        log: The shared call log.
+        usage: The builder hold, or ``None``.
+
+    Returns:
+        The snapshot.
+    """
+    storage = FakeSnapshotUsage(log, {"session_id": "session-1"}, "op-1:snapshot")
+    return BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=storage, builder_usage=usage)
+
+
+async def test_delete_settles_the_builder_hold_before_the_builder_is_destroyed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check that a receipt that turns final at delete time settles the hold, then the builder goes."""
+    monkeypatch.setattr(vercel, "BUILDER_RECEIPT_POLL", 0)
+    log: list[str] = []
+    client, builder = _builder_client(log)
+    usage = FakeBuilderUsage(log, final_after=2)
+    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert log.count("session-read") == 2
+    assert log.index("snapshot-settle:deleted") < log.index("builder-settle") < log.index("builder-destroy")
+    assert usage.is_settled
+    assert builder.destroys == 1
+
+
+async def test_delete_keeps_the_builder_when_its_receipt_never_turns_final(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a receipt that stays unfinal keeps the builder for the reconciler and warns."""
+    monkeypatch.setattr(vercel, "BUILDER_RECEIPT_WAIT", 0.05)
+    monkeypatch.setattr(vercel, "BUILDER_RECEIPT_POLL", 0.01)
+    log: list[str] = []
+    client, builder = _builder_client(log)
+    usage = FakeBuilderUsage(log, final_after=None)
+    with caplog.at_level(logging.WARNING, logger="core.sandbox.providers.vercel"):
+        await asyncio.wait_for(VercelEnvironment.delete_snapshot(_built(log, usage), client=client), 5)
+    assert "snapshot-settle:deleted" in log
+    assert log.count("session-read") >= 1
+    assert not usage.is_settled
+    assert builder.destroys == 0
+    assert any("builder" in record.getMessage() for record in caplog.records if record.levelno == logging.WARNING)
+
+
+async def test_delete_keeps_the_builder_when_its_settle_fails(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a settle failure other than a late receipt keeps the builder and warns."""
+    log: list[str] = []
+    client, builder = _builder_client(log)
+    usage = FakeBuilderUsage(log, error=RuntimeError("database down"))
+    with caplog.at_level(logging.WARNING, logger="core.sandbox.providers.vercel"):
+        await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert builder.destroys == 0
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+async def test_delete_does_not_settle_an_already_settled_builder_hold() -> None:
+    """Check that a settled builder hold is not read or settled again, and the builder goes."""
+    log: list[str] = []
+    client, builder = _builder_client(log)
+    usage = FakeBuilderUsage(log, settled=True)
+    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert usage.settles == 0
+    assert "session-read" not in log
+    assert builder.destroys == 1
+
+
+async def test_delete_without_a_builder_hold_removes_the_builder_as_before() -> None:
+    """Check that a snapshot with no builder hold reads no session and removes the builder."""
+    log: list[str] = []
+    client, builder = _builder_client(log)
+    await VercelEnvironment.delete_snapshot(_built(log, None), client=client)
+    assert log == ["snapshot-reserve", "snapshot-settle:deleted", "builder-destroy"]
+    assert builder.destroys == 1
+
+
+async def test_delete_removes_the_builder_when_its_session_is_not_found() -> None:
+    """Check that a 404 session read leaves nothing to learn, so the builder is removed."""
+    log: list[str] = []
+    client, builder = _builder_client(log)
+
+    async def refresh() -> Any:
+        """Answer like Vercel for a session with no record.
+
+        Raises:
+            SandboxApiError: Always, with a 404 answer.
+        """
+        log.append("session-read")
+        raise SandboxApiError(httpx.Response(404), "not found", data={"error": {"code": "not_found"}})
+
+    builder.current_session.refresh = refresh
+    usage = FakeBuilderUsage(log)
+    await VercelEnvironment.delete_snapshot(_built(log, usage), client=client)
+    assert usage.settles == 0
+    assert not usage.is_settled
+    assert builder.destroys == 1
 
 
 def _runtime(database: Engine) -> BudgetRuntime:

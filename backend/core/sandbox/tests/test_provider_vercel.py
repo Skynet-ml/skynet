@@ -358,6 +358,16 @@ class FakeSession:
         if self.box is not None:
             self.box.fs.stopped = True
 
+    async def refresh(self) -> FakeSession:
+        """Log one session read, like the SDK's ``GET`` of the session receipt.
+
+        Returns:
+            The session.
+        """
+        if self.log is not None:
+            self.log.append("session-read")
+        return self
+
 
 class FakeBox:
     """Stand in for a Vercel sandbox and count every read."""
@@ -550,6 +560,18 @@ class FakeClient:
         """
         return self.boxes[name]
 
+    async def query_sessions(self, *, name: str) -> Any:
+        """Yield the current session of the named box.
+
+        Args:
+            name: The box name.
+
+        Yields:
+            The session, if the box exists.
+        """
+        if name in self.boxes:
+            yield self.boxes[name].current_session
+
     async def query_sandboxes(self, *, query: Any) -> Any:
         """Yield every box.
 
@@ -585,6 +607,8 @@ class FakeUsage:
         self.extend_error: BaseException | None = None
         self.confirm_error: Exception | None = None
         self.calls: list[str] = []
+        self.session_id = "session-1"
+        self.is_settled = False
         log.append("reserve")
 
     def _record(self, name: str) -> None:
@@ -641,9 +665,18 @@ class FakeUsage:
         """
         self._record("fail")
 
+    def settled(self) -> bool:
+        """Tell whether the hold settled.
+
+        Returns:
+            True after a settle.
+        """
+        return self.is_settled
+
     def settle(self) -> None:
         """Log the settlement."""
         self._record("settle")
+        self.is_settled = True
 
 
 @pytest.fixture
@@ -2136,6 +2169,39 @@ async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.Mo
     monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(lambda capture: client))
     built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder")
     await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
+    assert builder.destroys == 1
+
+
+async def test_delete_snapshot_feeds_the_builder_receipt_to_the_builder_hold(
+    monkeypatch: pytest.MonkeyPatch, log: list[str]
+) -> None:
+    """Check that an owned client hands each response to the builder hold, which then settles."""
+    client = SnapshotQueryClient(log)
+    session = FakeSession()
+    session.log = log
+    builder = client.boxes["builder"] = FakeBox("builder", session)
+    usage = FakeUsage(log, None, {}, operation_key="op-1")
+    captures: list[Any] = []
+
+    def make_client(capture: Any) -> SnapshotQueryClient:
+        """Return the fake client and keep its response capture.
+
+        Args:
+            capture: The response capture hook.
+
+        Returns:
+            The fake client.
+        """
+        captures.append(capture)
+        return client
+
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(make_client))
+    built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", builder_usage=usage)
+    await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
+    await captures[0](httpx.Response(200))
+    assert usage.calls == ["settle", "capture"]
+    assert log.index("session-read") < log.index("settle")
     assert builder.destroys == 1
 
 

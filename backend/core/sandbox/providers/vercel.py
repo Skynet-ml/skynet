@@ -39,6 +39,7 @@ import base64
 import codecs
 import contextlib
 import dataclasses
+import functools
 import logging
 import math
 import posixpath
@@ -132,6 +133,10 @@ WAIT_ERROR_LIMIT = 20
 WAIT_BACKOFF = 0.5
 WAIT_BACKOFF_MAX = 5.0
 STOP_TIMEOUT = 60.0
+# Vercel's receipt of a snapshot builder can show the session running for a
+# while after the snapshot stopped it; the delete waits this long for it.
+BUILDER_RECEIPT_WAIT = 10.0
+BUILDER_RECEIPT_POLL = 1.0
 EXEC_ATTEMPTS = 3
 SLICE_MS = 600_000
 RENEW_LEAD = 180.0
@@ -1012,7 +1017,8 @@ class VercelEnvironment(SandboxEnvironment):
             except SessionNotStoppedError as billing_error:
                 # The snapshot call stops the builder's session, but Vercel's
                 # receipt can still show it running for a short time after the
-                # stop. The reconciler settles the hold when the receipt is final.
+                # stop. The snapshot delete settles the hold before it removes
+                # the builder, and the reconciler can settle it later.
                 if not (self._snapshotted and box is not None):
                     logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
                     if box is not None:
@@ -1520,8 +1526,9 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(reservation.bind, created.id)
                 except BaseException:
                     # No pod owns an unbound snapshot, so delete it now. The
-                    # delete settles the hold; teardown still removes the builder.
-                    orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation)
+                    # delete settles both holds and removes the builder only
+                    # after the builder hold settles; teardown cleans up the rest.
+                    orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation, self._usage)
                     with contextlib.suppress(Exception):
                         await self.delete_snapshot(orphan, client=self._client)
                     raise
@@ -1538,6 +1545,7 @@ class VercelEnvironment(SandboxEnvironment):
             builder_name=self.name,
             expires_at_ms=created.expires_at,
             reservation=reservation,
+            builder_usage=self._usage,
         )
 
     @classmethod
@@ -1563,19 +1571,75 @@ class VercelEnvironment(SandboxEnvironment):
         finally:
             await _close_client(client)
 
+    @staticmethod
+    async def _settle_builder(built: BuiltSnapshot, client: Any) -> bool:
+        """Read the builder session until its receipt is final, then settle its hold.
+
+        Args:
+            built: The snapshot whose builder hold to settle.
+            client: An SDK client that passes responses to ``built.builder_usage``.
+
+        Returns:
+            True when the builder box may be destroyed.
+        """
+        usage = built.builder_usage
+        if usage is None:
+            return True
+        try:
+            if await asyncio.to_thread(usage.settled):
+                return True
+            async with asyncio.timeout(BUILDER_RECEIPT_WAIT):
+                session = None
+                async for found in client.query_sessions(name=built.builder_name):
+                    if found.id == usage.session_id:
+                        session = found
+                        break
+                if session is None:
+                    logger.info("Snapshot builder %s has no session to read.", built.builder_name)
+                    return True
+                while True:
+                    # The read hands the raw receipt to the hold before the settle reads it.
+                    await session.refresh()
+                    try:
+                        await asyncio.to_thread(usage.settle)
+                        return True
+                    except SessionNotStoppedError:
+                        await asyncio.sleep(BUILDER_RECEIPT_POLL)
+        except Exception as error:
+            if _is_not_found(error):
+                logger.info("Snapshot builder %s has no session to read.", built.builder_name)
+                return True
+            # A kept builder costs nothing once stopped, and the reconciler can
+            # still read its receipt. A destroyed builder loses that receipt
+            # forever, so keep it on every doubt.
+            logger.warning(
+                "Snapshot builder %s is kept: its usage did not settle (%s).",
+                built.builder_name,
+                type(error).__name__,
+            )
+            return False
+
     @classmethod
     async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
         """Delete a run snapshot, settle its storage, then remove the builder box.
 
+        The builder box goes only after its session hold settles: once the
+        box is destroyed, Vercel no longer answers for its session receipt.
+
         Args:
             built: The snapshot to delete.
-            client: The SDK client, or ``None`` for one from the settings.
+            client: The SDK client, or ``None`` for one from the settings. A
+                given client must already pass responses to ``built.builder_usage``.
 
         Raises:
             Exception: The provider delete failed; the hold stays pending.
         """
         owned = client is None
-        client = client or cls._make_client(None)
+        if client is None:
+            usage = built.builder_usage
+            client = cls._make_client(
+                None if usage is None else functools.partial(asyncio.to_thread, usage.capture_response)
+            )
         try:
             try:
                 handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
@@ -1598,6 +1662,8 @@ class VercelEnvironment(SandboxEnvironment):
                 }
                 state["deleted_at"] = deleted_at
                 await asyncio.to_thread(built.reservation.settle, state)
+            if not await cls._settle_builder(built, client):
+                return
             try:
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)
                 await asyncio.wait_for(box.destroy(), STOP_TIMEOUT)

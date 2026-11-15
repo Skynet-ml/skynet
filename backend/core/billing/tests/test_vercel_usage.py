@@ -127,6 +127,24 @@ def test_lost_creation_response_keeps_the_hold_and_refuses_a_replay(database: En
         assert session.scalar(select(ExecutionOperationModel)).state == "pending"
 
 
+def test_settled_tells_a_settled_hold_and_a_second_settle_changes_nothing(database: Engine) -> None:
+    """Check ``settled`` before and after a settle, and that a replayed settle and pending are safe."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    created = httpx.Response(200, json={"session": {**RECEIPT, "status": "running"}}, request=_create_request())
+    reservation.capture_response(created)
+    url = "https://vercel.com/api/v2/sandboxes/sessions/session-one"
+    reservation.capture_response(httpx.Response(200, json={"session": RECEIPT}, request=httpx.Request("GET", url)))
+    assert reservation.settled() is False
+    reservation.settle()
+    assert reservation.settled() is True
+    billed = runtime.service.get(runtime.budget_id, "alice").billed_cents
+    reservation.settle()
+    reservation.pending()
+    assert reservation.settled() is True
+    assert runtime.service.get(runtime.budget_id, "alice").billed_cents == billed
+
+
 def test_refused_creation_without_a_session_releases_the_hold(database: Engine) -> None:
     """Release the hold when the provider answers the create call with a 400 and no session exists."""
     runtime = _runtime(database)
