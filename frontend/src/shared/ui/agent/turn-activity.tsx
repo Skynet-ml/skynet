@@ -62,6 +62,8 @@ interface TurnActivityProps {
   renderStep: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /** What kind of step a call is, for the burst's summary line. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
+  /** The user stopped the turn, so the header says so, as Codex does. */
+  stopped?: boolean;
   /** Backend-measured turn duration; the history's own span wins when longer. */
   durationMs?: number | null;
   /** The turn's start, when the caller knows it better than the steps do. */
@@ -87,6 +89,7 @@ export function TurnActivity({
   plan,
   renderStep,
   stepKind,
+  stopped = false,
   durationMs,
   startedAt = null,
   earlier = [],
@@ -216,7 +219,9 @@ export function TurnActivity({
     isLive ? nowTs : null,
   );
   const label = !isLive
-    ? formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) })
+    ? formatMsg(stopped ? "shared.agent.stopped_after" : "shared.agent.worked_for", {
+        duration: formatSpan(workedMs),
+      })
     : workedMs < 1000
       ? msg("shared.agent.working")
       : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });

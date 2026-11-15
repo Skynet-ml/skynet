@@ -48,6 +48,8 @@ export interface AgentMessage {
   id?: number;
   /** US cents of summary calls that stored no compaction, counted on this message. */
   sideCents?: number;
+  /** The user stopped this turn before it finished. */
+  stopped?: boolean;
 }
 
 /** One condensing of a chat's older messages into a summary, as the backend reported it. */

@@ -15,14 +15,13 @@ import { isChanged, keepFiles, lineMap, type DraftFile } from "./draft-changes";
 import type { RepoFile } from "./review/lib";
 import type { PaneComment } from "./review/parts";
 import { ReviewPane, type RepoHostLink } from "./review/review-pane";
+import { MIN_PANE, snapAt, type Snap } from "./split";
 
 const OPTIMIZE_TOML = "optimize.toml";
 // The entry files are new in the draft; the repository never holds them.
 const DRAFT_ONLY = new Set([RUN_FILE, METRIC_FILE]);
 // Below this width the chat and the Changes pane become two tabs.
 const TABS_BELOW_PX = 1024;
-const CHAT_MIN = 0.25;
-const CHAT_MAX = 0.75;
 
 type RepoRead = { text: string } | { issue: "binary" | "too_large" | "missing" };
 const NO_READS: ReadonlyMap<string, RepoRead | null> = new Map();
@@ -171,6 +170,8 @@ export function AgenticIde({
   const updateLineComment = agent?.updateLineComment;
   const lineComments = agent?.lineComments;
   const setChangesToggle = agent?.setChangesToggle;
+  const setRepoPaths = agent?.setRepoPaths;
+  const setChatFloat = agent?.setChatFloat;
 
   const [setRoot, width] = useWidth();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -183,6 +184,12 @@ export function AgenticIde({
   );
   // The chat's width follows the divider at once while it is dragged, and eases otherwise.
   const [dragging, setDragging] = React.useState(false);
+  // Where the divider snaps while it is dragged; the release applies it.
+  const [snap, setSnap] = React.useState<Snap>(null);
+  // Full view: the pane takes the full width, and the chat floats over it.
+  const [full, setFull] = React.useState(false);
+  const [chatExpanded, setChatExpanded] = React.useState(true);
+  if (full && !paneOpen) setFull(false);
 
   const draftPaths = React.useMemo(() => Object.keys(texts).sort(), [texts]);
   const basePaths = React.useMemo(
@@ -221,6 +228,16 @@ export function AgenticIde({
     setRepoBase?.(knownBase);
   }, [setRepoBase, knownBase]);
   React.useEffect(() => () => setRepoBase?.(null), [setRepoBase]);
+
+  // The composer's @file mentions offer the repository's files and the draft's new ones.
+  const mentionPaths = React.useMemo(
+    () => [...new Set([...treePaths, ...draftPaths])].sort(),
+    [treePaths, draftPaths],
+  );
+  React.useEffect(() => {
+    setRepoPaths?.(mentionPaths);
+  }, [setRepoPaths, mentionPaths]);
+  React.useEffect(() => () => setRepoPaths?.(null), [setRepoPaths]);
 
   // A file whose text did not change keeps its object, so an agent write to
   // another file does not redraw the rows of the open one.
@@ -261,11 +278,14 @@ export function AgenticIde({
     setPaneOpen(true);
   }, [anyChange]);
 
-  const showChanges = React.useCallback((path?: string, paths?: readonly string[]) => {
-    setPaneOpen(true);
-    setTab("changes");
-    if (path) setFocus({ path, paths });
-  }, []);
+  const showChanges = React.useCallback(
+    (path?: string, paths?: readonly string[]) => {
+      setPaneOpen(true);
+      setTab("changes");
+      if (path) setFocus({ path, paths });
+    },
+    [setTab],
+  );
   React.useEffect(() => {
     if (!setViewChanges) return;
     setViewChanges(showChanges);
@@ -278,6 +298,19 @@ export function AgenticIde({
     setChangesToggle(tabs ? null : { open: paneOpen, toggle: () => setPaneOpen((open) => !open) });
   }, [setChangesToggle, tabs, paneOpen]);
   React.useEffect(() => () => setChangesToggle?.(null), [setChangesToggle]);
+
+  // Cmd+Alt+B (Ctrl+Alt+B off Apple devices) shows or hides the pane.
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Alt changes e.key on macOS, so match the physical key.
+      if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey || e.code !== "KeyB") return;
+      e.preventDefault();
+      if (tabs) setTab((t) => (t === "chat" ? "changes" : "chat"));
+      else setPaneOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tabs]);
 
   // A write that moves lines moves the file's comments with them, so each
   // stays on its line and the agent gets the right number. The agent's writes
@@ -387,7 +420,10 @@ export function AgenticIde({
         : undefined,
     [updateLineComment, byId],
   );
-  const hidePane = React.useCallback(() => (tabs ? setTab("chat") : setPaneOpen(false)), [tabs]);
+  const hidePane = React.useCallback(
+    () => (tabs ? setTab("chat") : setPaneOpen(false)),
+    [tabs, setTab],
+  );
 
   const pane = (
     <ReviewPane
@@ -413,13 +449,20 @@ export function AgenticIde({
     // The drag drops the transition, so a running ease ends with no end event.
     setEasing(false);
     const rtl = getComputedStyle(rootRef.current!).direction === "rtl";
+    // A chat under MIN_PANE gives the pane the full width; a pane under it hides.
+    let last: Snap = null;
     const move = (e: PointerEvent) => {
-      const share = rtl ? (box.right - e.clientX) / box.width : (e.clientX - box.left) / box.width;
-      setChatShare(Math.min(CHAT_MAX, Math.max(CHAT_MIN, share)));
+      const x = rtl ? box.right - e.clientX : e.clientX - box.left;
+      last = snapAt(x, box.width);
+      setSnap(last);
+      if (!last) setChatShare(x / box.width);
     };
     const target = event.currentTarget;
-    const stop = () => {
+    const stop = (e: PointerEvent) => {
       setDragging(false);
+      setSnap(null);
+      if (e.type === "pointerup" && last === "end") setPaneOpen(false);
+      if (e.type === "pointerup" && last === "start") setFull(true);
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", stop);
       target.removeEventListener("pointercancel", stop);
@@ -429,12 +472,15 @@ export function AgenticIde({
     target.addEventListener("pointercancel", stop);
   };
 
+  // The keys move the divider only between the two snap edges.
+  const chatMin = width > 0 ? Math.min(0.5, MIN_PANE / width) : 0.25;
+  const chatMax = 1 - chatMin;
   const nudge = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const rtl = getComputedStyle(event.currentTarget).direction === "rtl";
     const grow = (event.key === "ArrowRight") !== rtl;
-    setChatShare((share) => Math.min(CHAT_MAX, Math.max(CHAT_MIN, share + (grow ? 0.02 : -0.02))));
+    setChatShare((share) => Math.min(chatMax, Math.max(chatMin, share + (grow ? 0.02 : -0.02))));
   };
 
   const tabClass = (active: boolean) =>
@@ -443,11 +489,36 @@ export function AgenticIde({
       active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
     );
   const showPane = tabs ? tab === "changes" : paneOpen;
+  const floating = full && showPane && !tabs;
+  // The floating chat draws its own bar: it holds the thread, which minimizes
+  // while the composer stays.
+  React.useEffect(() => {
+    setChatFloat?.(
+      floating
+        ? { expanded: chatExpanded, onExpand: setChatExpanded, onDock: () => setFull(false) }
+        : null,
+    );
+  }, [setChatFloat, floating, chatExpanded]);
+  React.useEffect(() => () => setChatFloat?.(null), [setChatFloat]);
+  // The chat's width in percent; null when the tabs or the full view set it.
+  const chatPct =
+    tabs || floating
+      ? null
+      : !showPane || snap === "end"
+        ? 100
+        : snap === "start"
+          ? 0
+          : chatShare * 100;
   const ease = "duration-[340ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:duration-150";
   // The pane's content keeps its open width, so it slides out from the edge
   // while the chat narrows, and does not reflow on every frame.
   // Less the 1px separator beside it.
-  const paneWidth = !tabs && width > 0 ? Math.round(width * (1 - chatShare)) - 1 : undefined;
+  const paneWidth =
+    !tabs && width > 0
+      ? floating || snap === "start"
+        ? Math.round(width)
+        : Math.round(width * (1 - chatShare)) - 1
+      : undefined;
   // After the close fade, the content leaves the layout, so a clipped pane
   // does not keep drawing the open file.
   const [paneGone, setPaneGone] = React.useState(!showPane);
@@ -456,18 +527,22 @@ export function AgenticIde({
   if (!showPane && tabs && !paneGone) setPaneGone(true);
   // Widths ease only when the pane opens, closes or is nudged. A window
   // resize moves the percent-wide chat at once, so the content must too.
-  const layout = `${tabs}|${showPane}|${chatShare}`;
+  const layout = String(chatPct);
   const [easedLayout, setEasedLayout] = React.useState(layout);
   const [easing, setEasing] = React.useState(false);
   if (easedLayout !== layout) {
     setEasedLayout(layout);
-    // The tabs have no width to ease, and the chat's width out of them starts at
-    // auto, which does not animate: no transition would end either ease.
-    setEasing(!dragging && !tabs && easedLayout.startsWith("false|"));
+    // The tabs and the full view have no width to ease, and the chat's width
+    // out of them starts at auto, which does not animate: no transition would
+    // end either ease.
+    setEasing(!dragging && chatPct !== null && easedLayout !== "null");
   }
   // Under reduced motion the widths move at once; the pane's fade stays.
+  // A drag eases only into and out of a snap.
   const widthEase =
-    !tabs && easing && !dragging && cn("transition-[width] motion-reduce:transition-none", ease);
+    !tabs &&
+    ((easing && !dragging) || (dragging && snap !== null)) &&
+    cn("transition-[width] motion-reduce:transition-none", ease);
 
   return (
     <div
@@ -503,28 +578,35 @@ export function AgenticIde({
           </button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {/* Full view keeps the same chat mounted, floating at the bottom center. */}
         <section
           aria-label={msg("submit.agentic_ide.chat_tab")}
           className={cn(
             "relative min-w-0",
-            tabs ? cn("flex-1", tab !== "chat" && "hidden") : "shrink-0",
+            floating
+              ? "absolute inset-x-0 bottom-4 z-30 mx-auto flex w-[min(680px,calc(100%-2rem))] flex-col overflow-clip rounded-2xl border border-border bg-background shadow-[0_16px_48px_-12px_rgba(19,19,19,0.35)]"
+              : tabs
+                ? cn("flex-1", tab !== "chat" && "hidden")
+                : "shrink-0",
+            snap === "start" && "overflow-hidden",
             widthEase,
           )}
-          style={tabs ? undefined : { width: showPane ? `${chatShare * 100}%` : "100%" }}
+          style={chatPct === null ? undefined : { width: `${chatPct}%` }}
           onTransitionEnd={(e) => {
             if (e.target === e.currentTarget) setEasing(false);
           }}
         >
-          {chat}
+          {/* Floating, the dock joins the flow, so the chat's own content sets the box height. */}
+          <div className={cn(floating ? "[&>*]:static!" : "h-full")}>{chat}</div>
         </section>
-        {showPane && !tabs && (
+        {showPane && !tabs && !floating && (
           <div
             role="separator"
             aria-orientation="vertical"
             aria-label={msg("submit.agentic_ide.resize")}
-            aria-valuemin={CHAT_MIN * 100}
-            aria-valuemax={CHAT_MAX * 100}
+            aria-valuemin={Math.round(chatMin * 100)}
+            aria-valuemax={Math.round(chatMax * 100)}
             aria-valuenow={Math.round(chatShare * 100)}
             tabIndex={0}
             onPointerDown={startDrag}
