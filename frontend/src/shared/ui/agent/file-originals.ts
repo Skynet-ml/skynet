@@ -10,9 +10,10 @@
 export type OriginalFormat = "pdf" | "docx" | "xlsx";
 
 const FORMATS: readonly string[] = ["pdf", "docx", "xlsx"];
-// The block and the server each clean a name in their own way. Dropping every
-// character that either one may change gives one key for both.
-const CHANGED = new Set(['"', "\\", "/", "<", ">", "_"]);
+// The block and the server each clean a name in their own way. The server keeps
+// only the part after the last slash or backslash. Then dropping every character
+// that either one may change gives one key for both.
+const CHANGED = new Set(['"', "<", ">", "_"]);
 
 /** The format of a file whose original the chat keeps, from its name, or null. */
 export function originalFormat(name: string): OriginalFormat | null {
@@ -22,7 +23,7 @@ export function originalFormat(name: string): OriginalFormat | null {
 }
 
 function nameKey(name: string): string {
-  return Array.from(name.normalize("NFC"))
+  return Array.from(name.normalize("NFC").split(/[\\/]/).pop()!)
     .filter((c) => c > "\u001f" && c !== "\u007f" && !CHANGED.has(c))
     .join("")
     .trim();

@@ -27,6 +27,12 @@ function page(body: string, style = ""): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${CSP}"><style>${style}</style></head><body>${body}</body></html>`;
 }
 
+/** Drop each link that leaves the file: a sandboxed frame still follows a link in itself. */
+function keepLinksInFile(root: ParentNode): void {
+  for (const a of root.querySelectorAll("a[href]"))
+    if (!a.getAttribute("href")?.startsWith("#")) a.removeAttribute("href");
+}
+
 /** Draw a DOCX as HTML with docx-preview, which loads only when a DOCX opens. */
 async function docxPage(data: ArrayBuffer): Promise<string> {
   const { renderAsync } = await import("docx-preview");
@@ -38,6 +44,7 @@ async function docxPage(data: ArrayBuffer): Promise<string> {
     renderAltChunks: false,
     ignoreLastRenderedPageBreak: true,
   });
+  keepLinksInFile(body);
   return page(`${style.innerHTML}${body.innerHTML}`, "body{margin:0}");
 }
 
@@ -47,6 +54,9 @@ async function xlsxPage(data: ArrayBuffer): Promise<string> {
   const book = read(data, { type: "array", sheetRows: SHEET_ROWS });
   const sheets = book.SheetNames.map((name) => {
     const sheet = book.Sheets[name];
+    // A sandboxed frame still follows a link in itself, so a cell's link goes.
+    for (const [ref, cell] of Object.entries(sheet ?? {}))
+      if (!ref.startsWith("!")) delete (cell as { l?: unknown }).l;
     const table = sheet ? utils.sheet_to_html(sheet, { header: "", footer: "" }) : "";
     return `<h2>${escapeHtml(name)}</h2>${table}`;
   }).join("");
@@ -80,7 +90,9 @@ export function OriginalFile({
     const format = originalFormat(name);
     const draw = async (): Promise<Shown> => {
       const url = await resolve(original);
-      if (format === "pdf") return { state: "pdf", url };
+      // A browser that downloads PDFs instead of showing them gets the text page.
+      if (format === "pdf")
+        return navigator.pdfViewerEnabled === false ? { state: "failed" } : { state: "pdf", url };
       const data = await (await fetch(url)).arrayBuffer();
       if (format === "docx") return { state: "page", html: await docxPage(data) };
       if (format === "xlsx") return { state: "page", html: await xlsxPage(data) };

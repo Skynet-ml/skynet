@@ -37,6 +37,10 @@ test("each file gets the first unused original with its name", () => {
     [{ name: "mysheet.xlsx", id: "3" }],
   );
   assert.deepEqual(pairOriginals([{ name: "mysheet.xlsx" }], [c]), [c]);
+  // The server keeps only the part after the last backslash or slash.
+  const report = { name: "report.pdf", id: "4" };
+  assert.deepEqual(pairOriginals([{ name: "Q3\\report.pdf" }], [report]), [report]);
+  assert.deepEqual(pairOriginals([{ name: "Q3/report.pdf" }], [report]), [report]);
 });
 
 test("a file with no original falls back to its text", () => {

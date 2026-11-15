@@ -298,7 +298,7 @@ export function useChatMedia(): ChatMediaDraft {
             ? [new File([got.value], m.name, { type: got.value.type })]
             : [];
         });
-        const added = media.flatMap((m, i) => {
+        const added = media.flatMap((m, i): Array<{ item: DraftMedia; file: File | null }> => {
           const got = blobs[i]!;
           if (m.kind === "document") return [];
           if (got.status === "rejected") {

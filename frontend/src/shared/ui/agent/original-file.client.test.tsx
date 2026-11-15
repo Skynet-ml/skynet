@@ -95,6 +95,47 @@ void test("an XLSX draws in a sandboxed frame that runs no script and loads noth
   await view.unmount();
 });
 
+void test("a PDF shows the file's text page when the browser has no PDF viewer", async () => {
+  Object.defineProperty(navigator, "pdfViewerEnabled", { value: false, configurable: true });
+  try {
+    const view = await mount({
+      name: "brief.pdf",
+      original: original("5", "brief.pdf"),
+      resolve: async () => "blob:https://example.test/pdf",
+      fallback,
+    });
+    await flush();
+    assert.ok(view.container.querySelector("[data-fallback]"));
+    assert.ok(!view.container.querySelector("iframe"));
+    await view.unmount();
+  } finally {
+    delete (navigator as { pdfViewerEnabled?: boolean }).pdfViewerEnabled;
+  }
+});
+
+void test("an XLSX cell link does not draw, so the frame cannot leave the file", async () => {
+  const sheet = utils.aoa_to_sheet([["out"]]);
+  sheet["A1"]!.l = { Target: "https://example.test/away" };
+  const book = utils.book_new();
+  utils.book_append_sheet(book, sheet, "Sheet1");
+  const bytes = write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(bytes)) as typeof fetch;
+  const view = await mount({
+    name: "links.xlsx",
+    original: original("6", "links.xlsx"),
+    resolve: async () => "blob:https://example.test/xlsx",
+    fallback,
+  });
+  await flush();
+  globalThis.fetch = fetchBefore;
+  const html =
+    view.container.querySelector("iframe[data-original-file='page']")?.getAttribute("srcdoc") ?? "";
+  assert.ok(!html.includes("example.test/away"), "the outside link goes");
+  assert.match(html, />out</);
+  await view.unmount();
+});
+
 void test("an original that does not load shows the file's text page", async () => {
   const view = await mount({
     name: "brief.pdf",
