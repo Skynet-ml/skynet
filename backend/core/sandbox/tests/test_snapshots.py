@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -681,7 +680,7 @@ def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine
     engine.dispose()
 
 
-async def test_failed_bind_deletes_the_snapshot_and_removes_the_builder() -> None:
+async def test_failed_bind_deletes_the_snapshot_and_keeps_an_unreadable_builder() -> None:
     """Check that a snapshot whose hold was not bound is deleted, settled and not kept."""
     log: list[str] = []
     handle = FakeSnapshotHandle("snap-9", 1_000)
@@ -722,7 +721,8 @@ async def test_failed_bind_deletes_the_snapshot_and_removes_the_builder() -> Non
     assert "snapshot-settle:deleted" in log
     assert env._snapshotted is False
     await env.stop()
-    assert client.boxes[env.name].destroys >= 1
+    # The fake builder hold has no ledger to settle, so the builder stays.
+    assert client.boxes[env.name].destroys == 0
 
 
 def _log_destroys(box: FakeBox, log: list[str], state: Callable[[], str] | None = None) -> None:
@@ -835,11 +835,20 @@ def _hold_state(usage: VercelUsageReservation) -> str:
     return usage.runtime.service.get_operation(usage.operation.id, usage.runtime.username).state
 
 
-async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_removed(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Check that the orphan delete reads the builder session by id and settles its hold before the destroy."""
-    log: list[str] = []
+async def _orphaned_env(
+    log: list[str], database: Engine, monkeypatch: pytest.MonkeyPatch, answers: list[Any]
+) -> tuple[VercelEnvironment, VercelUsageReservation, FakeReader, FakeBox]:
+    """Start a box with a real builder hold, then snapshot it with a bind that fails.
+
+    Args:
+        log: The shared call log.
+        database: The SQLite engine.
+        monkeypatch: Routes the builder read to a fake reader.
+        answers: The fake reader's planned answers.
+
+    Returns:
+        The box, its builder hold, the fake reader and the fake builder box.
+    """
     client = SnapshotClient(log, FakeSnapshotHandle("snap-9", 1_000))
     env = _snapshotting_env(log, client)
 
@@ -859,7 +868,7 @@ async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_remove
     env._snapshot_usage_factory = factory
     await env.start()
     usage = env._usage = _builder_hold(database)
-    reader = FakeReader(log, [RECEIPT])
+    reader = FakeReader(log, answers)
     _use_reader(monkeypatch, reader)
     box = client.boxes[env.name]
     _log_destroys(box, log, lambda: _hold_state(usage))
@@ -878,11 +887,50 @@ async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_remove
     box.current_session.snapshot = snapshot
     with pytest.raises(RuntimeError):
         await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    return env, usage, reader, box
+
+
+async def test_failed_bind_settles_the_builder_hold_before_the_builder_is_removed(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the orphan delete settles the builder hold before the destroy, and the stop charges nothing more."""
+    log: list[str] = []
+    env, usage, reader, _ = await _orphaned_env(log, database, monkeypatch, [RECEIPT])
     assert reader.reads == ["session-one"]
     assert log.index("snapshot-settle:deleted") < log.index("session-read") < log.index("builder-destroy:settled")
     assert usage.operation.id not in usage.runtime._pinned
-    with contextlib.suppress(Exception):
+    billed = usage.runtime.service.get(usage.runtime.budget_id, "alice").billed_cents
+    # The hold's own stored receipt still shows the session running; the
+    # settled ledger wins, so the stop reports no usage error.
+    await env.stop()
+    assert _hold_state(usage) == "settled"
+    assert usage.runtime.service.get(usage.runtime.budget_id, "alice").billed_cents == billed
+    assert log.count("builder-destroy:settled") == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {**RECEIPT, "status": "running"},
+        UsagePendingError("Vercel final usage remains unavailable (HTTP 500); its reservation is retained."),
+    ],
+)
+async def test_failed_bind_keeps_the_builder_when_its_hold_does_not_settle(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, answer: Any
+) -> None:
+    """Check that neither the orphan delete nor teardown destroys a builder whose hold stays pending."""
+    monkeypatch.setattr(vercel, "BUILDER_RECEIPT_WAIT", 0.05)
+    monkeypatch.setattr(vercel, "BUILDER_RECEIPT_POLL", 0.01)
+    log: list[str] = []
+    env, usage, reader, box = await _orphaned_env(log, database, monkeypatch, [answer])
+    assert reader.reads
+    assert box.destroys == 0
+    # The hold is really pending, so the stop still raises the usage error,
+    # and the reconciler can still read the session of the kept builder.
+    with pytest.raises(SessionNotStoppedError):
         await env.stop()
+    assert box.destroys == 0
+    assert _hold_state(usage) == "pending"
 
 
 def _builder_client(log: list[str], usage: VercelUsageReservation | None = None) -> tuple[SnapshotClient, FakeBox]:

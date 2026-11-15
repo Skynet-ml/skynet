@@ -510,6 +510,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._snapshot_usage_factory = snapshot_usage_factory
         self._secret_exposed = False
         self._snapshotted = False
+        self._snapshot_orphaned = False
         self._recorder = recorder
         self._egress_log: str | None = None
         self._egress_rows = 0
@@ -999,8 +1000,10 @@ class VercelEnvironment(SandboxEnvironment):
         # The snapshot already stopped the session, so do not stop or destroy
         # the builder here. Other pods look the snapshot up by its source
         # sandbox name. Vercel docs do not say if the builder record stays
-        # after a snapshot of a persistent=False box; that is unverified.
-        if box is not None and not self._snapshotted:
+        # after a snapshot of a persistent=False box; that is unverified. An
+        # orphaned snapshot's delete removes the builder only after its hold
+        # settles, and keeps it so the reconciler can still read its session.
+        if box is not None and not (self._snapshotted or self._snapshot_orphaned):
             try:
                 await asyncio.wait_for(box.stop(), STOP_TIMEOUT)
             except Exception as stop_error:
@@ -1527,7 +1530,8 @@ class VercelEnvironment(SandboxEnvironment):
                 except BaseException:
                     # No pod owns an unbound snapshot, so delete it now. The
                     # delete settles both holds and removes the builder only
-                    # after the builder hold settles; teardown cleans up the rest.
+                    # after the builder hold settles; teardown never removes it.
+                    self._snapshot_orphaned = True
                     orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation, self._usage)
                     with contextlib.suppress(Exception):
                         await self.delete_snapshot(orphan, client=self._client)
