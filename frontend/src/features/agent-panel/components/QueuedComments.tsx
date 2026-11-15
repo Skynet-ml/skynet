@@ -51,7 +51,11 @@ function IconAction({
 function Row({ c, onOpen, onRemove, onEdit }: { c: LineComment } & Omit<Props, "comments">) {
   const [editing, setEditing] = React.useState(false);
   const [text, setText] = React.useState(c.text);
+  // Enter and Escape unmount the focused input, and its blur fires after them.
+  const ended = React.useRef(false);
   const save = () => {
+    if (ended.current) return;
+    ended.current = true;
     const next = text.trim();
     if (next && next !== c.text) onEdit?.(c, next);
     setEditing(false);
@@ -87,6 +91,7 @@ function Row({ c, onOpen, onRemove, onEdit }: { c: LineComment } & Omit<Props, "
             }
             if (e.key === "Escape") {
               e.stopPropagation();
+              ended.current = true;
               setText(c.text);
               setEditing(false);
             }
@@ -110,6 +115,7 @@ function Row({ c, onOpen, onRemove, onEdit }: { c: LineComment } & Omit<Props, "
             <IconAction
               label={msg("agent.line_comments.edit")}
               onClick={() => {
+                ended.current = false;
                 setText(c.text);
                 setEditing(true);
               }}

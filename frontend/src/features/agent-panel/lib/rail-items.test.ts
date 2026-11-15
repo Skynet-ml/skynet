@@ -15,7 +15,7 @@ registerHooks({
   },
 });
 
-const { railItemsOf } = await import("./rail-items.ts");
+const { outputsByToolCalls, railItemsOf } = await import("./rail-items.ts");
 const { joinLineComments } = await import("../../../shared/ui/agent/line-comments.ts");
 
 const user = (content: string): AgentMessage => ({ role: "user", content });
@@ -60,4 +60,24 @@ test("the outputs collect each changed file once, across the turn's replies", ()
 
 test("replies before the first user message are skipped", () => {
   assert.deepEqual(railItemsOf([reply("hello")], none), []);
+});
+
+test("a streamed token does not read a reply's files again", () => {
+  let reads = 0;
+  const outputsOf = outputsByToolCalls(() => {
+    reads += 1;
+    return ["a.py"];
+  });
+  const toolCalls = [{ id: "t1" }] as unknown as AgentMessage["toolCalls"];
+  const first: AgentMessage = { role: "assistant", content: "Wri", toolCalls };
+  // The stream spreads the message for each token and keeps its tool calls.
+  const next: AgentMessage = { ...first, content: "Writing" };
+  assert.deepEqual(outputsOf(first), ["a.py"]);
+  assert.deepEqual(outputsOf(next), ["a.py"]);
+  assert.equal(reads, 1);
+  // New tool calls read the files again; a reply with none changed no files.
+  outputsOf({ ...next, toolCalls: [...toolCalls!] });
+  assert.equal(reads, 2);
+  assert.deepEqual(outputsOf(reply("text")), []);
+  assert.equal(reads, 2);
 });

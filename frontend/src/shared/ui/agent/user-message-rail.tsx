@@ -51,7 +51,13 @@ export function UserMessageRail({
   const scrub = React.useRef<{ last: number; moved: boolean } | null>(null);
   const swallowClick = React.useRef(false);
   const [rtl, setRtl] = React.useState(false);
-  const order = React.useMemo(() => items.map((item) => item.index), [items]);
+  // A streamed token makes new items with the same user messages. The key keeps `order`,
+  // and so the observer, until a user message changes.
+  const orderKey = JSON.stringify(items.map((item) => [item.index, item.label]));
+  const order = React.useMemo(
+    () => (JSON.parse(orderKey) as Array<[number, string]>).map(([index]) => index),
+    [orderKey],
+  );
   const [current, setCurrent] = React.useState<ReadonlySet<number>>(() => new Set(order.slice(-1)));
   const shown = items.length >= RAIL_MIN_ITEMS;
   const count = new Intl.NumberFormat(getActiveIntlLocale());

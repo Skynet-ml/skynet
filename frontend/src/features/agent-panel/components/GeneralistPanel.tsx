@@ -102,7 +102,7 @@ import { useFork } from "../hooks/use-fork";
 import { latestCompactionIndex } from "../lib/compaction";
 import { forkPoints } from "../lib/fork";
 import { modelChanges } from "../lib/model-changes";
-import { railItemsOf } from "../lib/rail-items";
+import { outputsByToolCalls, railItemsOf } from "../lib/rail-items";
 import { sessionStats } from "../lib/session-stats";
 import { ChatContextUsage } from "./ChatContextUsage";
 import { QueuedComments } from "./QueuedComments";
@@ -903,12 +903,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [writeBefore, repoBase, wizardCtx?.viewChanges],
   );
   // The user message rail. Bookmarks stay in memory, for this chat view only.
-  const railItems = React.useMemo(
+  const railOutputs = React.useMemo(
     () =>
-      railItemsOf(agent.messages, (m) =>
+      outputsByToolCalls((m) =>
         writeBefore ? messageEdits(m, writeBefore, repoBase).map((e) => e.path) : [],
       ),
-    [agent.messages, writeBefore, repoBase],
+    [writeBefore, repoBase],
+  );
+  const railItems = React.useMemo(
+    () => railItemsOf(agent.messages, railOutputs),
+    [agent.messages, railOutputs],
   );
   const [bookmarks, setBookmarks] = React.useState<{ key: number; at: ReadonlySet<number> }>({
     key: 0,

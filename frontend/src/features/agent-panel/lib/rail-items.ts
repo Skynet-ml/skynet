@@ -5,6 +5,34 @@ import type { AgentMessage } from "@/shared/ui/agent/types";
 import type { RailItem } from "@/shared/ui/agent/user-message-rail";
 
 /**
+ * Cache a reply's changed files on its tool calls.
+ *
+ * A streamed token makes a new message object but keeps its tool calls, so
+ * the files are read again only when the tool calls change.
+ *
+ * Args:
+ *   read: Read the files that one reply changed.
+ *
+ * Returns:
+ *   `read` with a cache. A message with no tool calls changed no files.
+ */
+export function outputsByToolCalls(
+  read: (message: AgentMessage) => readonly string[],
+): (message: AgentMessage) => readonly string[] {
+  const cache = new WeakMap<object, readonly string[]>();
+  return (message) => {
+    const calls = message.toolCalls;
+    if (!calls?.length) return [];
+    let paths = cache.get(calls);
+    if (!paths) {
+      paths = read(message);
+      cache.set(calls, paths);
+    }
+    return paths;
+  };
+}
+
+/**
  * Make one rail item for each user message.
  *
  * Args:
