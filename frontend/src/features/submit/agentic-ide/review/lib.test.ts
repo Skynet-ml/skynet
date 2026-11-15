@@ -17,7 +17,7 @@ registerHooks({
   },
 });
 
-const { diffLines, statusOf, turnView } = await import("./lib.ts");
+const { diffLines, editorFile, statusOf, turnView } = await import("./lib.ts");
 
 const files = [
   { path: "a.py", before: "x = 0\n", after: "x = 2\n" },
@@ -82,4 +82,25 @@ test("a user edit after the turn does not show in the turn's diff", () => {
     changed.map((row) => row.text),
     ["one", "ONE"],
   );
+});
+
+test("under Last turn a file the turn did not change keeps its repository base in the editor", () => {
+  const turn = new Map([["a.py", { before: "x = 1\n", after: "x = 2\n" }]]);
+  const repoText = "old\n";
+  const bases = ["new\n", "newer\n", "newest\n"].map((after) => {
+    const draft = { path: "b.py", before: repoText, after };
+    const [view] = turnView([draft], turn);
+    // The list and the diff still read b.py as unchanged under "Last turn".
+    assert.equal(statusOf(view!), "unchanged");
+    const edited = editorFile(view!, draft, turn);
+    assert.equal(edited.after, after);
+    return edited.before;
+  });
+  // Each keystroke keeps the same base, so the editor's extensions stay.
+  assert.deepEqual(bases, [repoText, repoText, repoText]);
+  // A file the turn changed keeps the turn's view, and the draft source is unchanged.
+  const a = { path: "a.py", before: "", after: "x = 3\n" };
+  const [aView] = turnView([a], turn);
+  assert.equal(editorFile(aView!, a, turn), aView);
+  assert.equal(editorFile(a, a, null), a);
 });

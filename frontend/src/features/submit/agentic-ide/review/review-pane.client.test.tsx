@@ -173,6 +173,10 @@ void test("the Last turn source shows only the files the agent's last turn chang
   await click(menuItem("Last turn")!);
   assert.match(sourcePill(solo.container)?.textContent ?? "", /^Last turn/);
   assert.equal(sourcePill(solo.container)?.tagName, "BUTTON");
+  // The b.py editor still takes edits and holds the draft text.
+  const bEditor = solo.container.querySelector<HTMLElement>(".cm-content")!;
+  assert.equal(bEditor.getAttribute("contenteditable"), "true");
+  assert.ok(bEditor.textContent?.includes("y = 2"));
 
   // A chat link to a comment shows the whole draft, since "Last turn" shows no comments.
   await solo.render(pane({ path: "a.py", comment: "c1" }));

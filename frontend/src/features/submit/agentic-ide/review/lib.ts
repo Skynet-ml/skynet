@@ -71,6 +71,27 @@ export function turnView(
   });
 }
 
+/**
+ * Pick the texts a file tab's editor holds. Under "Last turn", a file the turn
+ * did not change keeps the draft's file: its base stays the repository text,
+ * so the editor does not rebuild on each keystroke.
+ *
+ * Args:
+ *   view: The file as the pane's source shows it.
+ *   draft: The same file in the whole draft, if the draft holds it.
+ *   turn: The last turn's changes while "Last turn" is the source, else null.
+ *
+ * Returns:
+ *   The file whose texts the editor shows.
+ */
+export function editorFile(
+  view: RepoFile,
+  draft: RepoFile | undefined,
+  turn: ReadonlyMap<string, TurnChange> | null | undefined,
+): RepoFile {
+  return turn && draft && !turn.has(view.path) ? draft : view;
+}
+
 export interface DiffLine {
   kind: "same" | "add" | "del";
   text: string;

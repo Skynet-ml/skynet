@@ -51,6 +51,7 @@ import {
   baseName,
   buildTree,
   dirName,
+  editorFile,
   fuzzyScore,
   statusOf,
   turnView,
@@ -914,13 +915,14 @@ export function ReviewPane({
   const tabView = (f: RepoFile) => {
     if (f.loading || f.issue) return <FileNotice file={f} />;
     if (rich && isMarkdown(f.path) && f.after !== "") return <RichPreview file={f} />;
+    const edited = editorFile(f, draftByPath.get(f.path), source === "turn" ? turn : null);
     // A file tab is the editor, as in Codex; the draft's changes show inline until hidden.
     return (
       <CodeEditor
         key={f.path}
         path={f.path}
-        base={f.before}
-        value={f.after}
+        base={edited.before}
+        value={edited.after}
         // Under "Last turn" a file the turn changed shows the turn's end text,
         // not the draft now, so it takes no edits there.
         readOnly={readOnly || (source === "turn" && !!turn?.has(f.path))}
