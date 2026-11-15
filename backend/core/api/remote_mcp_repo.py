@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from threading import Thread
+from threading import Lock, Thread
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -107,10 +107,19 @@ _PENDING_RETRY_SECONDS = 5
 # A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
 # in_progress at this bound while the score continues in the background.
 _JUDGE_ANSWER_SECONDS = 25
+# A deploy stops the task with SIGTERM, and ECS kills it 120 s later
+# (infra/terraform/modules/environment/services.tf, stop_timeout). The
+# shutdown waits this long for background scores, so they can store their
+# outcome before the kill.
+_DRAIN_SECONDS = 100
 _TREE_SAMPLE = 60
 _SCORER_NAMES = ("score", "metric")
 
 logger = logging.getLogger(__name__)
+
+# The background judge scores that still run, so the app shutdown can wait for them.
+_IN_FLIGHT: set[Future[dict[str, Any]]] = set()
+_IN_FLIGHT_LOCK = Lock()
 
 TokenSource = Literal["managed", "byok", "subscription"]
 StepCheck = Callable[[dict[str, Any], str], tuple[list[str], list[str], dict[str, Any]]]
@@ -1083,6 +1092,47 @@ def _log_late_error(outcome: Future[dict[str, Any]]) -> None:
     logger.error("repo_judge_score failed after its answer with %s\n%s", type(error).__name__, frames)
 
 
+def _track(outcome: Future[dict[str, Any]]) -> None:
+    """Keep a background judge score in the in-flight set until it ends.
+
+    Args:
+        outcome: The score's future.
+    """
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.add(outcome)
+
+    def release(done: Future[dict[str, Any]]) -> None:
+        """Remove the ended score from the in-flight set.
+
+        Args:
+            done: The ended score's future.
+        """
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.discard(done)
+
+    outcome.add_done_callback(release)
+
+
+def drain_judge_scores() -> int:
+    """Wait up to ``_DRAIN_SECONDS`` for the background judge scores to end.
+
+    The app shutdown calls this, so a deploy does not kill a score before it
+    stores its outcome.
+
+    Returns:
+        How many scores still run at the bound.
+    """
+    with _IN_FLIGHT_LOCK:
+        running = list(_IN_FLIGHT)
+    if not running:
+        return 0
+    logger.info("Shutdown waits for %d judge score(s)", len(running))
+    left = len(wait(running, timeout=_DRAIN_SECONDS).not_done)
+    if left:
+        logger.warning("Shutdown stopped waiting with %d judge score(s) still running", left)
+    return left
+
+
 def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, job_store: Any) -> None:
     """Add the repository draft tools to the remote MCP server.
 
@@ -1647,6 +1697,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         # The work keeps going after the answer and stores its outcome as the call's evidence, so a
         # retry replays it or, while it runs, answers in_progress. No retry starts a second score.
         outcome: Future[dict[str, Any]] = Future()
+        _track(outcome)
         Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
         wait([outcome], timeout=_JUDGE_ANSWER_SECONDS)
         if outcome.done():

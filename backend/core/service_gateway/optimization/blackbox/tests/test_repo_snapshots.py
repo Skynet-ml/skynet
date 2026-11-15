@@ -9,9 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from vercel.sandbox import SandboxApiError
 
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import json_fingerprint
@@ -742,6 +744,25 @@ def test_a_version_that_does_not_apply_in_restored_stage_boxes_keeps_the_stage_s
     finally:
         scorer.close()
     assert [spec.snapshot_id for spec in runtime.specs[1:]] == ["stage-0"] * 4
+
+
+def test_a_temporary_provider_error_from_a_snapshot_stage_box_keeps_the_stage_snapshot(tmp_path: Path) -> None:
+    """Raise a 503 from a stage box opened from the snapshot raw, and keep the good snapshot for the retry.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = SandboxApiError(httpx.Response(503), "HTTP 503: provider text")
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", open_error=error)
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            scorer.score("")
+        assert raised.value is error
+        assert scorer._stage_snapshot_id == "stage-0"
+    finally:
+        scorer.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "stage-0"]
 
 
 def test_budget_refusal_from_a_snapshot_stage_box_is_raised(tmp_path: Path) -> None:

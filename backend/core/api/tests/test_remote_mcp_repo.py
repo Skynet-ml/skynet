@@ -1285,6 +1285,55 @@ def test_an_unexpected_error_after_the_bound_is_logged_by_type_only(
     assert "secret text" not in caplog.text
 
 
+def test_the_drain_waits_for_a_background_score_and_the_registry_releases_it(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hold a score that runs after its in_progress answer, wait for it at shutdown, then forget it."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 10)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    assert len(remote_mcp_repo._IN_FLIGHT) == 1
+    threading.Timer(0.2, slow.release.set).start()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert slow.done.is_set()
+    assert not remote_mcp_repo._IN_FLIGHT
+    _wait_for_thread("repo-judge-score")
+
+
+def test_the_drain_stops_at_its_bound_when_a_score_hangs(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return at the bound with the count of scores that still run, so the shutdown is not stuck."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 1
+    assert time.monotonic() - started < 5
+    slow.release.set()
+    _wait_for_thread("repo-judge-score")
+    assert not remote_mcp_repo._IN_FLIGHT
+
+
+def test_the_drain_returns_at_once_with_no_background_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return at once when no score runs, also with a long bound."""
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 60)
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert time.monotonic() - started < 1
+
+
 def test_a_call_that_finishes_in_time_keeps_its_answer(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """A score inside the bound answers as before: the score, or the refusal as a tool error."""
     client, _engine, record = judge

@@ -83,6 +83,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
+from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
@@ -757,6 +758,8 @@ class RepoScorer:
         Raises:
             RepoScoreError: When a stage box cannot open for a reason other
                 than the budget, or cannot lay out the version.
+            Exception: A temporary provider error from a stage box, raw; the
+                stage snapshot stays.
             BudgetReached: When the budget refuses a stage box.
             BudgetError: When a stage box's hold does not fit the budget.
             UsagePendingError: When earlier usage still needs reconciliation.
@@ -801,6 +804,8 @@ class RepoScorer:
                 for a reason other than the budget, or holds no tree.
             RepoScoreError: When an unpacked stage box cannot open for a reason
                 other than the budget, or a box cannot lay out the version.
+            Exception: A temporary provider error (``SandboxTransientError``,
+                or a sandbox API 429 or 5xx) from a box open or layout, raw.
             BudgetReached: And the other budget errors, from a stage box.
         """
         evaluation_id = uuid.uuid4().hex
@@ -820,6 +825,11 @@ class RepoScorer:
         except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
             raise
         except Exception as error:
+            # A provider refusal for now (429, 5xx) must stay raw: as a
+            # RepoScoreError the judge would store it as a lasting failure,
+            # and as a _StageSnapshotError it would drop a good snapshot.
+            if is_temporary_provider_error(error):
+                raise
             logger.warning("Stage boxes did not open: %s", error)
             failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
             raise failure("The stage boxes could not open, so the version has no score.") from None
@@ -834,6 +844,8 @@ class RepoScorer:
             except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
                 raise
             except Exception as error:
+                if is_temporary_provider_error(error):
+                    raise
                 logger.warning("Stage box layout failed: %s", error)
                 laid_out = [False]
             if not all(laid_out):

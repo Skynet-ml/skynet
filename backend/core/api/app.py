@@ -17,6 +17,7 @@ extraction rules.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
@@ -92,7 +93,7 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
-from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_repo import drain_judge_scores, register_repo_tools
 from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
@@ -881,6 +882,8 @@ def create_app(
         finally:
             if can_register_signal and original_handler is not None:
                 signal.signal(signal.SIGTERM, original_handler)
+            # A background judge score needs the app's database to store its outcome, so it ends first.
+            await asyncio.to_thread(drain_judge_scores)
             if worker:
                 worker.stop()
                 logger.info("Background worker stopped")
