@@ -185,3 +185,43 @@ def classify(exc: BaseException) -> ErrorGroup | None:
     if isinstance(exc, HealthcheckError):
         return ErrorGroup.INFRA
     return None
+
+
+def sandbox_api_error(error: BaseException) -> BaseException | None:
+    """Find the Vercel SDK's ``SandboxApiError`` in an error's cause chain.
+
+    The class is matched by name and module, so the backend does not load the
+    Vercel SDK for this check.
+
+    Args:
+        error: The error to check.
+
+    Returns:
+        The first API error with an integer HTTP status, raw or as a cause at any depth, or ``None``.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(getattr(current, "status_code", None), int) and any(
+            cls.__name__ == "SandboxApiError" and cls.__module__.startswith("vercel.") for cls in type(current).__mro__
+        ):
+            return current
+        current = current.__cause__
+    return None
+
+
+def is_temporary_provider_error(error: BaseException) -> bool:
+    """Say whether the sandbox provider failed for a reason a retry can pass.
+
+    Args:
+        error: The error to check.
+
+    Returns:
+        True for a ``SandboxTransientError``, and for a sandbox API answer of
+        429 or 5xx anywhere in the cause chain.
+    """
+    if isinstance(error, SandboxTransientError):
+        return True
+    api = sandbox_api_error(error)
+    return api is not None and (api.status_code == 429 or api.status_code >= 500)  # type: ignore[attr-defined]
