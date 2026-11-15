@@ -25,10 +25,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from ...config import settings
 from ...storage.models import ChatMediaModel
+from ...storage.usage import sweep_unsent_chat_media
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..rate_limit import RateLimiter, shared_redis_client
 from ._helpers import enforce_storage_quota
@@ -166,7 +167,12 @@ def _engine(job_store: Any) -> Any:
 
 
 def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[ChatMediaModel]:
-    """Load the caller's media rows in the order of ``media_ids``.
+    """Load the caller's media rows in the order of ``media_ids``, without their bytes.
+
+    Stale unsent files are swept first, so a turn never names a file that a
+    later storage measure deletes. A send holds these rows for the whole
+    streamed turn, so the bytes stay in the database; ``load_media_data``
+    reads only the ones the model gets.
 
     Args:
         engine: The SQLAlchemy engine.
@@ -174,7 +180,8 @@ def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[C
         media_ids: The ids the client sent; duplicates load once.
 
     Returns:
-        The owned rows, detached from their session, in request order.
+        The owned rows, detached from their session, in request order. Their
+        ``data`` column is not loaded.
 
     Raises:
         HTTPException: 404 when any id is unknown or another user owns it.
@@ -182,15 +189,38 @@ def load_owned_media(engine: Any, username: str, media_ids: list[str]) -> list[C
     wanted = list(dict.fromkeys(media_ids))
     if not wanted:
         return []
+    sweep_unsent_chat_media(engine, username)
     with Session(engine, expire_on_commit=False) as session:
         rows = session.scalars(
-            select(ChatMediaModel).where(ChatMediaModel.id.in_(wanted), ChatMediaModel.username == username)
+            select(ChatMediaModel)
+            .options(defer(ChatMediaModel.data))
+            .where(ChatMediaModel.id.in_(wanted), ChatMediaModel.username == username)
         ).all()
         session.expunge_all()
     by_id = {row.id: row for row in rows}
     if len(by_id) != len(wanted):
         raise HTTPException(status_code=404, detail="Attachment not found.")
     return [by_id[media_id] for media_id in wanted]
+
+
+def load_media_data(engine: Any, media_ids: list[str]) -> dict[str, bytes]:
+    """Read the stored bytes of some media rows.
+
+    Args:
+        engine: The SQLAlchemy engine.
+        media_ids: The ids of rows the caller already loaded as its own.
+
+    Returns:
+        A map from each id to its bytes.
+    """
+    if not media_ids:
+        return {}
+    with Session(engine) as session:
+        return dict(
+            session.execute(
+                select(ChatMediaModel.id, ChatMediaModel.data).where(ChatMediaModel.id.in_(media_ids))
+            ).all()
+        )
 
 
 def media_copy_bytes(rows: list[ChatMediaModel], conversation_id: str) -> int:
@@ -229,17 +259,23 @@ def attach_media_to_chat(
     Raises:
         DomainError: ``user.storage.quota_exceeded`` (409) when the copies
             would go over the caller's storage quota; nothing changes then.
+        HTTPException: 404 when a file is deleted while the quota is checked.
     """
     if not media_ids:
         return {}
-    rows = list(
-        session.scalars(
-            select(ChatMediaModel).where(ChatMediaModel.id.in_(media_ids), ChatMediaModel.username == username)
-        ).all()
-    )
-    copied = media_copy_bytes(rows, conversation_id)
+    owned = (ChatMediaModel.id.in_(media_ids), ChatMediaModel.username == username)
+    sizes = session.execute(
+        select(ChatMediaModel.id, ChatMediaModel.conversation_id, ChatMediaModel.byte_size).where(*owned)
+    ).all()
+    copied = sum(size for _, held_by, size in sizes if held_by not in (None, conversation_id))
+    # The quota measure sweeps stale unsent files in its own transaction. It
+    # runs before this session loads the rows, so no loaded row is deleted
+    # under it, and a file it deletes is a visible 404, not a lost turn.
     if copied:
         enforce_storage_quota(job_store, username, copied)
+    rows = list(session.scalars(select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned)).all())
+    if len(rows) != len(sizes):
+        raise HTTPException(status_code=404, detail="Attachment not found.")
     held: dict[str, str] = {}
     for row in rows:
         if row.conversation_id is None:
@@ -350,9 +386,13 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         Raises:
             HTTPException: 404 when the id is unknown or another user owns it.
         """
-        (row,) = load_owned_media(_engine(job_store), user.username, [media_id])
+        engine = _engine(job_store)
+        (row,) = load_owned_media(engine, user.username, [media_id])
+        data = load_media_data(engine, [row.id]).get(row.id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
         return Response(
-            content=row.data,
+            content=data,
             media_type=row.mime_type,
             headers={
                 "Content-Disposition": f"inline; filename*=UTF-8''{quote(row.filename)}",

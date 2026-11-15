@@ -18,7 +18,8 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, delete, event, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -28,7 +29,13 @@ from ...storage.usage import UNSENT_MEDIA_RETENTION
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers import chat_media
-from ..routers.chat_media import create_chat_media_router, load_owned_media, sniff_media
+from ..routers.chat_media import (
+    attach_media_to_chat,
+    create_chat_media_router,
+    load_media_data,
+    load_owned_media,
+    sniff_media,
+)
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 _ALICE = "alice@example.com"
@@ -359,8 +366,38 @@ def test_load_owned_media_keeps_order_and_checks_every_id(harness: SimpleNamespa
 
     rows = load_owned_media(engine, _ALICE, [second, first, second])
     assert [row.id for row in rows] == [second, first]
-    assert rows[0].data == _PNG
+    assert all("data" in sa_inspect(row).unloaded for row in rows)
+    assert load_media_data(engine, [second]) == {second: _PNG}
     assert load_owned_media(engine, _ALICE, []) == []
     with pytest.raises(HTTPException) as caught:
         load_owned_media(engine, _ALICE, [first, bobs])
+    assert caught.value.status_code == 404
+
+
+def test_file_deleted_during_the_copy_quota_check_is_a_404(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that the quota measure deletes fails the attach visibly; the session loaded no stale row."""
+    media_id = _upload(harness.client, _PNG).json()["id"]
+    engine = harness.store.engine
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AgentConversationModel(id="chat-a", username=_ALICE, title="a"),
+                AgentConversationModel(id="chat-b", username=_ALICE, title="b"),
+            ]
+        )
+        session.commit()
+        attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
+        session.commit()
+
+    def sweeping_quota(_store: object, _username: str, _incoming: int) -> None:
+        """Delete the file in another transaction, as a storage measure sweep does."""
+        with Session(engine) as other:
+            other.execute(delete(ChatMediaModel).where(ChatMediaModel.id == media_id))
+            other.commit()
+
+    monkeypatch.setattr(chat_media, "enforce_storage_quota", sweeping_quota)
+    with Session(engine) as session, pytest.raises(HTTPException) as caught:
+        attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-b")
     assert caught.value.status_code == 404

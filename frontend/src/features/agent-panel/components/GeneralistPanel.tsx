@@ -102,7 +102,7 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useFork } from "../hooks/use-fork";
 import { useChatMedia } from "../hooks/use-chat-media";
-import { freeFetchedMediaUrls, resolveChatMediaUrl } from "../lib/chat-media";
+import { freeChatMediaUrls, resolveChatMediaUrl } from "../lib/chat-media";
 import { latestCompactionIndex } from "../lib/compaction";
 import { expandOnAttention } from "../lib/float-attention";
 import { forkPoints } from "../lib/fork";
@@ -514,7 +514,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     setChatView({ id: agent.conversationId, key: sameChat ? chatView.key : chatView.key + 1 });
   }
   // A layout effect, so the old chat's files are freed before the new chat's tiles fetch theirs.
-  React.useLayoutEffect(() => freeFetchedMediaUrls, [chatView.key]);
+  React.useLayoutEffect(() => freeChatMediaUrls, [chatView.key]);
   // Any conversation still streaming or waiting its turn keeps the user's
   // notification pending; it fires once they have all settled.
   useCompletionNotification(

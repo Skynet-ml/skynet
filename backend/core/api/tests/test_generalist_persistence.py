@@ -20,13 +20,13 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import create_engine
@@ -47,7 +47,7 @@ from ...storage.models import (
     ChatMediaModel,
     UserModel,
 )
-from ...storage.usage import StorageUsage, compute_user_storage
+from ...storage.usage import UNSENT_MEDIA_RETENTION, StorageUsage, compute_user_storage
 from .. import auth as auth_mod
 from .. import model_catalog
 from ..routers import generalist_agent as agent_mod
@@ -1637,6 +1637,71 @@ def test_send_refuses_a_file_copy_over_the_storage_quota(
         assert session.query(AgentMessageModel).count() == 0
 
 
+def test_stale_unsent_media_is_a_404_and_stores_nothing(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send that names a stale unsent file fails before the turn is stored."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    with Session(engine) as session:
+        session.get(ChatMediaModel, "img-1").created_at = (
+            datetime.now(UTC) - UNSENT_MEDIA_RETENTION - timedelta(hours=1)
+        )
+        session.commit()
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def test_attach_failure_fails_the_send_instead_of_dropping_the_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file that goes away while the turn is stored fails the send; the turn is never silently lost."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+
+    def gone(*_args: Any) -> dict[str, str]:
+        """Fail as attach_media_to_chat does when a file is deleted under it."""
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    monkeypatch.setattr(agent_mod, "attach_media_to_chat", gone)
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def test_send_loads_bytes_only_for_the_images_the_model_sees(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Video and reference files keep their bytes in the database during the turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "vid-1", "video")
+    read: list[list[str]] = []
+    real = agent_mod.load_media_data
+    monkeypatch.setattr(agent_mod, "load_media_data", lambda eng, ids: read.append(ids) or real(eng, ids))
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1", "vid-1"], vision=True)
+
+    assert resp.status_code == 200
+    assert read == [["img-1"]]
+    assert len(seen["images"]) == 1
+
+
 def test_split_media_sends_images_only_up_to_the_turn_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Images past the turn's image budget become named references."""
     monkeypatch.setattr(agent_mod, "MAX_MODEL_IMAGE_BYTES", 5)
@@ -1647,7 +1712,7 @@ def test_split_media_sends_images_only_up_to_the_turn_budget(monkeypatch: pytest
 
     images, references = agent_mod._split_media(rows, sees_images=True)
 
-    assert len(images) == 1
+    assert [row.id for row in images] == ["img-1"]
     assert [row.id for row in references] == ["img-2"]
 
 

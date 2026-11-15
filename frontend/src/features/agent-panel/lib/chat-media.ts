@@ -54,12 +54,19 @@ export async function deleteChatMedia(id: string): Promise<void> {
 // from an earlier page load (a restored setup chat), so it is dead.
 const liveUrls = new Set<string>();
 const fetched = new Map<string, Promise<string>>();
+// Local URLs of sent files. The sent turn plays from them until the panel shows another chat.
+const sentUrls = new Set<string>();
 
 /** Make an object URL for a local file and track it as live. */
 export function localMediaUrl(file: Blob): string {
   const url = URL.createObjectURL(file);
   liveUrls.add(url);
   return url;
+}
+
+/** Keep the local URLs of sent files until the panel shows another chat. */
+export function markMediaSent(urls: readonly string[]): void {
+  for (const url of urls) if (liveUrls.has(url)) sentUrls.add(url);
 }
 
 /** Free an object URL from ``localMediaUrl``. */
@@ -87,11 +94,14 @@ export function resolveChatMediaUrl(media: MediaAttachment): Promise<string> {
 }
 
 /**
- * Free the object URLs of every stored file fetched for display. The panel calls it when it
- * shows another chat, so the cache never holds more than the files of one chat.
+ * Free the object URLs of the files a chat shows: the stored files fetched for display and
+ * the local URLs of sent files. The panel calls it when it shows another chat, so these URLs
+ * never outlive one chat. A chat shown again fetches its files by id.
  */
-export function freeFetchedMediaUrls(): void {
+export function freeChatMediaUrls(): void {
   // A fetch still in flight frees its URL when it lands.
   for (const pending of fetched.values()) pending.then(freeMediaUrl, () => {});
   fetched.clear();
+  for (const url of sentUrls) freeMediaUrl(url);
+  sentUrls.clear();
 }

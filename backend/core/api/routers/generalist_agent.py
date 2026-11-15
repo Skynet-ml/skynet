@@ -82,6 +82,7 @@ from .chat_media import (
     MAX_MEDIA_PER_MESSAGE,
     MAX_MODEL_IMAGE_BYTES,
     attach_media_to_chat,
+    load_media_data,
     load_owned_media,
     media_copy_bytes,
 )
@@ -1160,7 +1161,7 @@ def _sees_images(model_config: ModelConfig) -> bool:
     return bool(entry and entry.supports_vision)
 
 
-def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[str], list[ChatMediaModel]]:
+def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[ChatMediaModel], list[ChatMediaModel]]:
     """Split a message's media into model image input and reference-only files.
 
     Args:
@@ -1168,20 +1169,39 @@ def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[s
         sees_images: Whether the turn's model accepts image input.
 
     Returns:
-        ``(image_data_uris, references)``: the images the model sees, and the
-        files it only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in
-        total are references.
+        ``(images, references)``: the images the model sees, and the files it
+        only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in total are
+        references.
     """
-    images: list[str] = []
+    images: list[ChatMediaModel] = []
     references: list[ChatMediaModel] = []
     image_bytes = 0
     for row in media:
         if sees_images and row.kind == "image" and image_bytes + row.byte_size <= MAX_MODEL_IMAGE_BYTES:
             image_bytes += row.byte_size
-            images.append(f"data:{row.mime_type};base64,{base64.b64encode(row.data).decode('ascii')}")
+            images.append(row)
         else:
             references.append(row)
     return images, references
+
+
+def _image_data_uris(engine: Any, images: list[ChatMediaModel]) -> list[str]:
+    """Read the bytes of the images the model sees, as data URIs.
+
+    Args:
+        engine: The SQLAlchemy engine.
+        images: The image rows from ``_split_media``, in order.
+
+    Returns:
+        One ``data:`` URI for each image that is still stored, in order.
+    """
+    data = load_media_data(engine, [row.id for row in images])
+    # A file deleted after the rows loaded drops out instead of failing the turn.
+    return [
+        f"data:{row.mime_type};base64,{base64.b64encode(data[row.id]).decode('ascii')}"
+        for row in images
+        if row.id in data
+    ]
 
 
 def _with_media_references(user_message: str, references: list[ChatMediaModel]) -> str:
@@ -1683,7 +1703,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     media=media,
                     replaced=req.edit_user_text is not None or req.regenerate,
                 )
-            except DomainError:
+            except (DomainError, HTTPException):
                 raise
             except Exception:
                 logger.exception("Failed to persist user turn")
@@ -1702,7 +1722,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             if req.media_ids
             else []
         )
-        images, media_references = _split_media(media, await asyncio.to_thread(_sees_images, model_config))
+        image_rows, media_references = _split_media(media, await asyncio.to_thread(_sees_images, model_config))
+        images = await asyncio.to_thread(_image_data_uris, engine, image_rows) if image_rows else []
         agent_message = _with_media_references(req.user_message, media_references)
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and

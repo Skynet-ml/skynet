@@ -45,7 +45,7 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
 const { createRoot } = await import("react-dom/client");
 const { ToastContainer, toast } = await import("react-toastify");
 const { useChatMedia } = await import("./use-chat-media");
-const { MAX_MEDIA_PER_MESSAGE } = await import("../lib/chat-media");
+const { MAX_MEDIA_PER_MESSAGE, freeChatMediaUrls } = await import("../lib/chat-media");
 
 const errors: unknown[] = [];
 toast.error = ((content: unknown) => {
@@ -110,5 +110,34 @@ void test("Undo at the file limit shows the limit error and adds no extra tile",
   assert.equal(errors.length, 1);
   assert.match(String(errors[0]), /10/);
   assert.deepEqual(deleted, [removed.id]);
+  await React.act(async () => root.unmount());
+});
+
+void test("a sent file's local URL is freed on the next chat switch", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+  const draft = () => latest!;
+
+  await React.act(async () => draft().addFiles([image(1)]));
+  await flush();
+  const sent = draft().ready()!.map((m) => m.url);
+  await React.act(async () => draft().clear());
+  assert.equal(draft().tiles.length, 0);
+  assert.deepEqual(revoked, []);
+
+  freeChatMediaUrls();
+  assert.deepEqual(revoked, sent);
+  URL.revokeObjectURL = revoke;
   await React.act(async () => root.unmount());
 });

@@ -16,6 +16,7 @@ import {
   deleteChatMedia,
   freeMediaUrl,
   localMediaUrl,
+  markMediaSent,
   uploadChatMedia,
 } from "../lib/chat-media";
 
@@ -38,7 +39,7 @@ export interface ChatMediaDraft {
   remove: (localId: string) => void;
   /** The files to send, by stored id; null while an upload still runs. */
   ready: () => MediaAttachment[] | null;
-  /** Empty the draft after a send. The sent files stay stored and their URLs stay live. */
+  /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
   clear: () => void;
 }
 
@@ -182,7 +183,10 @@ export function useChatMedia(): ChatMediaDraft {
     return current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
   }, []);
 
-  const clear = React.useCallback(() => update(() => []), [update]);
+  const clear = React.useCallback(() => {
+    markMediaSent(itemsRef.current.map((m) => m.url));
+    update(() => []);
+  }, [update]);
 
   const tiles = React.useMemo(
     () => items.map((m) => ({ id: m.localId, name: m.name, kind: m.kind, url: m.url })),
