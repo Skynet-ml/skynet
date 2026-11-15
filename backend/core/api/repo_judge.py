@@ -68,6 +68,7 @@ from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..models import BlackboxRunRequest, JobCancelResponse
 from ..models.blackbox import BLACKBOX_MODULE_NAME, BlackboxNamedScore, BlackboxRunResponse
 from ..sandbox.bridge import default_provider
+from ..sandbox.errors import SandboxTransientError
 from ..service_gateway.optimization.blackbox.agent_runs import PHASE_FINAL
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds
 from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
@@ -118,7 +119,8 @@ ENDED_DETAIL = "This judge session ended. Call get_run with session_id for its f
 _END_MESSAGE = "The judge session ended and scored its best version once."
 _NO_FINAL_MESSAGE = "The budget ran out before the final score, so the session has no held-out score."
 # A retry can succeed after these failures, so a call does not store them as its result.
-_TRANSIENT_ERRORS = (RepoFetchError, InfrastructureInterruptionError)
+_TRANSIENT_ERRORS = (RepoFetchError, InfrastructureInterruptionError, SandboxTransientError)
+_API_CODE_CHARS = 64
 # Errors of these types keep their text in an answer; any other type shows only its name, and is logged.
 _KNOWN_ERRORS = (ServiceError, RuntimeError, ValueError, DomainError)
 # RepoFetchError also covers lasting failures, such as a lost connection, so only this many count as temporary.
@@ -677,6 +679,30 @@ def _failure(code: str, message: str) -> dict[str, Any]:
     }
 
 
+def _api_error(error: BaseException) -> BaseException | None:
+    """Find the Vercel SDK's ``SandboxApiError`` in an error's cause chain.
+
+    The class is matched by name and module, so the backend does not load the
+    Vercel SDK for this check.
+
+    Args:
+        error: The error of a score.
+
+    Returns:
+        The first API error with an integer HTTP status, raw or as a cause at any depth, or ``None``.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(getattr(current, "status_code", None), int) and any(
+            cls.__name__ == "SandboxApiError" and cls.__module__.startswith("vercel.") for cls in type(current).__mro__
+        ):
+            return current
+        current = current.__cause__
+    return None
+
+
 def _temporary(error: BaseException) -> bool:
     """Tell whether an error is a repository or sandbox failure that a retry can pass.
 
@@ -684,9 +710,37 @@ def _temporary(error: BaseException) -> bool:
         error: The error of a score.
 
     Returns:
-        True for a transient error, raw or as the direct cause.
+        True for a transient error, raw or as the direct cause, and for a
+        sandbox API answer of 429 or 5xx anywhere in the cause chain.
     """
-    return isinstance(error, _TRANSIENT_ERRORS) or isinstance(error.__cause__, _TRANSIENT_ERRORS)
+    if isinstance(error, _TRANSIENT_ERRORS) or isinstance(error.__cause__, _TRANSIENT_ERRORS):
+        return True
+    api = _api_error(error)
+    return api is not None and (api.status_code == 429 or api.status_code >= 500)  # type: ignore[attr-defined]
+
+
+def _log_api_failure(session_id: str, error: BaseException, *, temporary: bool) -> None:
+    """Log the HTTP status and provider code when a sandbox API error stopped a call.
+
+    The provider's message can quote the response body, so it stays out of
+    this line; the sandbox command log keeps a scrubbed, capped copy.
+
+    Args:
+        session_id: The judge session.
+        error: The error of the call.
+        temporary: Whether the call stored a temporary failure, not a lasting one.
+    """
+    api = _api_error(error)
+    if api is None:
+        return
+    code = getattr(api, "code", None)
+    logger.warning(
+        "A call of judge session %s stored a %s failure: sandbox API status %s, code %s",
+        session_id,
+        "temporary" if temporary else "lasting",
+        api.status_code,  # type: ignore[attr-defined]
+        str(code)[:_API_CODE_CHARS] if code else "none",
+    )
 
 
 def _reason(error: Exception) -> str:
@@ -940,8 +994,9 @@ def judge_call(
                 )
             except Exception as exc:
                 failures = int(claim.kept.get("temporary_failures") or 0) + 1
-                if _temporary(exc) and failures < _TEMPORARY_FAILURE_LIMIT:
-                    transient = True
+                transient = _temporary(exc) and failures < _TEMPORARY_FAILURE_LIMIT
+                _log_api_failure(session_id, exc, temporary=transient)
+                if transient:
                     # No judge_error, so the next claim runs the call again instead of replaying it.
                     document = store.finish(
                         identity,

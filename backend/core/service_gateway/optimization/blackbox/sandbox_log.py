@@ -42,6 +42,8 @@ stream_logger.setLevel(logging.DEBUG)
 
 _TAIL_LINES = 40
 _LABEL_CHARS = 120
+_ERROR_CHARS = 200
+_ERROR_CODE_CHARS = 64
 # Shorter values (ports, flags, "1") are not secrets, and scrubbing them would mangle ordinary text.
 _SECRET_MIN_CHARS = 8
 _CONTROL = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b-\x1f\x7f]")
@@ -366,7 +368,32 @@ class SandboxOutputLog:
                 self._line(self._pending)
                 self._pending = ""
             self._groups.flush()
-        self._summary(logging.WARNING, f"raised {type(error).__name__}: {self.label}")
+        self._summary(logging.WARNING, f"raised {type(error).__name__}{self._api_detail(error)}: {self.label}")
+
+    def _api_detail(self, error: BaseException) -> str:
+        """Describe the HTTP answer behind a provider API error, such as Vercel's ``SandboxApiError``.
+
+        Only errors with an integer ``status_code`` get a detail. Their text is
+        the provider's message, which can quote the response body, so it is
+        scrubbed, put on one line and capped.
+
+        Args:
+            error: The exception leaving ``run``.
+
+        Returns:
+            `` (status …, code …, message …)``, or an empty string for any other error.
+        """
+        status = getattr(error, "status_code", None)
+        if not isinstance(status, int) or isinstance(status, bool):
+            return ""
+        parts = [f"status {status}"]
+        code = getattr(error, "code", None)
+        if isinstance(code, str) and code.strip():
+            parts.append(f"code {self.scrub.text(code)[:_ERROR_CODE_CHARS]}")
+        message = " ".join(self.scrub.text(str(error)).split())
+        if message:
+            parts.append(f"message {message[:_ERROR_CHARS]}{'…' if len(message) > _ERROR_CHARS else ''}")
+        return f" ({', '.join(parts)})"
 
     def _summary(self, level: int, headline: str) -> None:
         """Log one record with the headline and the last stderr lines.

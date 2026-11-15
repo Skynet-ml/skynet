@@ -9,6 +9,8 @@ checks the feedback of a step and what the submit hands to the run path.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -1136,3 +1138,158 @@ def test_judge_errors_carry_the_code_and_the_session(judge: Any) -> None:
     assert (body["status"], body["retry_after_seconds"]) == ("in_progress", 5)
     record["answer"] = DomainError("budget.pending", status=409)
     assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+
+
+class _SlowJudge:
+    """Emulate a judge call that blocks until released and stores its outcome, like the real claim.
+
+    While the first call runs, another call gets ``JudgePendingError``; after
+    it ends, every call replays the stored outcome. So ``scores`` counts the
+    paid scores.
+    """
+
+    def __init__(self, outcome: Any) -> None:
+        """Prepare one score.
+
+        Args:
+            outcome: The answer to store, or the error to store and raise.
+        """
+        self.outcome = outcome
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.done = threading.Event()
+        self.scores = 0
+        self._lock = threading.Lock()
+        self._state = "free"
+
+    def __call__(self, job_store: Any, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Score once, or answer as the stored or running claim does.
+
+        Args:
+            job_store: The store.
+            session_id: The session.
+            **kwargs: The candidate and the account.
+
+        Returns:
+            The stored answer.
+
+        Raises:
+            JudgePendingError: While the first call still scores.
+            Exception: The stored error.
+        """
+        with self._lock:
+            state, self._state = self._state, "running" if self._state == "free" else self._state
+        if state == "running":
+            raise remote_mcp_repo.JudgePendingError("Another call scores this candidate.")
+        if state == "free":
+            self.scores += 1
+            self.started.set()
+            self.release.wait(10)
+            with self._lock:
+                self._state = "stored"
+            self.done.set()
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return {**self.outcome, "session_id": session_id}
+
+
+def _wait_for_thread(name: str) -> None:
+    """Wait until the background judge thread with this name ends.
+
+    Args:
+        name: The thread name.
+    """
+    for thread in threading.enumerate():
+        if thread.name == name:
+            thread.join(10)
+
+
+def test_a_slow_first_call_answers_in_progress_in_time_and_a_retry_does_not_score_twice(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answer in_progress at the bound while the session opens and the score runs, then replay the one score."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    opened = threading.Event()
+    fake_open = remote_mcp_repo.open_session
+
+    def slow_open(*args: Any, **kwargs: Any) -> str:
+        """Open the session only after the test releases it.
+
+        Args:
+            *args: The open arguments.
+            **kwargs: The open keyword arguments.
+
+        Returns:
+            The session id.
+        """
+        opened.wait(10)
+        return fake_open(*args, **kwargs)
+
+    monkeypatch.setattr(remote_mcp_repo, "open_session", slow_open)
+    started = time.monotonic()
+    first = _payload(_judge(client, draft_id))
+    assert time.monotonic() - started < 5
+    assert first["status"] == "in_progress"
+    assert first["retry_after_seconds"] == 5
+    assert first["detail"].endswith("Call repo_judge_score again with the same arguments.")
+    opened.set()
+    assert slow.started.wait(10)
+    during = _payload(_judge(client, draft_id))
+    assert during["status"] == "in_progress"
+    assert during["detail"].endswith("Call repo_judge_score again with the same arguments.")
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "score": 0.75, "session_id": "session-1"}
+    assert slow.scores == 1
+    assert len(record["opens"]) == 1
+
+
+def test_a_refusal_after_the_bound_is_stored_and_the_retry_reports_it(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A judge error that comes after the in_progress answer reaches the client on its retry, with the session."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge(remote_mcp_repo.JudgeError("judge.score_failed", "The metric failed."))
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert error == {"code": "judge.score_failed", "detail": "The metric failed.", "session_id": "session-1"}
+    assert slow.scores == 1
+
+
+def test_an_unexpected_error_after_the_bound_is_logged_by_type_only(
+    judge: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log an error that no client sees, without its text."""
+    caplog.set_level("ERROR", logger=remote_mcp_repo.logger.name)
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge(KeyError("secret text"))
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    assert "repo_judge_score failed after its answer with KeyError" in caplog.text
+    assert "secret text" not in caplog.text
+
+
+def test_a_call_that_finishes_in_time_keeps_its_answer(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A score inside the bound answers as before: the score, or the refusal as a tool error."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 5)
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "session_id": "session-1", "score": 0.5}
+    record["answer"] = remote_mcp_repo.JudgeError("judge.candidate_refused", "It changes optimize.toml.")
+    assert json.loads(_error_text(_judge(client, draft_id)))["code"] == "judge.candidate_refused"

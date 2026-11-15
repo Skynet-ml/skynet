@@ -21,9 +21,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
+from vercel.sandbox import SandboxApiError
 
 from ...billing.budgets import BudgetFencedError, BudgetInsufficientError, BudgetService
 from ...billing.runtime import UsagePendingError
@@ -31,6 +33,7 @@ from ...billing.signals import BudgetReached
 from ...connectors.github_repo import RepoFetchError, RepoRateLimitError
 from ...exceptions import InfrastructureInterruptionError, ServiceError
 from ...models.blackbox import BlackboxNamedScore
+from ...sandbox.errors import SandboxTransientError
 from ...service_gateway.optimization.blackbox.service import FinalRun
 from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
@@ -759,6 +762,106 @@ def test_a_repeated_temporary_failure_of_a_call_is_stored_at_the_limit(store: SQ
         _call(store, session_id)
     assert again.value.code == "judge.score_failed"
     assert len(boxes["paid"]) == repo_judge._TEMPORARY_FAILURE_LIMIT
+
+
+def _api_error(status: int, code: str | None = None) -> SandboxApiError:
+    """Build the error the Vercel SDK raises for an HTTP error answer.
+
+    Args:
+        status: The HTTP status.
+        code: The provider's error code, or none.
+
+    Returns:
+        The SDK error.
+    """
+    data = {"error": {"code": code}} if code else None
+    return SandboxApiError(httpx.Response(status), f"HTTP {status}: private provider text", data=data)
+
+
+def _caused(error: BaseException, *wrappers: Exception) -> Exception:
+    """Chain ``error`` as the cause under each wrapper, the outermost last.
+
+    Args:
+        error: The innermost error.
+        *wrappers: The errors that wrap it, innermost first.
+
+    Returns:
+        The outermost error.
+    """
+    for wrapper in wrappers:
+        wrapper.__cause__ = error
+        error = wrapper
+    return error  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: _api_error(503),
+        lambda: _api_error(429, "rate_limited"),
+        lambda: _caused(_api_error(502), ServiceError("scorer failed")),
+        lambda: _caused(_api_error(500), RuntimeError("box failed"), ServiceError("scorer failed")),
+        lambda: SandboxTransientError("rate limit"),
+    ],
+    ids=["503", "429", "502-as-cause", "500-deep-in-the-chain", "sandbox-transient"],
+)
+def test_a_temporary_sandbox_api_error_answers_in_progress_and_a_retry_scores(
+    store: SQLiteJobStore, boxes: Any, failure: Any
+) -> None:
+    """Treat a rate limit or a server error of the sandbox API as temporary, raw or anywhere in the cause chain."""
+    session_id = _session(store, _cases(3))
+    boxes["raise"] = failure()
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id)
+    assert _call(store, session_id)["status"] == "scored"
+    assert len(boxes["paid"]) == 2
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_a_client_error_of_the_sandbox_api_is_stored_at_once(store: SQLiteJobStore, boxes: Any, status: int) -> None:
+    """Store a 4xx answer other than 429 as a lasting failure, and replay it with no new box."""
+    session_id = _session(store, _cases(3))
+    boxes["raise"] = _caused(_api_error(status), ServiceError("scorer failed"))
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert failed.value.code == "judge.score_failed"
+    with pytest.raises(repo_judge.JudgeError):
+        _call(store, session_id)
+    assert len(boxes["paid"]) == 1
+
+
+def test_a_repeated_sandbox_server_error_is_stored_at_the_limit(store: SQLiteJobStore, boxes: Any) -> None:
+    """Stop retrying a 5xx answer at the temporary failure limit."""
+    session_id = _session(store, _cases(3))
+    for _ in range(repo_judge._TEMPORARY_FAILURE_LIMIT - 1):
+        boxes["raise"] = _api_error(503)
+        with pytest.raises(repo_judge.JudgePendingError):
+            _call(store, session_id)
+    boxes["raise"] = _api_error(503)
+    with pytest.raises(repo_judge.JudgeError) as failed:
+        _call(store, session_id)
+    assert failed.value.code == "judge.score_failed"
+    assert len(boxes["paid"]) == repo_judge._TEMPORARY_FAILURE_LIMIT
+
+
+def test_a_sandbox_api_failure_logs_the_session_status_and_code(
+    store: SQLiteJobStore, boxes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the session, HTTP status and provider code of a stored API failure, and never the provider text."""
+    caplog.set_level("WARNING", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(3))
+    boxes["raise"] = _caused(_api_error(429, "rate_limited"), ServiceError("scorer failed"))
+    with pytest.raises(repo_judge.JudgePendingError):
+        _call(store, session_id)
+    boxes["raise"] = _api_error(400, "bad_request")
+    with pytest.raises(repo_judge.JudgeError):
+        _call(store, session_id)
+    lines = [r.getMessage() for r in caplog.records if "sandbox API" in r.getMessage()]
+    assert lines == [
+        f"A call of judge session {session_id} stored a temporary failure: sandbox API status 429, code rate_limited",
+        f"A call of judge session {session_id} stored a lasting failure: sandbox API status 400, code bad_request",
+    ]
+    assert "private provider text" not in caplog.text
 
 
 def _final_rows(job_store: SQLiteJobStore, session_id: str) -> int:

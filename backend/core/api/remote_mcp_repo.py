@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
+import traceback
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Thread
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -100,8 +104,13 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
 _PENDING_RETRY_SECONDS = 5
+# A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
+# in_progress at this bound while the score continues in the background.
+_JUDGE_ANSWER_SECONDS = 25
 _TREE_SAMPLE = 60
 _SCORER_NAMES = ("score", "metric")
+
+logger = logging.getLogger(__name__)
 
 TokenSource = Literal["managed", "byok", "subscription"]
 StepCheck = Callable[[dict[str, Any], str], tuple[list[str], list[str], dict[str, Any]]]
@@ -1057,6 +1066,23 @@ def judge_draft(
         raise
 
 
+def _log_late_error(outcome: Future[dict[str, Any]]) -> None:
+    """Log an unexpected error of a judge call that ended after the tool answered in_progress.
+
+    A tool error is a refusal that the retry gets again, so it is not logged.
+    Any other error's text can quote payload content, so the log holds only
+    its type and the code frames.
+
+    Args:
+        outcome: The finished background work.
+    """
+    error = outcome.exception()
+    if error is None or isinstance(error, ToolError):
+        return
+    frames = "".join(traceback.format_tb(error.__traceback__))
+    logger.error("repo_judge_score failed after its answer with %s\n%s", type(error).__name__, frames)
+
+
 def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, job_store: Any) -> None:
     """Add the repository draft tools to the remote MCP server.
 
@@ -1556,7 +1582,9 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         reads optimize.toml at the base commit and refuses a version that
         changes it or a protected path. The answer has the score, the named
         scores and the feedback on the search cases only. A retry with the
-        same arguments does not pay twice. Only the budget or stop_run with
+        same arguments does not pay twice. An answer with status in_progress
+        means: wait retry_after_seconds, then call again with the same
+        arguments; a long score continues meanwhile. Only the budget or stop_run with
         session_id ends the session; the end scores the best version once on
         the held-out cases. Call repo_draft_review first and show the user its
         price. Send confirm=true only after the user agreed.
@@ -1570,6 +1598,17 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         user = _user(SCOPE_WRITE)
         with Session(job_store.engine) as session:
             spec = dict(_load_draft(session, draft_id, user.username).spec or {})
+
+        def run(outcome: Future[dict[str, Any]]) -> None:
+            """Do the tool body in the background and hand its answer or error to ``outcome``.
+
+            Args:
+                outcome: Gets the answer or the error.
+            """
+            try:
+                outcome.set_result(guarded(work))
+            except BaseException as error:
+                outcome.set_exception(error)
 
         def work() -> dict[str, Any]:
             """Score the candidate and turn the judge's refusals into tool answers.
@@ -1605,4 +1644,16 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                     else "Other usage on this account must settle first. Call repo_judge_score again with the same arguments.",
                 }
 
-        return guarded(work)
+        # The work keeps going after the answer and stores its outcome as the call's evidence, so a
+        # retry replays it or, while it runs, answers in_progress. No retry starts a second score.
+        outcome: Future[dict[str, Any]] = Future()
+        Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
+        wait([outcome], timeout=_JUDGE_ANSWER_SECONDS)
+        if outcome.done():
+            return outcome.result()
+        outcome.add_done_callback(_log_late_error)
+        return {
+            "status": "in_progress",
+            "retry_after_seconds": _PENDING_RETRY_SECONDS,
+            "detail": "The candidate is still being scored. Call repo_judge_score again with the same arguments.",
+        }
