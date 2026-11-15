@@ -591,13 +591,14 @@ export function AgenticIde({
         </div>
       )}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        {/* Full view keeps the same chat mounted, floating at the bottom center. */}
+        {/* Full view keeps the same chat mounted, floating at the bottom center. It does not
+            clip: the composer's slash and @file menus open above a minimized chat. */}
         <section
           aria-label={msg("submit.agentic_ide.chat_tab")}
           className={cn(
             "relative min-w-0",
             floating
-              ? "absolute inset-x-0 bottom-4 z-30 mx-auto flex w-[min(680px,calc(100%-2rem))] flex-col overflow-clip rounded-2xl border border-border bg-background shadow-[0_16px_48px_-12px_rgba(19,19,19,0.35)]"
+              ? "absolute inset-x-0 bottom-4 z-30 mx-auto flex w-[min(680px,calc(100%-2rem))] flex-col overflow-visible rounded-2xl border border-border bg-background shadow-[0_16px_48px_-12px_rgba(19,19,19,0.35)]"
               : tabs
                 ? cn("flex-1", tab !== "chat" && "hidden")
                 : "shrink-0",

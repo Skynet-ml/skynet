@@ -67,7 +67,6 @@ function Row({ c, onOpen, onRemove, onEdit }: { c: LineComment } & Omit<Props, "
         <button
           type="button"
           onClick={() => onOpen(c)}
-          aria-label={goTo}
           dir="ltr"
           className="flex w-32 shrink-0 cursor-pointer items-center gap-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"
         >

@@ -99,3 +99,11 @@ void test("Enter saves the edit once, also with its blur", async () => {
   assert.equal(view.container.querySelector("input"), null, "the edit closes");
   await view.done();
 });
+
+void test("the open button's name is the visible file and line", async () => {
+  const view = await mountEditor();
+  const open = view.container.querySelector("li button")!;
+  assert.equal(open.getAttribute("aria-label"), null, "no label hides the visible text");
+  assert.equal(open.textContent, "a.py:2");
+  await view.done();
+});
