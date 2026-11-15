@@ -10,7 +10,9 @@ import { cn } from "@/shared/lib/utils";
 import { MessageMarkdown } from "@/shared/ui/agent/message-markdown";
 import {
   ArrowSquareOut,
+  ArrowsIn,
   ArrowsInLineVertical,
+  ArrowsOut,
   BracketsCurly,
   CaretDown,
   CaretLeft,
@@ -87,8 +89,9 @@ const isNewTab = (tab: string) => tab.startsWith("new:");
 /**
  * A request from the chat to show a file's diff; a new object shows it again.
  * `paths`, when given, are the files of one turn, marked in the tree.
+ * `comment`, when given, is the id of a comment to scroll to in the diff.
  */
-type PaneRequest = { path: string; paths?: readonly string[] };
+type PaneRequest = { path: string; paths?: readonly string[]; comment?: string };
 
 /** The repository's page on its host, for the Open on host button. */
 export type RepoHostLink = { provider: "github" | "gitlab" | "bitbucket"; url: string };
@@ -110,7 +113,16 @@ type Props = {
   onEditComment?: (id: string, text: string) => void;
   onHide: () => void;
   host?: RepoHostLink | null;
+  /** The pane takes the full width; absent where no full view exists. */
+  full?: boolean;
+  onFull?: () => void;
 };
+
+// A comment opened from the chat rings once, so the eye finds it.
+const COMMENT_FLASH: Keyframe[] = [
+  { boxShadow: "0 0 0 2px var(--primary)" },
+  { boxShadow: "0 0 0 2px transparent" },
+];
 
 const iconButton =
   "flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground";
@@ -405,6 +417,8 @@ export function ReviewPane({
   onEditComment,
   onHide,
   host,
+  full,
+  onFull,
 }: Props) {
   const changed = React.useMemo(() => files.filter((f) => statusOf(f) !== "unchanged"), [files]);
   const tree = React.useMemo(() => buildTree(files), [files]);
@@ -519,7 +533,7 @@ export function ReviewPane({
   React.useEffect(() => {
     if (liveTabs.length !== tabs.length) keepTabs(liveTabs);
   });
-  const showDiff = (path: string) => {
+  const showDiff = (path: string, comment?: string) => {
     setActive("changes");
     setCurrent(path);
     setCollapsed((prev) => {
@@ -533,18 +547,32 @@ export function ReviewPane({
       const el = sections.current.get(path);
       const box = scroller.current;
       if (el && box) box.scrollTo({ top: el.offsetTop, behavior: "auto" });
+      if (comment) findComment(comment);
     });
   };
-  const go = (path: string, as: "diff" | "tab", asPreview = false) => {
+  // A folded file opens over a few frames, so look for the comment until it mounts.
+  const findComment = (id: string, tries = 20) => {
+    const el = [
+      ...(scroller.current?.querySelectorAll<HTMLElement>("[data-comment-id]") ?? []),
+    ].find((c) => c.dataset.commentId === id);
+    if (!el) {
+      if (tries > 0) requestAnimationFrame(() => findComment(id, tries - 1));
+      return;
+    }
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+    if (!still) el.animate?.(COMMENT_FLASH, { duration: 1400, easing: "ease-out" });
+  };
+  const go = (path: string, as: "diff" | "tab", asPreview = false, comment?: string) => {
     const file = byPath.get(path);
     if (as === "tab" || !file || statusOf(file) === "unchanged") openTab(path, asPreview);
-    else showDiff(path);
+    else showDiff(path, comment);
   };
 
   React.useEffect(() => {
     if (!request) return;
     setTouched(new Set(request.paths ?? []));
-    go(request.path, "diff");
+    go(request.path, "diff", false, request.comment);
     // Only a new request moves the pane.
   }, [request]);
 
@@ -827,6 +855,18 @@ export function ReviewPane({
             <Plus className="size-4" />
           </ToolButton>
         </div>
+        {onFull && (
+          <ToolButton
+            label={
+              full
+                ? msg("submit.agentic_ide.review.exit_full_view")
+                : msg("submit.agentic_ide.review.enter_full_view")
+            }
+            onClick={onFull}
+          >
+            {full ? <ArrowsIn className="size-4" /> : <ArrowsOut className="size-4" />}
+          </ToolButton>
+        )}
       </div>
 
       {/* Toolbar for the active tab. */}

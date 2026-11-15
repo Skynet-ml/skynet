@@ -169,6 +169,46 @@ void test("the pane opens by itself on the draft's first change, on that change"
   await ide.unmount();
 });
 
+void test("Ctrl+Alt+B toggles the pane, and AltGr+B types its character", async () => {
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={null}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  const pane = ide.container.querySelector<HTMLElement>('section[aria-label="Changes"]')!;
+  const press = async (altGraph: boolean) => {
+    const e = new dom.window.KeyboardEvent("keydown", {
+      code: "KeyB",
+      key: "b",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(e, "getModifierState", {
+      value: (key: string) => altGraph && key === "AltGraph",
+    });
+    await React.act(async () => {
+      dom.window.dispatchEvent(e);
+    });
+    return e.defaultPrevented;
+  };
+  assert.equal(pane.hasAttribute("inert"), false, "the pane is open");
+
+  assert.equal(await press(true), false, "AltGr+B keeps its character");
+  assert.equal(pane.hasAttribute("inert"), false, "AltGr+B leaves the pane open");
+
+  assert.equal(await press(false), true);
+  assert.equal(pane.hasAttribute("inert"), true, "Ctrl+Alt+B hides the pane");
+  assert.equal(await press(false), true);
+  assert.equal(pane.hasAttribute("inert"), false, "Ctrl+Alt+B shows the pane again");
+  await ide.unmount();
+});
+
 void test("an edit in a file tab writes the file's new text", async () => {
   const edits: Array<[string, string]> = [];
   const pane = await mount(<ReviewPane {...props({ onEdit: (p, t) => edits.push([p, t]) })} />);
@@ -336,6 +376,173 @@ void test("a focus request opens that file", async () => {
   assert.equal(panel.getAttribute("aria-labelledby"), tab.id);
   assert.equal(tab.querySelector("button"), null);
   assert.deepEqual(opened, ["README.md"]);
+  await pane.unmount();
+});
+
+// A comment opened from the chat waits for its fold to mount, over a few frames.
+const frames = () => React.act(() => new Promise<void>((done) => setTimeout(done, 100)));
+
+// A comment card shows its author, from the session.
+const Session = ({ children }: { children: React.ReactNode }) => (
+  <SessionProvider
+    session={{ user: { name: "Test User" }, expires: "2099-01-01" }}
+    refetchOnWindowFocus={false}
+  >
+    {children}
+  </SessionProvider>
+);
+
+async function scrolledTo(run: () => Promise<unknown>) {
+  const seen: string[] = [];
+  const proto = dom.window.HTMLElement.prototype;
+  const original = proto.scrollIntoView;
+  proto.scrollIntoView = function (this: HTMLElement) {
+    if (this.dataset.commentId) seen.push(this.dataset.commentId);
+  };
+  try {
+    await run();
+    await frames();
+  } finally {
+    proto.scrollIntoView = original;
+  }
+  return seen;
+}
+
+void test("a request with a comment scrolls the diff to that comment", async () => {
+  const comments = [
+    { id: "c-one", path: "src/a.py", line: 1, text: "First" },
+    { id: "c-two", path: "src/a.py", line: 2, text: "Second" },
+  ];
+  const base = props({ comments });
+  const pane = await mount(
+    <Session>
+      <ReviewPane {...base} />
+    </Session>,
+  );
+  const seen = await scrolledTo(() =>
+    pane.render(
+      <Session>
+        <ReviewPane {...base} request={{ path: "src/a.py", comment: "c-two" }} />
+      </Session>,
+    ),
+  );
+  assert.deepEqual(seen, ["c-two"]);
+  // A request without a comment scrolls to the file only.
+  const none = await scrolledTo(() =>
+    pane.render(
+      <Session>
+        <ReviewPane {...base} request={{ path: "src/a.py" }} />
+      </Session>,
+    ),
+  );
+  assert.deepEqual(none, []);
+  await pane.unmount();
+});
+
+void test("a queued comment opens the pane at its line", async () => {
+  let state: ReturnType<typeof useWizardStateOptional>;
+  function Probe() {
+    state = useWizardStateOptional();
+    return null;
+  }
+  const ide = await mount(
+    <Session>
+      <WizardStateProvider>
+        <AgenticIde
+          chat={<div />}
+          texts={{ "a.py": "x = 1\ny = 2\n" }}
+          repo={null}
+          busy={false}
+          onWrite={noop}
+        />
+        <Probe />
+      </WizardStateProvider>
+    </Session>,
+  );
+  await React.act(async () => state!.addLineComment({ path: "a.py", line: 2, text: "Rename y" }));
+  const id = lineCommentId(state!.lineComments[0]!);
+  const seen = await scrolledTo(() =>
+    React.act(async () => state!.viewChanges!("a.py", undefined, id)),
+  );
+  assert.deepEqual(seen, [id]);
+  await ide.unmount();
+});
+
+void test("Ctrl+Alt+B does nothing while the IDE is off screen", async () => {
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={null}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  const pane = ide.container.querySelector<HTMLElement>('section[aria-label="Changes"]')!;
+  // jsdom does not lay out, so the hidden step reports itself unseen here.
+  (ide.container.firstElementChild as HTMLElement).checkVisibility = () => false;
+  const e = new dom.window.KeyboardEvent("keydown", {
+    code: "KeyB",
+    key: "b",
+    ctrlKey: true,
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  await React.act(async () => {
+    dom.window.dispatchEvent(e);
+  });
+  assert.equal(e.defaultPrevented, false, "the key keeps its default");
+  assert.equal(pane.hasAttribute("inert"), false, "the pane stays open");
+  await ide.unmount();
+});
+
+void test("the chat floats only while the IDE docks it", async () => {
+  let state: ReturnType<typeof useWizardStateOptional>;
+  function Probe() {
+    state = useWizardStateOptional();
+    return null;
+  }
+  const ide = (chat: React.ReactNode) => (
+    <Session>
+      <WizardStateProvider>
+        <AgenticIde
+          chat={chat}
+          texts={{ "a.py": "x = 1\n" }}
+          repo={null}
+          busy={false}
+          onWrite={noop}
+        />
+        <Probe />
+      </WizardStateProvider>
+    </Session>
+  );
+  const view = await mount(ide(<div />));
+  await click(byLabel(view.container, "Enter full view")[0]!);
+  assert.ok(state!.chatFloat, "the full view floats the docked chat");
+
+  // The wizard left the step: it keeps the IDE mounted, and the chat docks elsewhere.
+  await view.render(ide(null));
+  assert.equal(state!.chatFloat, null, "another step shows the chat docked");
+
+  await view.render(ide(<div />));
+  assert.ok(state!.chatFloat, "back on the step, the full view floats the chat again");
+  await view.unmount();
+});
+
+void test("the full view button shows only with a handler, and names its state", async () => {
+  let presses = 0;
+  const pane = await mount(<ReviewPane {...props()} />);
+  assert.equal(byLabel(pane.container, "Enter full view").length, 0);
+
+  await pane.render(<ReviewPane {...props({ full: false, onFull: () => presses++ })} />);
+  await click(byLabel(pane.container, "Enter full view")[0]!);
+  assert.equal(presses, 1);
+
+  await pane.render(<ReviewPane {...props({ full: true, onFull: () => presses++ })} />);
+  assert.equal(byLabel(pane.container, "Enter full view").length, 0);
+  await click(byLabel(pane.container, "Exit full view")[0]!);
+  assert.equal(presses, 2);
   await pane.unmount();
 });
 

@@ -210,7 +210,10 @@ class OpenPageRequest(BaseModel):
     path: str | None = Field(
         default=None,
         max_length=200,
-        description="An in-app route such as /optimizations or /tagger?dataset=<id>, when no tab is given.",
+        description=(
+            "An in-app route such as /submit, /optimizations or /tagger?dataset=<id>. "
+            "A safe path wins over tab when both are given."
+        ),
     )
 
 
@@ -469,7 +472,7 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
         """Return a navigation instruction the chat panel follows.
 
         Args:
-            req: The tab, or an in-app path.
+            req: An in-app path, or the tab when no safe path is given.
             user: Authenticated caller.
 
         Returns:
@@ -480,11 +483,13 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
             DomainError: 409 when the tab is hidden in this app; 422 when
                 neither a tab nor a safe in-app path is given.
         """
+        # A model can send both fields; a stray tab beside /submit sent users
+        # to settings, so the more specific route wins.
+        if req.path and _SAFE_PATH.match(req.path):
+            return {"navigate": {"kind": "route", "path": req.path}}
         if req.tab:
             _reject_hidden(req.tab, user.username)
             return {"navigate": {"kind": "settings", "tab": req.tab}}
-        if req.path and _SAFE_PATH.match(req.path):
-            return {"navigate": {"kind": "route", "path": req.path}}
         raise DomainError("agent_settings.invalid_page", status=422)
 
     return router

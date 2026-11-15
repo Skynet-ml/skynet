@@ -307,6 +307,17 @@ def test_open_page_returns_navigation() -> None:
     assert client.post("/agent/open-page", json={"tab": "secret"}).status_code == 422
 
 
+def test_open_page_prefers_a_safe_path_over_the_tab() -> None:
+    """A model that sends a tab beside /submit opens /submit, not settings."""
+    client, _ = _client()
+    assert client.post("/agent/open-page", json={"tab": "wizard", "path": "/submit"}).json() == {
+        "navigate": {"kind": "route", "path": "/submit"}
+    }
+    assert client.post("/agent/open-page", json={"tab": "wizard", "path": "//evil.example"}).json() == {
+        "navigate": {"kind": "settings", "tab": "wizard"}
+    }
+
+
 def test_open_page_keeps_a_narrow_query_string() -> None:
     """A plain query string opens, an open-redirect shape does not (SKY-631)."""
     client, _ = _client()

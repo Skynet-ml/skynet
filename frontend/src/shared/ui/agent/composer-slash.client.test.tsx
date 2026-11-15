@@ -104,6 +104,7 @@ async function mount(
   draft: string,
   streaming: boolean,
   suggest?: React.ComponentProps<typeof Composer>["suggest"],
+  mentions?: readonly string[],
 ): Promise<Mounted> {
   const ran: string[] = [];
   const sent: string[] = [];
@@ -132,6 +133,7 @@ async function mount(
                 streaming={streaming}
                 midTurn={midTurn}
                 suggest={suggest}
+                mentions={mentions}
                 slash={{
                   commands: liveCommands,
                   run: (c, arg, fromMenu) => {
@@ -357,6 +359,51 @@ void test("a completed command shows as a token, and plain text shows no token",
   await composer.type("/usr/bin is a path");
   assert.equal(document.querySelector(".text-primary"), null);
   assert.doesNotMatch(composer.textarea.className, /text-transparent/);
+  await composer.unmount();
+});
+
+void test("an @word shows as a token only in a chat with file mentions", async () => {
+  // The side chat has no file mentions, so "@alice" stays plain text.
+  const plain = await mount("", false);
+  await plain.type("ask @alice");
+  assert.equal(document.querySelector(".text-primary"), null);
+  assert.doesNotMatch(plain.textarea.className, /text-transparent/);
+  // A slash token paints the draft, and the @word after it stays plain.
+  await plain.type("/name @alice");
+  assert.deepEqual(
+    [...document.querySelectorAll(".text-primary")].map((el) => el.textContent),
+    ["/name"],
+  );
+  await plain.unmount();
+
+  const files = await mount("", false, undefined, ["src/a.py"]);
+  await files.type("ask @src/a.py");
+  assert.deepEqual(
+    [...document.querySelectorAll(".text-primary")].map((el) => el.textContent),
+    ["", "@src/a.py"],
+  );
+  await files.unmount();
+});
+
+void test("the @file menu picks a file with Enter and with Tab", async () => {
+  const files = ["src/app.py", "src/lib/util.py", "README.md"];
+  const composer = await mount("", false, undefined, files);
+  await React.act(async () => composer.textarea.focus());
+  await composer.type("see @ut");
+  assert.equal(listbox()?.getAttribute("aria-label"), "Files");
+  assert.deepEqual(
+    [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+    ["util.pysrc/lib"],
+  );
+  await composer.press("Enter");
+  assert.equal(composer.textarea.value, "see @src/lib/util.py ");
+  assert.equal(listbox(), null, "the pick closes the menu");
+  assert.deepEqual(composer.sent, [], "Enter picks the file and does not send");
+
+  await composer.type("see @src/lib/util.py and @app");
+  await composer.press("Tab");
+  assert.equal(composer.textarea.value, "see @src/lib/util.py and @src/app.py ");
+  assert.deepEqual(composer.sent, []);
   await composer.unmount();
 });
 
