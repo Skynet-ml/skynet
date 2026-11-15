@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 
 const stubs: Record<string, string> = {
   "@/shared/lib/messages": "export const msg = (k) => k; export const formatMsg = (k) => k;",
@@ -8,7 +8,7 @@ const stubs: Record<string, string> = {
   "@/shared/lib/api":
     "export const announceWalletChange = () => { globalThis.streamTestWallet += 1; };" +
     "export const apiUrl = (path) => path;" +
-    "export const fetchWithAuthRetry = async () => new Response(globalThis.streamTestBody);",
+    "export const fetchWithAuthRetry = async (url, init) => globalThis.streamTestFetch ? globalThis.streamTestFetch(url, init) : new Response(globalThis.streamTestBody);",
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -25,7 +25,36 @@ registerHooks({
   },
 });
 
-const { streamGeneralistAgent } = await import("./stream.ts");
+const { MAX_RECONNECTS, reconnectDelayMs, streamGeneralistAgent } = await import("./stream.ts");
+
+type Fetch = (url: string, init: RequestInit) => Promise<Response>;
+const testGlobals = globalThis as { streamTestFetch?: Fetch; streamTestWallet?: number };
+
+/** Run `body` with fetch stubbed and timers mocked, ticking time until it settles. */
+async function withFetch(fetch: Fetch, body: () => Promise<void>): Promise<void> {
+  testGlobals.streamTestFetch = fetch;
+  testGlobals.streamTestWallet = 0;
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const run = body().finally(() => {
+    settled = true;
+  });
+  try {
+    while (!settled) {
+      await new Promise((resolve) => setImmediate(resolve));
+      mock.timers.tick(500);
+    }
+    await run;
+  } finally {
+    mock.timers.reset();
+    testGlobals.streamTestFetch = undefined;
+  }
+}
+
+/** An SSE response that sends one `done` event. */
+function doneResponse(): Response {
+  return new Response('event: done\ndata: {"assistant_message": "hi"}\n\n');
+}
 
 test("the balance refreshes at turn_billed, after done and before the title tail closes the stream", async () => {
   let push: (text: string) => void = () => {};
@@ -60,4 +89,239 @@ test("the balance refreshes at turn_billed, after done and before the title tail
   close();
   await finished;
   assert.equal(g.streamTestWallet, 2);
+});
+
+test("the reconnect wait doubles from half a second", () => {
+  assert.deepEqual([1, 2, 3, 4, 5].map(reconnectDelayMs), [500, 1000, 2000, 4000, 8000]);
+});
+
+/** Run `body` while the browser reports `onLine`. */
+async function withOnline(onLine: boolean, body: () => Promise<void>): Promise<void> {
+  const before = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: { onLine }, configurable: true });
+  try {
+    await body();
+  } finally {
+    if (before) Object.defineProperty(globalThis, "navigator", before);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+}
+
+test("a failed connection while offline reconnects with attempt n of max, then clears the notice", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  let done = false;
+  await withOnline(false, () =>
+    withFetch(
+      async () => {
+        calls += 1;
+        if (calls <= 2) throw new TypeError("Failed to fetch");
+        return doneResponse();
+      },
+      () =>
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {
+              done = true;
+            },
+            onError: () => assert.fail("no error expected"),
+          } as never,
+        ),
+    ),
+  );
+  assert.equal(calls, 3);
+  assert.deepEqual(progress, [
+    { attempt: 1, maxAttempts: MAX_RECONNECTS },
+    { attempt: 2, maxAttempts: MAX_RECONNECTS },
+    null,
+  ]);
+  assert.equal(done, true);
+});
+
+test("a gateway 503 reconnects, and the last failure shows the error", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  const errors: string[] = [];
+  await withFetch(
+    async () => {
+      calls += 1;
+      return new Response("Service Unavailable", { status: 503 });
+    },
+    () =>
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string) => errors.push(message),
+        } as never,
+      ),
+  );
+  assert.equal(calls, MAX_RECONNECTS + 1);
+  assert.equal(progress.length, MAX_RECONNECTS + 1);
+  assert.equal(progress.at(-1), null);
+  assert.equal(errors.length, 1);
+});
+
+test("a 502, a 504 or a backend error does not resend the turn", async () => {
+  for (const status of [500, 502, 504]) {
+    let calls = 0;
+    const progress: unknown[] = [];
+    await withFetch(
+      async () => {
+        calls += 1;
+        return new Response("{}", { status });
+      },
+      () =>
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {},
+            onError: () => {},
+          } as never,
+        ),
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(progress, []);
+  }
+});
+
+test("a failed connection while online does not resend the turn", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  const errors: string[] = [];
+  await withOnline(true, () =>
+    withFetch(
+      async () => {
+        calls += 1;
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => assert.fail("no done expected"),
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
+    ),
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(progress, []);
+  assert.equal(errors.length, 1);
+});
+
+test("a stop during the reconnect wait ends quietly and clears the notice", async () => {
+  const controller = new AbortController();
+  const progress: unknown[] = [];
+  const errors: string[] = [];
+  await withOnline(false, () =>
+    withFetch(
+      async () => {
+        controller.abort();
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent(
+          {} as never,
+          {
+            signal: controller.signal,
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {},
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
+    ),
+  );
+  assert.deepEqual(progress, [{ attempt: 1, maxAttempts: MAX_RECONNECTS }, null]);
+  assert.deepEqual(errors, []);
+});
+
+test("a Skynet 503 such as hosted_link.unreachable does not resend the turn", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  const errors: Array<[string, string | undefined]> = [];
+  await withFetch(
+    async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ detail: "Hosted is unreachable", code: "hosted_link.unreachable" }),
+        {
+          status: 503,
+        },
+      );
+    },
+    () =>
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string, code?: string) => errors.push([message, code]),
+        } as never,
+      ),
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(progress, []);
+  assert.deepEqual(errors, [["Hosted is unreachable", "hosted_link.unreachable"]]);
+});
+
+test("an edge 503, then a good answer, streams the turn with no error", async () => {
+  let calls = 0;
+  let done = false;
+  await withFetch(
+    async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("<html>Service Unavailable</html>", { status: 503 })
+        : doneResponse();
+    },
+    () =>
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onDone: () => {
+            done = true;
+          },
+          onError: () => assert.fail("no error expected"),
+        } as never,
+      ),
+  );
+  assert.equal(calls, 2);
+  assert.equal(done, true);
+});
+
+test("a connection that drops after the send while it was online does not resend the turn", async () => {
+  const nav = { onLine: true };
+  const before = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true });
+  let calls = 0;
+  const errors: string[] = [];
+  try {
+    await withFetch(
+      async () => {
+        calls += 1;
+        nav.onLine = false;
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: () => assert.fail("no reconnect expected"),
+            onDone: () => assert.fail("no done expected"),
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
+    );
+  } finally {
+    if (before) Object.defineProperty(globalThis, "navigator", before);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+  assert.equal(calls, 1);
+  assert.equal(errors.length, 1);
 });
