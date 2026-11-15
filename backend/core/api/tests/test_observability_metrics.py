@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -105,6 +106,139 @@ def test_model_reconciliation_uses_original_digest_and_bounded_cursor(monkeypatc
     sweeper._reconcile_sandbox_usage(object())
     sweeper._reconcile_sandbox_usage(object())
     assert observed == [(4, None), (4, "next")]
+
+
+def _paged_reconciler(pages: list[list[tuple[str, str, str | None]]]) -> Any:
+    """Build a fake reconciler class that returns one scripted page per sweep.
+
+    Args:
+        pages: For each tick, the (operation id, state, reason) results.
+
+    Returns:
+        A callable that accepts the reconciler arguments and returns the fake.
+    """
+    remaining = list(pages)
+
+    def sweep(*, limit: int, after_id: str | None) -> SimpleNamespace:
+        """Return the next scripted page.
+
+        Args:
+            limit: Unused page size.
+            after_id: Unused cursor.
+
+        Returns:
+            The next page with no continuation cursor.
+        """
+        results = [SimpleNamespace(operation_id=o, state=s, reason=r) for o, s, r in remaining.pop(0)]
+        return SimpleNamespace(results=results, next_cursor=None)
+
+    return lambda *args: SimpleNamespace(sweep=sweep)
+
+
+def _pending_lines(caplog: pytest.LogCaptureFixture, kind: str) -> list[str]:
+    """Return the captured INFO lines that report a pending operation of one kind.
+
+    Args:
+        caplog: Captured log records.
+        kind: Line prefix, for example "Vercel" or "Model".
+
+    Returns:
+        Formatted messages in emission order.
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO and record.getMessage().startswith(f"{kind} usage for operation ")
+    ]
+
+
+def test_vercel_pending_reason_logs_once_per_operation_and_reason(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Show why a Vercel hold stays pending without repeating the same line every tick.
+
+    Args:
+        monkeypatch: Test-owned dependency and settings replacements.
+        caplog: Captured log records.
+    """
+    monkeypatch.setattr(obs, "BudgetService", lambda **kwargs: object())
+    monkeypatch.setattr(obs, "OpenRouterUsageReconciler", _paged_reconciler([[]] * 4))
+    monkeypatch.setattr(obs, "VercelSessionUsageClient", lambda *args: object())
+    monkeypatch.setattr(
+        obs,
+        "VercelUsageReconciler",
+        _paged_reconciler(
+            [
+                [("op-1", "pending", "first reason"), ("op-2", "settled", None)],
+                [("op-1", "pending", "first reason")],
+                [("op-1", "pending", "second reason")],
+                [("op-1", "settled", None)],
+            ]
+        ),
+    )
+    monkeypatch.setattr(obs.settings, "vercel_token", SecretStr("token"))
+    monkeypatch.setattr(obs.settings, "vercel_team_id", "team")
+    caplog.set_level(logging.INFO, logger=obs.logger.name)
+    sweeper = obs.OrphanRecoverySweeper(_OrphanStore())
+
+    for _ in range(4):
+        sweeper._reconcile_sandbox_usage(object())
+
+    assert _pending_lines(caplog, "Vercel") == [
+        "Vercel usage for operation op-1 stays pending: first reason",
+        "Vercel usage for operation op-1 stays pending: second reason",
+    ]
+
+
+def test_model_pending_reason_logs_once_per_operation_and_reason(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Show why a model hold stays pending without repeating the same line every tick.
+
+    Args:
+        monkeypatch: Test-owned dependency and settings replacements.
+        caplog: Captured log records.
+    """
+    monkeypatch.setattr(obs, "BudgetService", lambda **kwargs: object())
+    monkeypatch.setattr(
+        obs,
+        "OpenRouterUsageReconciler",
+        _paged_reconciler(
+            [
+                [("op-1", "pending", "no generation yet"), ("op-2", "settled", None)],
+                [("op-1", "pending", "no generation yet")],
+                [("op-1", "pending", "key rotated")],
+            ]
+        ),
+    )
+    monkeypatch.setattr(obs.settings, "vercel_token", None)
+    caplog.set_level(logging.INFO, logger=obs.logger.name)
+    sweeper = obs.OrphanRecoverySweeper(_OrphanStore())
+
+    for _ in range(3):
+        sweeper._reconcile_sandbox_usage(object())
+
+    assert _pending_lines(caplog, "Model") == [
+        "Model usage for operation op-1 stays pending: no generation yet",
+        "Model usage for operation op-1 stays pending: key rotated",
+    ]
+
+
+def test_pending_reason_memory_stays_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the once-per-pair memory small when many holds never settle.
+
+    Args:
+        monkeypatch: Test-owned dependency and settings replacements.
+    """
+    many = [(f"op-{index}", "pending", "reason") for index in range(obs.PENDING_REASON_MEMORY_LIMIT + 50)]
+    monkeypatch.setattr(obs, "BudgetService", lambda **kwargs: object())
+    monkeypatch.setattr(obs, "OpenRouterUsageReconciler", _paged_reconciler([many]))
+    monkeypatch.setattr(obs.settings, "vercel_token", None)
+    sweeper = obs.OrphanRecoverySweeper(_OrphanStore())
+
+    sweeper._reconcile_sandbox_usage(object())
+
+    assert len(sweeper._logged_pending_reasons) == obs.PENDING_REASON_MEMORY_LIMIT
 
 
 def test_orphan_sweeper_swallows_recovery_exceptions() -> None:
