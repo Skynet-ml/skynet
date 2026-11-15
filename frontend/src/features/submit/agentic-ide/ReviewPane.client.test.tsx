@@ -169,6 +169,46 @@ void test("the pane opens by itself on the draft's first change, on that change"
   await ide.unmount();
 });
 
+void test("Ctrl+Alt+B toggles the pane, and AltGr+B types its character", async () => {
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={null}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  const pane = ide.container.querySelector<HTMLElement>('section[aria-label="Changes"]')!;
+  const press = async (altGraph: boolean) => {
+    const e = new dom.window.KeyboardEvent("keydown", {
+      code: "KeyB",
+      key: "b",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(e, "getModifierState", {
+      value: (key: string) => altGraph && key === "AltGraph",
+    });
+    await React.act(async () => {
+      dom.window.dispatchEvent(e);
+    });
+    return e.defaultPrevented;
+  };
+  assert.equal(pane.hasAttribute("inert"), false, "the pane is open");
+
+  assert.equal(await press(true), false, "AltGr+B keeps its character");
+  assert.equal(pane.hasAttribute("inert"), false, "AltGr+B leaves the pane open");
+
+  assert.equal(await press(false), true);
+  assert.equal(pane.hasAttribute("inert"), true, "Ctrl+Alt+B hides the pane");
+  assert.equal(await press(false), true);
+  assert.equal(pane.hasAttribute("inert"), false, "Ctrl+Alt+B shows the pane again");
+  await ide.unmount();
+});
+
 void test("an edit in a file tab writes the file's new text", async () => {
   const edits: Array<[string, string]> = [];
   const pane = await mount(<ReviewPane {...props({ onEdit: (p, t) => edits.push([p, t]) })} />);

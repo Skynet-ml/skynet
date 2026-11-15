@@ -306,6 +306,8 @@ export function AgenticIde({
     const onKey = (e: KeyboardEvent) => {
       // Alt changes e.key on macOS, so match the physical key.
       if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey || e.code !== "KeyB") return;
+      // Windows reports AltGr as Ctrl+Alt; AltGr+B types a character on some layouts.
+      if (e.getModifierState?.("AltGraph")) return;
       e.preventDefault();
       if (tabs) setTab((t) => (t === "chat" ? "changes" : "chat"));
       else setPaneOpen((open) => !open);
