@@ -39,28 +39,42 @@ test("a suggestion is asked at the end of a line or before closing brackets only
 });
 
 test("the answer loses trailing space and an echo of the rest of the line", () => {
-  assert.equal(cleanCompletion("a, b)\n\n", ")"), "a, b");
-  assert.equal(cleanCompletion("urn a + b  ", ""), "urn a + b");
-  assert.equal(cleanCompletion(")", ")"), "");
-  assert.equal(cleanCompletion("x)", "y"), "x)");
+  assert.equal(cleanCompletion("a, b)\n\n", "f(", ")"), "a, b");
+  assert.equal(cleanCompletion("urn a + b  ", "    ret", ""), "urn a + b");
+  assert.equal(cleanCompletion(")", "print(x", ")"), "");
+  assert.equal(cleanCompletion("x)", "f(", "y"), "x)");
+  assert.equal(cleanCompletion('hello"', 'x = "', '"'), "hello");
+  assert.equal(cleanCompletion("f(x)]", "a = [", "]"), "f(x)");
 });
 
-test("a closing bracket or quote that the completion opened stays whole", () => {
-  assert.equal(cleanCompletion("bar(1)", ")"), "bar(1)");
-  assert.equal(cleanCompletion("x[0]", "]"), "x[0]");
-  assert.equal(cleanCompletion('"a"', '"'), '"a"');
-  assert.equal(cleanCompletion("a, b)", ")"), "a, b");
-  assert.equal(cleanCompletion('hello"', '"'), "hello");
-  assert.equal(cleanCompletion("f(x)]", "]"), "f(x)");
+test("a closing bracket or quote that the line needs stays whole", () => {
+  assert.equal(cleanCompletion("bar(1)", "foo(", ")"), "bar(1)");
+  assert.equal(cleanCompletion("x[0]", "a = [", "]"), "x[0]");
+  assert.equal(cleanCompletion('"a"', 'x = "', '"'), '"a"');
+  assert.equal(cleanCompletion('"a"', "x = ", '"'), '"a', "here the last quote is an echo");
+  assert.equal(cleanCompletion("x)", "foo(bar(", ")"), "x)");
 });
 
-test("balance counts brackets outside strings and escaped quotes", () => {
+test("an apostrophe inside a string is plain text", () => {
+  assert.equal(cleanCompletion(`'t know")`, 'print("don', '")'), "'t know");
+  assert.equal(cleanCompletion(`'t do this."""`, '    """Don', '"""'), "'t do this.");
+});
+
+test("a bracket opened on an earlier line keeps the answer whole", () => {
+  assert.equal(cleanCompletion("y)", "    x, ", ")"), "y)");
+  assert.equal(cleanCompletion("b)\n", "    a, ", "):"), "b)");
+});
+
+test("balance counts brackets outside strings, escapes and triple quotes", () => {
   assert.ok(balanced("f(x[0], {a: 1})"));
   assert.ok(balanced('print(")")'));
   assert.ok(balanced('"a\\"b"'));
+  assert.ok(balanced(`print("don't")`));
+  assert.ok(balanced('"""a " b"""'));
   assert.equal(balanced("a)"), false);
   assert.equal(balanced("(a]"), false);
   assert.equal(balanced('"open'), false);
+  assert.equal(balanced('"""a""""""'), false);
 });
 
 test("typing through a ghost eats into it, and a mismatch drops it", () => {

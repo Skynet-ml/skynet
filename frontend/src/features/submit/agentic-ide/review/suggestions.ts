@@ -45,8 +45,10 @@ const CLOSERS = new Set(Object.values(OPENERS));
 const QUOTES = new Set(['"', "'", "`"]);
 
 /**
- * Whether every bracket and quote in `text` closes inside it. Brackets in a
- * string do not count, and a closer with no opener in `text` is unbalanced.
+ * Whether every bracket and string in `text` closes inside it. The scan
+ * starts outside any string. In a string, brackets and the other quote kinds
+ * are plain text, a backslash escapes the next character, and a string that
+ * opens with three quotes closes only with the same three.
  */
 export function balanced(text: string): boolean {
   const stack: string[] = [];
@@ -55,27 +57,42 @@ export function balanced(text: string): boolean {
     const ch = text[i]!;
     if (quote) {
       if (ch === "\\") i++;
-      else if (ch === quote) quote = "";
-    } else if (QUOTES.has(ch)) quote = ch;
-    else if (OPENERS[ch]) stack.push(OPENERS[ch]);
+      else if (text.startsWith(quote, i)) {
+        i += quote.length - 1;
+        quote = "";
+      }
+    } else if (QUOTES.has(ch)) {
+      quote = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
+      i += quote.length - 1;
+    } else if (OPENERS[ch]) stack.push(OPENERS[ch]);
     else if (CLOSERS.has(ch) && stack.pop() !== ch) return false;
   }
   return !quote && stack.length === 0;
 }
 
+/** The longest end of `text` that is also the start of `after`. */
+function overlap(text: string, after: string): number {
+  for (let k = Math.min(text.length, after.length); k > 0; k--) {
+    if (text.endsWith(after.slice(0, k))) return k;
+  }
+  return 0;
+}
+
 /**
  * Make the model's text safe to show: drop trailing blank space, and drop the
- * end when it echoes what already follows the caret on the line (an echoed
- * closing bracket would show twice). The end is an echo only when it closes
- * brackets or quotes that the completion did not open: `a, b)` before `)` is
- * cut, `bar(1)` before `)` stays whole. Returns "" when nothing is left.
+ * end when it echoes the start of the text after the caret (an echoed closing
+ * bracket would show twice). It scores the whole line, `before` + text +
+ * `after`, with and without that end. It cuts only when the line is balanced
+ * without the end and is not balanced with it. In all other cases the text
+ * stays whole, because a doubled character is easy to see and a dropped one
+ * is not. Returns "" when nothing is left.
  */
-export function cleanCompletion(text: string, after: string): string {
+export function cleanCompletion(text: string, before: string, after: string): string {
   const out = text.trimEnd();
-  const rest = after.trim();
-  if (!rest || !out.endsWith(rest)) return out;
-  const cut = out.slice(0, -rest.length).trimEnd();
-  return !balanced(out) && balanced(cut) ? cut : out;
+  const k = overlap(out, after);
+  if (!k) return out;
+  const cut = out.slice(0, -k).trimEnd();
+  return balanced(before + cut + after) && !balanced(before + out + after) ? cut : out;
 }
 
 /**
