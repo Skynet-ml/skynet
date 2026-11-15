@@ -549,7 +549,8 @@ export function AgenticIde({
     setEasing(!dragging && chatPct !== null && easedLayout !== "null");
   }
   // Under reduced motion the widths move at once; the pane's fade stays.
-  // A drag eases only into and out of a snap.
+  // A drag eases only into a snap. Out of a snap the pane follows the pointer
+  // at once: an ease there would lag behind each later move.
   const widthEase =
     !tabs &&
     ((easing && !dragging) || (dragging && snap !== null)) &&
