@@ -301,9 +301,10 @@ class GeneralistAgentRequest(BaseModel):
         default_factory=list,
         max_length=MAX_MEDIA_PER_MESSAGE,
         description=(
-            "Ids from ``POST /agent/media`` of the images, video and audio attached to this message. "
-            "The model sees the images when it accepts image input; every other file is a reference, "
-            "listed in a ``media_notice`` event."
+            "Ids from ``POST /agent/media`` of the images, video, audio and document originals attached "
+            "to this message. The model sees the images when it accepts image input. Every other "
+            "image, video and audio file is a reference, listed in a ``media_notice`` event. A document "
+            "original is only for the chat viewer: the model reads the file's text in the message."
         ),
     )
 
