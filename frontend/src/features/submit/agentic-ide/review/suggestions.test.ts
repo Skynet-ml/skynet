@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  balanced,
   cleanCompletion,
   completionWindow,
   consumeTyped,
@@ -42,6 +43,24 @@ test("the answer loses trailing space and an echo of the rest of the line", () =
   assert.equal(cleanCompletion("urn a + b  ", ""), "urn a + b");
   assert.equal(cleanCompletion(")", ")"), "");
   assert.equal(cleanCompletion("x)", "y"), "x)");
+});
+
+test("a closing bracket or quote that the completion opened stays whole", () => {
+  assert.equal(cleanCompletion("bar(1)", ")"), "bar(1)");
+  assert.equal(cleanCompletion("x[0]", "]"), "x[0]");
+  assert.equal(cleanCompletion('"a"', '"'), '"a"');
+  assert.equal(cleanCompletion("a, b)", ")"), "a, b");
+  assert.equal(cleanCompletion('hello"', '"'), "hello");
+  assert.equal(cleanCompletion("f(x)]", "]"), "f(x)");
+});
+
+test("balance counts brackets outside strings and escaped quotes", () => {
+  assert.ok(balanced("f(x[0], {a: 1})"));
+  assert.ok(balanced('print(")")'));
+  assert.ok(balanced('"a\\"b"'));
+  assert.equal(balanced("a)"), false);
+  assert.equal(balanced("(a]"), false);
+  assert.equal(balanced('"open'), false);
 });
 
 test("typing through a ghost eats into it, and a mismatch drops it", () => {

@@ -40,16 +40,42 @@ export function shouldSuggest(before: string, after: string): boolean {
   return before.trim().length > 0 && /^[\s)\]}"'`;:,]*$/.test(after);
 }
 
+const OPENERS: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+const CLOSERS = new Set(Object.values(OPENERS));
+const QUOTES = new Set(['"', "'", "`"]);
+
+/**
+ * Whether every bracket and quote in `text` closes inside it. Brackets in a
+ * string do not count, and a closer with no opener in `text` is unbalanced.
+ */
+export function balanced(text: string): boolean {
+  const stack: string[] = [];
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = "";
+    } else if (QUOTES.has(ch)) quote = ch;
+    else if (OPENERS[ch]) stack.push(OPENERS[ch]);
+    else if (CLOSERS.has(ch) && stack.pop() !== ch) return false;
+  }
+  return !quote && stack.length === 0;
+}
+
 /**
  * Make the model's text safe to show: drop trailing blank space, and drop the
- * end when it repeats what already follows the caret on the line (an echoed
- * closing bracket would show twice). Returns "" when nothing is left.
+ * end when it echoes what already follows the caret on the line (an echoed
+ * closing bracket would show twice). The end is an echo only when it closes
+ * brackets or quotes that the completion did not open: `a, b)` before `)` is
+ * cut, `bar(1)` before `)` stays whole. Returns "" when nothing is left.
  */
 export function cleanCompletion(text: string, after: string): string {
-  let out = text.trimEnd();
+  const out = text.trimEnd();
   const rest = after.trim();
-  if (rest && out.endsWith(rest)) out = out.slice(0, -rest.length).trimEnd();
-  return out;
+  if (!rest || !out.endsWith(rest)) return out;
+  const cut = out.slice(0, -rest.length).trimEnd();
+  return !balanced(out) && balanced(cut) ? cut : out;
 }
 
 /**
