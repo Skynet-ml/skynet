@@ -619,6 +619,7 @@ def _responses_dispatcher(database: Engine, kind: str, answer: httpx.Response) -
     [
         (404, {"error": {"message": "No endpoints found that support tool use.", "code": 404}}),
         (429, {"error": {"message": "Rate limited", "code": 429}}),
+        (500, {"error": {"message": "Internal server error", "code": 500}}),
     ],
 )
 def test_responses_provider_error_is_a_refusal(database: Engine, kind: str, status: int, body: dict) -> None:
@@ -630,9 +631,7 @@ def test_responses_provider_error_is_a_refusal(database: Engine, kind: str, stat
         status: The provider's error status.
         body: The provider's error body, with no response id and no usage.
     """
-    runtime, dispatcher, client = _responses_dispatcher(
-        database, kind, httpx.Response(status, json=body, headers={"Retry-After": "3"})
-    )
+    runtime, dispatcher, client = _responses_dispatcher(database, kind, httpx.Response(status, json=body))
     with client:
         result = dispatcher.dispatch(
             "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
@@ -643,6 +642,25 @@ def test_responses_provider_error_is_a_refusal(database: Engine, kind: str, stat
     assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
     with Session(database) as session:
         assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+
+
+def test_responses_stream_error_is_a_refusal(database: Engine) -> None:
+    """Release the hold and pass on the raw event stream when a streamed Responses call is refused."""
+    content = b'data: {"type":"error","error":{"message":"Rate limited"}}\n\n'
+    answer = httpx.Response(429, content=content, headers={"content-type": "text/event-stream"})
+    runtime, dispatcher, client = _responses_dispatcher(database, "managed_model", answer)
+    with client:
+        result = dispatcher.dispatch(
+            "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}], "stream": True}
+        )
+    assert result.status == 429
+    assert result.content_type == "text/event-stream"
+    assert result.body == content
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence["failure"] == "Rate limited"
 
 
 def test_responses_error_with_a_dropped_connection_stays_interrupted(database: Engine) -> None:
@@ -719,6 +737,45 @@ def test_funds_refusal_is_named_uncharged_and_not_resent(
     assert snapshot.billed_cents == 0
     assert snapshot.reserved_cents == 0
     assert alerts == (["fixture/text"] if code == MANAGED_FUNDS_EXHAUSTED else [])
+
+
+@pytest.mark.parametrize(
+    ("kind", "headers", "code"),
+    [
+        ("managed_model", {}, MANAGED_FUNDS_EXHAUSTED),
+        ("byok_model", {}, BYOK_FUNDS_EXHAUSTED),
+        ("managed_model", {"Retry-After": "3"}, FUNDS_BUSY),
+    ],
+)
+def test_responses_funds_refusal_is_named_uncharged_and_not_resent(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, kind: str, headers: dict, code: str
+) -> None:
+    """A Responses 402 says which funds ran out, costs nothing, and the retry never reaches OpenRouter.
+
+    Args:
+        database: The private test database.
+        monkeypatch: Replaces the managed refusal alert with a list.
+        kind: The charge policy kind of the route.
+        headers: The provider's 402 answer headers.
+        code: The expected relay error type.
+    """
+    alerts: list[str] = []
+    monkeypatch.setattr("core.billing.model_dispatch.notify_managed_refusal", alerts.append)
+    calls: list = []
+    runtime, dispatcher, client = _refusing_dispatcher(database, kind, headers, calls)
+    request = {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
+    with client:
+        first = dispatcher.dispatch("/responses", request)
+        second = dispatcher.dispatch("/responses", request, attempt=1)
+    assert first.status == second.status == 402
+    assert json.loads(first.body)["error"]["type"] == code
+    assert second.body == first.body
+    assert len(calls) == 1
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    assert alerts == (["fixture/text"] if code == MANAGED_FUNDS_EXHAUSTED else [])
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
 
 
 def test_funds_refusal_hold_expires(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
