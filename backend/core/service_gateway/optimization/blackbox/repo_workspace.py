@@ -145,8 +145,24 @@ _ANSWER_ENV_BYTES = 100_000
 # Given APP_ANSWER_PATH, it then writes APP_ANSWER there from inside the box:
 # unlike a Vercel file write, that moves no protected file's change time, so
 # a relay answer needs no fresh stamps after it.
+# The parent starts it as root, so its output file is root's own in sticky
+# /tmp and the version's processes cannot rewrite it. It becomes the tree's
+# owner before it reads or writes anything in the tree. So no root read or
+# write follows a link that the version plants, and the kernel then marks it
+# not dumpable, so the version's processes cannot trace it or open its fds.
+# A root with no capabilities, as in a local Docker box, cannot switch, and
+# its version runs as that same root anyway.
 _HASH_PROTECTED = r"""
 import hashlib, json, os, sys
+
+if os.geteuid() == 0:
+    owner = os.stat(".")
+    try:
+        os.setgroups([])
+        os.setgid(owner.st_gid)
+        os.setuid(owner.st_uid)
+    except PermissionError:
+        pass
 
 def digest(path):
     if os.path.islink(path):
@@ -1148,6 +1164,10 @@ class RepoWorkspace:
             f'{target}cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
             env={"APP_ANSWER": answer[1]} if answer is not None else None,
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
+            # A box-user command's output files belong to the box user, so a
+            # process that the version leaves running could replace a clean
+            # result there. The script itself drops root before it reads the tree.
+            sudo=True,
         )
         if not result.ok:
             return None

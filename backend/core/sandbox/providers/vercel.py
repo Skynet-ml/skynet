@@ -162,8 +162,9 @@ OUTPUT_POLL_TIMEOUT = 10.0
 OUTPUT_POLL_MAX_BYTES = 1 << 20
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
-# It runs as the box user while the [run] entry runs, and its output becomes the
-# trusted frames. ROOT_PATH keeps a tool planted in /app/.venv/bin from forging them.
+# Its output becomes the trusted frames of a command, so it runs as that
+# command's user. A non-root read starts with the box PATH, and ROOT_PATH keeps
+# a tool planted in /app/.venv/bin from forging the frames.
 TAIL_SCRIPT = (
     f"export PATH={ROOT_PATH}; "
     'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null'
@@ -1098,7 +1099,11 @@ class VercelEnvironment(SandboxEnvironment):
             tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))
             # A model mailbox answers frames only while the command runs, so
             # output that arrives after the exit would hang the guest (SKY-529).
-            poller = asyncio.ensure_future(self._stream_output(session, tails, sink)) if sink is not None else None
+            poller = (
+                asyncio.ensure_future(self._stream_output(session, tails, sink, sudo=sudo))
+                if sink is not None
+                else None
+            )
             try:
                 try:
                     if kill_after is None:
@@ -1180,13 +1185,18 @@ class VercelEnvironment(SandboxEnvironment):
                 raise
         raise AssertionError("unreachable")
 
-    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink) -> None:
+    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink, *, sudo: bool) -> None:
         """Send new command output to the sink until the caller cancels this task.
 
         Args:
             session: The SDK runtime session.
             tails: The read state of each output file.
             sink: Receives each new ``(stream, text)`` chunk.
+            sudo: The command runs as root, so its output files are root's
+                own and the reads run as root too. A box-user read could be
+                traced by the version's code and forge a frame. A non-root
+                command's files belong to the box user, so a root read there
+                could follow a planted link into a root-only file.
         """
         failures = 0
         while True:
@@ -1199,7 +1209,8 @@ class VercelEnvironment(SandboxEnvironment):
                 # read ends, and then ``_stop_poller`` waits forever.
                 async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
                     completed = await session.run_process(
-                        *_bash([TAIL_SCRIPT, "tail", *pairs]),
+                        *_bash([TAIL_SCRIPT, "tail", *pairs], sudo=sudo),
+                        sudo=sudo,
                         capture_output=True,
                         kill_after=OUTPUT_POLL_TIMEOUT,
                     )

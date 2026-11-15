@@ -217,6 +217,7 @@ class FakeSession:
         self.log: list[str] | None = None
         self.box: FakeBox | None = None
         self.tail_reads = 0
+        self.tail_sudo: list[bool] = []
         self.scripts: list[str] = []
         self.script_answers: list[tuple[int, str]] = []
         self.launchers: list[list[str]] = []
@@ -268,11 +269,12 @@ class FakeSession:
             raise _gone()
         script = args.index("-c") + 1
         self.launchers.append([command, *args[: script - len(vercel.SHELL_FLAGS)]])
-        if args[script] != vercel.TAIL_SCRIPT:
+        if args[script] not in (vercel.TAIL_SCRIPT, f"export PATH={vercel.ROOT_PATH}; {vercel.TAIL_SCRIPT}"):
             self.scripts.append(args[script])
             code, stdout = self.script_answers.pop(0) if self.script_answers else (0, "")
             return SimpleNamespace(returncode=code, stdout=stdout, stderr="")
         self.tail_reads += 1
+        self.tail_sudo.append(kwargs.get("sudo", False))
         pairs = args[script + 2 :]
         lines = []
         for start, path in zip(pairs[::2], pairs[1::2], strict=True):
@@ -862,6 +864,44 @@ async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: 
     assert session.scripts == ["true"]
     assert session.tail_reads >= 1
     assert all(launcher == [*vercel.NO_NEW_PRIVS, "/bin/bash"] for launcher in session.launchers)
+    await env.stop()
+
+
+@pytest.mark.parametrize(("sudo", "launcher"), [(False, [*vercel.NO_NEW_PRIVS, "/bin/bash"]), (True, ["/bin/bash"])])
+async def test_the_output_polls_run_as_the_command_user(
+    client: FakeClient, log: list[str], sudo: bool, launcher: list[str]
+) -> None:
+    """Read a root command's output as root, and a box-user command's output as the box user (PRE-1).
+
+    A box-user poll of the root ``[run]`` supervisor could be traced by the
+    entry and forge a result frame. A root poll of a box-user command could
+    follow a link that the command plants into a root-only file.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Run until the provider reads the output once.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "hello\n"
+        await _until_read(session, 1)
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    chunks: list[tuple[str, str]] = []
+    await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk), sudo=sudo), 5)
+    assert chunks == [("stdout", "hello\n")]
+    assert session.tail_sudo
+    assert set(session.tail_sudo) == {sudo}
+    assert all(read == launcher for read in session.launchers)
     await env.stop()
 
 

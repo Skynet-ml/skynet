@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import json
 import os
 import re
@@ -98,6 +99,7 @@ class _Box:
         self.spec = spec
         self.online = not spec.network_disabled
         self.commands: list[tuple[str, dict[str, str] | None]] = []
+        self.root_commands: list[str] = []
         self.writes: dict[str, str] = {}
         self.closed = False
 
@@ -115,9 +117,23 @@ class _Box:
         """Read from the wrapped box."""
         return self._inner.read_file(path)
 
-    def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, and answer the metric setup's pip install without the network."""
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record the command, and answer the metric setup's pip install without the network.
+
+        A local box refuses root on the developer's machine, so a root
+        command is recorded and then runs as the test's user.
+
+        Args:
+            command: The shell command.
+            sudo: The command asks for root.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
         self.commands.append((command, options.get("env")))
+        if sudo:
+            self.root_commands.append(command)
         return self._inner.run(_PIP_INSTALL.sub("true", command), **options)
 
     def close(self) -> None:
@@ -389,6 +405,148 @@ def test_a_stage_answer_checks_the_protected_files_and_is_written_in_one_run(tmp
         box.close()
     finally:
         space.close()
+
+
+def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:
+    """Start each check as root, so a process that the version leaves running cannot rewrite its output (PRE-1)."""
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        session = box.session
+        session.root_commands.clear()
+        box.stamp_before_run()
+        box.protected_changes()
+        box.answer("calls/000001/stages/a.json", '{"output": 1}')
+        checks = [command for command, _ in session.commands if shlex.quote(repo_workspace._HASH_PROTECTED) in command]
+        assert len(checks) == 3
+        assert session.root_commands == checks
+        box.close()
+    finally:
+        space.close()
+
+
+def _run_check_as(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tree: Path, *, euid: int, refuse: bool = False
+) -> tuple[list[tuple[str, int]], dict[str, Any]]:
+    """Run the protected-file check in this process, with a fake effective user and no real switch.
+
+    Args:
+        monkeypatch: Patches ``os`` and the process state.
+        capsys: Captures the check's output.
+        tree: The checkout the check runs in.
+        euid: The effective user that the check starts as.
+        refuse: The user switch fails as for a root with no capabilities.
+
+    Returns:
+        Each user switch and tree access with the effective user at that moment,
+        and the check's printed result.
+    """
+    state = {"euid": euid}
+    events: list[tuple[str, int]] = []
+
+    def switch(name: str) -> Any:
+        """Make a fake ``os`` user switch.
+
+        Args:
+            name: The ``os`` function name.
+
+        Returns:
+            The fake function.
+        """
+
+        def call(value: Any) -> None:
+            """Record the switch, and change the fake effective user on ``setuid``."""
+            if refuse:
+                raise PermissionError(name)
+            events.append((name, state["euid"]))
+            if name == "setuid":
+                state["euid"] = value
+
+        return call
+
+    def watch(name: str, real: Any) -> Any:
+        """Wrap a tree access so that it records the effective user.
+
+        Args:
+            name: The event name.
+            real: The real function.
+
+        Returns:
+            The wrapper.
+        """
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            """Record the access, then do it."""
+            events.append((f"{name} {args[0]}", state["euid"]))
+            return real(*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(os, "geteuid", lambda: state["euid"])
+    for name in ("setgroups", "setgid", "setuid"):
+        monkeypatch.setattr(os, name, switch(name))
+    monkeypatch.setattr(os, "walk", watch("walk", os.walk))
+    monkeypatch.setattr(os, "replace", watch("replace", os.replace))
+    monkeypatch.chdir(tree)
+    monkeypatch.setattr(sys, "argv", ["-c", "eval"])
+    monkeypatch.setenv("APP_ANSWER_PATH", "calls/a.json")
+    monkeypatch.setenv("APP_ANSWER", '{"output": 1}')
+    names = {**vars(builtins), "open": watch("open", open)}
+    exec(compile(repo_workspace._HASH_PROTECTED, "<check>", "exec"), {"__builtins__": names})
+    return events, json.loads(capsys.readouterr().out)
+
+
+def _planted_tree(tmp_path: Path) -> Path:
+    """Build a checkout whose answer path is a link that the version planted into another file.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The checkout.
+    """
+    tree = tmp_path / "tree"
+    (tree / "eval").mkdir(parents=True)
+    (tree / "eval" / "labels.csv").write_text("a,1\n")
+    (tree / "calls").mkdir()
+    target = tmp_path / "root-only"
+    target.write_text("secret\n")
+    (tree / "calls" / "a.json.tmp").symlink_to(target)
+    return tree
+
+
+def test_the_check_becomes_the_tree_owner_before_it_reads_or_writes_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drop root before the first tree access, so a link planted at the answer path gets no root write (PRE-1)."""
+    tree = _planted_tree(tmp_path)
+    owner = tree.stat().st_uid
+    assert owner != 0
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=0)
+    assert [name for name, _ in events[:3]] == ["setgroups", "setgid", "setuid"]
+    accesses = events[3:]
+    assert [name for name, _ in accesses] == [
+        "walk eval",
+        "open eval/labels.csv",
+        "open calls/a.json.tmp",
+        "replace calls/a.json.tmp",
+    ]
+    assert {user for _, user in accesses} == {owner}
+    assert set(result["files"]) == {"eval/labels.csv"}
+
+
+@pytest.mark.parametrize(("euid", "refuse"), [(None, False), (0, True)], ids=["box-user", "root-without-capabilities"])
+def test_a_check_that_cannot_or_need_not_switch_users_still_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], euid: int | None, refuse: bool
+) -> None:
+    """Skip the switch for a non-root check, and keep going when a root with no capabilities cannot switch."""
+    tree = _planted_tree(tmp_path)
+    start = os.geteuid() if euid is None else euid
+    events, result = _run_check_as(monkeypatch, capsys, tree, euid=start, refuse=refuse)
+    assert not [name for name, _ in events if name.startswith("set")]
+    assert {user for _, user in events} == {start}
+    assert set(result["files"]) == {"eval/labels.csv"}
+    assert (tree / "calls" / "a.json").read_text() == '{"output": 1}'
 
 
 def test_a_failed_answer_check_is_told_apart_from_a_protected_change(
