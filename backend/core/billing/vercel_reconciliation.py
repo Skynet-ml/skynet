@@ -92,7 +92,15 @@ class VercelSessionUsageClient:
                 raise ValueError("Missing exact provider session")
             return {name: session[name] for name in _SESSION_FIELDS if name in session}
         except (httpx.HTTPError, ValueError) as error:
-            raise UsagePendingError("Vercel final usage remains unavailable; its reservation is retained.") from error
+            # The error text holds the request URL with the team id, so name only the failure kind.
+            kind = (
+                f"HTTP {int(error.response.status_code)}"
+                if isinstance(error, httpx.HTTPStatusError)
+                else type(error).__name__
+            )
+            raise UsagePendingError(
+                f"Vercel final usage remains unavailable ({kind}); its reservation is retained."
+            ) from error
 
 
 class VercelUsageReconciler:

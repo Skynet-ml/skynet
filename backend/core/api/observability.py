@@ -126,6 +126,9 @@ ORPHAN_SWEEP_LOCK_KEY = 742137000001
 STARTUP_WORK_LOCK_KEY = 742137000002
 STALE_CONVERSATION_SWEEP_LOCK_KEY = 742137000003
 STAGED_DATASET_SWEEP_LOCK_KEY = 742137000004
+# A hold that leaves the ledger without settling never sends the "settled"
+# result that drops its entry, so the memory evicts on its own.
+PENDING_REASON_MEMORY_LIMIT = 1000
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
 _jobs_pending_gauge = _make_gauge("skynet_jobs_pending", "Number of Skynet jobs waiting to be claimed")
@@ -400,6 +403,7 @@ class OrphanRecoverySweeper:
         self._thread: threading.Thread | None = None
         self._vercel_reconciliation_cursor: str | None = None
         self._model_reconciliation_cursor: str | None = None
+        self._logged_pending_reasons: dict[str, str] = {}
 
     def start(self) -> None:
         """Start the background sweep loop."""
@@ -513,6 +517,7 @@ class OrphanRecoverySweeper:
                 limit=4, after_id=self._vercel_reconciliation_cursor
             )
             self._vercel_reconciliation_cursor = page.next_cursor
+            self._log_pending_reasons("Vercel", page.results)
             settled = sum(result.state == "settled" for result in page.results)
             if settled:
                 logger.info("Reconciled final usage for %d covered Vercel session(s)", settled)
@@ -544,11 +549,31 @@ class OrphanRecoverySweeper:
                 limit=4, after_id=self._model_reconciliation_cursor
             )
             self._model_reconciliation_cursor = page.next_cursor
+            self._log_pending_reasons("Model", page.results)
             settled = sum(result.state == "settled" for result in page.results)
             if settled:
                 logger.info("Reconciled final usage for %d covered model request(s)", settled)
         except Exception:
             logger.warning("Model usage reconciliation failed; coverage remains held", exc_info=True)
+
+    def _log_pending_reasons(self, kind: str, results: Any) -> None:
+        """Log why each unsettled hold stays pending, once per operation and reason.
+
+        Args:
+            kind: Label that starts the log line, for example "Vercel" or "Model".
+            results: Reconciliation results from one sweep page.
+        """
+        for result in results:
+            if result.state == "settled":
+                self._logged_pending_reasons.pop(result.operation_id, None)
+                continue
+            if not result.reason or self._logged_pending_reasons.get(result.operation_id) == result.reason:
+                continue
+            logger.info("%s usage for operation %s stays pending: %s", kind, result.operation_id, result.reason)
+            self._logged_pending_reasons.pop(result.operation_id, None)
+            self._logged_pending_reasons[result.operation_id] = result.reason
+            if len(self._logged_pending_reasons) > PENDING_REASON_MEMORY_LIMIT:
+                del self._logged_pending_reasons[next(iter(self._logged_pending_reasons))]
 
     def _run(self) -> None:
         """Run the sweep loop until stopped."""

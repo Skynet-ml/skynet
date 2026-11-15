@@ -643,7 +643,10 @@ class ProviderDispatcher:
             failure = None
             if path == "/responses":
                 identity, usage, complete = responses_receipt(content, content_type)
-                interrupted = interrupted or not complete
+                # A plain error body is never a response object, so it has no terminal status;
+                # without this it would count as interrupted and could never be a refusal.
+                bare_error = status >= 400 and identity is None and usage is None
+                interrupted = interrupted or not (complete or bare_error)
                 failure = responses_failure(content, content_type)
             else:
                 interrupted = interrupted or not response_complete(

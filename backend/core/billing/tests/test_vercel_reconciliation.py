@@ -274,3 +274,31 @@ def test_provider_client_only_reads_exact_session_and_strips_secrets() -> None:
     assert request.url.path == "/api/v2/sandboxes/sessions/session-one"
     assert request.url.params["teamId"] == "team"
     assert request.headers["Authorization"] == "Bearer parent-token"
+
+
+@pytest.mark.parametrize(
+    ("respond", "expected"),
+    [
+        (lambda request: httpx.Response(404, json={"error": "gone"}), "(HTTP 404)"),
+        (lambda request: httpx.Response(401, json={"error": "denied"}), "(HTTP 401)"),
+        (lambda request: (_ for _ in ()).throw(httpx.ConnectTimeout("timed out", request=request)), "(ConnectTimeout)"),
+        (lambda request: httpx.Response(200, content=b"not json"), "(JSONDecodeError)"),
+        (lambda request: httpx.Response(200, json={"session": {"id": "other"}}), "(ValueError)"),
+    ],
+)
+def test_provider_client_pending_reason_names_failure_without_secrets(respond: Any, expected: str) -> None:
+    """Name the failure kind in the pending reason, but never the URL, team, session or token.
+
+    Args:
+        respond: Fake provider behavior for one request.
+        expected: Failure label the reason must carry.
+    """
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        reader = VercelSessionUsageClient("secret-token-value", "team-secret-id", client=client)
+        with pytest.raises(UsagePendingError) as caught:
+            reader("session-secret-id")
+    reason = str(caught.value)
+    assert reason.startswith("Vercel final usage remains unavailable")
+    assert expected in reason
+    for secret in ("secret-token-value", "team-secret-id", "session-secret-id", "vercel.com"):
+        assert secret not in reason

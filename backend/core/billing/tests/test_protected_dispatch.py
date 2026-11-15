@@ -564,6 +564,172 @@ def test_failed_responses_stream_is_retryable_but_keeps_its_coverage(database: E
         assert operation.provider_request_id == "gen-failed"
 
 
+class _BrokenStream(httpx.SyncByteStream):
+    """Yield part of a body, then fail the way a dropped connection does."""
+
+    def __init__(self, first: bytes) -> None:
+        """Keep the bytes to send before the failure.
+
+        Args:
+            first: The body bytes the provider sends before the connection drops.
+        """
+        self._first = first
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Yield the first bytes, then raise a transport error.
+
+        Yields:
+            The body bytes received before the drop.
+        """
+        yield self._first
+        raise httpx.ReadError("connection dropped")
+
+
+def _responses_dispatcher(database: Engine, kind: str, answer: httpx.Response) -> tuple:
+    """Build a dispatcher whose fake OpenRouter gives one fixed answer to every Responses call.
+
+    Args:
+        database: The private test database.
+        kind: The charge policy kind of the route.
+        answer: The provider answer for each inference request.
+
+    Returns:
+        The runtime, the dispatcher and the HTTP client to close.
+    """
+    runtime = _runtime(database)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Serve the price catalog and give the fixed answer to inference."""
+        if request.url.path.endswith("/endpoints"):
+            return httpx.Response(200, json={"data": CATALOG})
+        if request.method == "GET":
+            return httpx.Response(404)
+        return answer
+
+    client = httpx.Client(transport=httpx.MockTransport(provider))
+    dispatcher = OpenRouterDispatcher(
+        runtime, api_key="private", model="fixture/text", role="task", policy=ChargePolicy(kind), client=client
+    )
+    return runtime, dispatcher, client
+
+
+@pytest.mark.parametrize("kind", ["managed_model", "byok_model"])
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (404, {"error": {"message": "No endpoints found that support tool use.", "code": 404}}),
+        (429, {"error": {"message": "Rate limited", "code": 429}}),
+        (500, {"error": {"message": "Internal server error", "code": 500}}),
+    ],
+)
+def test_responses_provider_error_is_a_refusal(database: Engine, kind: str, status: int, body: dict) -> None:
+    """Release the hold and pass on the provider's own error when a Responses call is refused.
+
+    Args:
+        database: The private test database.
+        kind: The charge policy kind of the route.
+        status: The provider's error status.
+        body: The provider's error body, with no response id and no usage.
+    """
+    runtime, dispatcher, client = _responses_dispatcher(database, kind, httpx.Response(status, json=body))
+    with client:
+        result = dispatcher.dispatch(
+            "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
+        )
+    assert result.status == status
+    assert json.loads(result.body) == body
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+
+
+def test_responses_stream_error_is_a_refusal(database: Engine) -> None:
+    """Release the hold and pass on the raw event stream when a streamed Responses call is refused."""
+    content = b'data: {"type":"error","error":{"message":"Rate limited"}}\n\n'
+    answer = httpx.Response(429, content=content, headers={"content-type": "text/event-stream"})
+    runtime, dispatcher, client = _responses_dispatcher(database, "managed_model", answer)
+    with client:
+        result = dispatcher.dispatch(
+            "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}], "stream": True}
+        )
+    assert result.status == 429
+    assert result.content_type == "text/event-stream"
+    assert result.body == content
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence["failure"] == "Rate limited"
+
+
+def test_responses_error_with_a_dropped_connection_stays_interrupted(database: Engine) -> None:
+    """Keep the coverage of a Responses error answer whose connection dropped before the body ended."""
+    answer = httpx.Response(
+        429, stream=_BrokenStream(b'{"error": {"message"'), headers={"content-type": "application/json"}
+    )
+    runtime, dispatcher, client = _responses_dispatcher(database, "managed_model", answer)
+    with client, pytest.raises(UsagePendingError):
+        dispatcher.dispatch("/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]})
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "pending"
+
+
+def test_incomplete_successful_responses_answer_stays_interrupted(database: Engine) -> None:
+    """Keep the coverage of a 200 Responses answer that never reached a terminal status."""
+    answer = httpx.Response(200, json={"status": "in_progress", "output": []})
+    runtime, dispatcher, client = _responses_dispatcher(database, "managed_model", answer)
+    with client, pytest.raises(UsagePendingError):
+        dispatcher.dispatch("/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]})
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "pending"
+
+
+def test_responses_data_policy_refusal_names_the_setting_and_releases_the_hold(database: Engine) -> None:
+    """Turn OpenRouter's data-policy 404 on a Responses call into guidance, with no charge."""
+    runtime = _runtime(database)
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Serve the price catalog and refuse inference for the data policy."""
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        sent.append(json.loads(request.content))
+        return httpx.Response(
+            404,
+            json={"error": {"message": "No endpoints found matching your data policy. Configure: openrouter.ai"}},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="private",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("managed_model"),
+            client=client,
+            data_policy="zdr",
+        )
+        result = dispatcher.dispatch(
+            "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
+        )
+    assert sent[0]["provider"]["zdr"] is True
+    assert result.status == 404
+    error = json.loads(result.body)["error"]
+    assert error["type"] == "data_policy_unavailable"
+    assert "openrouter.ai" not in error["message"]
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+
+
 def _refusing_dispatcher(database: Engine, kind: str, headers: dict[str, str], calls: list) -> tuple:
     """Build a dispatcher whose fake OpenRouter answers every inference with 402."""
     runtime = _runtime(database)
@@ -610,6 +776,45 @@ def test_funds_refusal_is_named_uncharged_and_not_resent(
     assert snapshot.billed_cents == 0
     assert snapshot.reserved_cents == 0
     assert alerts == (["fixture/text"] if code == MANAGED_FUNDS_EXHAUSTED else [])
+
+
+@pytest.mark.parametrize(
+    ("kind", "headers", "code"),
+    [
+        ("managed_model", {}, MANAGED_FUNDS_EXHAUSTED),
+        ("byok_model", {}, BYOK_FUNDS_EXHAUSTED),
+        ("managed_model", {"Retry-After": "3"}, FUNDS_BUSY),
+    ],
+)
+def test_responses_funds_refusal_is_named_uncharged_and_not_resent(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, kind: str, headers: dict, code: str
+) -> None:
+    """A Responses 402 says which funds ran out, costs nothing, and the retry never reaches OpenRouter.
+
+    Args:
+        database: The private test database.
+        monkeypatch: Replaces the managed refusal alert with a list.
+        kind: The charge policy kind of the route.
+        headers: The provider's 402 answer headers.
+        code: The expected relay error type.
+    """
+    alerts: list[str] = []
+    monkeypatch.setattr("core.billing.model_dispatch.notify_managed_refusal", alerts.append)
+    calls: list = []
+    runtime, dispatcher, client = _refusing_dispatcher(database, kind, headers, calls)
+    request = {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
+    with client:
+        first = dispatcher.dispatch("/responses", request)
+        second = dispatcher.dispatch("/responses", request, attempt=1)
+    assert first.status == second.status == 402
+    assert json.loads(first.body)["error"]["type"] == code
+    assert second.body == first.body
+    assert len(calls) == 1
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    assert alerts == (["fixture/text"] if code == MANAGED_FUNDS_EXHAUSTED else [])
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
 
 
 def test_funds_refusal_hold_expires(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
