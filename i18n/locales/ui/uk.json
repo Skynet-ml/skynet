@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "Спробувати ще раз",
   "shared.agent.reconnecting": "Повторне підключення {progress}",
   "shared.agent.retry_in": "Повтор через {seconds} с",
+  "shared.agent.retry_auto": "Повтор через кілька секунд",
   "shared.agent.run_code": "Запустити код",
   "shared.agent.run_code_prompt": "Запустіть наведений фрагмент коду ({language}) і поверніть результати:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "с",

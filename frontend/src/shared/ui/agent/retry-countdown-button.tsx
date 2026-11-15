@@ -3,7 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 
-import { formatMsg } from "@/shared/lib/messages";
+import { formatMsg, msg } from "@/shared/lib/messages";
 import { Button } from "@/shared/ui/primitives/button";
 
 import { secondsLeft } from "./capacity-retry";
@@ -15,12 +15,9 @@ import { secondsLeft } from "./capacity-retry";
  */
 export function RetryCountdownButton({
   seconds,
-  label,
   onRetry,
 }: {
   seconds: number;
-  /** The button's stable accessible name; the changing number stays hidden from screen readers. */
-  label?: string;
   onRetry: () => void;
 }) {
   const [deadline] = React.useState(() => Date.now() + seconds * 1000);
@@ -46,7 +43,9 @@ export function RetryCountdownButton({
       size="xs"
       className="relative shrink-0 overflow-hidden"
       onClick={onRetry}
-      aria-label={label}
+      // A stable name that starts with the visible words, so voice control
+      // ("click Retry") works, and with no number to read again each second.
+      aria-label={msg("shared.agent.retry_auto")}
     >
       <motion.span
         aria-hidden

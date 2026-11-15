@@ -2751,6 +2751,7 @@
   "shared.agent.regenerate": "再試一次",
   "shared.agent.reconnecting": "重新連線緊 {progress}",
   "shared.agent.retry_in": "{seconds} 秒後再試",
+  "shared.agent.retry_auto": "幾秒後再試",
   "shared.agent.run_code": "執行程式碼",
   "shared.agent.run_code_prompt": "執行以下程式碼片段（{language}）並傳回結果：\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "秒",

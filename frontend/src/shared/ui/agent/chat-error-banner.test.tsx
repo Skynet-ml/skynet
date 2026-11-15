@@ -48,7 +48,7 @@ void describe("ChatErrorBanner", () => {
     );
     // The live region must not read the changing number each second.
     assert.match(html, /<span aria-hidden="true" class="relative z-10 tabular-nums">/);
-    assert.match(html, /<button[^>]*aria-label="Retry"/);
+    assert.match(html, /<button[^>]*aria-label="shared.agent.retry_auto"/);
   });
 
   void it("shows the plain retry button when no automatic retry is left", () => {

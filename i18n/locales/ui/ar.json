@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "حاول مجددًا",
   "shared.agent.reconnecting": "جارٍ إعادة الاتصال {progress}",
   "shared.agent.retry_in": "إعادة المحاولة بعد {seconds} ث",
+  "shared.agent.retry_auto": "إعادة المحاولة بعد لحظات",
   "shared.agent.run_code": "تشغيل الكود",
   "shared.agent.run_code_prompt": "شغّل مقتطف الكود التالي ({language}) وأعِد النتائج:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "ث",

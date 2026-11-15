@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "Riprova",
   "shared.agent.reconnecting": "Riconnessione {progress}",
   "shared.agent.retry_in": "Riprova tra {seconds} s",
+  "shared.agent.retry_auto": "Riprova tra poco",
   "shared.agent.run_code": "Esegui il codice",
   "shared.agent.run_code_prompt": "Esegui il seguente snippet di codice ({language}) e restituisci i risultati:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "s",

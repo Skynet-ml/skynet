@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "फिर से प्रयास करें",
   "shared.agent.reconnecting": "फिर से कनेक्ट हो रहा है {progress}",
   "shared.agent.retry_in": "{seconds} सेकंड में फिर से कोशिश",
+  "shared.agent.retry_auto": "कुछ सेकंड में फिर से कोशिश",
   "shared.agent.run_code": "कोड चलाएँ",
   "shared.agent.run_code_prompt": "निम्नलिखित कोड स्निपेट ({language}) चलाएँ और परिणाम लौटाएँ:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "से",

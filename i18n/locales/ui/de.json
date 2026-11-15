@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "Erneut versuchen",
   "shared.agent.reconnecting": "Verbindung wird wiederhergestellt {progress}",
   "shared.agent.retry_in": "Erneut in {seconds} s",
+  "shared.agent.retry_auto": "Erneut in Kürze",
   "shared.agent.run_code": "Code ausführen",
   "shared.agent.run_code_prompt": "Führe das folgende Code-Snippet ({language}) aus und gib die Ergebnisse zurück:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "s",

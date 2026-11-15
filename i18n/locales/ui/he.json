@@ -2161,6 +2161,7 @@
   "shared.agent.regenerate": "נסה/נסי שוב",
   "shared.agent.reconnecting": "מתחבר מחדש {progress}",
   "shared.agent.retry_in": "ניסיון חוזר בעוד {seconds} שנ׳",
+  "shared.agent.retry_auto": "ניסיון חוזר בעוד רגע",
   "shared.agent.run_code": "בדוק/בדקי את הקוד",
   "shared.agent.run_code_prompt": "בדוק/בדקי את קטע הקוד הבא ({language}) והחזר/החזירי את התוצאות:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "s",

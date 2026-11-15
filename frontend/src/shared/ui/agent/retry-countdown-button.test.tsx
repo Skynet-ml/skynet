@@ -26,7 +26,12 @@ Object.assign(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 // The browser catalog slot that msg() reads; only the countdown string is needed.
-Object.assign(dom.window, { __APP_MESSAGES__: { "shared.agent.retry_in": "Retry in {seconds}s" } });
+Object.assign(dom.window, {
+  __APP_MESSAGES__: {
+    "shared.agent.retry_in": "Retry in {seconds}s",
+    "shared.agent.retry_auto": "Retry in a moment",
+  },
+});
 after(() => dom.window.close());
 const { createRoot } = await import("react-dom/client");
 const { RetryCountdownButton } = await import("./retry-countdown-button");
@@ -46,6 +51,8 @@ void it("counts down each second and retries by itself at zero", async () => {
       root.render(<RetryCountdownButton seconds={3} onRetry={() => retries++} />),
     );
     assert.match(host.textContent ?? "", /Retry in 3s/);
+    const button = host.querySelector("button")!;
+    assert.equal(button.getAttribute("aria-label"), "Retry in a moment");
 
     await React.act(async () => mock.timers.tick(1000));
     assert.match(host.textContent ?? "", /Retry in 2s/);

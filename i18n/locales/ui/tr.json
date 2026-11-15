@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "Yeniden dene",
   "shared.agent.reconnecting": "Yeniden bağlanıyor {progress}",
   "shared.agent.retry_in": "{seconds} sn sonra yeniden dene",
+  "shared.agent.retry_auto": "Biraz sonra yeniden dene",
   "shared.agent.run_code": "Kodu çalıştır",
   "shared.agent.run_code_prompt": "Aşağıdaki kod parçacığını ({language}) çalıştırın ve sonuçları döndürün:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "sn",

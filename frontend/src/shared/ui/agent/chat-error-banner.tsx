@@ -60,7 +60,7 @@ export function ChatErrorBanner({
           {message}
         </p>
         {onRetry && retryInSeconds != null && (
-          <RetryCountdownButton seconds={retryInSeconds} label={retryLabel} onRetry={onRetry} />
+          <RetryCountdownButton seconds={retryInSeconds} onRetry={onRetry} />
         )}
         {onRetry && retryLabel && retryInSeconds == null && (
           <RetryIconButton

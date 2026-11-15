@@ -3071,6 +3071,7 @@
   "shared.agent.regenerate": "重试",
   "shared.agent.reconnecting": "正在重新连接 {progress}",
   "shared.agent.retry_in": "{seconds} 秒后重试",
+  "shared.agent.retry_auto": "几秒后重试",
   "shared.agent.run_code": "运行代码",
   "shared.agent.run_code_prompt": "运行以下代码片段（{language}）并返回结果：\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "秒",
