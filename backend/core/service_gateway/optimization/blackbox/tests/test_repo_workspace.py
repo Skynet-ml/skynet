@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import builtins
 import json
+import logging
 import os
 import re
 import shlex
@@ -22,7 +23,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.sandbox.providers.docker import DockerEnvironment
@@ -30,6 +33,7 @@ from core.sandbox.providers.vercel import VercelEnvironment
 
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
+from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     METRIC_REPO_DIR,
@@ -509,6 +513,329 @@ def test_a_box_call_error_on_the_answer_write_goes_up_raw(tmp_path: Path, monkey
         with pytest.raises(_BoxCallError, match="429"):
             box.answer("calls/000001/stages/a.json", '{"output": 1}')
         assert session.read_file("calls/000001/stages/a.json") is None
+        box.close()
+    finally:
+        space.close()
+
+
+def _write_error(status: int) -> SandboxFilesystemWriteError:
+    """Build the SDK's file write error over an HTTP error answer, chained as the SDK chains it.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The write error; its cause is the API error.
+    """
+    api = SandboxApiError(httpx.Response(status), f"HTTP {status}: provider text")
+    try:
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=api) from api
+    except SandboxFilesystemWriteError as error:
+        return error
+
+
+class _RefusingSession:
+    """A box whose every file write raises one error."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each write raises.
+        """
+        self.error = error
+
+    def write_files(self, files: Any) -> None:
+        """Fail the write.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_temporary_answer_file_write_error_goes_up_raw(status: int) -> None:
+    """Let a 429 or 5xx on an answer file write go up as the same error, so the relay can tell it is temporary.
+
+    Args:
+        status: The HTTP status of the write.
+    """
+    error = _write_error(status)
+    with pytest.raises(SandboxFilesystemWriteError) as raised:
+        repo_workspace._deliver(_RefusingSession(error), "a.json", "{}")  # type: ignore[arg-type]
+    assert raised.value is error
+
+
+def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_reports_a_lasting_one() -> None:
+    """With no protected files, a 429 on the answer write goes up raw; a 404 still gives an unchecked answer."""
+    session = _RefusingSession(_write_error(429))
+    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace")  # type: ignore[arg-type]
+    with pytest.raises(SandboxFilesystemWriteError) as raised:
+        box.answer("calls/000001/stages/a.json", "{}")
+    assert raised.value is session.error
+    session.error = _write_error(404)
+    assert box.answer("calls/000001/stages/a.json", "{}") is None
+
+
+def test_a_lasting_answer_file_write_error_logs_no_provider_text(caplog: pytest.LogCaptureFixture) -> None:
+    """Log only the type of a lasting answer write error: the run log shows it, and its text is the provider's.
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    error = SandboxApiError(httpx.Response(404), "HTTP 404: provider text")
+    with caplog.at_level(logging.WARNING):
+        assert repo_workspace._deliver(_RefusingSession(error), "a.json", "{}") is False  # type: ignore[arg-type]
+    assert "SandboxApiError" in caplog.text
+    assert "provider text" not in caplog.text
+
+
+def _fail_answer_step(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, step: str) -> None:
+    """Make one step of the box's next relay answer raise.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        box: The candidate box.
+        step: ``write`` (the answer command), ``check`` (the protected-file
+            check), ``deliver`` (the file write of a large answer, a 503) or
+            ``fallback`` (the answer command exits 1, then its fallback file
+            write gets a 503).
+    """
+    if step == "fallback":
+        run = box.session.run
+        monkeypatch.setattr(
+            box.session,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1)
+                if shlex.quote(repo_workspace._WRITE_ANSWER) in command
+                else run(command, **options)
+            ),
+        )
+        monkeypatch.setattr(box.session, "write_files", _RefusingSession(_write_error(503)).write_files)
+    elif step == "write":
+        run = box.session.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Raise for the answer write, and run every other command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+
+            Raises:
+                _BoxCallError: The command is the answer write.
+            """
+            if shlex.quote(repo_workspace._WRITE_ANSWER) in command:
+                raise _BoxCallError("429")
+            return run(command, **options)
+
+        monkeypatch.setattr(box.session, "run", failing)
+    elif step == "check":
+
+        def refuse(*_: Any) -> None:
+            """Fail the check before it writes anything.
+
+            Raises:
+                _BoxCallError: Always.
+            """
+            raise _BoxCallError("429")
+
+        monkeypatch.setattr(box._workspace, "fingerprint", refuse)
+    else:
+        monkeypatch.setattr(repo_workspace, "_ANSWER_ENV_BYTES", 10)
+        monkeypatch.setattr(box.session, "write_files", _RefusingSession(_write_error(503)).write_files)
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("step", ["write", "check", "deliver", "fallback"])
+def test_a_raised_answer_never_hides_a_protected_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, judge: bool
+) -> None:
+    """Name a protected file the version changed, also when the relay answer after the change raises.
+
+    The answer command and the check write no file, so the final check still
+    runs. A file write (of a large answer, or after a failed answer command)
+    may have moved the change times, so the change its check found before the
+    write is kept.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        step: The answer step that raises.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        box.session.run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv")
+        with monkeypatch.context() as patched:
+            _fail_answer_step(patched, box, step)
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            relay._answer("a" * 32, {"output": 1})
+            relay.close()
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(RepoScoreError) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        assert "eval/labels.csv" in str(raised.value), str(raised.value)
+        assert box.unstamped is (step in ("deliver", "fallback"))
+        box.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("step", ["deliver", "fallback"])
+def test_a_raised_answer_file_write_never_reports_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, judge: bool
+) -> None:
+    """A 503 on an answer file write gives the unchecked error, never a clean check.
+
+    The server can do the write before the 503, which moves every change time,
+    so the final check cannot tell a change apart.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        step: The file write that raises: a large answer's, or the fallback after a failed answer command.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _fail_answer_step(patched, box, step)
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            assert relay._answer("a" * 32, {"output": 1}) is False
+            relay.close()
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(Exception) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        if judge:
+            assert raised.value is relay.failure
+        else:
+            assert str(raised.value) == "A relay answer could not be checked or delivered, so the version has no score."
+        assert box.unstamped
+        box.close()
+    finally:
+        space.close()
+
+
+def _unstamp_first_answer(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, *, edit: str = "") -> None:
+    """Make the box's first answer command exit 1, so its fallback file write leaves the box unstamped.
+
+    The fallback write does the write, moves the change time of every
+    protected file as a Vercel file write does, and then gets a 503.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        box: The candidate box.
+        edit: A shell command that the version's code runs during the write, or nothing.
+    """
+    session = box.session
+    run, write = session.run, session.write_files
+    failed: list[bool] = []
+
+    def answer_fails_once(command: str, **options: Any) -> CommandResult:
+        """Fail the first answer command, and run every other command.
+
+        Args:
+            command: The shell command.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        if not failed and shlex.quote(repo_workspace._WRITE_ANSWER) in command:
+            failed.append(True)
+            return CommandResult(exit_code=1)
+        return run(command, **options)
+
+    def write_moves_ctimes(files: Any) -> None:
+        """Write the files, move every change time under ``eval``, and then fail.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            SandboxFilesystemWriteError: Always, a 503 after the write.
+        """
+        write(files)
+        run(f"cd {WORK_DIR} && find eval -type f -exec chmod u+x {{}} + -exec chmod u-x {{}} + {edit}")
+        monkeypatch.setattr(session, "write_files", write)
+        raise _write_error(503)
+
+    monkeypatch.setattr(session, "run", answer_fails_once)
+    monkeypatch.setattr(session, "write_files", write_moves_ctimes)
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_an_answer_after_an_unstamped_write_names_no_untouched_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """Compare only file contents after an unstamped answer write, so moved change times name no file.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _unstamp_first_answer(patched, box)
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            assert relay._answer("a" * 32, {"output": 1}) is False
+            assert relay._answer("b" * 32, {"output": 2}) is True
+            relay.close()
+        assert relay.changes == []
+        assert box.session.read_file("calls/000001/stages/" + "b" * 32 + ".json") == '{"output": 2}'
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(Exception) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        if judge:
+            assert raised.value is relay.failure
+        else:
+            assert str(raised.value) == "A relay answer could not be checked or delivered, so the version has no score."
+        assert box.unstamped
+        box.close()
+    finally:
+        space.close()
+
+
+def test_an_answer_after_an_unstamped_write_still_names_a_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Name a protected file whose content changed, also when the stamps are stale after an unstamped write.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _unstamp_first_answer(patched, box, edit="&& printf 'a,0\\n' > eval/labels.csv")
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            relay._answer("a" * 32, {"output": 1})
+            relay._answer("b" * 32, {"output": 2})
+            relay.close()
+        assert [change.split("'")[1] for change in relay.changes] == ["eval/labels.csv"]
+        with pytest.raises(RepoScoreError, match=r"eval/labels\.csv"):
+            RepoScorer._check_changes(SimpleNamespace(_rule_judge=None, raw_provider_errors=True), relay, [], box)  # type: ignore[arg-type]
         box.close()
     finally:
         space.close()
