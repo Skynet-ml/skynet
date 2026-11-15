@@ -244,6 +244,8 @@ def test_pending_reason_memory_stays_bounded(monkeypatch: pytest.MonkeyPatch) ->
     sweeper._reconcile_sandbox_usage(object())
 
     assert len(sweeper._logged_pending_reasons) == obs.PENDING_REASON_MEMORY_LIMIT
+    assert "op-0" not in sweeper._logged_pending_reasons
+    assert f"op-{obs.PENDING_REASON_MEMORY_LIMIT + 49}" in sweeper._logged_pending_reasons
 
 
 def test_orphan_sweeper_swallows_recovery_exceptions() -> None:
