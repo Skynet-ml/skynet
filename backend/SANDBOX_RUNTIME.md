@@ -50,9 +50,11 @@ names the state in `snapshot_id` or `snapshot_archive`. The opener checks the
 prepared tree's digest before it lays out a version.
 
 The parent starts the `[run]` supervisor with `sudo: true`, through the model
-mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
-the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
-The supervisor checks that file, then starts the entry as the owner of the
+mailbox, so the entry keeps its model route. On Vercel the root exec wrapper
+first makes a root-owned `/tmp/.app-root-output-<token>` folder with mode 0755.
+It stops if anything is already at that name. It sends the supervisor's
+stdout to `output.out` in that folder. The supervisor checks that file and
+its folder, then starts the entry as the owner of the
 candidate tree, so the entry cannot write the wrapper's files. Before the
 switch, the supervisor sets `no_new_privs` on itself, so the entry cannot use
 the box's `sudo` to get back to root. If it cannot set the flag, it does not

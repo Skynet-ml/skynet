@@ -140,6 +140,11 @@ POLL_SLACK = 60.0
 IMAGE_RETRY_DELAY = 2.0
 EXIT_PREFIX = "/tmp/.app-exit-"
 OUTPUT_PREFIX = "/tmp/.app-output-"
+# A root command's output files go into a folder that root makes first. A box
+# process can read the token from root's command line and plant a FIFO, file
+# or link at a /tmp name before root's redirect opens it. In sticky /tmp it
+# cannot plant into, rename or remove root's own 0755 folder (TU-1).
+ROOT_OUTPUT_PREFIX = "/tmp/.app-root-output-"
 TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # The sandbox image ships a NOPASSWD sudo for the parent's own `sudo: true`
@@ -296,6 +301,32 @@ def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
         return "/bin/bash", [*SHELL_FLAGS, f"export PATH={ROOT_PATH}; {script}", *rest]
     # setpriv looks up a bare name on the box PATH, which the box user can write.
     return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "/bin/bash", *SHELL_FLAGS, *args]
+
+
+def _wrapper(inner: str, token: str, *, sudo: bool) -> tuple[str, str, str, str]:
+    """Make the exec wrapper script and the paths of its output and exit code files.
+
+    Args:
+        inner: The command line that the wrapper runs.
+        token: The command's unique token.
+        sudo: The wrapper runs as root.
+
+    Returns:
+        The script, the stdout path, the stderr path and the exit code path.
+    """
+    if not sudo:
+        out_path, err_path, sentinel = (
+            f"{OUTPUT_PREFIX}{token}.out",
+            f"{OUTPUT_PREFIX}{token}.err",
+            f"{EXIT_PREFIX}{token}",
+        )
+        return f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}", out_path, err_path, sentinel
+    folder = f"{ROOT_OUTPUT_PREFIX}{token}"
+    out_path, err_path, sentinel = f"{folder}/output.out", f"{folder}/output.err", f"{folder}/exit"
+    # No ``-p``: mkdir fails on anything already at the name, a dangling link
+    # too, and the command then never runs.
+    script = f"/bin/mkdir -m 0755 {folder} || exit 1; {inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
+    return script, out_path, err_path, sentinel
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
@@ -1084,9 +1115,6 @@ class VercelEnvironment(SandboxEnvironment):
             self._secret_exposed = True
         with self.timings.phase("run"):
             token = uuid.uuid4().hex
-            sentinel = f"{EXIT_PREFIX}{token}"
-            out_path = f"{OUTPUT_PREFIX}{token}.out"
-            err_path = f"{OUTPUT_PREFIX}{token}.err"
             # A non-root wrapper starts with the box PATH, which holds the
             # box-writable /app/.venv/bin. Absolute paths keep a planted `bash`
             # or `timeout` from replacing a trusted helper's command.
@@ -1095,7 +1123,7 @@ class VercelEnvironment(SandboxEnvironment):
             if timeout_sec is not None:
                 inner = f"/usr/bin/timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
-            script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
+            script, out_path, err_path, sentinel = _wrapper(inner, token, sudo=sudo)
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
             sink = on_output or current_output_sink()
             tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))

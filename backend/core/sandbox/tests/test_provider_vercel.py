@@ -778,7 +778,11 @@ async def test_a_sudo_command_starts_without_no_new_privs(client: FakeClient, lo
     assert call["command"] == "/bin/bash"
     assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
     assert len(call["args"]) == 4
-    assert call["args"][-1].startswith(f"export PATH={vercel.ROOT_PATH}; /usr/bin/timeout --signal=KILL 30s /bin/bash ")
+    assert re.match(
+        rf"export PATH={re.escape(vercel.ROOT_PATH)}; /bin/mkdir -m 0755 \S+ \|\| exit 1;"
+        r" /usr/bin/timeout --signal=KILL 30s /bin/bash ",
+        call["args"][-1],
+    )
     assert "/app/.venv" not in vercel.ROOT_PATH
     assert "setpriv" not in call["args"][-1]
     assert call["sudo"] is True
@@ -811,6 +815,35 @@ async def test_the_command_wrapper_names_its_programs_by_absolute_path(
     script = client.boxes[env.name].create_calls[0]["args"][-1]
     assert re.search(r"(^|; )/usr/bin/timeout --signal=KILL 30s /bin/bash --noprofile --norc -c ", script)
     await env.stop()
+
+
+async def test_a_root_command_writes_its_files_into_a_folder_that_root_makes_first(
+    client: FakeClient, log: list[str]
+) -> None:
+    """Make root's output folder with no ``-p`` before the command, and stop when the name is taken (TU-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", sudo=True)
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    await env.stop()
+    found = re.search(r"; /bin/mkdir -m 0755 (/tmp/\.app-root-output-[0-9a-f]{32}) \|\| exit 1; /bin/bash ", script)
+    assert found
+    folder = found.group(1)
+    assert _PATHS.search(script).groups() == (f"{folder}/output.out", f"{folder}/output.err", f"{folder}/exit")
+
+
+async def test_a_non_root_command_keeps_its_output_names(client: FakeClient, log: list[str]) -> None:
+    """Keep the box user's own output files at their ``/tmp`` names, with no folder (TU-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    await env.stop()
+    token = re.search(r"/tmp/\.app-exit-([0-9a-f]{32})$", script).group(1)
+    assert script == (
+        f"/bin/bash --noprofile --norc -c 'echo hello' > /tmp/.app-output-{token}.out"
+        f" 2> /tmp/.app-output-{token}.err; echo $? > /tmp/.app-exit-{token}"
+    )
 
 
 async def test_a_non_root_command_wrapper_ignores_a_bash_planted_on_path(

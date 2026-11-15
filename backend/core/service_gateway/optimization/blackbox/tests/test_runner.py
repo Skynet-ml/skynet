@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -1477,9 +1478,103 @@ def test_the_metric_site_goes_before_the_image_packages(tmp_path: Path, monkeypa
 
 
 def test_the_wrapper_file_names_match_the_vercel_exec_wrapper() -> None:
-    """The supervisor checks the names that the Vercel exec wrapper writes, so the prefixes stay equal (SKY-398)."""
-    assert runner.WRAPPER_OUTPUT_PREFIX == vercel.OUTPUT_PREFIX
-    assert runner.WRAPPER_EXIT_PREFIX == vercel.EXIT_PREFIX
+    """The supervisor checks the names that the Vercel root exec wrapper writes, so they stay equal (SKY-398, TU-1)."""
+    _, out_path, _, sentinel = vercel._wrapper("true", "0" * 32, sudo=True)
+    folder = f"{runner.WRAPPER_FOLDER_PREFIX}{'0' * 32}"
+    assert runner.WRAPPER_FOLDER_PREFIX == vercel.ROOT_OUTPUT_PREFIX
+    assert (out_path, sentinel) == (f"{folder}/{runner.WRAPPER_OUTPUT_NAME}", f"{folder}/{runner.WRAPPER_EXIT_NAME}")
+
+
+_TOKEN = "ab" * 16
+_FOLDER = f"/tmp/.app-root-output-{_TOKEN}"
+
+
+def _wrapper_stdout(
+    monkeypatch: pytest.MonkeyPatch, path: str, *, folder_uid: int = 0, folder_mode: int = stat.S_IFDIR | 0o755
+) -> list[str]:
+    """Make the supervisor see a root stdout file at ``path`` in a folder with the given owner and mode.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        path: The name behind fd 1.
+        folder_uid: The owner of ``path``'s folder.
+        folder_mode: The type and mode of ``path``'s folder.
+
+    Returns:
+        The names that the supervisor creates, filled as it runs.
+    """
+    output = os.stat_result((stat.S_IFREG | 0o600, 7, 1, 1, 0, 0, 0, 0, 0, 0))
+    folder = os.stat_result((folder_mode, 8, 1, 2, folder_uid, 0, 0, 0, 0, 0))
+    names = {path: output, path.rpartition("/")[0]: folder}
+    created: list[str] = []
+
+    def lstat(name: str) -> os.stat_result:
+        """Return the fake entry at ``name``.
+
+        Args:
+            name: The path.
+
+        Returns:
+            Its fake status.
+
+        Raises:
+            FileNotFoundError: No fake entry has that name.
+        """
+        if name not in names:
+            raise FileNotFoundError(name)
+        return names[name]
+
+    def create(name: str, flags: int, mode: int) -> int:
+        """Record the created name.
+
+        Args:
+            name: The path.
+            flags: The open flags.
+            mode: The file mode.
+
+        Returns:
+            A fake fd.
+        """
+        created.append(name)
+        return 99
+
+    monkeypatch.setattr(runner.os, "fstat", lambda fd: output)
+    monkeypatch.setattr(runner.os, "lstat", lstat)
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runner.os, "fchmod", lambda fd, mode: None)
+    monkeypatch.setattr(runner.os, "open", create)
+    monkeypatch.setattr(runner.os, "close", lambda fd: None)
+    monkeypatch.setattr(runner.Path, "readlink", lambda self: Path(path))
+    return created
+
+
+def test_a_root_file_in_the_wrappers_root_folder_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept the root wrapper's own output file, and create its exit code file in the same folder (TU-1)."""
+    created = _wrapper_stdout(monkeypatch, f"{_FOLDER}/output.out")
+
+    assert runner.unsafe_output() is None
+    assert created == [f"{_FOLDER}/exit"]
+
+
+@pytest.mark.parametrize(
+    ("path", "options", "refusal"),
+    [
+        (f"/tmp/.app-output-{_TOKEN}.out", {}, "is not a file of the exec wrapper"),
+        (f"{_FOLDER}/output.out", {"folder_uid": 1000}, "is not a root-only folder"),
+        (f"{_FOLDER}/output.out", {"folder_mode": stat.S_IFDIR | 0o775}, "is not a root-only folder"),
+        (f"{_FOLDER}/output.out", {"folder_mode": stat.S_IFDIR | 0o757}, "is not a root-only folder"),
+        (f"{_FOLDER}/output.out", {"folder_mode": stat.S_IFLNK | 0o777}, "is not a root-only folder"),
+    ],
+    ids=["old-name", "box-user-folder", "group-writable", "other-writable", "link"],
+)
+def test_a_root_file_outside_a_root_only_wrapper_folder_is_refused(
+    monkeypatch: pytest.MonkeyPatch, path: str, options: dict[str, int], refusal: str
+) -> None:
+    """Refuse the old ``/tmp`` name and a folder that another user could plant into, and create no exit file (TU-1)."""
+    created = _wrapper_stdout(monkeypatch, path, **options)
+
+    assert refusal in (runner.unsafe_output() or "")
+    assert created == []
 
 
 _UNSAFE_OUTPUT = (
