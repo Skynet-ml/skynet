@@ -244,6 +244,29 @@ def test_upload_rejects_a_zip_that_is_not_docx_or_xlsx(harness: SimpleNamespace,
         assert session.scalars(select(ChatMediaModel)).all() == []
 
 
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [
+        (_zip("[Content_Types].xml", "word/document.xml"), "brief.pdf"),
+        (_PDF, "brief.docx"),
+        (_zip("xl/workbook.xml"), "budget"),
+    ],
+)
+def test_upload_rejects_a_document_named_as_another_type(harness: SimpleNamespace, data: bytes, name: str) -> None:
+    """The viewer draws an original by its name's extension, so a name that hides the real type gets a 415."""
+    assert _upload(harness.client, data, name=name, content_type="application/octet-stream").status_code == 415
+    with Session(harness.store.engine) as session:
+        assert session.scalars(select(ChatMediaModel)).all() == []
+
+
+def test_upload_rejects_a_zip_whose_directory_passes_the_cap(harness: SimpleNamespace) -> None:
+    """A zip of many small entries gets a 415 before its directory is parsed."""
+    names = ["word/document.xml", *(f"pad/{n:08d}-{'x' * 40}" for n in range(12_000))]
+    data = _zip(*names)
+    assert len(data) < chat_media.MAX_MEDIA_BYTES["document"]
+    assert _upload(harness.client, data, name="big.docx").status_code == 415
+
+
 def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """A document original does not use the cap that its file's text read already counted against."""
     monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)

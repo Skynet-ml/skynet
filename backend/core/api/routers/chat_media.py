@@ -65,6 +65,20 @@ _OFFICE_PARTS = {
     "word/document.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xl/workbook.xml": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+# The viewer picks how to draw an original from its file name, so a document
+# must carry the extension of its real type.
+_DOCUMENT_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    _OFFICE_PARTS["word/document.xml"]: ".docx",
+    _OFFICE_PARTS["xl/workbook.xml"]: ".xlsx",
+}
+_ZIP_END_MAGIC = b"PK\x05\x06"
+_ZIP_END_SIZE = 22
+# A zip's comment can be at most this long, so its end record is in this tail.
+_ZIP_END_SEARCH = _ZIP_END_SIZE + 0xFFFF
+# Real DOCX and XLSX directories are a few KiB. The cap stops a zip of many
+# small entries from costing memory and CPU in the request thread.
+MAX_ZIP_DIRECTORY_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -170,6 +184,13 @@ def office_document_type(data: bytes) -> str | None:
     Returns:
         The DOCX or XLSX content type, or ``None`` for any other zip.
     """
+    # zipfile reads the central directory that this end record names. A
+    # ZIP64 file marks its size 0xFFFFFFFF, which the cap also refuses.
+    end = data.rfind(_ZIP_END_MAGIC, max(0, len(data) - _ZIP_END_SEARCH))
+    if end < 0 or len(data) - end < _ZIP_END_SIZE:
+        return None
+    if int.from_bytes(data[end + 12 : end + 16], "little") > MAX_ZIP_DIRECTORY_BYTES:
+        return None
     try:
         # Only the central directory is read; no part is decompressed.
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -425,8 +446,9 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             The stored file's id, name, kind, real type and size.
 
         Raises:
-            HTTPException: 415 for a type that is not allowed, 413 for a file
-                over its kind's limit.
+            HTTPException: 415 for a type that is not allowed or a document
+                whose name has another type's extension, 413 for a file over
+                its kind's limit.
             DomainError: 429 over the hourly cap (file text reads share it,
                 and document originals have their own), 409 over the storage
                 quota.
@@ -455,6 +477,9 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             if office is None:
                 raise HTTPException(status_code=415, detail="This file type is not supported.")
             sniffed = SniffedMedia("document", office)
+        filename = _safe_filename(file.filename)
+        if sniffed.kind == "document" and not filename.lower().endswith(_DOCUMENT_EXTENSIONS[sniffed.mime_type]):
+            raise HTTPException(status_code=415, detail="This file type is not supported.")
         # The quota check measures storage, and that measure first sweeps the
         # user's stale unsent files, so they never block this upload.
         enforce_storage_quota(job_store, user.username, len(data))
@@ -463,7 +488,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         row = ChatMediaModel(
             id=str(uuid4()),
             username=user.username,
-            filename=_safe_filename(file.filename),
+            filename=filename,
             kind=sniffed.kind,
             mime_type=sniffed.mime_type,
             byte_size=len(data),
