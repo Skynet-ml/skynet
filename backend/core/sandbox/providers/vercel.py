@@ -320,13 +320,28 @@ def _wrapper(inner: str, token: str, *, sudo: bool) -> tuple[str, str, str, str]
             f"{OUTPUT_PREFIX}{token}.err",
             f"{EXIT_PREFIX}{token}",
         )
-        return f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}", out_path, err_path, sentinel
+        return f"{inner} > {out_path} 2> {err_path}; {_exit_with_code(sentinel)}", out_path, err_path, sentinel
     folder = f"{ROOT_OUTPUT_PREFIX}{token}"
     out_path, err_path, sentinel = f"{folder}/output.out", f"{folder}/output.err", f"{folder}/exit"
     # No ``-p``: mkdir fails on anything already at the name, a dangling link
     # too, and the command then never runs.
-    script = f"/bin/mkdir -m 0755 {folder} || exit 1; {inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
+    script = f"/bin/mkdir -m 0755 {folder} || exit 1; {inner} > {out_path} 2> {err_path}; {_exit_with_code(sentinel)}"
     return script, out_path, err_path, sentinel
+
+
+def _exit_with_code(sentinel: str) -> str:
+    """Make the wrapper's end: write the command's exit code, then exit with it.
+
+    ``process.wait()`` gives the wrapper shell's own status. A wrapper that
+    ends with its ``echo`` exits 0, so every failed command looked successful.
+
+    Args:
+        sentinel: The path of the exit code file.
+
+    Returns:
+        The shell text that follows the command.
+    """
+    return f"code=$?; echo $code > {sentinel}; exit $code"
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:

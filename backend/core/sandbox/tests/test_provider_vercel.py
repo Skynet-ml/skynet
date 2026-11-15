@@ -40,7 +40,27 @@ from core.sandbox.telemetry import use_output_sink
 from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.worker.scoped_relay import CallRecorder
 
-_PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
+_PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); (?:code=\$\?; )?echo \$\S+ > (\S+)(?:; exit \$code)?$")
+
+
+def _wrapper_status(script: str, code: int) -> int:
+    """Run the wrapper's own end in a real local shell, after a command that exits with ``code``.
+
+    A real box's ``process.wait()`` gives the status of the wrapper shell, not
+    of the inner command, so the fake must give the same.
+
+    Args:
+        script: The wrapper script.
+        code: The inner command's exit code.
+
+    Returns:
+        The wrapper shell's exit status.
+    """
+    found = _PATHS.search(script)
+    trailer = script[found.end(2) :].replace(found.group(3), "/dev/null")
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"(exit {code}){trailer}"], timeout=30, check=False
+    ).returncode
 
 
 def _gone() -> SandboxApiError:
@@ -173,6 +193,7 @@ class FakeProcess:
             block: Wait until terminate or kill when True.
         """
         self.fs = fs
+        self.script = script
         self.out, self.err, self.sentinel = _PATHS.search(script).groups()
         self.outcomes = list(outcomes)
         self.block = block
@@ -196,7 +217,7 @@ class FakeProcess:
             raise outcome
         self.fs.files[self.out] = "hello\n"
         self.fs.files[self.sentinel] = f"{outcome}\n"
-        return outcome
+        return _wrapper_status(self.script, outcome)
 
     async def terminate(self) -> None:
         """Count the terminate call and release a blocked wait."""
@@ -839,11 +860,49 @@ async def test_a_non_root_command_keeps_its_output_names(client: FakeClient, log
     await env.exec("echo hello")
     script = client.boxes[env.name].create_calls[0]["args"][-1]
     await env.stop()
-    token = re.search(r"/tmp/\.app-exit-([0-9a-f]{32})$", script).group(1)
+    token = re.search(r"/tmp/\.app-exit-([0-9a-f]{32})", script).group(1)
     assert script == (
         f"/bin/bash --noprofile --norc -c 'echo hello' > /tmp/.app-output-{token}.out"
-        f" 2> /tmp/.app-output-{token}.err; echo $? > /tmp/.app-exit-{token}"
+        f" 2> /tmp/.app-output-{token}.err; code=$?; echo $code > /tmp/.app-exit-{token}; exit $code"
     )
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+@pytest.mark.parametrize("code", [0, 3, 124, 137])
+def test_the_wrapper_shell_exits_with_the_command_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sudo: bool, code: int
+) -> None:
+    """Run the real wrapper in a local shell: its own status and the exit file hold the command's code.
+
+    A real box's ``process.wait()`` gives the wrapper shell's status. A wrapper
+    that ends with its ``echo`` exits 0, so every failed command looked
+    successful, and the exit file was read only after many wait errors.
+    """
+    monkeypatch.setattr(vercel, "OUTPUT_PREFIX", f"{tmp_path}/output-")
+    monkeypatch.setattr(vercel, "EXIT_PREFIX", f"{tmp_path}/exit-")
+    monkeypatch.setattr(vercel, "ROOT_OUTPUT_PREFIX", f"{tmp_path}/root-output-")
+    inner = f"/bin/bash --noprofile --norc -c {shlex.quote(f'echo hello; exit {code}')}"
+    script, out_path, _, sentinel = vercel._wrapper(inner, uuid.uuid4().hex, sudo=sudo)
+    done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], timeout=30, check=False)
+    assert done.returncode == code
+    assert Path(sentinel).read_text() == f"{code}\n"
+    assert Path(out_path).read_text() == "hello\n"
+
+
+def test_the_root_wrapper_still_stops_when_its_folder_name_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 1 before the command runs when the root output folder already exists (TU-1)."""
+    monkeypatch.setattr(vercel, "ROOT_OUTPUT_PREFIX", f"{tmp_path}/root-output-")
+    marker = tmp_path / "ran"
+    token = uuid.uuid4().hex
+    (tmp_path / f"root-output-{token}").mkdir()
+    script, *_ = vercel._wrapper(f"/usr/bin/touch {marker}", token, sudo=True)
+    done = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script], capture_output=True, timeout=30, check=False
+    )
+    assert done.returncode == 1
+    assert not marker.exists()
 
 
 async def test_a_non_root_command_wrapper_ignores_a_bash_planted_on_path(
@@ -1714,6 +1773,8 @@ async def test_timeout_codes_mark_timed_out(client: FakeClient, log: list[str]) 
     client.boxes[env.name].outcomes = [137]
     result = await env.exec("sleep 100", timeout_sec=1)
     assert result.timed_out
+    assert result.exit_code == 137
+    assert client.boxes[env.name].processes[0].waits == 1
     await env.stop()
 
 
@@ -2049,6 +2110,7 @@ class GrowingProcess:
             run: An async callable ``run(fs, out_path)`` that returns the exit code.
         """
         self.fs = fs
+        self.script = script
         self.out, self.err, self.sentinel = _PATHS.search(script).groups()
         self.run = run
 
@@ -2060,7 +2122,7 @@ class GrowingProcess:
         """
         code = await self.run(self.fs, self.out)
         self.fs.files[self.sentinel] = f"{code}\n"
-        return code
+        return _wrapper_status(self.script, code)
 
     async def terminate(self) -> None:
         """Accept a terminate call."""
