@@ -18,8 +18,9 @@ const action =
 
 /**
  * The quiet row for a call the auto-review stopped (SKY-706), after Codex:
- * "Auto-review denied", the action and the reason. "Approve anyway" runs the
- * call through the normal confirm; "Keep denied" tells the agent it did not run.
+ * "Auto-review denied", the action and a fixed reason (decision models give no
+ * free-text reason). "Approve anyway" runs the call through the normal confirm;
+ * "Keep denied" tells the agent it did not run.
  */
 export function AutoReviewDeniedRow({ payload, onResolve }: AutoReviewDeniedRowProps) {
   const [busy, setBusy] = React.useState<"approve" | "deny" | null>(null);
@@ -49,11 +50,7 @@ export function AutoReviewDeniedRow({ payload, onResolve }: AutoReviewDeniedRowP
           </button>
         </span>
       </div>
-      {payload.auto_review?.reason && (
-        <p className="ps-5.5 pt-0.5 text-[0.75rem]" dir="auto">
-          {payload.auto_review.reason}
-        </p>
-      )}
+      <p className="ps-5.5 pt-0.5 text-[0.75rem]">{msg("agent.approval.auto_review_mismatch")}</p>
     </div>
   );
 }

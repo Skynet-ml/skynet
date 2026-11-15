@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Abgelehnt lassen",
   "shared.agent.denied_actions": "{count, plural, one {# abgelehnte Aktion} other {# abgelehnte Aktionen}}",
   "shared.agent.denied_actions_tooltip": "Die automatische Prüfung hat diese Aktionen blockiert, daher hat der Agent sie nicht ausgeführt.",
+  "agent.approval.auto_review_mismatch": "Die Prüfung hat ergeben, dass diese Aktion nicht zu deiner Anfrage passt.",
   "shared.agent.context_label": "Kontextfenster:",
   "shared.agent.context_left": "{usage} % belegt ({remaining} % frei)",
   "shared.agent.context_full": "{usage} % voll",

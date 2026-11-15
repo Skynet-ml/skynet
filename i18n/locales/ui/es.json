@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Mantener rechazado",
   "shared.agent.denied_actions": "{count, plural, one {# acción rechazada} other {# acciones rechazadas}}",
   "shared.agent.denied_actions_tooltip": "La revisión automática bloqueó estas acciones, así que el agente no las ejecutó.",
+  "agent.approval.auto_review_mismatch": "La revisión determinó que esta acción no coincide con tu solicitud.",
   "shared.agent.context_label": "Ventana de contexto:",
   "shared.agent.context_left": "{usage} % usado (queda un {remaining} %)",
   "shared.agent.context_full": "{usage} % lleno",

@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Оставить отклонённым",
   "shared.agent.denied_actions": "{count, plural, one {# отклонённое действие} few {# отклонённых действия} many {# отклонённых действий} other {# отклонённого действия}}",
   "shared.agent.denied_actions_tooltip": "Автопроверка заблокировала эти действия, поэтому агент их не выполнил.",
+  "agent.approval.auto_review_mismatch": "Проверка показала, что это действие не соответствует вашему запросу.",
   "shared.agent.context_label": "Окно контекста:",
   "shared.agent.context_left": "Занято {usage}% (свободно {remaining}%)",
   "shared.agent.context_full": "Заполнено на {usage}%",

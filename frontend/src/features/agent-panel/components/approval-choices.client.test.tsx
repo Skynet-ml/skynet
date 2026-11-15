@@ -117,13 +117,13 @@ void test("the third answer sends what the agent should do instead", async () =>
   await React.act(async () => root.unmount());
 });
 
-void test("an auto-review denial shows its reason and 'Approve anyway' runs the call", async () => {
+void test("an auto-review denial shows the fixed reason and 'Approve anyway' runs the call", async () => {
   const { container, calls, root } = await mount({
     tool: "rename_job_optimizations",
-    auto_review: { denied: true, reason: "Not the run you named." },
+    auto_review: { denied: true },
   });
   assert.match(container.textContent ?? "", /Auto-review denied/);
-  assert.match(container.textContent ?? "", /Not the run you named\./);
+  assert.match(container.textContent ?? "", /does not match your request\./);
   const approve = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve anyway");
   assert.ok(approve, container.innerHTML);
   await React.act(async () => approve.click());

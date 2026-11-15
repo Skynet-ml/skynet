@@ -803,7 +803,7 @@ class _ApprovalGatedTool:
             # An injected policy (react-serve gates by its own rules) must not
             # be able to wave a protected settings action through.
             gated = self._tool_name in _ALWAYS_CONFIRM_TOOLS or self._needs_approval(self._tool_name, self._trust_mode)
-            denial: str | None = None
+            denied = False
             # A chat rule is the user's own choice, so it also skips the auto-review.
             ruled = self._tool_name in self._authoring_flag.chat_allowed and chat_rule_allowed(self._tool_name)
             if gated and ruled:
@@ -816,8 +816,7 @@ class _ApprovalGatedTool:
             ):
                 verdict = await self._authoring_flag.auto_review.review(self._tool_name, kwargs)
                 gated = verdict is None or not verdict.allowed
-                if verdict is not None and not verdict.allowed:
-                    denial = verdict.reason
+                denied = verdict is not None and not verdict.allowed
             if gated:
                 fut = self._registry.register(pending_key)
                 pending: dict[str, Any] = {
@@ -826,8 +825,8 @@ class _ApprovalGatedTool:
                     "arguments": kwargs,
                     "chat_rule": chat_rule_allowed(self._tool_name),
                 }
-                if denial is not None:
-                    pending["auto_review"] = {"denied": True, "reason": denial}
+                if denied:
+                    pending["auto_review"] = {"denied": True}
                 self._emit({"event": "pending_approval", "data": pending})
                 try:
                     # Bounded wait racing the local future against the durable
@@ -862,7 +861,7 @@ class _ApprovalGatedTool:
                 }
                 if note:
                     resolved["note"] = note
-                if denial is not None:
+                if denied:
                     resolved["auto_review_denied"] = True
                 self._emit({"event": "approval_resolved", "data": resolved})
                 if not approved:
@@ -3809,7 +3808,7 @@ async def run_generalist_agent(
     feedback_target: FeedbackTarget | None = None,
     on_steer: Callable[[str], None] | None = None,
     chat_allowed_tools: list[str] | None = None,
-    auto_review_send: Callable[[list[dict[str, str]]], str] | None = None,
+    auto_review_send: Callable[[dict[str, Any]], bytes] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 

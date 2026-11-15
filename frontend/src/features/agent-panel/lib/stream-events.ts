@@ -1,7 +1,7 @@
 import type { GeneralistAgentHandlers } from "./stream";
 
-/** True when `value` is the auto-review's `{denied: true, reason}` block. */
-function isDenial(value: unknown): value is { denied: true; reason?: unknown } {
+/** True when `value` is the auto-review's `{denied: true}` block. */
+function isDenial(value: unknown): value is { denied: true } {
   return typeof value === "object" && value !== null && (value as { denied?: unknown }).denied === true;
 }
 
@@ -66,7 +66,7 @@ export function dispatchGeneralistEvent(
         arguments: (data.arguments as Record<string, unknown>) ?? {},
         ...(data.chat_rule === true ? { chat_rule: true } : {}),
         ...(isDenial(data.auto_review)
-          ? { auto_review: { denied: true as const, reason: String(data.auto_review.reason ?? "") } }
+          ? { auto_review: { denied: true as const } }
           : {}),
       });
       break;

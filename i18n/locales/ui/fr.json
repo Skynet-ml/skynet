@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Garder refusé",
   "shared.agent.denied_actions": "{count, plural, one {# action refusée} other {# actions refusées}}",
   "shared.agent.denied_actions_tooltip": "La revue automatique a bloqué ces actions, donc l'agent ne les a pas exécutées.",
+  "agent.approval.auto_review_mismatch": "La revue a constaté que cette action ne correspond pas à votre demande.",
   "shared.agent.context_label": "Fenêtre de contexte :",
   "shared.agent.context_left": "{usage} % utilisé ({remaining} % restant)",
   "shared.agent.context_full": "{usage} % plein",

@@ -4521,5 +4521,6 @@
   "settings.code.markers.description": "Show changes with colors or with +/− signs.",
   "settings.code.markers.color": "Color",
   "settings.code.markers.signs": "+/−",
-  "settings.code.reset": "Reset to default"
+  "settings.code.reset": "Reset to default",
+  "agent.approval.auto_review_mismatch": "The reviewer found that this action does not match your request."
 }

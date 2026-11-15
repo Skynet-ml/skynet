@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Reddedilmiş kalsın",
   "shared.agent.denied_actions": "{count, plural, one {# reddedilen işlem} other {# reddedilen işlem}}",
   "shared.agent.denied_actions_tooltip": "Otomatik inceleme bu işlemleri engelledi, bu yüzden ajan bunları çalıştırmadı.",
+  "agent.approval.auto_review_mismatch": "İnceleme, bu işlemin isteğinizle eşleşmediğini buldu.",
   "shared.agent.context_label": "Bağlam penceresi:",
   "shared.agent.context_left": "%{usage} kullanıldı (%{remaining} kaldı)",
   "shared.agent.context_full": "%{usage} dolu",

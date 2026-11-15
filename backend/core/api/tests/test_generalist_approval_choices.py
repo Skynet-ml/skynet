@@ -9,6 +9,7 @@ wallet reservation and redaction.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from functools import partial
 from typing import Any
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ...billing.budgets import BudgetError
-from ...billing.tests.test_protected_dispatch import CATALOG
+from ...billing.tests.test_decision_dispatch import CATALOG
 from ...config import settings
 from ...service_gateway.agents import approval_choices
 from ...service_gateway.agents import auto_review as review_mod
@@ -36,7 +37,8 @@ from ...service_gateway.agents.approval_choices import (
 from ...service_gateway.agents.auto_review import (
     AutoReviewer,
     AutoReviewVerdict,
-    parse_review_reply,
+    parse_decision,
+    review_request,
     send_protected_review,
 )
 from ...service_gateway.agents.generalist import (
@@ -438,27 +440,50 @@ def test_the_confirm_route_stores_the_extras_before_the_decision(monkeypatch: py
     assert seen == ["Rename it instead"]
 
 
-def _reviewer(reply: Any) -> tuple[AutoReviewer, list]:
-    """Build a reviewer whose sender returns ``reply`` and records its prompts.
+def _decision(choice: Any = "allow", confidence: Any = 0.9, kind: str = "choice") -> bytes:
+    """Build a Decisions API response body.
 
     Args:
-        reply: The reply text, or an exception to raise.
+        choice: The chosen option.
+        confidence: The model's confidence.
+        kind: The answer type.
 
     Returns:
-        The reviewer and the list of prompts the sender got.
+        The JSON body.
+    """
+    answer = {"type": kind, "choice": choice, "probabilities": {}, "confidence": confidence}
+    return json.dumps(
+        {
+            "model": "typesafe/jev-1.14",
+            "answers": {"verdict": answer},
+            "usage": {"input_tokens": 120, "output_tokens": 0, "cost": 0.00002},
+            "id": "gen-dec-1-review",
+            "provider": "TypeSafe",
+        }
+    ).encode()
+
+
+def _reviewer(reply: Any) -> tuple[AutoReviewer, list]:
+    """Build a reviewer whose sender returns ``reply`` and records its requests.
+
+    Args:
+        reply: The response body, or an exception to raise.
+
+    Returns:
+        The reviewer and the list of request bodies the sender got.
     """
     prompts: list = []
 
-    def send(messages: list[dict[str, str]]) -> str:
-        """Return the fixed reply.
+    def send(request: dict[str, Any]) -> bytes:
+        """Return the fixed response.
 
         Args:
-            messages: The prompt.
+            request: The Decisions API body.
 
         Returns:
-            The reply text.
+            The response body.
         """
-        prompts.append(messages)
+        prompts.append(request)
         if isinstance(reply, Exception):
             raise reply
         return reply
@@ -470,7 +495,7 @@ async def test_an_allow_lets_the_safe_mutation_run_without_a_prompt() -> None:
     """In auto-safe mode an allow runs the call with one review."""
     events: list[dict[str, Any]] = []
     flag = _TurnAuthoringFlag()
-    flag.auto_review, prompts = _reviewer('{"label": "allow", "confidence": 0.9, "reason": "Asked for."}')
+    flag.auto_review, prompts = _reviewer(_decision("allow", 0.9))
     tool = _wrap("rename_job_optimizations", events, ApprovalRegistry(), flag, trust_mode="auto_safe")
     assert await tool.func._async_body() == "ran"
     assert not [e for e in events if e["event"] == "pending_approval"]
@@ -478,28 +503,38 @@ async def test_an_allow_lets_the_safe_mutation_run_without_a_prompt() -> None:
 
 
 async def test_a_deny_stops_the_call_until_the_user_approves_anyway() -> None:
-    """A deny shows the reason; "Approve anyway" runs the call through the normal confirm."""
+    """A deny shows the denial row; "Approve anyway" runs the call through the normal confirm."""
     events: list[dict[str, Any]] = []
     registry = ApprovalRegistry()
     calls: list[dict[str, Any]] = []
     flag = _TurnAuthoringFlag()
-    flag.auto_review, _ = _reviewer('{"label": "deny", "confidence": 0.8, "reason": "Not the run you named."}')
+    flag.auto_review, _ = _reviewer(_decision("deny", 0.8))
     tool = _wrap("rename_job_optimizations", events, registry, flag, trust_mode="auto_safe", calls=calls)
     call = asyncio.create_task(tool.func._async_body())
     pending = await _pending(events)
-    assert pending["auto_review"] == {"denied": True, "reason": "Not the run you named."}
+    assert pending["auto_review"] == {"denied": True}
     assert calls == []
     registry.resolve(approval_key(pending["id"], "alice"), True)
     assert await call == "ran"
     assert _resolved(events)[-1]["auto_review_denied"] is True
 
 
-@pytest.mark.parametrize("reply", [RuntimeError("timeout"), "not json", '{"label": "maybe", "reason": "x"}'])
+@pytest.mark.parametrize(
+    "reply",
+    [
+        RuntimeError("timeout"),
+        b"not json",
+        _decision("maybe"),
+        _decision("allow", 0.49),
+        _decision("deny", 0.3),
+        _decision("allow", kind="refusal"),
+    ],
+)
 async def test_a_failed_review_asks_the_user_and_never_allows(reply: Any) -> None:
-    """An error or a bad reply falls back to the normal prompt, with no denial shown.
+    """An error, an unknown option or a low confidence falls back to the normal prompt, with no denial shown.
 
     Args:
-        reply: A failing LM reply.
+        reply: A failing response.
     """
     events: list[dict[str, Any]] = []
     registry = ApprovalRegistry()
@@ -516,20 +551,20 @@ async def test_a_failed_review_asks_the_user_and_never_allows(reply: Any) -> Non
 
 async def test_a_review_that_times_out_asks_the_user() -> None:
     """A slow review counts as failed."""
-    reviewer, _ = _reviewer('{"label": "allow", "confidence": 1, "reason": "ok"}')
+    reviewer, _ = _reviewer(_decision())
     reviewer._timeout = 0.01
-    reviewer._send = lambda _messages: time.sleep(0.5) or "late"
+    reviewer._send = lambda _request: time.sleep(0.5) or _decision()
     assert await reviewer.review("rename_job_optimizations", {}) is None
 
 
 async def test_the_review_masks_secrets_in_the_arguments() -> None:
-    """Secret-like keys and credential-shaped values never reach the classifier."""
-    reviewer, prompts = _reviewer('{"label": "allow", "confidence": 1, "reason": "ok"}')
+    """Secret-like keys and credential-shaped values never reach the decision model."""
+    reviewer, prompts = _reviewer(_decision("allow", 1))
     secret = "sk-or-v1-" + "a" * 48
     verdict = await reviewer.review(
         "update_wizard_state", {"api_key": "plain-value-123", "notes": f"use {secret}", "job_name": "Q3"}
     )
-    assert verdict == AutoReviewVerdict(allowed=True, reason="ok")
+    assert verdict == AutoReviewVerdict(allowed=True, confidence=1.0)
     text = str(prompts[0])
     assert "plain-value-123" not in text
     assert secret not in text
@@ -540,7 +575,7 @@ async def test_the_review_masks_secrets_in_the_arguments() -> None:
 async def test_the_review_runs_only_where_auto_safe_skips_the_prompt() -> None:
     """Read-only tools, destructive tools and Ask mode get no review."""
     flag = _TurnAuthoringFlag()
-    flag.auto_review, prompts = _reviewer('{"label": "allow", "confidence": 1, "reason": "ok"}')
+    flag.auto_review, prompts = _reviewer(_decision())
     events: list[dict[str, Any]] = []
     registry = ApprovalRegistry()
     assert await _wrap("list_jobs_optimizations", events, registry, flag, trust_mode="auto_safe").func._async_body()
@@ -553,40 +588,73 @@ async def test_the_review_runs_only_where_auto_safe_skips_the_prompt() -> None:
     assert prompts == []
 
 
-def test_the_reviewer_uses_jev_for_its_classifier_role() -> None:
-    """The review model is TypeSafe Jev under the auto-review role."""
-    assert review_mod.AUTO_REVIEW_MODEL == "openrouter/typesafe/jev-router"
+def test_the_reviewer_uses_the_jev_decision_model() -> None:
+    """The review model is TypeSafe Jev 1.14 under the auto-review role, and it passes the catalog check."""
+    assert review_mod.AUTO_REVIEW_MODEL == "openrouter/typesafe/jev-1.14"
     assert review_mod.AUTO_REVIEW_ROLE == "auto_review"
+    review_mod.require_known_model(review_mod.AUTO_REVIEW_MODEL, role=review_mod.AUTO_REVIEW_ROLE)
+
+
+def test_the_review_request_keeps_the_request_and_the_call_as_state() -> None:
+    """The user's request and the masked call go in ``state``; the question is a fixed allow or deny choice."""
+    body = review_request("rename_job_optimizations", {"job_id": "j1", "token": "hidden-1"}, "Rename it")
+    assert body["model"] == "typesafe/jev-1.14"
+    assert body["state"]["user_latest_request"] == "Rename it"
+    assert body["state"]["tool_call"]["name"] == "rename_job_optimizations"
+    assert body["state"]["tool_call"]["args"]["job_id"] == "j1"
+    assert "hidden-1" not in json.dumps(body)
+    question = body["questions"]["verdict"]
+    assert question["type"] == "choice"
+    assert set(question["criteria"]) == {"allow", "deny"}
+    assert "Rename it" not in question["instructions"]
+
+
+def test_the_review_request_clips_long_arguments() -> None:
+    """Large arguments become one clipped string, so the billed state stays small."""
+    body = review_request("update_wizard_state", {"notes": "n" * 10_000}, "x" * 5000)
+    assert isinstance(body["state"]["tool_call"]["args"], str)
+    assert len(body["state"]["tool_call"]["args"]) == 4000
+    assert len(body["state"]["user_latest_request"]) == 2000
 
 
 @pytest.mark.parametrize(
-    "reply",
-    [
-        None,
-        "",
-        '{"label": "allow", "reason": ""}',
-        '{"label": "allow", "reason": "a"} {"label": "deny", "reason": "b"}',
-    ],
+    ("body", "allowed"),
+    [(_decision("allow", 0.5), True), (_decision("deny", 0.99), False), (_decision("allow", 1), True)],
 )
-def test_the_review_parser_refuses_a_bad_reply(reply: str | None) -> None:
-    """No object, no reason or two answers all raise.
+def test_the_decision_maps_to_a_verdict(body: bytes, allowed: bool) -> None:
+    """A confident allow or deny maps to the verdict.
 
     Args:
-        reply: A bad reply.
+        body: The response.
+        allowed: The expected verdict.
+    """
+    assert parse_decision(body).allowed is allowed
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"[]",
+        b'{"answers": {}}',
+        b'{"answers": {"verdict": "allow"}}',
+        _decision("Allow"),
+        _decision("allow", None),
+        _decision("allow", True),
+        _decision("allow", "0.9"),
+        _decision("allow", 1.5),
+        _decision("allow", 0.2),
+        _decision("allow", kind="score"),
+    ],
+)
+def test_the_decision_parser_refuses_a_bad_answer(body: bytes) -> None:
+    """No answer, another type, an unknown option or a missing, invalid or low confidence all raise.
+
+    Args:
+        body: A bad response.
     """
     with pytest.raises(ClassificationError):
-        parse_review_reply(reply)
-
-
-def test_the_review_parser_clips_the_reason() -> None:
-    """A long reason is clipped for the chat row."""
-    verdict = parse_review_reply('```json\n{"label": "DENY", "confidence": 1, "reason": "' + "r" * 500 + '"}\n```')
-    assert verdict.allowed is False
-    assert len(verdict.reason) == 200
-
-
-_JEV_SLUG = "typesafe/jev-router"
-_ALLOW_REPLY = '{"label": "allow", "confidence": 1, "reason": "Asked for."}'
+        parse_decision(body)
 
 
 class _Provider:
@@ -597,7 +665,7 @@ class _Provider:
 
         Args:
             engine: The test database.
-            status: The status of each chat answer.
+            status: The status of each decision answer.
         """
         self.engine = engine
         self.status = status
@@ -605,31 +673,23 @@ class _Provider:
         self.states_at_call: list[str] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        """Answer the price lookup and the chat call.
+        """Answer the price lookup and the decision call.
 
         Args:
             request: The outgoing request.
 
         Returns:
-            Live-shaped prices, or a chat answer with a reported cost.
+            Live-shaped prices, or a decision answer with a reported cost.
         """
         if request.method == "GET":
-            return httpx.Response(200, json={"data": {**CATALOG, "id": _JEV_SLUG}})
+            return httpx.Response(200, json={"data": CATALOG})
         self.posts.append(request)
         with Session(self.engine) as session:
             operation = session.scalar(select(ExecutionOperationModel))
             self.states_at_call.append(operation.state if operation else "none")
         if self.status >= 400:
             return httpx.Response(self.status, json={"error": {"message": "provider failed"}})
-        return httpx.Response(
-            200,
-            json={
-                "id": "gen-review",
-                "model": _JEV_SLUG,
-                "choices": [{"message": {"content": _ALLOW_REPLY}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 40, "completion_tokens": 12, "cost": 0.001},
-            },
-        )
+        return httpx.Response(200, content=_decision(), headers={"content-type": "application/json"})
 
 
 @pytest.fixture
@@ -701,9 +761,10 @@ def test_the_review_reserves_before_the_provider_call_and_settles_after(
     """
     provider = _Provider(wallet)
     _route(monkeypatch, provider)
-    reply = send_protected_review(wallet, "alice", "synthetic-platform-key", [{"role": "user", "content": "x"}])
-    assert reply == _ALLOW_REPLY
+    reply = send_protected_review(wallet, "alice", "synthetic-platform-key", review_request("rename", {}, "x"))
+    assert parse_decision(reply).allowed is True
     assert provider.states_at_call == ["dispatched"]
+    assert str(provider.posts[0].url) == "https://openrouter.ai/api/alpha/decisions"
     assert provider.posts[0].headers["authorization"] == "Bearer synthetic-platform-key"
     operations, budgets, charged, _ = _ledger(wallet)
     assert operations == ["settled"]
@@ -724,7 +785,7 @@ async def test_an_empty_wallet_skips_the_review_and_asks_the_user(wallet: Any, m
     provider = _Provider(wallet)
     _route(monkeypatch, provider)
     with pytest.raises(BudgetError):
-        send_protected_review(wallet, "alice", "synthetic-platform-key", [{"role": "user", "content": "x"}])
+        send_protected_review(wallet, "alice", "synthetic-platform-key", review_request("rename", {}, "x"))
     events: list[dict[str, Any]] = []
     registry = ApprovalRegistry()
     flag = _TurnAuthoringFlag()

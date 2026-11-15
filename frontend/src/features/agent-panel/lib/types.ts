@@ -121,7 +121,7 @@ export interface PendingApprovalPayload {
   /** True when "Allow for this chat" may cover this tool. */
   chat_rule?: boolean;
   /** The auto-review stopped this call; the user can approve it anyway. */
-  auto_review?: { denied: true; reason: string };
+  auto_review?: { denied: true };
 }
 
 export interface ApprovalResolvedPayload {

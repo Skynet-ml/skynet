@@ -597,11 +597,15 @@ def is_effortless_model(name: str) -> bool:
 
 
 # D50: TypeSafe Jev is a router, so the removed-model rule hides it, but its
-# typed labels suit the classification roles (the watch hook, the exploit
-# judge and the chat's auto-review of tool calls, SKY-706). Only those roles
-# may pick it; every other role keeps it hidden.
-CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge", "auto_review"})
+# typed labels suit the classification roles (the watch hook and the exploit
+# judge). Only those roles may pick it; every other role keeps it hidden.
+CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge"})
 CLASSIFIER_ONLY_MODELS: frozenset[str] = frozenset({"openrouter/typesafe/jev-router"})
+# SKY-706: the chat's auto-review asks an OpenRouter Decisions API model. The
+# chat catalog never lists decision models, and only the auto_review role may
+# use this one. The auto-review imports this constant, so the id lives here once.
+AUTO_REVIEW_ROLE = "auto_review"
+AUTO_REVIEW_MODEL = "openrouter/typesafe/jev-1.14"
 
 
 # Featured-model selection over the OpenRouter listing: the agent panels'
@@ -2137,13 +2141,15 @@ def require_known_model(model: str | None, *, role: str | None = None) -> None:
     Args:
         model: LiteLLM model id; empty/None passes (the server default runs).
         role: The role the model fills; the classifier roles also accept the
-            classifier-only models.
+            classifier-only models, and the auto-review role its decision model.
 
     Raises:
         DomainError: 422 when the id is not a catalog model.
     """
     name = str(model or "").strip()
     if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
+        return
+    if role == AUTO_REVIEW_ROLE and name == AUTO_REVIEW_MODEL:
         return
     if (
         name

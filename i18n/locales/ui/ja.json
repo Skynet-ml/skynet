@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "拒否のままにする",
   "shared.agent.denied_actions": "{count, plural, other {# 件の拒否された操作}}",
   "shared.agent.denied_actions_tooltip": "自動レビューがこれらの操作をブロックしたため、エージェントは実行しませんでした。",
+  "agent.approval.auto_review_mismatch": "レビューの結果、この操作はあなたの依頼と一致しません。",
   "shared.agent.context_label": "コンテキストウィンドウ:",
   "shared.agent.context_left": "{usage}% 使用中 (残り {remaining}%)",
   "shared.agent.context_full": "{usage}% 使用済み",

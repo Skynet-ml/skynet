@@ -19,7 +19,13 @@ from .data_policy import DataPolicy, apply_data_policy
 from .model_batch import BatchCollector
 from .model_terms import excluded_from_managed, managed_model_refusal
 from .openrouter_float import notify_managed_refusal
-from .openrouter_quotes import PricedRequest, fetch_endpoint_prices, price_embedding_request, price_text_request
+from .openrouter_quotes import (
+    PricedRequest,
+    fetch_endpoint_prices,
+    price_decision_request,
+    price_embedding_request,
+    price_text_request,
+)
 from .operation_pricing import (
     ChargePolicy,
     OperationQuote,
@@ -476,7 +482,7 @@ class ProviderDispatcher:
         """Send one final request only after its physical attempt is fully reserved.
 
         Args:
-            path: Chat completions, Anthropic messages, Responses, or embeddings protocol path.
+            path: Chat completions, Anthropic messages, Responses, embeddings, or managed decisions path.
             request: Fully resolved SDK body including final token and tool settings.
             operation_key: Optional stable physical-attempt identity for a transport replay.
             attempt: Physical retry number within a stable logical operation.
@@ -489,7 +495,7 @@ class ProviderDispatcher:
         if self.embeddings and not self.upstream.embeddings:
             paths = set()
         if not self.embeddings and self.policy.kind == "managed_model" and self.upstream == OPENROUTER:
-            paths.add("/messages")
+            paths.update({"/messages", "/decisions"})
         if path not in paths or request.get("model") != self.model:
             raise UnpricedOperationError(
                 "This scoped route cannot dispatch a different model or API operation.",
@@ -515,7 +521,11 @@ class ProviderDispatcher:
                 routed = mark_prompt_cache(path, routed)
             if self.policy.kind != "byok_model":
                 catalog = fetch_endpoint_prices(self.model, client=self._client)
-                pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}
+                pricer = {
+                    "/responses": price_responses_request,
+                    "/embeddings": price_embedding_request,
+                    "/decisions": price_decision_request,
+                }
                 priced = pricer.get(path, price_text_request)(routed, catalog, self.policy)
             else:
                 if routed.get("n", 1) != 1 or routed.get("best_of", 1) != 1:
@@ -600,6 +610,10 @@ class ProviderDispatcher:
             and self.policy.kind == "managed_model"
         )
 
+        # OpenRouter serves the Decisions API under /api/alpha, not the /api/v1
+        # base. Only the managed OpenRouter route admits "/decisions" above.
+        base_url = "https://openrouter.ai/api/alpha" if path == "/decisions" else self.upstream.base_url
+
         def send() -> PaidResult[ModelHTTPResult]:
             """Send exactly once and retain trusted usage even for a provider error response."""
             chunks = []
@@ -609,7 +623,7 @@ class ProviderDispatcher:
                 answer = self._batch.run(priced.body, batch_rates(priced.quote))
                 return settle(answer.status, "application/json", answer.body, answer.interrupted, None)
             with self._client.stream(
-                "POST", f"{self.upstream.base_url}{path}", headers=headers, json=priced.body, follow_redirects=False
+                "POST", f"{base_url}{path}", headers=headers, json=priced.body, follow_redirects=False
             ) as response:
                 content_type = response.headers.get("content-type", "application/json")
                 try:

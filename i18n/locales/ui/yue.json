@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "保持拒絕",
   "shared.agent.denied_actions": "{count, plural, other {# 個被拒絕嘅動作}}",
   "shared.agent.denied_actions_tooltip": "自動審查封鎖咗呢啲動作，所以代理冇執行佢哋。",
+  "agent.approval.auto_review_mismatch": "審查發現呢個動作同你嘅要求唔相符。",
   "shared.agent.context_label": "上下文窗口：",
   "shared.agent.context_left": "用咗 {usage}%（仲剩 {remaining}%）",
   "shared.agent.context_full": "已經滿咗 {usage}%",

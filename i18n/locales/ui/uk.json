@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "Залишити відхиленим",
   "shared.agent.denied_actions": "{count, plural, one {# відхилена дія} few {# відхилені дії} many {# відхилених дій} other {# відхиленої дії}}",
   "shared.agent.denied_actions_tooltip": "Автоперевірка заблокувала ці дії, тому агент їх не виконав.",
+  "agent.approval.auto_review_mismatch": "Перевірка показала, що ця дія не відповідає вашому запиту.",
   "shared.agent.context_label": "Вікно контексту:",
   "shared.agent.context_left": "Зайнято {usage}% (вільно {remaining}%)",
   "shared.agent.context_full": "Заповнено на {usage}%",

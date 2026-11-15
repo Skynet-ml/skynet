@@ -4521,5 +4521,6 @@
   "settings.code.markers.description": "הצגת שינויים בצבעים או בסימני +/−.",
   "settings.code.markers.color": "צבע",
   "settings.code.markers.signs": "+/−",
-  "settings.code.reset": "איפוס לברירת המחדל"
+  "settings.code.reset": "איפוס לברירת המחדל",
+  "agent.approval.auto_review_mismatch": "הבודק מצא שהפעולה הזו לא תואמת את הבקשה שלך."
 }

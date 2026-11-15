@@ -1180,9 +1180,9 @@ def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
 _JEV = "openrouter/typesafe/jev-router"
 
 
-@pytest.mark.parametrize("role", ["hook", "judge", "auto_review"])
+@pytest.mark.parametrize("role", ["hook", "judge"])
 def test_jev_is_selectable_for_the_classifier_roles(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
-    """TypeSafe Jev passes validation for the hook, judge and auto-review roles."""
+    """TypeSafe Jev passes validation for the hook and judge roles."""
     kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
     catalog = ModelCatalogResponse(providers=[], models=[kept])
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
@@ -1201,6 +1201,21 @@ def test_jev_stays_hidden_for_every_other_role(monkeypatch: pytest.MonkeyPatch, 
 
     with pytest.raises(mc.DomainError):
         mc.require_known_model(_JEV, role=role)
+
+
+def test_the_auto_review_decision_model_passes_only_for_its_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The auto-review role accepts its decision model; no other role does, and it accepts no other model."""
+    kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=[kept]))
+
+    mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=mc.AUTO_REVIEW_ROLE)
+
+    for role in (None, "agent", "hook", "judge"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=role)
+    for other in (_JEV, "openrouter/typesafe/jev-1.13"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(other, role=mc.AUTO_REVIEW_ROLE)
 
 
 def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.MonkeyPatch) -> None:

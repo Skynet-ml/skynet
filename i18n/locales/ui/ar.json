@@ -4497,6 +4497,7 @@
   "agent.approval.keep_denied": "أبقِ الرفض",
   "shared.agent.denied_actions": "{count, plural, one {إجراء مرفوض واحد} other {# إجراءات مرفوضة}}",
   "shared.agent.denied_actions_tooltip": "حظرت المراجعة التلقائية هذه الإجراءات، لذلك لم يشغّلها الوكيل.",
+  "agent.approval.auto_review_mismatch": "وجد المراجع أن هذا الإجراء لا يطابق طلبك.",
   "shared.agent.context_label": "نافذة السياق:",
   "shared.agent.context_left": "مستخدم {usage}% (متبقٍ {remaining}%)",
   "shared.agent.context_full": "ممتلئة بنسبة {usage}%",

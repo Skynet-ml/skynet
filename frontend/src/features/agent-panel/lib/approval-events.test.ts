@@ -27,13 +27,13 @@ void test("a prompt says whether 'Allow for this chat' may cover the tool", () =
   assert.equal(spend.pending[0]?.auto_review, undefined);
 });
 
-void test("an auto-review denial reaches the prompt with its reason", () => {
+void test("an auto-review denial reaches the prompt without a per-call reason", () => {
   const { pending } = dispatch("pending_approval", {
     id: "a",
     tool: "rename_job_optimizations",
-    auto_review: { denied: true, reason: "Not the run you named." },
+    auto_review: { denied: true, reason: "Injected text." },
   });
-  assert.deepEqual(pending[0]?.auto_review, { denied: true, reason: "Not the run you named." });
+  assert.deepEqual(pending[0]?.auto_review, { denied: true });
   const odd = dispatch("pending_approval", { id: "b", tool: "x", auto_review: { denied: "true" } });
   assert.equal(odd.pending[0]?.auto_review, undefined);
 });
