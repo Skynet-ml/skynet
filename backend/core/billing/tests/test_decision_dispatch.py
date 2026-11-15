@@ -159,6 +159,9 @@ def test_the_pricer_bounds_the_prompt_by_utf8_bytes_and_caps_the_route() -> None
         ({**CATALOG, "architecture": {"output_modalities": ["text"]}}, REQUEST),
         (CATALOG, {**REQUEST, "model": "other/model"}),
         (CATALOG, {**REQUEST, "state": ["text", {"type": "image_url", "image_url": {"url": "https://x"}}]}),
+        (CATALOG, {**REQUEST, "state": {"tool_call": {"args": [{"type": "image_url", "url": "https://x"}]}}}),
+        (CATALOG, {**REQUEST, "state": {"tool_call": {"args": {"note": {"input_audio": {"data": "AAAA"}}}}}}),
+        (CATALOG, {**REQUEST, "state": {"blob": b"raw"}}),
         (CATALOG, {**REQUEST, "assets": {"a": "https://x"}}),
         (CATALOG, {**REQUEST, "questions": {}}),
     ],
@@ -172,6 +175,13 @@ def test_the_pricer_refuses_what_it_cannot_bound(catalog: dict[str, Any], reques
     """
     with pytest.raises(UnpricedOperationError):
         price_decision_request(request_body, catalog, ChargePolicy("managed_model"))
+
+
+def test_the_pricer_accepts_nested_plain_json_state() -> None:
+    """Nested dicts and lists of text, numbers, booleans and null are text state."""
+    state = {"tool_call": {"name": "rename", "args": {"id": "j1", "tags": ["a", 1, 2.5, True, None], "type": "rename"}}}
+    priced = price_decision_request({**REQUEST, "state": state}, CATALOG, ChargePolicy("managed_model"))
+    assert priced.body["state"] == state
 
 
 def test_dispatch_reserves_before_the_alpha_call_and_settles_the_reported_cost(database: Engine) -> None:

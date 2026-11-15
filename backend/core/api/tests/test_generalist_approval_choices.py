@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -440,6 +441,91 @@ def test_the_confirm_route_stores_the_extras_before_the_decision(monkeypatch: py
     assert seen == ["Rename it instead"]
 
 
+class _BrokenStore:
+    """A steer store whose database is down."""
+
+    def post(self, *args: Any) -> None:
+        """Fail like a lost database connection.
+
+        Args:
+            *args: Ignored.
+
+        Raises:
+            OperationalError: Always.
+        """
+        raise OperationalError("insert", {}, Exception("database is down"))
+
+    def take(self, *args: Any) -> None:
+        """Fail like a lost database connection.
+
+        Args:
+            *args: Ignored.
+
+        Raises:
+            OperationalError: Always.
+        """
+        raise OperationalError("select", {}, Exception("database is down"))
+
+
+def test_the_confirm_route_resolves_the_decision_when_the_extras_store_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A database error on the extras drops only the extras; the decision still lands.
+
+    Args:
+        monkeypatch: Breaks the steer store and records the decision.
+    """
+    decided: list[bool] = []
+
+    class _Registry:
+        """Record the decision."""
+
+        def resolve_or_persist(self, key: str, approved: bool) -> bool:
+            """Record the decision and accept it.
+
+            Args:
+                key: The approval key.
+                approved: The decision.
+
+            Returns:
+                True.
+            """
+            decided.append(approved)
+            return True
+
+    monkeypatch.setattr(approval_choices, "get_steer_store", _BrokenStore)
+    monkeypatch.setattr(agent_mod, "get_approval_registry", _Registry)
+    app = FastAPI()
+    app.include_router(agent_mod.create_generalist_agent_router())
+    bypass_auth(app)
+    response = TestClient(app).post(
+        "/optimizations/generalist-agent/confirm",
+        json={"call_id": "call1", "approved": True, "scope": "conversation"},
+    )
+    assert response.status_code == 200
+    assert decided == [True]
+
+
+async def test_an_approved_call_runs_once_when_the_extras_store_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A storage error while reading the extras counts as no extras, so the approved call still runs.
+
+    Args:
+        monkeypatch: Breaks the steer store.
+    """
+    monkeypatch.setattr(approval_choices, "get_steer_store", _BrokenStore)
+    events: list[dict[str, Any]] = []
+    registry = ApprovalRegistry()
+    flag = _TurnAuthoringFlag()
+    calls: list[dict[str, Any]] = []
+    call = asyncio.create_task(
+        _wrap("rename_job_optimizations", events, registry, flag, calls=calls).func._async_body()
+    )
+    pending = await _pending(events)
+    registry.resolve(approval_key(pending["id"], "alice"), True)
+    assert await call == "ran"
+    assert len(calls) == 1
+    assert _resolved(events)[-1]["scope"] == "once"
+    assert "rename_job_optimizations" not in flag.chat_allowed
+
+
 def _decision(choice: Any = "allow", confidence: Any = 0.9, kind: str = "choice") -> bytes:
     """Build a Decisions API response body.
 
@@ -609,12 +695,35 @@ def test_the_review_request_keeps_the_request_and_the_call_as_state() -> None:
     assert "Rename it" not in question["instructions"]
 
 
-def test_the_review_request_clips_long_arguments() -> None:
-    """Large arguments become one clipped string, so the billed state stays small."""
-    body = review_request("update_wizard_state", {"notes": "n" * 10_000}, "x" * 5000)
-    assert isinstance(body["state"]["tool_call"]["args"], str)
-    assert len(body["state"]["tool_call"]["args"]) == 4000
+def test_the_review_request_clips_only_the_user_request() -> None:
+    """A long user request keeps its last 2000 characters; arguments that fit stay whole."""
+    body = review_request("update_wizard_state", {"notes": "n" * 3000}, "x" * 5000)
+    assert body is not None
+    assert body["state"]["tool_call"]["args"] == {"notes": "n" * 3000}
     assert len(body["state"]["user_latest_request"]) == 2000
+
+
+def test_arguments_too_long_to_show_get_no_review_request() -> None:
+    """A call the reviewer cannot see in full gets no review body, so a hidden tail cannot pass."""
+    assert review_request("update_wizard_state", {"notes": "n" * 3990, "tail": "drop"}, "x") is None
+
+
+async def test_a_call_too_long_to_review_asks_the_user_with_no_paid_call() -> None:
+    """Arguments over the limit skip the review, send nothing, and show the normal prompt with no denial."""
+    events: list[dict[str, Any]] = []
+    registry = ApprovalRegistry()
+    calls: list[dict[str, Any]] = []
+    flag = _TurnAuthoringFlag()
+    flag.auto_review, prompts = _reviewer(_decision("allow", 0.99))
+    tool = _wrap("rename_job_optimizations", events, registry, flag, trust_mode="auto_safe", calls=calls)
+    call = asyncio.create_task(tool.func._async_body(new_name="n" * 5000))
+    pending = await _pending(events)
+    assert "auto_review" not in pending
+    assert prompts == []
+    assert calls == []
+    registry.resolve(approval_key(pending["id"], "alice"), False)
+    await call
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -761,7 +870,9 @@ def test_the_review_reserves_before_the_provider_call_and_settles_after(
     """
     provider = _Provider(wallet)
     _route(monkeypatch, provider)
-    reply = send_protected_review(wallet, "alice", "synthetic-platform-key", review_request("rename", {}, "x"))
+    body = review_request("rename", {}, "x")
+    assert body is not None
+    reply = send_protected_review(wallet, "alice", "synthetic-platform-key", body)
     assert parse_decision(reply).allowed is True
     assert provider.states_at_call == ["dispatched"]
     assert str(provider.posts[0].url) == "https://openrouter.ai/api/alpha/decisions"
@@ -784,8 +895,10 @@ async def test_an_empty_wallet_skips_the_review_and_asks_the_user(wallet: Any, m
         session.commit()
     provider = _Provider(wallet)
     _route(monkeypatch, provider)
+    body = review_request("rename", {}, "x")
+    assert body is not None
     with pytest.raises(BudgetError):
-        send_protected_review(wallet, "alice", "synthetic-platform-key", review_request("rename", {}, "x"))
+        send_protected_review(wallet, "alice", "synthetic-platform-key", body)
     events: list[dict[str, Any]] = []
     registry = ApprovalRegistry()
     flag = _TurnAuthoringFlag()

@@ -31,6 +31,7 @@
   "agent.approval.auto_review_denied": "Auto-review denied",
   "agent.approval.approve_anyway": "Approve anyway",
   "agent.approval.keep_denied": "Keep denied",
+  "agent.approval.auto_review_mismatch": "The reviewer found that this action does not match your request.",
   "agent.kickoff.oversized_data": "The data you added is too large for me to scan. What would you like to do?",
   "agent.kickoff.oversized_repo": "{name} is a large repository, so I couldn't scan it. What would you like to do?",
   "agent.composer.attach": "Attach a file",
@@ -539,7 +540,6 @@
   "auto.features.agent.panel.components.analyticssummarycard.total": "Total {p1}",
   "auto.features.agent.panel.components.approvalcard.literal.1": "Hide technical details",
   "auto.features.agent.panel.components.approvalcard.literal.2": "Show technical details",
-  "auto.features.agent.panel.components.approvalcard.literal.3": "Cancel",
   "auto.features.agent.panel.components.conversationdrawer.delete": "Delete",
   "auto.features.agent.panel.components.conversationdrawer.empty": "No saved conversations yet",
   "auto.features.agent.panel.components.conversationdrawer.no_results": "No search results",
@@ -4521,6 +4521,5 @@
   "settings.code.markers.description": "Show changes with colors or with +/− signs.",
   "settings.code.markers.color": "Color",
   "settings.code.markers.signs": "+/−",
-  "settings.code.reset": "Reset to default",
-  "agent.approval.auto_review_mismatch": "The reviewer found that this action does not match your request."
+  "settings.code.reset": "Reset to default"
 }

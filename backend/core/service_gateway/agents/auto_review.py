@@ -67,7 +67,7 @@ class AutoReviewVerdict:
     confidence: float
 
 
-def review_request(tool: str, arguments: dict[str, Any], request: str) -> dict[str, Any]:
+def review_request(tool: str, arguments: dict[str, Any], request: str) -> dict[str, Any] | None:
     """Build the Decisions API body for one tool call.
 
     The request and the call go in ``state`` as data, never in the
@@ -79,16 +79,20 @@ def review_request(tool: str, arguments: dict[str, Any], request: str) -> dict[s
         request: The user's latest message.
 
     Returns:
-        The body with one ``choice`` question whose options are allow and deny.
+        The body with one ``choice`` question whose options are allow and
+        deny, or ``None`` when the arguments are too long to show in full.
     """
     masked = mask_secrets(arguments)
     shown = json.dumps(masked, ensure_ascii=False, default=str)
-    args: Any = json.loads(shown) if len(shown) <= _ARGUMENTS_MAX_CHARS else shown[:_ARGUMENTS_MAX_CHARS]
+    if len(shown) > _ARGUMENTS_MAX_CHARS:
+        # A clipped call hides its tail from the reviewer, so an injected
+        # change after the cut could pass. The user decides these calls.
+        return None
     return {
         "model": AUTO_REVIEW_MODEL.removeprefix("openrouter/"),
         "state": {
             "user_latest_request": request[-_REQUEST_MAX_CHARS:],
-            "tool_call": {"name": tool, "args": args},
+            "tool_call": {"name": tool, "args": json.loads(shown)},
         },
         "questions": {
             _QUESTION: {"type": "choice", "instructions": _INSTRUCTIONS, "criteria": dict(_CRITERIA)},
@@ -210,6 +214,9 @@ class AutoReviewer:
         try:
             require_known_model(AUTO_REVIEW_MODEL, role=AUTO_REVIEW_ROLE)
             body = review_request(tool, arguments, self._request)
+            if body is None:
+                logger.info("auto-review of %s skipped: the arguments are too long; asking the user", tool)
+                return None
             reply = await asyncio.wait_for(asyncio.to_thread(self._send, body), self._timeout)
             return parse_decision(reply)
         except Exception:

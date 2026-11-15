@@ -459,6 +459,32 @@ def price_embedding_request(
     return PricedRequest(body, operation_quote(body, maximum, policy, evidence))
 
 
+# Keys and part types that mark an image, audio, video or file part at any depth.
+_MEDIA_KEYS = {"image", "image_url", "input_image", "file", "file_data", "input_audio", "audio", "video", "video_url"}
+
+
+def _plain_text_state(value: Any) -> bool:
+    """Check that a decisions state is plain JSON text data at every depth.
+
+    Args:
+        value: The state, or one value inside it.
+
+    Returns:
+        True for strings, numbers, booleans, ``None``, and lists or dicts of
+        those. False for any other type, and for a dict that looks like a
+        media part (a media key, or a ``type`` that names a media key).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, list):
+        return all(_plain_text_state(item) for item in value)
+    if isinstance(value, dict):
+        if _MEDIA_KEYS.intersection(value) or value.get("type") in _MEDIA_KEYS:
+            return False
+        return all(isinstance(key, str) and _plain_text_state(item) for key, item in value.items())
+    return False
+
+
 def price_decision_request(
     request: Mapping[str, Any], catalog: Mapping[str, Any], policy: ChargePolicy
 ) -> PricedRequest:
@@ -488,10 +514,7 @@ def price_decision_request(
         raise UnpricedOperationError("This model is not a decisions model.")
     if set(body) - {"model", "state", "questions", "provider"} or not body.get("questions"):
         raise UnpricedOperationError("This request includes a field without verified coverage.")
-    state = body.get("state")
-    if not isinstance(state, (str, dict)) and not (
-        isinstance(state, list) and all(isinstance(item, str) for item in state)
-    ):
+    if not _plain_text_state(body.get("state")):
         # Images and files bill tokens their bytes do not bound.
         raise UnpricedOperationError("A decisions request must hold text state only.")
     routing = body.get("provider") or {}

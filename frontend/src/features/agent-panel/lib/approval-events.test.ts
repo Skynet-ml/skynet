@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dispatchGeneralistEvent } from "./stream-events.ts";
 import type { GeneralistAgentHandlers } from "./stream.ts";
 import type { ApprovalResolvedPayload, PendingApprovalPayload } from "./types.ts";
-import { deniedCount } from "../../../shared/ui/agent/denied-count.ts";
+import { deniedCount, withAutoReviewDenied } from "../../../shared/ui/agent/denied-count.ts";
 
 /** Dispatch one event and return what the approval handlers got. */
 function dispatch(event: string, data: Record<string, unknown>) {
@@ -61,4 +61,19 @@ void test("a resolution carries the scope, the note and the denial flag", () => 
 void test("the turn header counts only the calls the auto-review stopped", () => {
   assert.equal(deniedCount([{}, { autoReviewDenied: true }, { autoReviewDenied: false }, { autoReviewDenied: true }]), 2);
   assert.equal(deniedCount([]), 0);
+});
+
+void test("'Approve anyway' clears the denial, so the header counts only calls that did not run", () => {
+  const call = (id: string) => ({ id, tool: "rename", reason: "", status: "running" as const, startedAt: 0, endedAt: null });
+  const turn = [
+    { role: "user", content: "Rename it" },
+    { role: "assistant", content: "", toolCalls: [call("a"), call("b")] },
+  ];
+  const denied = withAutoReviewDenied(withAutoReviewDenied(turn, "a", true), "b", true);
+  assert.equal(deniedCount(denied[1]?.toolCalls ?? []), 2);
+  const approved = withAutoReviewDenied(denied, "a", false);
+  assert.equal(deniedCount(approved[1]?.toolCalls ?? []), 1);
+  assert.equal(approved[1]?.toolCalls?.find((t) => t.id === "b")?.autoReviewDenied, true);
+  assert.equal(withAutoReviewDenied(approved, "missing", true), approved);
+  assert.equal(withAutoReviewDenied(approved, "b", true), approved);
 });

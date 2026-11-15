@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from .steering import SteerInputError, SteerLimitError, get_steer_store
+from .steering import get_steer_store
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,9 @@ def post_approval_choice(owner: str, call_id: str, scope: ApprovalScope, note: s
         return
     try:
         get_steer_store().post(owner, approval_choice_key(call_id), json.dumps({"scope": scope, "note": text}))
-    except (SteerInputError, SteerLimitError):
+    except Exception:
+        # A storage error (also a database error) must never stop the
+        # decision itself, which the confirm call resolves after this.
         logger.warning("approval extras for %s were not stored", call_id, exc_info=True)
 
 
@@ -89,16 +91,22 @@ def take_approval_choice(owner: str | None, call_id: str) -> ApprovalChoice:
 
     Returns:
         The latest stored choice, or the default one-time choice with no note
-        when nothing usable was stored.
+        when nothing usable was stored or the store fails.
     """
     if not owner:
         return ApprovalChoice()
-    store = get_steer_store()
     key = approval_choice_key(call_id)
-    taken = store.take(owner, key)
+    try:
+        store = get_steer_store()
+        taken = store.take(owner, key)
+        if taken:
+            store.mark_delivered(owner, key, taken)
+    except Exception:
+        # A storage error must not turn an approved call into a tool error.
+        logger.warning("approval extras for %s were not read", call_id, exc_info=True)
+        return ApprovalChoice()
     if not taken:
         return ApprovalChoice()
-    store.mark_delivered(owner, key, taken)
     try:
         value = json.loads(taken[-1][1])
     except ValueError:

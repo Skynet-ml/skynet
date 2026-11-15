@@ -31,6 +31,7 @@
   "agent.approval.auto_review_denied": "הבדיקה האוטומטית חסמה",
   "agent.approval.approve_anyway": "לאשר בכל זאת",
   "agent.approval.keep_denied": "להשאיר חסום",
+  "agent.approval.auto_review_mismatch": "הבודק מצא שהפעולה הזו לא תואמת את הבקשה שלך.",
   "agent.kickoff.oversized_data": "הנתונים שהעליתם גדולים מדי, אז לא סרקתי אותם. מה תרצו לעשות?",
   "agent.kickoff.oversized_repo": "המאגר {name} גדול מדי, אז לא סרקתי אותו. מה תרצו לעשות?",
   "agent.composer.attach": "צירוף קובץ",
@@ -389,7 +390,6 @@
   "auto.features.agent.panel.components.analyticssummarycard.total": "סה\"כ {p1}",
   "auto.features.agent.panel.components.approvalcard.literal.1": "הסתר/הסתירי פרטים טכניים",
   "auto.features.agent.panel.components.approvalcard.literal.2": "הצג/הציגי פרטים טכניים",
-  "auto.features.agent.panel.components.approvalcard.literal.3": "בטל/י",
   "auto.features.agent.panel.components.conversationdrawer.delete": "מחק/י",
   "auto.features.agent.panel.components.conversationdrawer.empty": "אין עדיין שיחות שמורות",
   "auto.features.agent.panel.components.conversationdrawer.no_results": "אין תוצאות חיפוש",
@@ -4521,6 +4521,5 @@
   "settings.code.markers.description": "הצגת שינויים בצבעים או בסימני +/−.",
   "settings.code.markers.color": "צבע",
   "settings.code.markers.signs": "+/−",
-  "settings.code.reset": "איפוס לברירת המחדל",
-  "agent.approval.auto_review_mismatch": "הבודק מצא שהפעולה הזו לא תואמת את הבקשה שלך."
+  "settings.code.reset": "איפוס לברירת המחדל"
 }

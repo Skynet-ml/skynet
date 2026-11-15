@@ -27,6 +27,7 @@ import {
 } from "@/shared/lib/thinking-segments";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
+import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
@@ -526,19 +527,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [patchMessages],
   );
 
-  /** Flag a call the auto-review stopped, so its turn's header counts it. */
+  /** Flag or clear a call the auto-review stopped, so its turn's header counts only calls that did not run. */
   const markAutoReviewDenied = React.useCallback(
-    (key: string, id: string) => {
-      patchMessages(key, (prev) => {
-        const last = prev[prev.length - 1];
-        if (!last || last.role !== "assistant" || !last.toolCalls?.some((t) => t.id === id)) return prev;
-        const next = prev.slice();
-        next[next.length - 1] = {
-          ...last,
-          toolCalls: last.toolCalls.map((t) => (t.id === id ? { ...t, autoReviewDenied: true } : t)),
-        };
-        return next;
-      });
+    (key: string, id: string, denied: boolean) => {
+      patchMessages(key, (prev) => withAutoReviewDenied(prev, id, denied));
     },
     [patchMessages],
   );
@@ -827,7 +819,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onPendingApproval: (ev) => {
               if (ended()) return;
-              if (ev.auto_review) markAutoReviewDenied(key, ev.id);
+              if (ev.auto_review) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: ev,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.2"),
@@ -836,6 +828,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             onApprovalResolved: (ev) => {
               if (ended()) return;
               if (ev.approved && ev.scope === "conversation") rt.chatAllowedTools.add(ev.tool);
+              // "Approve anyway" runs the call, so it no longer counts as denied.
+              if (ev.approved) markAutoReviewDenied(key, ev.id, false);
+              else if (ev.auto_review_denied) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: null,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.3"),
