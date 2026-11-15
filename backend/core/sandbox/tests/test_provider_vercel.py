@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 import pytest
-from vercel.sandbox import SandboxApiError
+from vercel.sandbox import SandboxApiError, SandboxPathNotFoundError
 from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
 from core.billing.model_dispatch import ModelHTTPResult
@@ -87,6 +87,7 @@ class FakeFs:
         self.files: dict[str, str | bytes] = {}
         self.dirs: list[str] = []
         self.stopped = False
+        self.exists_calls: list[str] = []
 
     def _check(self) -> None:
         """Answer 410 after the session stops.
@@ -98,7 +99,10 @@ class FakeFs:
             raise _gone()
 
     async def exists(self, path: str, *, cwd: str) -> bool:
-        """Tell whether a file exists.
+        """Tell whether a file exists, and record the call.
+
+        The real SDK answers ``exists`` with a bare ``sh`` box command, so a
+        test can check that the provider never calls it.
 
         Args:
             path: The file path.
@@ -108,6 +112,7 @@ class FakeFs:
             True when the file exists.
         """
         self._check()
+        self.exists_calls.append(path)
         return path in self.files
 
     async def read_text(self, path: str, *, cwd: str, errors: str = "strict") -> str:
@@ -120,8 +125,15 @@ class FakeFs:
 
         Returns:
             The file text.
+
+        Raises:
+            SandboxPathNotFoundError: The file does not exist, as the SDK HTTP read answers.
         """
         self._check()
+        if path not in self.files:
+            raise SandboxPathNotFoundError(
+                path, operation="read_text", cwd=cwd, cause=SandboxApiError(httpx.Response(404), "missing")
+            )
         value = self.files[path]
         return value.decode(errors=errors) if isinstance(value, bytes) else value
 
@@ -1691,6 +1703,24 @@ async def test_upload_and_download(client: FakeClient, log: list[str]) -> None:
     assert await env.download_file("/work/a.txt") == "data"
     assert await env.download_file("/work/none.txt") is None
     assert client.boxes[env.name].fs.dirs == ["/work"]
+    await env.stop()
+
+
+async def test_an_output_read_runs_no_box_command(client: FakeClient, log: list[str]) -> None:
+    """Check that an optional read uses only the HTTP read, never the SDK ``exists``.
+
+    The SDK runs ``exists`` as a bare ``sh`` in the box, found by PATH lookup,
+    and a version can control that PATH.
+    """
+    env = make_env(client, log)
+    await env.start()
+    fs = client.boxes[env.name].fs
+    fs.files["/work/out.txt"] = "text"
+    session = env._require_session()
+    assert await env._read_optional(session, "/work/none.txt") is None
+    assert await env._read_optional(session, "/work/out.txt") == "text"
+    assert await env.download_file("/work/none.txt") is None
+    assert fs.exists_calls == []
     await env.stop()
 
 

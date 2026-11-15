@@ -92,6 +92,7 @@ try:
         SandboxApiError,
         SandboxClient,
         SandboxCredentials,
+        SandboxPathNotFoundError,
         SandboxQueryByCreatedAt,
         SandboxResources,
         SandboxResponseError,
@@ -108,6 +109,7 @@ except ImportError:
     SandboxApiError = None
     SandboxClient = None
     SandboxCredentials = None
+    SandboxPathNotFoundError = None
     SandboxQueryByCreatedAt = None
     SandboxResources = None
     SandboxResponseError = None
@@ -1360,10 +1362,13 @@ class VercelEnvironment(SandboxEnvironment):
             SandboxInfraError: The session stopped.
         """
         cwd = self._cwd(session)
+        # The SDK runs ``fs.exists`` as a bare ``sh`` box command, found by a PATH
+        # the version can control; ``read_text`` is an HTTP read with no box command.
         with self._stop_guard():
-            if not await session.fs.exists(path, cwd=cwd):
+            try:
+                return await session.fs.read_text(path, cwd=cwd, errors=errors)
+            except SandboxPathNotFoundError:
                 return None
-            return await session.fs.read_text(path, cwd=cwd, errors=errors)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.

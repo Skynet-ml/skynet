@@ -142,13 +142,10 @@ _ANSWER_ENV_BYTES = 100_000
 # contents it records each file's and folder's inode and change times: any
 # write, rename or link moves the change time, so a file rewritten and then
 # restored while the ``[run]`` entry runs still shows.
-# Given APP_ANSWER_PATH, it then writes APP_ANSWER there from inside the box:
-# unlike a Vercel file write, that moves no protected file's change time, so
-# a relay answer needs no fresh stamps after it.
 # The parent starts it as root, so its output file is root's own in sticky
 # /tmp and the version's processes cannot rewrite it. It becomes the tree's
-# owner before it reads or writes anything in the tree. So no root read or
-# write follows a link that the version plants, and the kernel then marks it
+# owner before it reads anything in the tree, and it writes nothing there. So
+# no root read follows a link that the version plants, and the kernel marks it
 # not dumpable, so the version's processes cannot trace it or open its fds.
 # The tree owner is the user that runner._entry_user starts the entry as. The
 # version can point the tree at a root-owned folder, so a check that stays
@@ -158,8 +155,6 @@ _ANSWER_ENV_BYTES = 100_000
 # box, cannot switch users and runs the entry as itself. That root has no
 # power above the entry, and Docker hands the parent a pipe, not a file, so
 # the check runs as that root. A missing CapEff line counts as capabilities.
-# The answer's temporary file is opened without following a link, and a
-# leftover one is removed first, so a planted file blocks only this answer.
 _HASH_PROTECTED = r"""
 import hashlib, json, os, sys
 
@@ -216,19 +211,33 @@ for top in sys.argv[1:]:
     elif os.path.lexists(top):
         found[os.path.normpath(top)] = digest(top)
         stamps[os.path.normpath(top)] = stamp(top)
-answer = os.environ.get("APP_ANSWER_PATH")
-if answer:
-    os.makedirs(os.path.dirname(answer), exist_ok=True)
-    temporary = answer + ".tmp"
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    with os.fdopen(os.open(temporary, flags, 0o666), "w", encoding="utf-8") as handle:
-        handle.write(os.environ["APP_ANSWER"])
-    os.replace(temporary, answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
+"""
+# Writes APP_ANSWER to the path in its argument from inside the box, after a
+# clean check. Unlike a Vercel file write, a box command moves the change time
+# only of the files it writes, so the stamps from before the run stay valid.
+# It runs as the box user, not with the root check: the parent's file write
+# makes each call folder as the box user with mode 0755, and a local Docker
+# root has no capability to write there. The version controls that user, so
+# a process it leaves running can forge or break only this answer. A change in
+# the gap between the check and this write is like a change just after the
+# write, and the final protected-file check after the run still catches it.
+# The temporary file is opened without following a link, and a leftover one is
+# removed first, so a planted file blocks only this answer.
+_WRITE_ANSWER = r"""
+import os, sys
+
+answer = sys.argv[1]
+os.makedirs(os.path.dirname(answer), exist_ok=True)
+temporary = answer + ".tmp"
+try:
+    os.unlink(temporary)
+except FileNotFoundError:
+    pass
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+with os.fdopen(os.open(temporary, flags, 0o666), "w", encoding="utf-8") as handle:
+    handle.write(os.environ["APP_ANSWER"])
+os.replace(temporary, answer)
 """
 # Hashes the whole prepared tree, ``.git`` included: each path's type, mode,
 # link target and content. A candidate box from the saved state must hold the
@@ -478,9 +487,10 @@ class CandidateBox:
     def answer(self, path: str, text: str) -> tuple[str, ...] | None:
         """Check the protected files while the version runs, then write one relay answer into the box.
 
-        The check and the write share one box command, so the stamps taken
-        before the run stay valid; an answer too large for that is written
-        with a file write and the files are stamped again after it.
+        A root check runs first, then a box-user command writes the answer
+        only when the check finds no change. Box commands keep the stamps
+        taken before the run valid. An answer too large for the environment
+        is written with a file write, and the files are stamped again after it.
 
         Args:
             path: Where the waiting client reads the answer, relative to the box.
@@ -496,11 +506,14 @@ class CandidateBox:
             if not workspace.watched:
                 return () if _deliver(self.session, path, text) else None
             if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
-                current = workspace.fingerprint(self.session, WORK_DIR, answer=(path, text))
-                if current is not None:
-                    return workspace.changes(current, before)
-                _deliver(self.session, path, text)
-                return None
+                current = workspace.fingerprint(self.session, WORK_DIR)
+                if current is None:
+                    _deliver(self.session, path, text)
+                    return None
+                changes = workspace.changes(current, before)
+                if changes:
+                    return changes
+                return changes if _write_answer(self.session, path, text) else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
             if not _deliver(self.session, path, text) or current is None or before is None:
                 return None
@@ -568,6 +581,25 @@ class MetricBox:
             return
         self._closed = True
         self.session.close()
+
+
+def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
+    """Write one relay answer with a box-user command, which moves no protected file's change time.
+
+    Args:
+        session: The box the answer goes to.
+        path: Where the answer goes, relative to the box.
+        text: The answer.
+
+    Returns:
+        Whether the write succeeded.
+    """
+    result = session.run(
+        f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
+        env={"APP_ANSWER": text},
+        timeout_seconds=_HASH_TIMEOUT_SECONDS,
+    )
+    return result.ok
 
 
 def _deliver(session: SandboxSession, path: str, text: str) -> bool:
@@ -1171,16 +1203,12 @@ class RepoWorkspace:
         digest = lines[-1] if lines else ""
         return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
-    def fingerprint(
-        self, session: SandboxSession, directory: str, answer: tuple[str, str] | None = None
-    ) -> tuple[dict[str, str], dict[str, str]] | None:
+    def fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
         """Hash every file under the protected paths of one tree in a box.
 
         Args:
             session: The box holding the tree.
             directory: The tree's folder, relative to the box.
-            answer: A path relative to the box and the text to write there
-                once the hashing is done, in the same command.
 
         Returns:
             Repository-relative path to digest, and path to inode and change
@@ -1188,10 +1216,8 @@ class RepoWorkspace:
             command failed or printed something unreadable.
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
-        target = f'export APP_ANSWER_PATH="$PWD"/{shlex.quote(answer[0])} && ' if answer is not None else ""
         result = session.run(
-            f'{target}cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
-            env={"APP_ANSWER": answer[1]} if answer is not None else None,
+            f'cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
             # A box-user command's output files belong to the box user, so a
             # process that the version leaves running could replace a clean
