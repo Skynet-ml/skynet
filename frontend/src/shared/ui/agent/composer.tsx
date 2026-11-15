@@ -159,16 +159,16 @@ function SlashRow({
   );
 }
 
-/**
- * Draws the draft again under the transparent textarea text, with the slash
- * command at its start marked as a token. The textarea keeps the caret, the
- * selection and the real text; this layer only paints.
- */
 // "@path" mentions paint as tokens too. The capture group keeps each mention
 // at an odd index of the split.
 const MENTION_TOKEN = /(?<=^|\s)(@[^\s@]+)/;
 const hasMention = (text: string) => MENTION_TOKEN.test(text);
 
+/**
+ * Draws the draft again under the transparent textarea text, with the slash
+ * command at its start marked as a token. The textarea keeps the caret, the
+ * selection and the real text; this layer only paints.
+ */
 function SlashTokenLayer({
   text,
   length,
