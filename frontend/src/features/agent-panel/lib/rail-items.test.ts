@@ -81,3 +81,22 @@ test("a streamed token does not read a reply's files again", () => {
   assert.deepEqual(outputsOf(reply("text")), []);
   assert.equal(reads, 2);
 });
+
+test("a hidden user message gets no item, and its reply adds to the last shown turn", () => {
+  const hidden: AgentMessage = { role: "user", content: "internal kickoff", hidden: true };
+  const first = reply("kickoff answer");
+  const later = reply("back answer");
+  const outputs = new Map([
+    [first, ["a.py"]],
+    [later, ["b.py"]],
+  ]);
+  const items = railItemsOf(
+    [hidden, first, user("shown"), reply("ok"), { ...hidden, content: "back" }, later],
+    (m) => outputs.get(m) ?? [],
+  );
+  assert.deepEqual(
+    items.map((i) => [i.index, i.label, i.preview, i.outputs]),
+    [[2, "shown", "ok", ["b.py"]]],
+    "the reply before the first shown turn goes to no item",
+  );
+});

@@ -33,7 +33,7 @@ export function outputsByToolCalls(
 }
 
 /**
- * Make one rail item for each user message.
+ * Make one rail item for each user message that the chat shows.
  *
  * Args:
  *   messages: The chat's messages.
@@ -49,6 +49,9 @@ export function railItemsOf(
 ): RailItem[] {
   const items: RailItem[] = [];
   messages.forEach((m, index) => {
+    // The transcript drops a hidden user message (an internal request), so it gets
+    // no mark. Its reply adds to the last shown turn, or to none before the first.
+    if (m.role === "user" && m.hidden) return;
     if (m.role === "user") {
       items.push({
         index,

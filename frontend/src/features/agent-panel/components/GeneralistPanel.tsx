@@ -100,6 +100,7 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useFork } from "../hooks/use-fork";
 import { latestCompactionIndex } from "../lib/compaction";
+import { expandOnAttention } from "../lib/float-attention";
 import { forkPoints } from "../lib/fork";
 import { modelChanges } from "../lib/model-changes";
 import { outputsByToolCalls, railItemsOf } from "../lib/rail-items";
@@ -492,6 +493,14 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages, busy: false });
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
+  // A minimized floating chat hides its thread, so a turn that ends in an
+  // error, a question or an approval request opens it again.
+  const needsUser = !!agent.error || !!agent.pendingApproval || (!!choices && !streaming);
+  const neededUser = React.useRef(needsUser);
+  React.useEffect(() => {
+    expandOnAttention(neededUser.current, needsUser, chatFloat);
+    neededUser.current = needsUser;
+  }, [needsUser, chatFloat]);
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
   // getting its id from its first turn is still the same chat.
@@ -1594,38 +1603,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           )}
           {/* The setup's chat is the draft's own: no history or second chat. */}
           {!inSetup && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={() => setDrawerOpen(true)}
-                  className="relative text-muted-foreground hover:text-foreground"
-                  aria-label={msg(
-                    "auto.features.agent.panel.components.generalistpanel.history_button",
-                  )}
-                >
-                  <ClockCounterClockwise className="size-3.5" />
-                  {agent.backgroundBusyCount > 0 && (
-                    <CountBadge overlay aria-hidden="true">
-                      {agent.backgroundBusyCount}
-                    </CountBadge>
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
-                {agent.backgroundBusyCount > 0 && (
-                  <>
-                    {" · "}
-                    {formatMsg("agent.parallel.background_count", {
-                      p1: agent.backgroundBusyCount,
-                    })}
-                  </>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => setDrawerOpen(true)}
+                className="relative text-muted-foreground hover:text-foreground"
+                aria-label={msg(
+                  "auto.features.agent.panel.components.generalistpanel.history_button",
                 )}
-              </TooltipContent>
-            </Tooltip>
+              >
+                <ClockCounterClockwise className="size-3.5" />
+                {agent.backgroundBusyCount > 0 && (
+                  <CountBadge overlay aria-hidden="true">
+                    {agent.backgroundBusyCount}
+                  </CountBadge>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
+              {agent.backgroundBusyCount > 0 && (
+                <>
+                  {" · "}
+                  {formatMsg("agent.parallel.background_count", {
+                    p1: agent.backgroundBusyCount,
+                  })}
+                </>
+              )}
+            </TooltipContent>
+          </Tooltip>
           )}
           {!inSetup && agent.messages.length > 0 && (
             <Tooltip>
@@ -1661,7 +1670,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   aria-label={msg("auto.features.agent.panel.components.generalistpanel.literal.4")}
                 >
                   {/* Icon points toward the edge the panel collapses to:
-                    right when docked right (LTR), left when docked left (RTL). */}
+                      right when docked right (LTR), left when docked left (RTL). */}
                   {isRtl ? (
                     <SidebarSimple className="size-3.5" />
                   ) : (
