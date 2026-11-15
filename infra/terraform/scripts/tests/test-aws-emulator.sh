@@ -4,7 +4,8 @@
 # image-key.sh and the commands of secrets.sh. Read docs/agents/aws-emulator.md.
 #
 # Start the emulator first: scripts/aws-emulator.sh start
-# With no emulator, the test prints SKIP and exits 0.
+# It needs Bash 5.1 or newer, as lib.sh does.
+# With no emulator or no Bash 5.1, the test prints SKIP and exits 0.
 # AWS_EMULATOR_REQUIRED=1 makes that a failure.
 set -euo pipefail
 
@@ -23,6 +24,9 @@ skip() {
   exit 0
 }
 
+# image-key.sh does not parse in an older Bash, so check before it loads.
+((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))) ||
+  skip "Bash 5.1 or newer is required; $BASH has $BASH_VERSION"
 for command in aws curl jq python3; do
   command -v "$command" >/dev/null 2>&1 || skip "missing test command: $command"
 done
@@ -34,8 +38,14 @@ command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
   skip "no AWS Emulator answers on $endpoint"
 
 # Remove every way to reach a real account, also the GitHub Actions OIDC path
-# of lib.sh, before the scripts load.
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_PROFILE \
+# of lib.sh, before the scripts load. A service endpoint (AWS_ENDPOINT_URL_S3
+# and the others) overrides AWS_ENDPOINT_URL. This stray one on a closed port
+# proves that the loop below removes them: else the secrets calls fail.
+export AWS_ENDPOINT_URL_SECRETS_MANAGER="https://127.0.0.1:1"
+for var in $(compgen -e); do
+  [[ "$var" != AWS_ENDPOINT_URL_* ]] || unset "$var"
+done
+unset AWS_IGNORE_CONFIGURED_ENDPOINT_URLS AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_PROFILE \
   AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN AWS_ROLE_SESSION_NAME \
   AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI \
   AWS_CONTAINER_AUTHORIZATION_TOKEN \
@@ -43,7 +53,8 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_PROF
 export AWS_ENDPOINT_URL="$endpoint"
 export AWS_SHARED_CREDENTIALS_FILE="$files/emulator_credentials"
 export AWS_CONFIG_FILE="$files/config"
-# The config file names a CA path inside the container; this one is on the host.
+# The config names the CA path that the emulator saw: a host path when
+# scripts/aws-emulator.sh started it, else a path inside the container.
 export AWS_CA_BUNDLE="$files/ca.pem"
 export AWS_PROFILE=default
 export AWS_REGION=us-east-1
@@ -78,9 +89,20 @@ guard
 run_id="$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 repo="skynet-test/emulator-$run_id"
 tmp="$(mktemp -d)"
+task_defs=()
+# Removes what the run wrote, also after a failure. A missing resource is fine.
 cleanup() {
+  local id
   aws ecr delete-repository --repository-name "$repo" --force >/dev/null 2>&1 || true
   aws ssm delete-parameter --name "/skynet/emulator-$run_id/deploy" >/dev/null 2>&1 || true
+  for id in app frontend litellm; do
+    aws secretsmanager delete-secret --secret-id "skynet/staging/$id" --force-delete-without-recovery \
+      >/dev/null 2>&1 || true
+  done
+  for id in "${task_defs[@]}"; do
+    aws ecs deregister-task-definition --task-definition "$id" >/dev/null 2>&1 || true
+    aws ecs delete-task-definitions --task-definitions "$id" >/dev/null 2>&1 || true
+  done
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -176,9 +198,9 @@ done
 
 register() {
   local family="$1" secrets="$2"
-  aws ecs register-task-definition --family "skynet-$env-$family" --cli-input-json \
+  task_defs+=("$(aws ecs register-task-definition --family "skynet-$env-$family" --cli-input-json \
     "{\"executionRoleArn\":\"arn:aws:iam::000000000000:role/skynet-test-execution\",\"containerDefinitions\":[{\"name\":\"$family\",\"image\":\"busybox\",\"memory\":512,\"secrets\":$secrets}]}" \
-    >/dev/null
+    --query taskDefinition.taskDefinitionArn --output text)")
 }
 from() {
   jq -nc --arg arn "$1" '$ARGS.positional | map({name: ., valueFrom: "\($arn):\(.)::"})' --args "${@:2}"
@@ -228,8 +250,17 @@ printf 'session\n' | secrets_sh set "$env" app SESSION_KEY >/dev/null || fail "s
   jq -c 'to_entries | map(.key) | sort')" == '["DATABASE_URL","EXTRA","SESSION_KEY","WORKER_TOKEN"]' ]] ||
   fail "set did not keep the other keys"
 secrets_sh check-empty "$env" >/dev/null || fail "check-empty failed after set"
-printf '' | secrets_sh set "$env" app SESSION_KEY 2>/dev/null && fail "set accepted an empty value"
-printf 'x\n' | secrets_sh set "$env" app bad-key 2>/dev/null && fail "set accepted a bad key name"
+# A refusal must name its reason and leave the stored secret as it was.
+app_value() {
+  aws secretsmanager get-secret-value --secret-id "skynet/$env/app" --query SecretString --output text
+}
+before="$(app_value)"
+printf '' | secrets_sh set "$env" app SESSION_KEY 2>"$tmp/set.err" && fail "set accepted an empty value"
+grep -q 'empty value; skynet/staging/app not changed' "$tmp/set.err" || fail "set did not refuse the empty value"
+[[ "$(app_value)" == "$before" ]] || fail "a refused set with an empty value changed the secret"
+printf 'x\n' | secrets_sh set "$env" app bad-key 2>"$tmp/set.err" && fail "set accepted a bad key name"
+grep -q 'KEY must be upper case letters, digits and _' "$tmp/set.err" || fail "set did not refuse the bad key name"
+[[ "$(app_value)" == "$before" ]] || fail "a refused set with a bad key name changed the secret"
 
 # A secret with no version yet: set starts from {}.
 reset_secret litellm >/dev/null

@@ -22,8 +22,10 @@ just aws-emulator-stop               # or: scripts/aws-emulator.sh stop
   The build always gets the latest release. `AWS_EMULATOR_REBUILD=1` rebuilds now.
 - The emulator writes `config`, `emulator_credentials` and `ca.pem` to
   `$HOME/.aws/emulator/<port>/`. A stop deletes them. They change on each start.
+- On Linux, `start` runs the container as your user (`--user`), so the
+  emulator can write its files.
 - `env` prints the export and unset lines. Run it in a subshell, so your
-  real AWS settings come back after it.
+  real AWS settings come back after it. The lines work in Bash and zsh.
 - A stop deletes all emulator state. Each start begins empty.
 
 ## Safety rules
@@ -34,6 +36,8 @@ just aws-emulator-stop               # or: scripts/aws-emulator.sh stop
 - Remove the real credential variables (`AWS_ACCESS_KEY_ID`,
   `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN` and the others in `scripts/aws-emulator.sh`).
   Use the profile `default` with the emulator's credentials and config files.
+- Remove every `AWS_ENDPOINT_URL_<SERVICE>` variable and
+  `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS`. They override `AWS_ENDPOINT_URL`.
 - Never turn off TLS verification. Trust `ca.pem` only for emulator calls:
   `AWS_CA_BUNDLE` for the CLI and boto3, and an `ssl` context for httpx.
   Never set `SSL_CERT_FILE`: it replaces the whole trust store.
@@ -59,10 +63,12 @@ just test-aws-emulator
 - `backend/tests/aws_emulator/` runs the S3 connector and the EC2 sandbox
   provider against the emulator. The EC2 tests replace only the SSH wait.
 - The shell test runs `deploy_config`, the ECR helpers of `image-key.sh` and
-  the commands of `secrets.sh`, with the real `aws` CLI.
-- The shell test writes `skynet/staging/{app,frontend,litellm}` and the
-  `skynet-staging-*` task definitions in the emulator. Its guard makes sure
-  that these writes never go to real AWS.
+  the commands of `secrets.sh`, with the real `aws` CLI. It needs Bash 5.1
+  or newer, as `lib.sh` does. With an older Bash, it skips.
+- The shell test writes an ECR repository, an SSM parameter, the secrets
+  `skynet/staging/{app,frontend,litellm}` and `skynet-staging-*` task
+  definitions in the emulator. Its guard makes sure that these writes never
+  go to real AWS. At its end, also after a failure, it deletes them.
 - With no emulator, the tests skip. `AWS_EMULATOR_REQUIRED=1` makes a skip a
   failure. The recipe sets it.
 - The tests are not part of `just test-unit` or CI.

@@ -57,7 +57,7 @@ running() {
 }
 
 start() {
-  local i
+  local i user=()
   command -v docker >/dev/null 2>&1 || die "missing command: docker"
   command -v curl >/dev/null 2>&1 || die "missing command: curl"
   if healthy; then
@@ -70,7 +70,10 @@ start() {
     # The official container recipe, plus hardening. HOME is the same path in
     # the container, so the files that the emulator writes hold host paths.
     # Port publish on loopback only: other computers must never reach it.
-    docker run -d --rm --name "$name" \
+    # On Linux the image user (uid 1000) cannot write to the mount of another
+    # uid, so the container runs as the host user, as the upstream guide says.
+    [[ "$(uname -s)" != Linux ]] || user=(--user "$(id -u):$(id -g)")
+    docker run -d --rm --name "$name" ${user[@]+"${user[@]}"} \
       --cap-drop ALL --security-opt no-new-privileges --read-only \
       --memory=2g --memory-swap=2g \
       -e EMULATOR_TELEMETRY=off -e HOME="$HOME" \
@@ -119,6 +122,14 @@ print_env() {
     AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI \
     AWS_CONTAINER_AUTHORIZATION_TOKEN; do
     printf 'unset %s\n' "$var"
+  done
+  # A service endpoint (AWS_ENDPOINT_URL_S3 and the others) overrides
+  # AWS_ENDPOINT_URL, so remove each one that the caller exported.
+  printf 'unset AWS_IGNORE_CONFIGURED_ENDPOINT_URLS\n'
+  for var in $(compgen -e); do
+    if [[ "$var" == AWS_ENDPOINT_URL_* ]]; then
+      printf 'unset %s\n' "$var"
+    fi
   done
   [[ -f "$dir/emulator_credentials" && -f "$dir/ca.pem" ]] ||
     die "no emulator files in $dir: run scripts/aws-emulator.sh start first"

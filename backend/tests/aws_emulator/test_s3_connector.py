@@ -68,7 +68,7 @@ def _secret(emulator: Emulator) -> ConnectorSecret:
 
 
 @pytest.fixture(autouse=True)
-def emulator_transport(aws_emulator: Emulator, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def emulator_transport(aws_emulator: Emulator, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[httpx.Response]]:
     """Send connector calls through a client that trusts only the emulator CA.
 
     Args:
@@ -76,11 +76,16 @@ def emulator_transport(aws_emulator: Emulator, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch: Replaces the shared transport client for this test.
 
     Yields:
-        Nothing. The client closes after the test.
+        The responses that the client got, in order, with their requests.
     """
-    client = httpx.Client(follow_redirects=True, verify=aws_emulator.ssl_context())
+    responses: list[httpx.Response] = []
+    client = httpx.Client(
+        follow_redirects=True,
+        verify=aws_emulator.ssl_context(),
+        event_hooks={"response": [responses.append]},
+    )
     monkeypatch.setattr(transport, "CLIENT", client)
-    yield
+    yield responses
     client.close()
 
 
@@ -140,7 +145,9 @@ def test_browse_lists_buckets_and_objects(aws_emulator: Emulator, bucket: str) -
     assert [entry.name for entry in s3.browse(secret, f"{bucket}/data/", "ODD")] == ["odd name+v1 (copy).csv"]
 
 
-def test_get_object_in_full_and_ranged(aws_emulator: Emulator, bucket: str) -> None:
+def test_get_object_in_full_and_ranged(
+    aws_emulator: Emulator, bucket: str, emulator_transport: list[httpx.Response]
+) -> None:
     """Check full and ranged downloads, also for a key that needs quoting."""
     secret = _secret(aws_emulator)
     config = json.loads(secret.access_token)
@@ -148,7 +155,14 @@ def test_get_object_in_full_and_ranged(aws_emulator: Emulator, bucket: str) -> N
     for key in ("top.csv", ODD_KEY):
         fetch = s3._fetcher(config, bucket, key)
         assert fetch(None) == (CSV, False)
+        full = emulator_transport[-1]
+        assert (full.request.headers.get("Range"), full.status_code) == (None, 200)
         assert fetch(10) == (CSV[:10], True)
+        # download() also cuts the body on the client, so only the wire shows
+        # that the server got the range and answered with it.
+        ranged = emulator_transport[-1]
+        assert (ranged.request.headers.get("Range"), ranged.status_code) == ("bytes=0-10", 206)
+        assert ranged.headers["Content-Range"] == f"bytes 0-10/{len(CSV)}"
 
     assert s3.preview(secret, f"{bucket}/{ODD_KEY}")["rows"] == [
         {"name": "ada", "score": "3"},

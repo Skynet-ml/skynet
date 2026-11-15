@@ -114,8 +114,7 @@ def _healthy(ca_bundle: Path) -> bool:
     return response.status_code == 200 and response.text.strip() == "ok"
 
 
-@pytest.fixture(autouse=True)
-def aws_emulator(monkeypatch: pytest.MonkeyPatch) -> Emulator:
+def connect(monkeypatch: pytest.MonkeyPatch) -> Emulator:
     """Point AWS clients at the local emulator, then check that they reach it.
 
     Args:
@@ -134,10 +133,15 @@ def aws_emulator(monkeypatch: pytest.MonkeyPatch) -> Emulator:
 
     for name in REAL_CREDENTIAL_VARS:
         monkeypatch.delenv(name, raising=False)
+    # A service endpoint (AWS_ENDPOINT_URL_S3 and the others) overrides AWS_ENDPOINT_URL.
+    monkeypatch.delenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", raising=False)
+    for name in [name for name in os.environ if name.startswith("AWS_ENDPOINT_URL_")]:
+        monkeypatch.delenv(name)
     monkeypatch.setenv("AWS_ENDPOINT_URL", ENDPOINT)
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
     monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-    # The config file names a CA path inside the container; this one is on the host.
+    # The config names the CA path that the emulator saw: a host path when
+    # scripts/aws-emulator.sh started it, else a path inside the container.
     monkeypatch.setenv("AWS_CA_BUNDLE", str(ca_bundle))
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.setenv("AWS_REGION", REGION)
@@ -155,3 +159,16 @@ def aws_emulator(monkeypatch: pytest.MonkeyPatch) -> Emulator:
     if not access_key_id or not secret_access_key:
         pytest.fail(f"no default key pair in {credentials}")
     return Emulator(ENDPOINT, ca_bundle, access_key_id, secret_access_key)
+
+
+@pytest.fixture(autouse=True)
+def aws_emulator(monkeypatch: pytest.MonkeyPatch) -> Emulator:
+    """Connect each test to the emulator through ``connect``.
+
+    Args:
+        monkeypatch: Sets the connect variables for this test only.
+
+    Returns:
+        The connection facts of the emulator.
+    """
+    return connect(monkeypatch)
