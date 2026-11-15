@@ -573,6 +573,8 @@ class RepoScorer:
                 )
         # Before the timeout: a lost answer leaves the scorer waiting until its timeout.
         if relay is not None and relay.unchecked:
+            # A budget stop whose answer was lost still stops the run.
+            _raise_control({"control": relay.first_control()})
             if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
                 raise relay.failure
             raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
@@ -721,14 +723,17 @@ class RepoScorer:
 
         Raises:
             RepoScoreError: When a file changed, or a check or an answer could not run.
+            BudgetReached: When no file changed, an answer was lost, and the
+                run's budget stopped a service or MCP call.
             Exception: A temporary provider error from a relay answer, raw, only
                 when ``raw_provider_errors`` is set and no file changed.
         """
         judge = self._rule_judge
         unchecked = relay is not None and relay.unchecked
-        # After a failed answer check the answer went in by a file write, which moves
-        # every ctime, so only the checks the answers passed can still name a change.
-        final = () if unchecked else candidate.protected_changes()
+        # After an answer file write the ctimes may have moved, so only the checks
+        # the answers passed can still name a change. A raised check or answer
+        # command writes no file, so the final check still runs after it.
+        final = () if candidate.unstamped else candidate.protected_changes()
         # Each relay answer checks again, so a lasting change would repeat once per answer.
         changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
         if changes:
@@ -736,6 +741,8 @@ class RepoScorer:
             reason = redact(" ".join(changes), secrets)
             raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
         if unchecked:
+            # A budget stop whose answer was lost still stops the run; a protected change still wins.
+            _raise_control({"control": relay.first_control()})
             if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
                 raise relay.failure
             raise RepoScoreError("A relay answer could not be checked or delivered, so the version has no score.")

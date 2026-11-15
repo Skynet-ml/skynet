@@ -6,6 +6,7 @@ import base64
 import builtins
 import io
 import json
+import logging
 import os
 import re
 import shlex
@@ -30,6 +31,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
+from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     METRIC_REPO_DIR,
@@ -570,6 +572,138 @@ def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_report
     assert raised.value is session.error
     session.error = _write_error(404)
     assert box.answer("calls/000001/stages/a.json", "{}") is None
+
+
+def test_a_lasting_answer_file_write_error_logs_no_provider_text(caplog: pytest.LogCaptureFixture) -> None:
+    """Log only the type of a lasting answer write error: the run log shows it, and its text is the provider's.
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    error = SandboxApiError(httpx.Response(404), "HTTP 404: provider text")
+    with caplog.at_level(logging.WARNING):
+        assert repo_workspace._deliver(_RefusingSession(error), "a.json", "{}") is False  # type: ignore[arg-type]
+    assert "SandboxApiError" in caplog.text
+    assert "provider text" not in caplog.text
+
+
+def _fail_answer_step(monkeypatch: pytest.MonkeyPatch, box: CandidateBox, step: str) -> None:
+    """Make one step of the box's next relay answer raise.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        box: The candidate box.
+        step: ``write`` (the answer command), ``check`` (the protected-file
+            check) or ``deliver`` (the file write of a large answer, a 503).
+    """
+    if step == "write":
+        run = box.session.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Raise for the answer write, and run every other command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+
+            Raises:
+                _BoxCallError: The command is the answer write.
+            """
+            if shlex.quote(repo_workspace._WRITE_ANSWER) in command:
+                raise _BoxCallError("429")
+            return run(command, **options)
+
+        monkeypatch.setattr(box.session, "run", failing)
+    elif step == "check":
+
+        def refuse(*_: Any) -> None:
+            """Fail the check before it writes anything.
+
+            Raises:
+                _BoxCallError: Always.
+            """
+            raise _BoxCallError("429")
+
+        monkeypatch.setattr(box._workspace, "fingerprint", refuse)
+    else:
+        monkeypatch.setattr(repo_workspace, "_ANSWER_ENV_BYTES", 10)
+        monkeypatch.setattr(box.session, "write_files", _RefusingSession(_write_error(503)).write_files)
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("step", ["write", "check", "deliver"])
+def test_a_raised_answer_never_hides_a_protected_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, judge: bool
+) -> None:
+    """Name a protected file the version changed, also when the relay answer after the change raises.
+
+    The answer command and the check write no file, so the final check still
+    runs. A large answer's file write may have moved the change times, so the
+    change its check found before the write is kept.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        step: The answer step that raises.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        box.session.run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv")
+        with monkeypatch.context() as patched:
+            _fail_answer_step(patched, box, step)
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            relay._answer("a" * 32, {"output": 1})
+            relay.close()
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(RepoScoreError) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        assert "eval/labels.csv" in str(raised.value), str(raised.value)
+        assert box.unstamped is (step == "deliver")
+        box.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_raised_large_answer_write_never_reports_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A 503 on a large answer's file write gives the unchecked error, never a clean check.
+
+    The server can do the write before the 503, which moves every change time,
+    so the final check cannot tell a change apart.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    space, archive = _guarded(tmp_path)
+    try:
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        box.stamp_before_run()
+        with monkeypatch.context() as patched:
+            _fail_answer_step(patched, box, "deliver")
+            relay = _StageRelay({}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, candidate=box)
+            assert relay._answer("a" * 32, {"output": 1}) is False
+            relay.close()
+        scorer = SimpleNamespace(_rule_judge=None, raw_provider_errors=judge)
+        with pytest.raises(Exception) as raised:
+            RepoScorer._check_changes(scorer, relay, [], box)  # type: ignore[arg-type]
+        if judge:
+            assert raised.value is relay.failure
+        else:
+            assert str(raised.value) == "A relay answer could not be checked or delivered, so the version has no score."
+        assert box.unstamped
+        box.close()
+    finally:
+        space.close()
 
 
 def test_every_protected_file_check_starts_as_root(tmp_path: Path) -> None:

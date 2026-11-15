@@ -2389,6 +2389,49 @@ def test_a_temporary_unwatched_candidate_answer_write_stays_raw_in_judge_use(
     assert _score_or_error(scorer, {"input": 1}) is error
 
 
+def _stop_every_call(*_: Any, **__: Any) -> bytes:
+    """Raise the budget stop as the metered relay does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_lost_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, role: str, judge: bool
+) -> None:
+    """A 429 on the answer that carries a budget stop never hides the stop behind a no-score or raw error.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        role: The role whose service call hits the stop.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    monkeypatch.setattr(repo_scorer, "relay_request", _stop_every_call)
+    if role == "run":
+        _refuse_candidate_answers(monkeypatch, _api_error(429))
+        scorer = _service_scorer(
+            tmp_path,
+            upstream.port,
+            {"run": ("judge-api",), "metric": ()},
+            run_entry="src/cand.py:run",
+            code=_OUTPUT_SCORER,
+            run_timeout=2,
+        )
+    else:
+        _refuse_answer_writes(monkeypatch, _write_error(429)[1])
+        scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=3)
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
 def test_a_temporary_answer_write_error_reaches_the_judge_as_temporary(
     tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:
