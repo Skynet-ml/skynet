@@ -1827,7 +1827,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                         key={agent.capacityFailures}
                         message={agent.error}
                         retryInSeconds={
-                          agent.errorCode === CAPACITY_ERROR_CODE
+                          agent.errorCode === CAPACITY_ERROR_CODE && agent.capacityFailures > 0
                             ? capacityRetryDelay(agent.capacityFailures - 1)
                             : undefined
                         }

@@ -46,13 +46,19 @@ void describe("ChatErrorBanner", () => {
     const html = renderToStaticMarkup(
       <ChatErrorBanner message="Busy" retryLabel="Retry" onRetry={() => {}} retryInSeconds={30} />,
     );
-    assert.match(html, /tabular-nums/);
-    assert.doesNotMatch(html, /aria-label="Retry"/);
+    // The live region must not read the changing number each second.
+    assert.match(html, /<span aria-hidden="true" class="relative z-10 tabular-nums">/);
+    assert.match(html, /<button[^>]*aria-label="Retry"/);
   });
 
   void it("shows the plain retry button when no automatic retry is left", () => {
     const html = renderToStaticMarkup(
-      <ChatErrorBanner message="Busy" retryLabel="Retry" onRetry={() => {}} retryInSeconds={null} />,
+      <ChatErrorBanner
+        message="Busy"
+        retryLabel="Retry"
+        onRetry={() => {}}
+        retryInSeconds={null}
+      />,
     );
     assert.doesNotMatch(html, /tabular-nums/);
     assert.match(html, /Retry/);

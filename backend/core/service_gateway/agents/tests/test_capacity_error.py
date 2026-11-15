@@ -62,6 +62,14 @@ def test_spent_quota_429_is_not_capacity() -> None:
     assert "code" not in _turn_error_payload(exc)
 
 
+def test_anthropic_spend_cap_429_is_not_capacity() -> None:
+    """Anthropic's spend-cap 429 stays until the cap changes, so it gets no retry code."""
+    exc = _rate_limit(
+        "You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."
+    )
+    assert "code" not in _turn_error_payload(exc)
+
+
 def test_context_overflow_keeps_its_code() -> None:
     """A classified context overflow keeps ``context_too_long``."""
     exc = litellm.ContextWindowExceededError("prompt is too long", model="gpt-4o", llm_provider="openai")

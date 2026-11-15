@@ -293,3 +293,23 @@ test("capacity errors count up, and done or another error resets the count and t
     await unmount();
   }
 });
+
+test("a capacity error after a tool call gets no automatic retry", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  try {
+    await act(() => agent().send("one"));
+    await act(() => calls[0]!.handlers.onError!("busy", "capacity"));
+    assert.equal(agent().capacityFailures, 1);
+
+    await act(() => agent().retry());
+    await act(() =>
+      calls[1]!.handlers.onToolStart!({ id: "t1", tool: "list_jobs", arguments: {} }),
+    );
+    await act(() => calls[1]!.handlers.onError!("busy", "capacity"));
+    assert.equal(agent().errorCode, "capacity");
+    assert.equal(agent().error, "agent.error.capacity");
+    assert.equal(agent().capacityFailures, 0);
+  } finally {
+    await unmount();
+  }
+});

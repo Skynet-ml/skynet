@@ -119,13 +119,16 @@ test("a failed connection while offline reconnects with attempt n of max, then c
         return doneResponse();
       },
       () =>
-        streamGeneralistAgent({} as never, {
-          onReconnect: (p) => progress.push(p),
-          onDone: () => {
-            done = true;
-          },
-          onError: () => assert.fail("no error expected"),
-        } as never),
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {
+              done = true;
+            },
+            onError: () => assert.fail("no error expected"),
+          } as never,
+        ),
     ),
   );
   assert.equal(calls, 3);
@@ -147,11 +150,14 @@ test("a gateway 503 reconnects, and the last failure shows the error", async () 
       return new Response("Service Unavailable", { status: 503 });
     },
     () =>
-      streamGeneralistAgent({} as never, {
-        onReconnect: (p) => progress.push(p),
-        onDone: () => assert.fail("no done expected"),
-        onError: (message: string) => errors.push(message),
-      } as never),
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string) => errors.push(message),
+        } as never,
+      ),
   );
   assert.equal(calls, MAX_RECONNECTS + 1);
   assert.equal(progress.length, MAX_RECONNECTS + 1);
@@ -169,11 +175,14 @@ test("a 502, a 504 or a backend error does not resend the turn", async () => {
         return new Response("{}", { status });
       },
       () =>
-        streamGeneralistAgent({} as never, {
-          onReconnect: (p) => progress.push(p),
-          onDone: () => {},
-          onError: () => {},
-        } as never),
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {},
+            onError: () => {},
+          } as never,
+        ),
     );
     assert.equal(calls, 1);
     assert.deepEqual(progress, []);
@@ -191,11 +200,14 @@ test("a failed connection while online does not resend the turn", async () => {
         throw new TypeError("Failed to fetch");
       },
       () =>
-        streamGeneralistAgent({} as never, {
-          onReconnect: (p) => progress.push(p),
-          onDone: () => assert.fail("no done expected"),
-          onError: (message: string) => errors.push(message),
-        } as never),
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: (p) => progress.push(p),
+            onDone: () => assert.fail("no done expected"),
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
     ),
   );
   assert.equal(calls, 1);
@@ -214,12 +226,15 @@ test("a stop during the reconnect wait ends quietly and clears the notice", asyn
         throw new TypeError("Failed to fetch");
       },
       () =>
-        streamGeneralistAgent({} as never, {
-          signal: controller.signal,
-          onReconnect: (p) => progress.push(p),
-          onDone: () => {},
-          onError: (message: string) => errors.push(message),
-        } as never),
+        streamGeneralistAgent(
+          {} as never,
+          {
+            signal: controller.signal,
+            onReconnect: (p) => progress.push(p),
+            onDone: () => {},
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
     ),
   );
   assert.deepEqual(progress, [{ attempt: 1, maxAttempts: MAX_RECONNECTS }, null]);
@@ -233,16 +248,22 @@ test("a Skynet 503 such as hosted_link.unreachable does not resend the turn", as
   await withFetch(
     async () => {
       calls += 1;
-      return new Response(JSON.stringify({ detail: "Hosted is unreachable", code: "hosted_link.unreachable" }), {
-        status: 503,
-      });
+      return new Response(
+        JSON.stringify({ detail: "Hosted is unreachable", code: "hosted_link.unreachable" }),
+        {
+          status: 503,
+        },
+      );
     },
     () =>
-      streamGeneralistAgent({} as never, {
-        onReconnect: (p) => progress.push(p),
-        onDone: () => assert.fail("no done expected"),
-        onError: (message: string, code?: string) => errors.push([message, code]),
-      } as never),
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onReconnect: (p) => progress.push(p),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string, code?: string) => errors.push([message, code]),
+        } as never,
+      ),
   );
   assert.equal(calls, 1);
   assert.deepEqual(progress, []);
@@ -255,15 +276,20 @@ test("an edge 503, then a good answer, streams the turn with no error", async ()
   await withFetch(
     async () => {
       calls += 1;
-      return calls === 1 ? new Response("<html>Service Unavailable</html>", { status: 503 }) : doneResponse();
+      return calls === 1
+        ? new Response("<html>Service Unavailable</html>", { status: 503 })
+        : doneResponse();
     },
     () =>
-      streamGeneralistAgent({} as never, {
-        onDone: () => {
-          done = true;
-        },
-        onError: () => assert.fail("no error expected"),
-      } as never),
+      streamGeneralistAgent(
+        {} as never,
+        {
+          onDone: () => {
+            done = true;
+          },
+          onError: () => assert.fail("no error expected"),
+        } as never,
+      ),
   );
   assert.equal(calls, 2);
   assert.equal(done, true);
@@ -283,11 +309,14 @@ test("a connection that drops after the send while it was online does not resend
         throw new TypeError("Failed to fetch");
       },
       () =>
-        streamGeneralistAgent({} as never, {
-          onReconnect: () => assert.fail("no reconnect expected"),
-          onDone: () => assert.fail("no done expected"),
-          onError: (message: string) => errors.push(message),
-        } as never),
+        streamGeneralistAgent(
+          {} as never,
+          {
+            onReconnect: () => assert.fail("no reconnect expected"),
+            onDone: () => assert.fail("no done expected"),
+            onError: (message: string) => errors.push(message),
+          } as never,
+        ),
     );
   } finally {
     if (before) Object.defineProperty(globalThis, "navigator", before);

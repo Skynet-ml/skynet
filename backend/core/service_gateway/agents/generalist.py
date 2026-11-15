@@ -3673,7 +3673,14 @@ _CAPACITY_STATUS_CODES = frozenset({429, 503, 529})
 _CAPACITY_ERROR_TYPES = frozenset({"RateLimitError", "ServiceUnavailableError"})
 # A 429 for a spent quota or an unpaid bill does not clear with time, so a
 # retry only spends the user's wait.
-_QUOTA_PATTERNS = ("insufficient_quota", "exceeded your current quota", "billing", "credit balance")
+_QUOTA_PATTERNS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "billing",
+    "credit balance",
+    # Anthropic's 429 when the workspace spend cap is reached.
+    "reached your specified api usage limits",
+)
 
 
 def _is_capacity_error(exc: BaseException) -> bool:

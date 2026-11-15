@@ -78,7 +78,11 @@ export interface GeneralistAgentState {
   error: string | null;
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
-  /** Capacity errors in a row, this one included; a reply that ends with ``done`` resets it. */
+  /**
+   * Capacity errors in a row, this one included, that the chat may retry by
+   * itself. A reply that ends with ``done``, another error, or a capacity error
+   * after a tool call resets it to 0.
+   */
   capacityFailures: number;
   /** The stream's reconnect attempt while it cannot connect, else null. */
   reconnect: ReconnectProgress | null;
@@ -562,6 +566,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       let steerAnchor = sessionsRef.current.get(key)?.messages[turnStart - 1];
       // The reply `done` landed on; stats that arrive after it belong there.
       let replyAt: number | null = null;
+      // A turn that ran a tool may have changed files or spent model steps, so
+      // a capacity error after it gets only the manual retry (SKY-705).
+      let ranTools = false;
       let pendingSeq = 0;
       // Rows for calls the model wrote but never ran (a failed parse, a
       // denied step) must not outlive the turn as spinning pills.
@@ -784,6 +791,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onToolStart: (ev) => {
               if (ended()) return;
+              ranTools = true;
               // A tool call ends the current stretch of thinking; reasoning
               // after it opens a new "Thought for" row below the tool.
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
@@ -939,7 +947,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                         : message),
                 errorCode: code ?? null,
                 capacityFailures:
-                  code === CAPACITY_ERROR_CODE
+                  code === CAPACITY_ERROR_CODE && !ranTools
                     ? (sessionsRef.current.get(key)?.capacityFailures ?? 0) + 1
                     : 0,
                 reconnect: null,

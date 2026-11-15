@@ -13,7 +13,13 @@ const TOKEN = "\u0000";
  * The live line while the chat stream reconnects, as "Reconnecting 2/5".
  * The only motion is the attempt number rolling up; no spinner, no shimmer.
  */
-export function ReconnectingNotice({ attempt, maxAttempts }: { attempt: number; maxAttempts: number }) {
+export function ReconnectingNotice({
+  attempt,
+  maxAttempts,
+}: {
+  attempt: number;
+  maxAttempts: number;
+}) {
   const reduceMotion = useReducedMotion();
   const count = new Intl.NumberFormat(getActiveIntlLocale());
   const sentence = formatMsg("shared.agent.reconnecting", { progress: TOKEN });
@@ -37,7 +43,11 @@ export function ReconnectingNotice({ attempt, maxAttempts }: { attempt: number; 
                 key={attempt}
                 initial={reduceMotion ? false : { y: "100%", opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                exit={reduceMotion ? { opacity: 0, transition: { duration: 0 } } : { y: "-100%", opacity: 0 }}
+                exit={
+                  reduceMotion
+                    ? { opacity: 0, transition: { duration: 0 } }
+                    : { y: "-100%", opacity: 0 }
+                }
                 transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
               >
                 {count.format(attempt)}

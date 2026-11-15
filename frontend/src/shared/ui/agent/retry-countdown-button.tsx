@@ -13,7 +13,16 @@ import { secondsLeft } from "./capacity-retry";
  * passes and retries by itself at zero. A click retries at once. Give it a new
  * key for each failure, so the countdown starts again.
  */
-export function RetryCountdownButton({ seconds, onRetry }: { seconds: number; onRetry: () => void }) {
+export function RetryCountdownButton({
+  seconds,
+  label,
+  onRetry,
+}: {
+  seconds: number;
+  /** The button's stable accessible name; the changing number stays hidden from screen readers. */
+  label?: string;
+  onRetry: () => void;
+}) {
   const [deadline] = React.useState(() => Date.now() + seconds * 1000);
   const [left, setLeft] = React.useState(seconds);
   const retry = React.useEffectEvent(onRetry);
@@ -37,6 +46,7 @@ export function RetryCountdownButton({ seconds, onRetry }: { seconds: number; on
       size="xs"
       className="relative shrink-0 overflow-hidden"
       onClick={onRetry}
+      aria-label={label}
     >
       <motion.span
         aria-hidden
@@ -44,7 +54,10 @@ export function RetryCountdownButton({ seconds, onRetry }: { seconds: number; on
         initial={false}
         animate={{ scaleX: (seconds - left) / seconds }}
       />
-      <span className="relative z-10 tabular-nums">{formatMsg("shared.agent.retry_in", { seconds: left })}</span>
+      {/* The banner is a live region; a number that changes each second would be read again each second. */}
+      <span aria-hidden className="relative z-10 tabular-nums">
+        {formatMsg("shared.agent.retry_in", { seconds: left })}
+      </span>
     </Button>
   );
 }
