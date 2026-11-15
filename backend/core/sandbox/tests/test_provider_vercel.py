@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,7 +190,8 @@ class FakeProcess:
         Args:
             fs: The box file system.
             script: The wrapper script.
-            outcomes: Exceptions to raise, then an exit code.
+            outcomes: Exceptions to raise, then an exit code. A callable
+                outcome runs during the wait and returns the outcome.
             block: Wait until terminate or kill when True.
         """
         self.fs = fs
@@ -213,6 +215,8 @@ class FakeProcess:
             await self.released.wait()
             return 143
         outcome = self.outcomes.pop(0)
+        if callable(outcome):
+            outcome = outcome()
         if isinstance(outcome, BaseException):
             raise outcome
         self.fs.files[self.out] = "hello\n"
@@ -1766,15 +1770,52 @@ async def test_output_goes_to_context_sink(client: FakeClient, log: list[str]) -
     await env.stop()
 
 
-async def test_timeout_codes_mark_timed_out(client: FakeClient, log: list[str]) -> None:
-    """Check that the kill code marks a command with a limit as timed out."""
+def _code_after(clock: FakeClock, seconds: float, code: int) -> Callable[[], int]:
+    """Make a wait outcome that takes some fake time and then exits.
+
+    Args:
+        clock: The environment clock.
+        seconds: The fake time the command runs.
+        code: The exit code.
+
+    Returns:
+        The outcome for ``FakeProcess.wait``.
+    """
+
+    def outcome() -> int:
+        """Move the clock forward and return the code.
+
+        Returns:
+            The exit code.
+        """
+        clock.now += seconds
+        return code
+
+    return outcome
+
+
+@pytest.mark.parametrize("seconds", [2.0, 2.5])
+async def test_kill_at_the_limit_marks_timed_out(client: FakeClient, log: list[str], seconds: float) -> None:
+    """Check that the kill code at or after the rounded-up limit marks the command as timed out."""
     env = make_env(client, log)
     await env.start()
-    client.boxes[env.name].outcomes = [137]
-    result = await env.exec("sleep 100", timeout_sec=1)
+    client.boxes[env.name].outcomes = [_code_after(env._clock, seconds, 137)]
+    result = await env.exec("sleep 100", timeout_sec=1.5)
     assert result.timed_out
     assert result.exit_code == 137
     assert client.boxes[env.name].processes[0].waits == 1
+    await env.stop()
+
+
+@pytest.mark.parametrize(("seconds", "code"), [(1.0, 124), (5.0, 124), (1.9, 137)])
+async def test_own_exit_code_is_not_a_timeout(client: FakeClient, log: list[str], seconds: float, code: int) -> None:
+    """Check that a command's own 124, or a kill before the limit (an OOM kill), keeps its code and is no timeout."""
+    env = make_env(client, log)
+    await env.start()
+    client.boxes[env.name].outcomes = [_code_after(env._clock, seconds, code)]
+    result = await env.exec("timeout 1 ./fetch.sh", timeout_sec=1.5)
+    assert not result.timed_out
+    assert result.exit_code == code
     await env.stop()
 
 
