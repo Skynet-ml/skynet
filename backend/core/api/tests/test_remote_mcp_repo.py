@@ -1362,6 +1362,36 @@ def test_a_call_with_other_arguments_during_a_running_score_gets_its_own_answer(
         _wait_for_thread("repo-judge-score")
 
 
+def test_a_score_thread_that_cannot_start_releases_its_call_key(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer an error when the score thread cannot start, and keep no key, so the next call scores."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_RUNNING", {})
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+
+    class _NoStartThread(threading.Thread):
+        """Fail to start, like a process at its thread limit."""
+
+        def start(self) -> None:
+            """Raise as ``Thread.start`` does when the system has no thread left.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(remote_mcp_repo, "Thread", _NoStartThread)
+    assert _judge(client, draft_id).get("isError") is True
+    assert not remote_mcp_repo._RUNNING
+    assert not remote_mcp_repo._IN_FLIGHT
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert time.monotonic() - started < 1
+    monkeypatch.setattr(remote_mcp_repo, "Thread", threading.Thread)
+    assert _payload(_judge(client, draft_id))["status"] != "in_progress"
+    assert len(record["calls"]) == 1
+
+
 def test_a_refusal_after_the_bound_is_stored_and_the_retry_reports_it(
     judge: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

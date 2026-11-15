@@ -1724,7 +1724,12 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         )
         outcome, new = _track(key)
         if new:
-            Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
+            try:
+                Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
+            except BaseException as error:
+                # Only ``run`` resolves the future; without this, the key stays taken until a restart.
+                outcome.set_exception(error)
+                raise
         wait([outcome], timeout=_JUDGE_ANSWER_SECONDS)
         if outcome.done():
             return outcome.result()
