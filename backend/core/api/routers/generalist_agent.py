@@ -1077,6 +1077,36 @@ def _context_window(model_name: str) -> int:
     return entry.max_input_tokens if entry and entry.max_input_tokens else compaction.DEFAULT_CONTEXT_WINDOW
 
 
+def _auto_review_sender(
+    model_config: ModelConfig, username: str, engine: Any
+) -> Callable[[dict[str, Any]], bytes] | None:
+    """Choose whether a turn's auto-safe calls get the paid Jev review.
+
+    The review is a managed call that reserves on the wallet before it runs.
+    A BYOK, CLI or local turn has no managed wallet route, so it gets no
+    review and keeps the normal approval prompt. A CLI turn needs its own
+    check: :func:`metering_token_source` counts it as managed.
+
+    Args:
+        model_config: The turn's resolved model.
+        username: The wallet owner.
+        engine: The database engine of the wallet, or ``None``.
+
+    Returns:
+        The sender bound to the managed wallet and key, or ``None`` for no review.
+    """
+    if (
+        metering_token_source(model_config) != TOKEN_SOURCE_MANAGED
+        or model_config.token_source not in (None, TOKEN_SOURCE_MANAGED)
+        or model_config.cli_provider is not None
+        or settings.local_mode
+        or settings.openrouter_api_key is None
+        or engine is None
+    ):
+        return None
+    return partial(send_protected_review, engine, username, settings.openrouter_api_key.get_secret_value())
+
+
 def _anchor_by_text(
     turns: list[ChatTurn], cut: int, newest_id: int | None
 ) -> tuple[str, int | None, int | None, int, int]:
@@ -1563,22 +1593,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             else None
         )
         usage_sink: list = []
-        # The Jev review is a managed call that reserves on the wallet before
-        # it runs. A BYOK, CLI or local turn has no managed wallet route, so it
-        # gets no review and keeps the normal approval prompt.
-        auto_review_send = (
-            partial(
-                send_protected_review,
-                job_store.engine,
-                current_user.username,
-                settings.openrouter_api_key.get_secret_value(),
-            )
-            if metering_token_source(model_config) == TOKEN_SOURCE_MANAGED
-            and not settings.local_mode
-            and settings.openrouter_api_key is not None
-            and getattr(job_store, "engine", None) is not None
-            else None
-        )
+        auto_review_send = _auto_review_sender(model_config, current_user.username, getattr(job_store, "engine", None))
         compaction_cents: float | None = None
         steer_ids: dict[str, int] = {}
         feedback_target = (

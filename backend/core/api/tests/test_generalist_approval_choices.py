@@ -19,7 +19,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -28,6 +28,7 @@ from sqlalchemy.pool import StaticPool
 from ...billing.budgets import BudgetError
 from ...billing.tests.test_decision_dispatch import CATALOG
 from ...config import settings
+from ...models import ModelConfig
 from ...service_gateway.agents import approval_choices
 from ...service_gateway.agents import auto_review as review_mod
 from ...service_gateway.agents.approval_choices import (
@@ -684,6 +685,7 @@ def test_the_reviewer_uses_the_jev_decision_model() -> None:
 def test_the_review_request_keeps_the_request_and_the_call_as_state() -> None:
     """The user's request and the masked call go in ``state``; the question is a fixed allow or deny choice."""
     body = review_request("rename_job_optimizations", {"job_id": "j1", "token": "hidden-1"}, "Rename it")
+    assert body is not None
     assert body["model"] == "typesafe/jev-1.14"
     assert body["state"]["user_latest_request"] == "Rename it"
     assert body["state"]["tool_call"]["name"] == "rename_job_optimizations"
@@ -943,3 +945,78 @@ async def test_a_provider_error_releases_the_reservation_and_asks_the_user(
     assert budgets == ["closed"]
     assert charged == [0]
     assert balance == 100
+
+
+_MANAGED_TURN = ModelConfig(name="openrouter/anthropic/claude-sonnet-4.5")
+
+
+@pytest.fixture
+def _review_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as a hosted server with a managed OpenRouter key.
+
+    Args:
+        monkeypatch: Sets the mode and the key.
+    """
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "openrouter_api_key", SecretStr("synthetic-platform-key"))
+
+
+@pytest.mark.usefixtures("_review_settings")
+@pytest.mark.parametrize(
+    "model_config",
+    [_MANAGED_TURN, ModelConfig(name="openrouter/anthropic/claude-sonnet-4.5", token_source="managed")],
+)
+def test_a_managed_turn_gets_the_review_bound_to_its_own_wallet(model_config: ModelConfig) -> None:
+    """A managed OpenRouter turn gets the Jev sender, bound to the caller's wallet and the platform key.
+
+    Args:
+        model_config: A managed turn's model.
+    """
+    engine = object()
+    sender = agent_mod._auto_review_sender(model_config, "alice", engine)
+    assert isinstance(sender, partial)
+    assert sender.func is agent_mod.send_protected_review
+    assert sender.args == (engine, "alice", "synthetic-platform-key")
+
+
+@pytest.mark.usefixtures("_review_settings")
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        ModelConfig(name="openrouter/anthropic/claude-sonnet-4.5", token_source="byok", byok_provider="openrouter"),
+        ModelConfig(name="anthropic/claude-sonnet-4.5", token_source="byok", byok_provider="anthropic"),
+        ModelConfig(name="claude-sonnet-4.5", token_source="subscription", cli_provider="claude"),
+        ModelConfig(name="gpt-5.5", token_source="subscription", cli_provider="codex"),
+    ],
+)
+def test_byok_and_cli_turns_never_get_the_paid_review(model_config: ModelConfig) -> None:
+    """A BYOK or CLI turn gets no sender, so its approvals can never charge the managed wallet for Jev.
+
+    Args:
+        model_config: A turn that does not run on the managed route.
+    """
+    assert agent_mod._auto_review_sender(model_config, "alice", object()) is None
+
+
+def test_a_local_turn_gets_no_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In local mode no managed wallet exists, so no review runs.
+
+    Args:
+        monkeypatch: Sets local mode with a key present.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "openrouter_api_key", SecretStr("synthetic-platform-key"))
+    assert agent_mod._auto_review_sender(_MANAGED_TURN, "alice", object()) is None
+
+
+def test_a_turn_without_an_openrouter_key_or_a_database_gets_no_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no platform key, or no wallet database to reserve on, the review does not run.
+
+    Args:
+        monkeypatch: Sets hosted mode and removes the key.
+    """
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "openrouter_api_key", None)
+    assert agent_mod._auto_review_sender(_MANAGED_TURN, "alice", object()) is None
+    monkeypatch.setattr(settings, "openrouter_api_key", SecretStr("synthetic-platform-key"))
+    assert agent_mod._auto_review_sender(_MANAGED_TURN, "alice", None) is None
