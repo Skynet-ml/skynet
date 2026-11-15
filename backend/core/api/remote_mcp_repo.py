@@ -20,11 +20,16 @@ No step runs user code or spends money before the preflight or the submit.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
+import logging
 import math
+import traceback
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Lock, Thread
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -100,8 +105,26 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
 _PENDING_RETRY_SECONDS = 5
+# A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
+# in_progress at this bound while the score continues in the background.
+_JUDGE_ANSWER_SECONDS = 25
+# A deploy stops the task with SIGTERM, and ECS kills it 120 s later
+# (infra/terraform/modules/environment/services.tf, stop_timeout). The
+# shutdown waits this long for background scores, so they can store their
+# outcome before the kill.
+_DRAIN_SECONDS = 100
 _TREE_SAMPLE = 60
 _SCORER_NAMES = ("score", "metric")
+
+logger = logging.getLogger(__name__)
+
+# The background judge scores that still run, so the app shutdown can wait for them.
+_IN_FLIGHT: set[Future[dict[str, Any]]] = set()
+_IN_FLIGHT_LOCK = Lock()
+# The running score of each call key, so a poll waits on it and starts no second
+# background thread. It is per process: a poll on another worker starts its own
+# thread, and the judge's stored claim keeps that from scoring twice.
+_RUNNING: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
 
 TokenSource = Literal["managed", "byok", "subscription"]
 StepCheck = Callable[[dict[str, Any], str], tuple[list[str], list[str], dict[str, Any]]]
@@ -1057,6 +1080,75 @@ def judge_draft(
         raise
 
 
+def _log_late_error(outcome: Future[dict[str, Any]]) -> None:
+    """Log an unexpected error of a judge call that ended after the tool answered in_progress.
+
+    A tool error is a refusal that the retry gets again, so it is not logged.
+    Any other error's text can quote payload content, so the log holds only
+    its type and the code frames.
+
+    Args:
+        outcome: The finished background work.
+    """
+    error = outcome.exception()
+    if error is None or isinstance(error, ToolError):
+        return
+    frames = "".join(traceback.format_tb(error.__traceback__))
+    logger.error("repo_judge_score failed after its answer with %s\n%s", type(error).__name__, frames)
+
+
+def _track(key: tuple[Any, ...]) -> tuple[Future[dict[str, Any]], bool]:
+    """Find the running score of this call key, or register a new one until it ends.
+
+    Args:
+        key: The user and the arguments that identify the call.
+
+    Returns:
+        The score's future, and whether it is new, so the caller must start it.
+    """
+    with _IN_FLIGHT_LOCK:
+        running = _RUNNING.get(key)
+        if running is not None:
+            return running, False
+        outcome: Future[dict[str, Any]] = Future()
+        _IN_FLIGHT.add(outcome)
+        _RUNNING[key] = outcome
+
+    def release(done: Future[dict[str, Any]]) -> None:
+        """Remove the ended score from the in-flight set and from the call keys.
+
+        Args:
+            done: The ended score's future.
+        """
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.discard(done)
+            if _RUNNING.get(key) is done:
+                del _RUNNING[key]
+
+    outcome.add_done_callback(release)
+    return outcome, True
+
+
+def drain_judge_scores() -> int:
+    """Wait up to ``_DRAIN_SECONDS`` for the background judge scores to end.
+
+    The app shutdown calls this, so a deploy does not kill a score before it
+    stores its outcome.
+
+    Returns:
+        How many scores still run at the bound.
+    """
+    with _IN_FLIGHT_LOCK:
+        running = list(_IN_FLIGHT)
+    if not running:
+        return 0
+    logger.info("Shutdown waits for %d judge score(s)", len(running))
+    left = len(wait(running, timeout=_DRAIN_SECONDS).not_done)
+    if left:
+        logger.warning("Shutdown stopped waiting with %d judge score(s) still running", left)
+    return left
+
+
 def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, job_store: Any) -> None:
     """Add the repository draft tools to the remote MCP server.
 
@@ -1556,7 +1648,9 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         reads optimize.toml at the base commit and refuses a version that
         changes it or a protected path. The answer has the score, the named
         scores and the feedback on the search cases only. A retry with the
-        same arguments does not pay twice. Only the budget or stop_run with
+        same arguments does not pay twice. An answer with status in_progress
+        means: wait retry_after_seconds, then call again with the same
+        arguments; a long score continues meanwhile. Only the budget or stop_run with
         session_id ends the session; the end scores the best version once on
         the held-out cases. Call repo_draft_review first and show the user its
         price. Send confirm=true only after the user agreed.
@@ -1570,6 +1664,17 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         user = _user(SCOPE_WRITE)
         with Session(job_store.engine) as session:
             spec = dict(_load_draft(session, draft_id, user.username).spec or {})
+
+        def run(outcome: Future[dict[str, Any]]) -> None:
+            """Do the tool body in the background and hand its answer or error to ``outcome``.
+
+            Args:
+                outcome: Gets the answer or the error.
+            """
+            try:
+                outcome.set_result(guarded(work))
+            except BaseException as error:
+                outcome.set_exception(error)
 
         def work() -> dict[str, Any]:
             """Score the candidate and turn the judge's refusals into tool answers.
@@ -1605,4 +1710,33 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                     else "Other usage on this account must settle first. Call repo_judge_score again with the same arguments.",
                 }
 
-        return guarded(work)
+        # The work keeps going after the answer and stores its outcome as the call's evidence, so a
+        # retry replays it. While it runs, a poll with the same arguments waits on it and starts no
+        # new work. The key holds a digest of the patch, never its text.
+        patch_digest = None if candidate_patch is None else hashlib.sha256(candidate_patch.encode()).hexdigest()
+        key = (
+            user.username,
+            draft_id,
+            json_fingerprint({"spec": spec}),
+            max_cost_cents,
+            candidate_commit,
+            patch_digest,
+        )
+        outcome, new = _track(key)
+        if new:
+            try:
+                Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
+            except BaseException as error:
+                # Only ``run`` resolves the future; without this, the key stays taken until a restart.
+                outcome.set_exception(error)
+                raise
+        wait([outcome], timeout=_JUDGE_ANSWER_SECONDS)
+        if outcome.done():
+            return outcome.result()
+        if new:
+            outcome.add_done_callback(_log_late_error)
+        return {
+            "status": "in_progress",
+            "retry_after_seconds": _PENDING_RETRY_SECONDS,
+            "detail": "The candidate is still being scored. Call repo_judge_score again with the same arguments.",
+        }

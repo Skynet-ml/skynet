@@ -98,6 +98,12 @@ interface WizardStateContextValue {
   /** The repository's text of the setup draft's files, by path; null while no Changes pane is mounted. */
   repoBase: ReadonlyMap<string, string> | null;
   setRepoBase: (base: ReadonlyMap<string, string> | null) => void;
+  /** The repository's file paths, for the composer's @file mentions; null while no Changes pane is mounted. */
+  repoPaths: readonly string[] | null;
+  setRepoPaths: (paths: readonly string[] | null) => void;
+  /** Set while the chat floats over the full-view Changes pane; null while it is docked. */
+  chatFloat: ChatFloat | null;
+  setChatFloat: (float: ChatFloat | null) => void;
   /** The draft's files as the Changes pane holds them; null while no pane is mounted. */
   draftFiles: DraftFiles | null;
   setDraftFiles: (files: DraftFiles | null) => void;
@@ -120,13 +126,23 @@ export interface DraftFiles {
   write: (edits: readonly FileEdit[], side: "before" | "after") => boolean;
 }
 
-/** Open the Changes pane at `path`, marking `paths` (one turn's files) when given. */
-export type ViewChanges = (path?: string, paths?: readonly string[]) => void;
+/**
+ * Open the Changes pane at `path`, marking `paths` (one turn's files) when given.
+ * `comment`, a line comment's id, scrolls the diff to that comment.
+ */
+export type ViewChanges = (path?: string, paths?: readonly string[], comment?: string) => void;
 
 /** The Changes pane's open state and its toggle, for the chat header's button. */
 export interface ChangesToggle {
   open: boolean;
   toggle: () => void;
+}
+
+/** The full view's floating chat: whether its thread shows, and its bar's actions. */
+export interface ChatFloat {
+  expanded: boolean;
+  onExpand: (expanded: boolean) => void;
+  onDock: () => void;
 }
 
 /** A message the wizard sends its agent without the user typing it. */
@@ -186,6 +202,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   }, []);
   const [changesToggle, setChangesToggle] = React.useState<ChangesToggle | null>(null);
   const [repoBase, setRepoBase] = React.useState<ReadonlyMap<string, string> | null>(null);
+  const [repoPaths, setRepoPaths] = React.useState<readonly string[] | null>(null);
+  const [chatFloat, setChatFloat] = React.useState<ChatFloat | null>(null);
   const [draftFiles, setDraftFiles] = React.useState<DraftFiles | null>(null);
   const [lineComments, setLineComments] = React.useState<readonly LineComment[]>([]);
   const addLineComment = React.useCallback((comment: LineComment) => {
@@ -371,6 +389,10 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setChangesToggle,
       repoBase,
       setRepoBase,
+      repoPaths,
+      setRepoPaths,
+      chatFloat,
+      setChatFloat,
       draftFiles,
       setDraftFiles,
       lineComments,
@@ -410,6 +432,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setViewChanges,
       repoBase,
       setRepoBase,
+      repoPaths,
+      chatFloat,
       draftFiles,
       lineComments,
       addLineComment,

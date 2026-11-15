@@ -74,6 +74,8 @@ from ..language_models import (
 from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
+from .approval_choices import declined_result, take_approval_choice
+from .auto_review import AutoReviewer
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
@@ -212,6 +214,22 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
 # The setup agent's own file tools, not agent routes. Like a safe mutation they
 # ask only in Ask mode: they change the setup draft, never the user's repository.
 _ASK_FILE_TOOLS: frozenset[str] = frozenset({WRITE_FILE_TOOL, EDIT_FILE_TOOL})
+
+# "Allow for this chat" never covers these (SKY-706). Each call spends the
+# balance, or (``change_setting``) can switch the assistant engine or the data
+# policy, so each one asks again.
+_NO_CHAT_RULE_TOOLS: frozenset[str] = frozenset(
+    {
+        "submit_unified_run_optimize_post",
+        "clone_job_optimizations",
+        "retry_job_optimizations",
+        "resume_job_optimizations",
+        "restart_job_optimizations",
+        "change_setting",
+    }
+)
+# The client sends its chat rules with each turn; a bound keeps the list small.
+CHAT_RULES_MAX_TOOLS = 64
 
 
 # Upper bound on how long a tool waits for the user's approval decision. The
@@ -479,6 +497,36 @@ def _needs_approval(tool_name: str, trust_mode: TrustMode) -> bool:
     return trust_mode == "ask" and (tool_name in _SAFE_MUTATIONS or tool_name in _ASK_FILE_TOOLS)
 
 
+def chat_rule_allowed(tool_name: str) -> bool:
+    """Tell whether "allow for this chat" may cover a tool.
+
+    A rule names one exact tool. It covers only a tool that asks in Ask mode,
+    never an always-confirm tool, a tool that spends the balance or
+    ``change_setting``.
+
+    Args:
+        tool_name: The MCP tool's registered name.
+
+    Returns:
+        True when a chat rule may let calls of this tool run without a prompt.
+    """
+    if tool_name in _ALWAYS_CONFIRM_TOOLS or tool_name in _NO_CHAT_RULE_TOOLS:
+        return False
+    return _needs_approval(tool_name, "ask")
+
+
+def chat_rules(tool_names: list[str] | None) -> set[str]:
+    """Keep the chat rules a turn may use from the names the client sent.
+
+    Args:
+        tool_names: Tool names the user allowed earlier in this chat.
+
+    Returns:
+        At most :data:`CHAT_RULES_MAX_TOOLS` names that :func:`chat_rule_allowed` accepts.
+    """
+    return {name for name in (tool_names or [])[:CHAT_RULES_MAX_TOOLS] if chat_rule_allowed(name)}
+
+
 def _screen_needs_approval(tool_name: str, trust_mode: TrustMode) -> bool:
     """Let a wizard screen agent call its tools without asking.
 
@@ -520,6 +568,12 @@ class _TurnAuthoringFlag:
         self.end_refused = False
         # An ``ask_user`` question ends the turn as well as a typed one does.
         self.asked = False
+        # Tools the user allowed for this chat (SKY-706), already filtered by
+        # :func:`chat_rule_allowed`; an "allow for this chat" choice adds to it.
+        self.chat_allowed: set[str] = set()
+        # Reviews the safe mutations that auto-safe mode would run without a
+        # prompt; ``None`` when the turn has no auto-review.
+        self.auto_review: AutoReviewer | None = None
 
 
 _SAMPLE_STAGE_TOOL = "stage_sample_dataset_datasets_samples"
@@ -679,8 +733,8 @@ class _ApprovalGatedTool:
             **kwargs: Keyword arguments forwarded to the underlying tool.
 
         Returns:
-            The wrapped tool's return value, or the literal string
-            ``"User declined"`` when the call is rejected.
+            The wrapped tool's return value, or ``"User declined"`` (with the
+            user's note, when they wrote one) when the call is rejected.
 
         Raises:
             asyncio.CancelledError: If the surrounding stream is cancelled.
@@ -748,14 +802,32 @@ class _ApprovalGatedTool:
             pending_key = approval_key(call_id, self._approval_owner)
             # An injected policy (react-serve gates by its own rules) must not
             # be able to wave a protected settings action through.
-            if self._tool_name in _ALWAYS_CONFIRM_TOOLS or self._needs_approval(self._tool_name, self._trust_mode):
+            gated = self._tool_name in _ALWAYS_CONFIRM_TOOLS or self._needs_approval(self._tool_name, self._trust_mode)
+            denied = False
+            # A chat rule is the user's own choice, so it also skips the auto-review.
+            ruled = self._tool_name in self._authoring_flag.chat_allowed and chat_rule_allowed(self._tool_name)
+            if gated and ruled:
+                gated = False
+            elif (
+                not gated
+                and not ruled
+                and self._authoring_flag.auto_review is not None
+                and self._needs_approval(self._tool_name, "ask")
+            ):
+                verdict = await self._authoring_flag.auto_review.review(self._tool_name, kwargs)
+                gated = verdict is None or not verdict.allowed
+                denied = verdict is not None and not verdict.allowed
+            if gated:
                 fut = self._registry.register(pending_key)
-                self._emit(
-                    {
-                        "event": "pending_approval",
-                        "data": {"id": call_id, "tool": self._tool_name, "arguments": kwargs},
-                    }
-                )
+                pending: dict[str, Any] = {
+                    "id": call_id,
+                    "tool": self._tool_name,
+                    "arguments": kwargs,
+                    "chat_rule": chat_rule_allowed(self._tool_name),
+                }
+                if denied:
+                    pending["auto_review"] = {"denied": True}
+                self._emit({"event": "pending_approval", "data": pending})
                 try:
                     # Bounded wait racing the local future against the durable
                     # store — see ApprovalRegistry.wait_for_decision.
@@ -774,17 +846,29 @@ class _ApprovalGatedTool:
                         }
                     )
                     raise
-                self._emit(
-                    {
-                        "event": "approval_resolved",
-                        "data": {"id": call_id, "tool": self._tool_name, "approved": approved},
-                    }
-                )
+                choice = await asyncio.to_thread(take_approval_choice, self._approval_owner, call_id)
+                scope = "conversation" if approved and choice.scope == "conversation" else "once"
+                if scope == "conversation" and chat_rule_allowed(self._tool_name):
+                    self._authoring_flag.chat_allowed.add(self._tool_name)
+                else:
+                    scope = "once"
+                note = "" if approved else choice.note
+                resolved: dict[str, Any] = {
+                    "id": call_id,
+                    "tool": self._tool_name,
+                    "approved": approved,
+                    "scope": scope,
+                }
+                if note:
+                    resolved["note"] = note
+                if denied:
+                    resolved["auto_review_denied"] = True
+                self._emit({"event": "approval_resolved", "data": resolved})
                 if not approved:
                     declined: Any = (
                         secret_request_result(str(kwargs.get("name")), saved=False)
                         if self._tool_name == SECRET_REQUEST_TOOL
-                        else "User declined"
+                        else declined_result(note)
                     )
                     self._emit(
                         {
@@ -2072,11 +2156,12 @@ How a turn works:
   without ``ask_user``.
 * Some calls show the user an approval card first. A ``User declined``
   result means they refused that action: do not call that tool again this
-  turn. Carry on with what does not depend on it and say in the final
-  message that it was not done.
+  turn. When the result also quotes what the user said instead, follow that.
+  Carry on with what does not depend on it and say in the final message
+  that it was not done.
 * Starting tagging: when the user asks to tag or label a dataset, call
-  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
-  ``list_datasets_for_agent``. The tagger opens on its setup with that
+  ``open_page`` with ``path`` ``/tagger?dataset=<id>`` and no ``tab``, with
+  the id from ``list_datasets_for_agent``. The tagger opens on its setup with that
   dataset loaded. When no saved dataset fits, use ``/tagger?new=1``: the
   setup opens with no dataset, and the user adds the data there. End the
   turn with one short line that tells the user to pick the task in the
@@ -2121,8 +2206,8 @@ The wizard screen on view:
   ``wizard_screen`` the wizard is not on view and any field may be set.
 * Starting a setup: when the user asks to set up, create or start a new
   optimization run and ``wizard_screen`` is absent, call ``open_page``
-  with ``path`` ``/submit``. The setup opens with this same chat beside
-  it, and its first screen gives you a turn of its own, so write no
+  with ``path`` ``/submit`` and no ``tab``. The setup opens with this same
+  chat beside it, and its first screen gives you a turn of its own, so write no
   wizard field in this turn. End the turn with one short line that the
   setup is open.
 * Say only what a tool result confirms. A refused write changed
@@ -2285,8 +2370,9 @@ Capabilities worth knowing about:
   keys. Never ask the user to type a password, card number, authenticator
   code or provider key in the chat: for a ``page_only`` step (any card,
   token or key change, 2FA setup, password change, deleting the account)
-  call ``open_page`` with the area's tab and tell the user what to do there.
-  Use ``open_page`` too when the user asks to see a settings tab.
+  call ``open_page`` with only the area's ``tab`` (no ``path``) and tell
+  the user what to do there. Use ``open_page`` too when the user asks to
+  see a settings tab.
 * Saved secrets: when a run's optimize.toml sends a secret as ``${NAME}``
   in a ``[services.<name>]`` entry, call ``request_secret`` with that name,
   what it is for and its host, one secret per call. The user types the value
@@ -2416,7 +2502,8 @@ How a turn works:
   ``share_plan`` first, once: one or two short sentences on what you will
   do this turn. A turn that only replies skips it.
 * A ``User declined`` result means they refused that action: do not call
-  that tool again this turn.
+  that tool again this turn. When it quotes what the user said instead,
+  follow that.
 * Write ``assistant_message`` and every user-facing tool argument in
   {language}. Tool results, error messages, sample datasets, notes and the
   user's data often arrive in another language (often Hebrew); that never
@@ -3486,6 +3573,8 @@ async def _drive_generalist_agent(
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
     on_steer: Callable[[str], None] | None = None,
+    chat_allowed_tools: list[str] | None = None,
+    auto_review: AutoReviewer | None = None,
 ) -> str:
     """Open the MCP session, run the turn on Pi, and return the final assistant message.
 
@@ -3519,6 +3608,10 @@ async def _drive_generalist_agent(
             on; ``None`` (a chat that is not stored) leaves the tool out.
         on_steer: Runs in a worker thread with each steered text before the
             agent reads it; the router stores the steer message there.
+        chat_allowed_tools: Tool names the user allowed earlier in this chat;
+            :func:`chat_rules` drops every name a rule may not cover.
+        auto_review: Reviews the safe mutations that auto-safe mode would run
+            without a prompt, or ``None``.
 
     Returns:
         The full assistant reply text after the loop completes.
@@ -3540,6 +3633,8 @@ async def _drive_generalist_agent(
         # One per turn, shared across every wrapper, so a later call sees the
         # wizard fields an earlier call wrote this turn.
         authoring_flag = _TurnAuthoringFlag()
+        authoring_flag.chat_allowed = chat_rules(chat_allowed_tools)
+        authoring_flag.auto_review = auto_review
         screen = wizard_state.get("wizard_screen") if "wizard_screen" in wizard_state else None
         dspy_tools = [
             _wrap_tool_with_approval(
@@ -3666,6 +3761,77 @@ async def _drive_generalist_agent(
         return reply_text
 
 
+# SKY-705: the chat retries these by itself after a countdown. 529 is
+# Anthropic's "overloaded" status.
+_CAPACITY_STATUS_CODES = frozenset({429, 503, 529})
+_CAPACITY_ERROR_TYPES = frozenset({"RateLimitError", "ServiceUnavailableError"})
+# A 429 for a spent quota or an unpaid bill does not clear with time, so a
+# retry only spends the user's wait.
+_QUOTA_PATTERNS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    # Not a bare "billing": OpenAI's passing 429 for an org without a payment
+    # method links to .../account/billing and still clears with time.
+    "billing details",
+    "plan and billing",
+    "credit balance",
+    # Anthropic's 429 when the workspace spend cap is reached.
+    "reached your specified api usage limits",
+)
+
+
+def _is_capacity_error(exc: BaseException) -> bool:
+    """Tell whether a turn failed because the model provider had no capacity.
+
+    Walks exception groups and ``__cause__``/``__context__`` links, as the
+    provider error often sits below the Pi bridge or a task group.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        True for a rate limit, an overload or a provider 503, and False for
+        a spent quota.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    found = False
+    while stack:
+        leaf = stack.pop()
+        if id(leaf) in seen:
+            continue
+        seen.add(id(leaf))
+        text = str(leaf).lower()
+        if any(pattern in text for pattern in _QUOTA_PATTERNS):
+            return False
+        if (
+            type(leaf).__name__ in _CAPACITY_ERROR_TYPES
+            or getattr(leaf, "status_code", None) in _CAPACITY_STATUS_CODES
+            or "overloaded" in text
+        ):
+            found = True
+        if isinstance(leaf, BaseExceptionGroup):
+            stack.extend(leaf.exceptions)
+        stack.extend(linked for linked in (leaf.__cause__, leaf.__context__) if linked is not None)
+    return found
+
+
+def _turn_error_payload(exc: BaseException) -> dict[str, str]:
+    """Build the ``error`` event data for a failed turn.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        The agent error payload. A capacity failure without another code gets
+        ``code="capacity"``, so the chat counts down and retries.
+    """
+    payload = _agent_error_payload(exc)
+    if "code" not in payload and _is_capacity_error(exc):
+        payload["code"] = "capacity"
+    return payload
+
+
 def build_turn_lm(model_config: ModelConfig | None) -> Any:
     """Build the metered LM that a chat turn runs on.
 
@@ -3712,6 +3878,8 @@ async def run_generalist_agent(
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
     on_steer: Callable[[str], None] | None = None,
+    chat_allowed_tools: list[str] | None = None,
+    auto_review_send: Callable[[dict[str, Any]], bytes] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
@@ -3769,6 +3937,11 @@ async def run_generalist_agent(
             on, or ``None`` when the chat is not stored.
         on_steer: Runs in a worker thread with each steered text before the
             agent reads it, or ``None``.
+        chat_allowed_tools: Tool names the user allowed earlier in this chat.
+        auto_review_send: Sends one paid TypeSafe Jev review through the
+            protected dispatch of a managed turn. When set in auto-safe mode,
+            Jev reviews each safe mutation before it runs. ``None`` turns the
+            review off.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -3795,6 +3968,11 @@ async def run_generalist_agent(
     emit: Callable[[dict], None] = partial(_emit_to_queue_threadsafe, loop, out_queue)
     reply_language = _reply_language(locale)
     summaries = _thinking_summaries(reply_language, out_queue, usage_sink, model_config)
+    reviewer = (
+        AutoReviewer(send=auto_review_send, request=user_message)
+        if trust_mode == "auto_safe" and auto_review_send is not None
+        else None
+    )
 
     drive_task = asyncio.create_task(
         _drive_generalist_agent(
@@ -3813,6 +3991,8 @@ async def run_generalist_agent(
             github_token=github_token,
             feedback_target=feedback_target,
             on_steer=on_steer,
+            chat_allowed_tools=chat_allowed_tools,
+            auto_review=reviewer,
         )
     )
     try:
@@ -3856,7 +4036,7 @@ async def run_generalist_agent(
         yield {"event": "error", "data": {"error": str(exc)}}
     except Exception as exc:
         logger.exception("generalist agent failed")
-        yield {"event": "error", "data": _agent_error_payload(exc)}
+        yield {"event": "error", "data": _turn_error_payload(exc)}
     finally:
         # A closed stream arrives as GeneratorExit, a cancelled request as
         # CancelledError; either way the loop must not outlive the stream.

@@ -1203,6 +1203,21 @@ def test_jev_stays_hidden_for_every_other_role(monkeypatch: pytest.MonkeyPatch, 
         mc.require_known_model(_JEV, role=role)
 
 
+def test_the_auto_review_decision_model_passes_only_for_its_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The auto-review role accepts its decision model; no other role does, and it accepts no other model."""
+    kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=[kept]))
+
+    mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=mc.AUTO_REVIEW_ROLE)
+
+    for role in (None, "agent", "hook", "judge"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=role)
+    for other in (_JEV, "openrouter/typesafe/jev-1.13"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(other, role=mc.AUTO_REVIEW_ROLE)
+
+
 def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.MonkeyPatch) -> None:
     """The classifier exception names Jev only; other routers stay refused for the judge."""
     empty = ModelCatalogResponse(providers=[], models=[])

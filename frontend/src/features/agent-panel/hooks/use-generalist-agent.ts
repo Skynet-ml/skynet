@@ -27,11 +27,18 @@ import {
 } from "@/shared/lib/thinking-segments";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
+import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
+import { CAPACITY_ERROR_CODE } from "@/shared/ui/agent/capacity-retry";
 import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
-import { confirmGeneralistApproval, streamCompaction, streamGeneralistAgent } from "../lib/stream";
+import {
+  confirmGeneralistApproval,
+  streamCompaction,
+  streamGeneralistAgent,
+  type ReconnectProgress,
+} from "../lib/stream";
 import {
   chatWindow,
   compactionAnchor,
@@ -49,6 +56,7 @@ import {
 } from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
 import type {
+  ApprovalChoice,
   ChatTurn,
   PendingApprovalPayload,
   ToolEndPayload,
@@ -72,6 +80,14 @@ export interface GeneralistAgentState {
   error: string | null;
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
+  /**
+   * Capacity errors in a row, this one included, that the chat may retry by
+   * itself. A reply that ends with ``done``, another error, or a capacity error
+   * after a tool call resets it to 0.
+   */
+  capacityFailures: number;
+  /** The stream's reconnect attempt while it cannot connect, else null. */
+  reconnect: ReconnectProgress | null;
   pendingApproval: PendingApprovalPayload | null;
   conversationId: string | null;
   /** LiteLLM id of the composer menu's chosen model; null runs the default. */
@@ -95,7 +111,8 @@ export interface GeneralistAgentState {
   editAndResend: (messageIndex: number, content: string) => void;
   retry: () => void;
   stop: () => void;
-  confirmApproval: (approved: boolean) => Promise<void>;
+  /** Answer the pending approval; `choice` carries the chat scope or a decline note. */
+  confirmApproval: (approved: boolean, choice?: ApprovalChoice) => Promise<void>;
   /** Start a fresh empty chat; every other chat keeps streaming untouched. */
   newSession: () => void;
   /**
@@ -190,6 +207,8 @@ interface SessionView {
   error: string | null;
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
+  capacityFailures: number;
+  reconnect: ReconnectProgress | null;
   pendingApproval: PendingApprovalPayload | null;
   compacting: ChatCompacting | null;
 }
@@ -232,6 +251,8 @@ interface SessionRuntime {
   afterCompact?: { message: string; override?: WizardState } | null;
   /** An edit cancelled a /compact the server may still save; read its cost when the turn ends. */
   syncCostAfterTurn?: "due" | "reading";
+  /** Tools the user allowed for this chat; each turn sends them, the backend filters them. */
+  chatAllowedTools: Set<string>;
 }
 
 function blankSession(key: string): SessionView {
@@ -243,6 +264,8 @@ function blankSession(key: string): SessionView {
     messages: [],
     error: null,
     errorCode: null,
+    capacityFailures: 0,
+    reconnect: null,
     pendingApproval: null,
     compacting: null,
   };
@@ -257,6 +280,7 @@ function blankRuntime(): SessionRuntime {
     turnStart: 0,
     unsavedEdit: null,
     source: "local",
+    chatAllowedTools: new Set(),
   };
 }
 
@@ -521,6 +545,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [patchMessages],
   );
 
+  /** Flag or clear a call the auto-review stopped, so its turn's header counts only calls that did not run. */
+  const markAutoReviewDenied = React.useCallback(
+    (key: string, id: string, denied: boolean) => {
+      patchMessages(key, (prev) => withAutoReviewDenied(prev, id, denied));
+    },
+    [patchMessages],
+  );
+
   const eventContext = React.useCallback((key: string): SessionEventContext => {
     return {
       isActive: activeKeyRef.current === key,
@@ -548,6 +580,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       let steerAnchor = sessionsRef.current.get(key)?.messages[turnStart - 1];
       // The reply `done` landed on; stats that arrive after it belong there.
       let replyAt: number | null = null;
+      // A turn that ran a tool may have changed files or spent model steps, so
+      // a capacity error after it gets only the manual retry (SKY-705).
+      let ranTools = false;
       let pendingSeq = 0;
       // Rows for calls the model wrote but never ran (a failed parse, a
       // denied step) must not outlive the turn as spinning pills.
@@ -663,9 +698,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             fast_mode: sentFastMode(fastRef.current, sentModel) || undefined,
             steer_key: steerKey,
             compaction_summary: run.compactionSummary,
+            chat_allowed_tools: [...rt.chatAllowedTools],
           },
           {
             signal: controller.signal,
+            onReconnect: (progress) => {
+              if (settled) return;
+              patchSession(key, { reconnect: progress });
+            },
             onCompactionStart: ({ reason, summarizedTurns }) => {
               if (ended()) return;
               patchSession(key, {
@@ -766,6 +806,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onToolStart: (ev) => {
               if (ended()) return;
+              ranTools = true;
               // A tool call ends the current stretch of thinking; reasoning
               // after it opens a new "Thought for" row below the tool.
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
@@ -804,13 +845,18 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onPendingApproval: (ev) => {
               if (ended()) return;
+              if (ev.auto_review) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: ev,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.2"),
               });
             },
-            onApprovalResolved: () => {
+            onApprovalResolved: (ev) => {
               if (ended()) return;
+              if (ev.approved && ev.scope === "conversation") rt.chatAllowedTools.add(ev.tool);
+              // "Approve anyway" runs the call, so it no longer counts as denied.
+              if (ev.approved) markAutoReviewDenied(key, ev.id, false);
+              else if (ev.auto_review_denied) markAutoReviewDenied(key, ev.id, true);
               patchSession(key, {
                 pendingApproval: null,
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.3"),
@@ -850,6 +896,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               patchSession(key, {
                 status: "done",
                 statusLabel: "",
+                capacityFailures: 0,
               });
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
               patchMessages(key, (prev) => {
@@ -915,8 +962,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                     ? msg("agent.error.context_too_long")
                     : code === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                       ? msg("agent.error.insufficient_funds")
-                      : message),
+                      : code === CAPACITY_ERROR_CODE
+                        ? msg("agent.error.capacity")
+                        : message),
                 errorCode: code ?? null,
+                capacityFailures:
+                  code === CAPACITY_ERROR_CODE && !ranTools
+                    ? (sessionsRef.current.get(key)?.capacityFailures ?? 0) + 1
+                    : 0,
+                reconnect: null,
                 // The stream that would act on the decision is gone.
                 pendingApproval: null,
                 compacting: null,
@@ -961,6 +1015,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       eventContext,
       finishToolCall,
       getRuntime,
+      markAutoReviewDenied,
       patchMessages,
       patchSession,
       patchThinking,
@@ -1517,13 +1572,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const confirmApproval = React.useCallback(
-    async (approved: boolean) => {
+    async (approved: boolean, choice?: ApprovalChoice) => {
       const key = activeKeyRef.current;
       const pa = sessionsRef.current.get(key)?.pendingApproval;
       if (!pa) return;
       patchSession(key, { pendingApproval: null });
       const source = runtimesRef.current.get(key)?.source ?? "local";
-      const resolved = await confirmGeneralistApproval(pa.id, approved, source);
+      const resolved = await confirmGeneralistApproval(pa.id, approved, source, choice);
       if (!resolved) {
         // The confirm never reached the stream's process (network blip or a
         // different replica) — silently dropping it leaves the tool hanging
@@ -1557,6 +1612,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     messages: active.messages,
     error: active.error,
     errorCode: active.errorCode,
+    capacityFailures: active.capacityFailures,
+    reconnect: active.reconnect,
     pendingApproval: active.pendingApproval,
     conversationId: active.conversationId,
     model,

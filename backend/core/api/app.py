@@ -17,6 +17,7 @@ extraction rules.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
@@ -92,7 +93,7 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
-from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_repo import drain_judge_scores, register_repo_tools
 from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
@@ -101,6 +102,7 @@ from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
 from .routers.agent_attachments import create_agent_attachments_router
 from .routers.agent_history import create_agent_history_router
+from .routers.agent_ide_completion import create_agent_ide_completion_router
 from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
 from .routers.api_tokens import create_api_tokens_router
@@ -881,6 +883,8 @@ def create_app(
         finally:
             if can_register_signal and original_handler is not None:
                 signal.signal(signal.SIGTERM, original_handler)
+            # A background judge score needs the app's database to store its outcome, so it ends first.
+            await asyncio.to_thread(drain_judge_scores)
             if worker:
                 worker.stop()
                 logger.info("Background worker stopped")
@@ -1346,6 +1350,7 @@ def create_app(
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_agent_history_router(job_store=job_store), tags=["Optimizations"])
+    app.include_router(create_agent_ide_completion_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_api_tokens_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_desktop_link_router(job_store=job_store), tags=["Desktop link"])
     app.include_router(create_mcp_oauth_router(job_store=job_store), tags=["MCP connection"])

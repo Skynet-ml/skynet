@@ -17,6 +17,7 @@ import urllib.parse
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -24,19 +25,26 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
+from core.api import repo_judge
 from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.model_gateway import ModelGateway
+from core.billing.model_mailbox import ModelMailbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
-from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
+from core.billing.tests.test_model_gateway_transport import (
+    _OneCallSession,
+    gateway,  # noqa: F401 - pytest fixture
+)
 from core.billing.usage_tags import box_tag, usage_scope
 from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.sandbox.errors import SandboxTransientError, sandbox_api_error
 from core.storage.models import Base
 from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
@@ -1348,6 +1356,74 @@ def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
     assert runtime.closed == len(runtime.specs)
 
 
+def _api_error(status: int) -> SandboxApiError:
+    """Build the error the Vercel SDK raises for an HTTP error answer.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The SDK error.
+    """
+    return SandboxApiError(httpx.Response(status), f"HTTP {status}: provider text")
+
+
+@pytest.mark.parametrize(
+    "error", [_api_error(429), _api_error(503), SandboxTransientError("busy")], ids=["429", "503", "transient"]
+)
+def test_a_temporary_provider_error_on_a_stage_open_stays_raw(tmp_path: Path, error: Exception) -> None:
+    """In judge use, a stage box open that the provider refuses for now raises the raw error, and no box stays open.
+
+    Args:
+        tmp_path: Scratch folder.
+        error: The temporary provider error.
+    """
+    runtime = RecordingRuntime(fail_on="shout", error=error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(type(error)) as raised:
+            scorer.dispatch({"candidate": "", "case": None})
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_lasting_provider_error_on_a_stage_open_gets_no_score(tmp_path: Path) -> None:
+    """A stage box open that the provider refuses for good still fails the version with the fixed message.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = RecordingRuntime(fail_on="shout", error=_api_error(400))
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(RepoScoreError, match="stage boxes could not open"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+
+def test_a_temporary_stage_open_error_reaches_the_judge_as_temporary(tmp_path: Path) -> None:
+    """The judge's real score path gets the raw provider error, so the judge stores a temporary failure.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = _api_error(429)
+    runtime = RecordingRuntime(fail_on="shout", error=error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert repo_judge._temporary(raised.value)
+    assert scorer.raw_provider_errors is True
+
+
 def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
     """A stage box the budget refuses stops the run as budget reached, with no box left open."""
     runtime = RecordingRuntime(fail_on="shout", error=BudgetReached("spent"))
@@ -1554,6 +1630,206 @@ def test_a_layout_failure_gets_no_score_and_closes_every_box(tmp_path: Path) -> 
             scorer.score("")
     finally:
         scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_temporary_provider_error_in_the_layout_stays_raw_and_closes_every_box(tmp_path: Path) -> None:
+    """In judge use, a stage box write that the provider refuses for now raises the raw error, and every box closes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = _api_error(503)
+
+    class _BusyRuntime(_LayoutFailingRuntime):
+        """Open stage boxes whose file writes get a 503 from the provider."""
+
+        def open(self, spec: SandboxSpec) -> SandboxSession:
+            """Open one local box whose writes raise the 503.
+
+            Args:
+                spec: The stage box's spec.
+
+            Returns:
+                The local session.
+            """
+            session = super().open(spec)
+
+            def refuse(files: Mapping[str, str]) -> None:
+                """Fail every write with the provider's 503.
+
+                Args:
+                    files: The files the layout tried to write.
+
+                Raises:
+                    SandboxApiError: Always.
+                """
+                raise error
+
+            session.write_files = refuse  # type: ignore[method-assign]
+            return session
+
+    runtime = _BusyRuntime()
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert runtime.specs
+    assert runtime.closed == len(runtime.specs)
+
+
+class _WriteFailingRuntime(RecordingRuntime):
+    """Open stage boxes whose file writes fail as the Vercel SDK fails them."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Set the error every write raises.
+
+        Args:
+            error: The write error.
+        """
+        super().__init__()
+        self._write_error = error
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box whose writes raise the SDK write error.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session.
+        """
+        session = super().open(spec)
+
+        def refuse(files: Mapping[str, str]) -> None:
+            """Fail every write.
+
+            Args:
+                files: The files the layout tried to write.
+
+            Raises:
+                SandboxFilesystemWriteError: Always.
+            """
+            raise self._write_error
+
+        session.write_files = refuse  # type: ignore[method-assign]
+        return session
+
+
+def _write_error(status: int) -> tuple[SandboxApiError, SandboxFilesystemWriteError]:
+    """Build the SDK's file write error over an HTTP error answer, chained as the SDK chains it.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The API error and the write error that wraps it.
+    """
+    api = _api_error(status)
+    try:
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=api) from api
+    except SandboxFilesystemWriteError as error:
+        return api, error
+
+
+@pytest.mark.parametrize(("status", "temporary"), [(429, True), (503, True), (400, False)])
+def test_a_stage_write_error_keeps_its_api_status_through_the_judge_score(
+    tmp_path: Path, status: int, temporary: bool
+) -> None:
+    """The judge's real score path keeps the API error under an SDK write error, so a 429 or 5xx is temporary.
+
+    Args:
+        tmp_path: Scratch folder.
+        status: The HTTP status of the write.
+        temporary: Whether the judge must treat the error as temporary.
+    """
+    api, error = _write_error(status)
+    runtime = _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(BaseException) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+    if temporary:
+        assert raised.value is error
+        assert sandbox_api_error(raised.value) is api
+    else:
+        assert isinstance(raised.value, ServiceError)
+        assert "could not lay out the version" in str(raised.value)
+    assert repo_judge._temporary(raised.value) is temporary
+
+
+_STAGE_FAILURES = {
+    "open": "The stage boxes could not open, so the version has no score.",
+    "layout": "A stage box could not lay out the version, so it has no score.",
+}
+
+
+def _temporary_stage_scorer(tmp_path: Path, where: str, status: int) -> tuple[RepoScorer, RecordingRuntime]:
+    """Open a scorer whose stage box open or layout gets a temporary sandbox API error.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: ``open`` or ``layout``, the step that fails.
+        status: The HTTP status, 429 or 5xx.
+
+    Returns:
+        The scorer, with the default flag, and its stage runtime.
+    """
+    error = _api_error(status)
+    runtime = RecordingRuntime(fail_on="shout", error=error) if where == "open" else _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    return scorer, runtime
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_in_a_run_answers_the_guest_and_the_engine_command_ends(
+    tmp_path: Path, where: str, status: int
+) -> None:
+    """In a run, a temporary stage box error gives the guest the 422 of the base, and the mailbox does not raise.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    body = base64.b64encode(json.dumps({"candidate": "", "case": None}).encode()).decode()
+    session = _OneCallSession({"id": "e" * 32, "path": "/v1/_evaluator", "body": body, "headers": {}})
+    try:
+        ModelMailbox(lambda _t, _p, b, _h: scorer.dispatch(b), concurrency=1).run(session, "engine")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    answer = session.answer()
+    assert answer["status"] == 422
+    assert base64.b64decode(answer["body"]).decode() == _STAGE_FAILURES[where]
+    assert runtime.closed == len(runtime.specs)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_with_the_default_flag_gets_no_score(tmp_path: Path, where: str, status: int) -> None:
+    """With the default flag, ``dispatch`` answers a temporary stage box error with the 422 of the base.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    try:
+        reply = scorer.dispatch({"candidate": "", "case": None})
+    finally:
+        scorer.close()
+    assert scorer.raw_provider_errors is False
+    assert (reply.status, reply.body.decode()) == (422, _STAGE_FAILURES[where])
     assert runtime.closed == len(runtime.specs)
 
 

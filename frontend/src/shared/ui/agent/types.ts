@@ -18,6 +18,8 @@ export interface AgentToolCall {
    * keeps counting. Set only for display, never stored.
    */
   working?: boolean;
+  /** The auto-review stopped this call before it ran (SKY-706); the turn's header counts it. */
+  autoReviewDenied?: boolean;
 }
 
 export interface AgentMessage {

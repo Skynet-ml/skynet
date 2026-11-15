@@ -116,6 +116,7 @@ export function UserBubble({
         ))}
         {text && (
           <div
+            data-user-message-bubble
             className="max-w-full rounded-[22px] rounded-ee-[4px] bg-primary-fill text-primary-foreground px-4 py-2.5 text-sm leading-[1.45]"
             dir="auto"
           >
@@ -173,6 +174,7 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
     <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
         <div
+          data-user-message-bubble
           className="max-w-full rounded-2xl rounded-ee-[4px] border border-dashed border-border bg-muted/40 px-4 py-2.5 text-sm leading-[1.45] text-foreground"
           dir="auto"
         >

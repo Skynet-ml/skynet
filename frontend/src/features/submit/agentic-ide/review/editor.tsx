@@ -10,6 +10,7 @@ import { Decoration, EditorView, WidgetType, keymap, type DecorationSet, type Vi
 
 import { CODE_HIGHLIGHT_SPECS } from "@/shared/ui/code-highlight-style";
 
+import { agentComplete } from "./ghost";
 import { pycharmCompletion } from "./pycharm-completion";
 import { diffLines } from "./lib";
 
@@ -285,11 +286,11 @@ export function CodeEditor({
       theme,
       highlight,
       ...lang,
-      ...(readOnly ? [] : editing),
+      ...(readOnly ? [] : [agentComplete(path), ...editing]),
       ...(review ? [lastTurnDiff(base)] : []),
       ...(wrap ? [EditorView.lineWrapping] : []),
     ],
-    [lang, review, base, readOnly, wrap],
+    [lang, review, base, readOnly, wrap, path],
   );
   return (
     <div className="ide-editor h-full min-w-0" dir="ltr">

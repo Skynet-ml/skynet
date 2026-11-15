@@ -27,11 +27,10 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 
-from ...billing.byok_vault import ProviderKeyVault
-from ...billing.protected_credentials import _openrouter_endpoint
 from ...config import settings
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ..openrouter_byok import own_openrouter_key
 from ..platform_budget import budget_open, record_spend
 from ..rate_limit import RateLimiter, shared_redis_client
 
@@ -49,7 +48,6 @@ _HTTP_TIMEOUT_S = 120.0
 _FALLBACK_DOLLARS_PER_AUDIO_HOUR = 0.04
 _FALLBACK_MIN_BILLED_SECONDS = 10.0
 _BUDGET_SERVICE = "transcription"
-_BYOK_PROVIDER = "openrouter"
 
 
 def _clip_cost(usage: dict[str, Any]) -> float:
@@ -104,37 +102,6 @@ async def _openrouter_transcribe(
         raise RuntimeError(f"openrouter transcribe: {res.status_code}")
     body = res.json()
     return str(body.get("text") or ""), _clip_cost(body.get("usage") or {})
-
-
-def _own_openrouter_key(engine: Any, username: str) -> str | None:
-    """Return the caller's verified OpenRouter BYOK secret, or None.
-
-    Args:
-        engine: SQLAlchemy engine backing the vault, or ``None``.
-        username: The caller.
-
-    Returns:
-        The decrypted key when the caller has a verified OpenRouter connection that
-        the vault can decrypt and that targets openrouter.ai itself; otherwise
-        None, which routes to the platform key.
-    """
-    # Without a vault key no stored secret can be decrypted, so skip the read.
-    if engine is None or settings.byok_vault_key is None:
-        return None
-    vault = ProviderKeyVault(engine=engine)
-    try:
-        # One read: ``verified_only`` filters in the same query that picks the key.
-        connection = vault.resolve_connection(username, _BYOK_PROVIDER, verified_only=True)
-    except DomainError as err:
-        logger.warning("openrouter byok key unusable for %s: %s", username, err.code)
-        return None
-    if connection is None:
-        return None
-    # A connection with a custom base holds a credential for another host;
-    # sending it to openrouter.ai would leak it and fail every clip.
-    if not _openrouter_endpoint(connection.api_base):
-        return None
-    return connection.secret
 
 
 # One client for the process keeps the TCP and TLS connection to OpenRouter
@@ -205,7 +172,7 @@ def create_transcription_router(job_store: Any) -> APIRouter:
         data = await audio.read()
         if len(data) > _MAX_AUDIO_BYTES:
             raise DomainError("transcription.too_large", status=413, max_mb=_MAX_AUDIO_MB)
-        own_key = _own_openrouter_key(getattr(job_store, "engine", None), user.username)
+        own_key = own_openrouter_key(getattr(job_store, "engine", None), user.username)
         if own_key is None and not settings.transcription_api_key:
             raise DomainError("transcription.unconfigured", status=503)
         RateLimiter(shared_redis_client()).enforce(
