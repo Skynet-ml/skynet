@@ -20,6 +20,7 @@ No step runs user code or spends money before the preflight or the submit.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import math
@@ -120,6 +121,10 @@ logger = logging.getLogger(__name__)
 # The background judge scores that still run, so the app shutdown can wait for them.
 _IN_FLIGHT: set[Future[dict[str, Any]]] = set()
 _IN_FLIGHT_LOCK = Lock()
+# The running score of each call key, so a poll waits on it and starts no second
+# background thread. It is per process: a poll on another worker starts its own
+# thread, and the judge's stored claim keeps that from scoring twice.
+_RUNNING: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
 
 TokenSource = Literal["managed", "byok", "subscription"]
 StepCheck = Callable[[dict[str, Any], str], tuple[list[str], list[str], dict[str, Any]]]
@@ -1092,25 +1097,36 @@ def _log_late_error(outcome: Future[dict[str, Any]]) -> None:
     logger.error("repo_judge_score failed after its answer with %s\n%s", type(error).__name__, frames)
 
 
-def _track(outcome: Future[dict[str, Any]]) -> None:
-    """Keep a background judge score in the in-flight set until it ends.
+def _track(key: tuple[Any, ...]) -> tuple[Future[dict[str, Any]], bool]:
+    """Find the running score of this call key, or register a new one until it ends.
 
     Args:
-        outcome: The score's future.
+        key: The user and the arguments that identify the call.
+
+    Returns:
+        The score's future, and whether it is new, so the caller must start it.
     """
     with _IN_FLIGHT_LOCK:
+        running = _RUNNING.get(key)
+        if running is not None:
+            return running, False
+        outcome: Future[dict[str, Any]] = Future()
         _IN_FLIGHT.add(outcome)
+        _RUNNING[key] = outcome
 
     def release(done: Future[dict[str, Any]]) -> None:
-        """Remove the ended score from the in-flight set.
+        """Remove the ended score from the in-flight set and from the call keys.
 
         Args:
             done: The ended score's future.
         """
         with _IN_FLIGHT_LOCK:
             _IN_FLIGHT.discard(done)
+            if _RUNNING.get(key) is done:
+                del _RUNNING[key]
 
     outcome.add_done_callback(release)
+    return outcome, True
 
 
 def drain_judge_scores() -> int:
@@ -1695,14 +1711,25 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 }
 
         # The work keeps going after the answer and stores its outcome as the call's evidence, so a
-        # retry replays it or, while it runs, answers in_progress. No retry starts a second score.
-        outcome: Future[dict[str, Any]] = Future()
-        _track(outcome)
-        Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
+        # retry replays it. While it runs, a poll with the same arguments waits on it and starts no
+        # new work. The key holds a digest of the patch, never its text.
+        patch_digest = None if candidate_patch is None else hashlib.sha256(candidate_patch.encode()).hexdigest()
+        key = (
+            user.username,
+            draft_id,
+            json_fingerprint({"spec": spec}),
+            max_cost_cents,
+            candidate_commit,
+            patch_digest,
+        )
+        outcome, new = _track(key)
+        if new:
+            Thread(target=run, args=(outcome,), daemon=True, name="repo-judge-score").start()
         wait([outcome], timeout=_JUDGE_ANSWER_SECONDS)
         if outcome.done():
             return outcome.result()
-        outcome.add_done_callback(_log_late_error)
+        if new:
+            outcome.add_done_callback(_log_late_error)
         return {
             "status": "in_progress",
             "retry_after_seconds": _PENDING_RETRY_SECONDS,
