@@ -112,7 +112,8 @@ export function FileTile({
   const frame = cn(CARD, TILE, "flex flex-col bg-card p-2.5 text-start");
   return (
     <TileFrame name={name} onRemove={onRemove}>
-      {preview ? (
+      {/* A shared viewer may show a file with no text preview, such as its original. */}
+      {preview || onOpen ? (
         <button
           type="button"
           onClick={onOpen ?? (() => setOpen(true))}

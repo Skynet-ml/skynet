@@ -18,7 +18,7 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
-import { originalFormat } from "./file-originals";
+import { originalsToKeep } from "./file-originals";
 import {
   isUnsupportedImage,
   type MediaAttachment,
@@ -474,8 +474,7 @@ export function Composer({
         const latest = splitPastes(valueRef.current);
         const added = read.attached.map((file) => attachedFile(file.name, file.text));
         onChange(joinPastes({ ...latest, files: [...latest.files, ...added] }));
-        const skipped = new Set([...read.failed, ...read.tooLarge]);
-        const originals = files.filter((f) => originalFormat(f.name) && !skipped.has(f.name));
+        const originals = originalsToKeep(files, [...read.failed, ...read.tooLarge]);
         if (originals.length) onOriginalFiles?.(originals);
       }
     } finally {

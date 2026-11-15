@@ -11,6 +11,7 @@ import type { MediaAttachment } from "./media-attachments";
 // fonts come inline as data URLs, styles inline.
 const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
 const SHEET_ROWS = 1000;
+const SHEET_COLS = 100;
 const FRAME = "h-full w-full max-w-5xl rounded-sm border-0 bg-white";
 
 type Shown =
@@ -62,6 +63,13 @@ async function xlsxPage(data: ArrayBuffer): Promise<string> {
   const book = read(data, { type: "array", sheetRows: SHEET_ROWS });
   const sheets = book.SheetNames.map((name) => {
     const sheet = book.Sheets[name];
+    // sheetRows caps the rows only. A file can declare a range of thousands of
+    // empty columns, and the table would draw them all.
+    const range = sheet?.["!ref"] ? utils.decode_range(sheet["!ref"]) : null;
+    if (sheet && range && range.e.c - range.s.c >= SHEET_COLS) {
+      range.e.c = range.s.c + SHEET_COLS - 1;
+      sheet["!ref"] = utils.encode_range(range);
+    }
     // A sandboxed frame still follows a link in itself, so a cell's link goes.
     for (const [ref, cell] of Object.entries(sheet ?? {}))
       if (!ref.startsWith("!")) delete (cell as { l?: unknown }).l;
@@ -97,10 +105,10 @@ export function OriginalFile({
     let live = true;
     const format = originalFormat(name);
     const draw = async (): Promise<Shown> => {
-      const url = await resolve(original);
       // A browser that downloads PDFs instead of showing them gets the text page.
-      if (format === "pdf")
-        return navigator.pdfViewerEnabled === false ? { state: "failed" } : { state: "pdf", url };
+      if (format === "pdf" && navigator.pdfViewerEnabled === false) return { state: "failed" };
+      const url = await resolve(original);
+      if (format === "pdf") return { state: "pdf", url };
       const data = await (await fetch(url)).arrayBuffer();
       if (format === "docx") return { state: "page", html: await docxPage(data) };
       if (format === "xlsx") return { state: "page", html: await xlsxPage(data) };

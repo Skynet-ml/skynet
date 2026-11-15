@@ -319,6 +319,22 @@ void test("a sent file with a preview opens in the same viewer, after the media"
   await unmount();
 });
 
+void test("a sent file with no text preview still opens when it has an original", async () => {
+  const scan: Media = { id: "d-1", name: "scan.pdf", kind: "document", url: "" };
+  const { container, unmount } = await mount(
+    <MediaUrlContext.Provider value={async () => "blob:https://example.test/scan"}>
+      <SentAttachments media={[scan]} files={[{ name: "scan.pdf", text: "" }]} />
+    </MediaUrlContext.Provider>,
+  );
+  await click(container.querySelector('button[aria-label="Open scan.pdf"]'));
+  await settle();
+  assert.equal(
+    dialog()?.querySelector("iframe[data-original-file='pdf']")?.getAttribute("src"),
+    "blob:https://example.test/scan",
+  );
+  await unmount();
+});
+
 void test("the viewer zoom buttons step the image scale and stop at the fitted size", async () => {
   const { container, unmount } = await mount(<SentAttachments media={[image(1)]} files={[]} />);
   await click(container.querySelector('button[aria-label="Open photo-1.png"]'));

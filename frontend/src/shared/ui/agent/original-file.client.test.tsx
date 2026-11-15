@@ -98,14 +98,19 @@ void test("an XLSX draws in a sandboxed frame that runs no script and loads noth
 void test("a PDF shows the file's text page when the browser has no PDF viewer", async () => {
   Object.defineProperty(navigator, "pdfViewerEnabled", { value: false, configurable: true });
   try {
+    let resolved = 0;
     const view = await mount({
       name: "brief.pdf",
       original: original("5", "brief.pdf"),
-      resolve: async () => "blob:https://example.test/pdf",
+      resolve: async () => {
+        resolved += 1;
+        return "blob:https://example.test/pdf";
+      },
       fallback,
     });
     await flush();
     assert.ok(view.container.querySelector("[data-fallback]"));
+    assert.equal(resolved, 0, "the file is not fetched for nothing");
     assert.ok(!view.container.querySelector("iframe"));
     await view.unmount();
   } finally {
@@ -133,6 +138,28 @@ void test("an XLSX cell link does not draw, so the frame cannot leave the file",
     view.container.querySelector("iframe[data-original-file='page']")?.getAttribute("srcdoc") ?? "";
   assert.ok(!html.includes("example.test/away"), "the outside link goes");
   assert.match(html, />out</);
+  await view.unmount();
+});
+
+void test("a wide XLSX sheet draws at most 100 columns", async () => {
+  const sheet = utils.aoa_to_sheet([Array.from({ length: 300 }, (_, i) => `c${i}`)]);
+  const book = utils.book_new();
+  utils.book_append_sheet(book, sheet, "Wide");
+  const bytes = write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(bytes)) as typeof fetch;
+  const view = await mount({
+    name: "wide.xlsx",
+    original: original("7", "wide.xlsx"),
+    resolve: async () => "blob:https://example.test/xlsx",
+    fallback,
+  });
+  await flush();
+  globalThis.fetch = fetchBefore;
+  const html =
+    view.container.querySelector("iframe[data-original-file='page']")?.getAttribute("srcdoc") ?? "";
+  assert.equal(html.match(/<td/g)?.length, 100);
+  assert.ok(!html.includes(">c100<"));
   await view.unmount();
 });
 

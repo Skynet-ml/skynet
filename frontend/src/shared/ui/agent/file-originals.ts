@@ -22,6 +22,15 @@ export function originalFormat(name: string): OriginalFormat | null {
   return FORMATS.includes(ext) ? (ext as OriginalFormat) : null;
 }
 
+/** The read files whose originals the chat keeps: a skipped file sends no text, so no original. */
+export function originalsToKeep<T extends { name: string }>(
+  files: readonly T[],
+  skipped: Iterable<string>,
+): T[] {
+  const names = new Set(skipped);
+  return files.filter((f) => originalFormat(f.name) && !names.has(f.name));
+}
+
 function nameKey(name: string): string {
   return Array.from(name.normalize("NFC").split(/[\\/]/).pop()!)
     .filter((c) => c > "\u001f" && c !== "\u007f" && !CHANGED.has(c))

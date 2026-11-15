@@ -3,7 +3,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fitOriginals, keptOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
+import {
+  fitOriginals,
+  keptOriginals,
+  originalFormat,
+  originalsToKeep,
+  pairOriginals,
+} from "./file-originals.ts";
 
 test("only pdf, docx and xlsx keep an original", () => {
   assert.equal(originalFormat("Brief.PDF"), "pdf");
@@ -79,4 +85,12 @@ test("a name's originals fit in a message together or not at all", () => {
   assert.deepEqual(fitOriginals([a1, c, a2], 1), [c]);
   assert.deepEqual(fitOriginals([a1, a2, c], 0), []);
   assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
+});
+
+test("a read file keeps its original only in a kept format and when its text went in", () => {
+  const files = [{ name: "a.pdf" }, { name: "b.csv" }, { name: "big.xlsx" }, { name: "bad.docx" }, { name: "c.docx" }];
+  assert.deepEqual(
+    originalsToKeep(files, ["big.xlsx", "bad.docx"]).map((f) => f.name),
+    ["a.pdf", "c.docx"],
+  );
 });
