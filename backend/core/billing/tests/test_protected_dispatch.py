@@ -691,6 +691,45 @@ def test_incomplete_successful_responses_answer_stays_interrupted(database: Engi
         assert session.scalars(select(ExecutionOperationModel.state)).one() == "pending"
 
 
+def test_responses_data_policy_refusal_names_the_setting_and_releases_the_hold(database: Engine) -> None:
+    """Turn OpenRouter's data-policy 404 on a Responses call into guidance, with no charge."""
+    runtime = _runtime(database)
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Serve the price catalog and refuse inference for the data policy."""
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        sent.append(json.loads(request.content))
+        return httpx.Response(
+            404,
+            json={"error": {"message": "No endpoints found matching your data policy. Configure: openrouter.ai"}},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="private",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("managed_model"),
+            client=client,
+            data_policy="zdr",
+        )
+        result = dispatcher.dispatch(
+            "/responses", {"model": "fixture/text", "input": [{"role": "user", "content": "hi"}]}
+        )
+    assert sent[0]["provider"]["zdr"] is True
+    assert result.status == 404
+    error = json.loads(result.body)["error"]
+    assert error["type"] == "data_policy_unavailable"
+    assert "openrouter.ai" not in error["message"]
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+
+
 def _refusing_dispatcher(database: Engine, kind: str, headers: dict[str, str], calls: list) -> tuple:
     """Build a dispatcher whose fake OpenRouter answers every inference with 402."""
     runtime = _runtime(database)
