@@ -1737,7 +1737,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   // An edit drops the turns after it, so their bookmarks go too.
                   setBookmarks((prev) => ({
                     key: prev.key,
-                    at: new Set([...prev.at].filter((at) => at < index)),
+                    at: new Set([...prev.at].filter((at) => at <= index)),
                   }));
                   agent.editAndResend(index, content);
                 }}

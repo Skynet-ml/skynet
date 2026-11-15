@@ -48,3 +48,22 @@ test("a turn takes the model of its last reply", () => {
   const changes = modelChanges([user("a"), reply("m1"), user("b"), reply("m1"), reply("m2")]);
   assert.deepEqual([...changes], [[2, { from: "m1", to: "m2" }]]);
 });
+
+test("a change on a hidden user message's turn shows on the next shown user message", () => {
+  const kickoff: AgentMessage = { role: "user", content: "next screen", hidden: true };
+  const changes = modelChanges([user("a"), reply("m1"), kickoff, reply("m2"), user("b")]);
+  assert.deepEqual([...changes], [[4, { from: "m1", to: "m2" }]]);
+});
+
+test("a hidden turn that changes the model and back shows no notice", () => {
+  const kickoff: AgentMessage = { role: "user", content: "next screen", hidden: true };
+  const changes = modelChanges([
+    user("a"),
+    reply("m1"),
+    kickoff,
+    reply("m2"),
+    user("b"),
+    reply("m1"),
+  ]);
+  assert.equal(changes.size, 0);
+});
