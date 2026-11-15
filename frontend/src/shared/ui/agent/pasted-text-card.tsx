@@ -71,34 +71,61 @@ export function PastedTextCard({
           </button>
         )}
       </div>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-[min(48rem,92vw)]">
-          <DialogTitle className="flex items-baseline gap-2">
-            <span className="min-w-0 truncate" dir="auto">
-              {title}
-            </span>
-            <span className="text-xs font-normal text-muted-foreground">{lines}</span>
-          </DialogTitle>
-          <div className="min-h-0 flex-1 overflow-y-auto text-sm" dir="auto">
-            <React.Suspense fallback={<pre className="whitespace-pre-wrap">{text}</pre>}>
-              <MessageMarkdown content={text} />
-            </React.Suspense>
-          </div>
-          {onRestore && (
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setOpen(false);
-                  onRestore();
-                }}
-              >
-                {msg("shared.agent.pasted_text_restore")}
-              </Button>
-            </DialogFooter>
-          )}
-        </DialogContent>
-      </Dialog>
+      <TextPreviewDialog
+        open={open}
+        onOpenChange={setOpen}
+        title={title}
+        text={text}
+        onRestore={onRestore}
+      />
     </>
+  );
+}
+
+/** The full text of a paste or an attached file, with its name and line count. */
+export function TextPreviewDialog({
+  open,
+  onOpenChange,
+  title,
+  text,
+  onRestore,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  text: string;
+  /** Composer only: put the text back into the text field as plain draft. */
+  onRestore?: () => void;
+}) {
+  const lines = msg("shared.code_editor.lines_count", { count: countLines(text) });
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-[min(48rem,92vw)]">
+        <DialogTitle className="flex items-baseline gap-2">
+          <span className="min-w-0 truncate" dir="auto">
+            {title}
+          </span>
+          <span className="text-xs font-normal text-muted-foreground">{lines}</span>
+        </DialogTitle>
+        <div className="min-h-0 flex-1 overflow-y-auto text-sm" dir="auto">
+          <React.Suspense fallback={<pre className="whitespace-pre-wrap">{text}</pre>}>
+            <MessageMarkdown content={text} />
+          </React.Suspense>
+        </div>
+        {onRestore && (
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                onOpenChange(false);
+                onRestore();
+              }}
+            >
+              {msg("shared.agent.pasted_text_restore")}
+            </Button>
+          </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

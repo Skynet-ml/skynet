@@ -33,11 +33,16 @@ after(() => dom.window.close());
 
 let uploads = 0;
 const deleted: string[] = [];
+// A test sets this to hold the next upload until it settles the promise.
+let nextUpload: Promise<Response> | null = null;
 globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   if (init?.method === "DELETE") {
     deleted.push(String(_url).split("/").pop() ?? "");
     return new Response(null, { status: 204 });
   }
+  const held = nextUpload;
+  nextUpload = null;
+  if (held) return held;
   uploads += 1;
   return Response.json({ id: `s-${uploads}`, name: "f.png", kind: "image" });
 }) as typeof fetch;
@@ -168,4 +173,31 @@ void test("an unmount frees the local URLs of files still in the draft", async (
   await React.act(async () => root.unmount());
   assert.deepEqual(revoked, drafted);
   URL.revokeObjectURL = revoke;
+});
+
+void test("Send waits with a reason while an upload runs, and a failed upload stays marked", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+  assert.equal(latest!.blocked, null);
+
+  let settle: (res: Response) => void = () => {};
+  nextUpload = new Promise<Response>((resolve) => (settle = resolve));
+  await React.act(async () => latest!.addFiles([image(1)]));
+  assert.equal(latest!.blocked, "Wait for the files to finish uploading.");
+  assert.equal(latest!.ready(), null);
+
+  await React.act(async () => settle(new Response(null, { status: 500 })));
+  await flush();
+  assert.equal(latest!.tiles.length, 1, "the failed file keeps its tile");
+  assert.equal(latest!.tiles[0]!.status, "failed");
+  assert.equal(latest!.blocked, "Remove the files that failed to upload, then send.");
+  await React.act(async () => root.unmount());
 });

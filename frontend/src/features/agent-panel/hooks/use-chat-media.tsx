@@ -28,6 +28,8 @@ interface DraftMedia {
   url: string;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
+  /** The upload failed; the tile stays, marked, until the user removes it. */
+  failed: boolean;
 }
 
 export interface ChatMediaDraft {
@@ -39,6 +41,8 @@ export interface ChatMediaDraft {
   remove: (localId: string) => void;
   /** The files to send, by stored id; null while an upload still runs. */
   ready: () => MediaAttachment[] | null;
+  /** Why Send must wait: an upload runs or failed. Null when the files can go. */
+  blocked: string | null;
   /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
   clear: () => void;
 }
@@ -85,9 +89,12 @@ export function useChatMedia(): ChatMediaDraft {
           }
         },
         (err: unknown) => {
-          update((prev) => prev.filter((m) => m.localId !== item.localId));
-          removedRef.current.delete(item.localId);
-          freeMediaUrl(item.url);
+          // The tile stays with a failed mark, so the user sees which file did not go.
+          const removed = removedRef.current.get(item.localId);
+          if (removed) removed.failed = true;
+          update((prev) =>
+            prev.map((m) => (m.localId === item.localId ? { ...m, failed: true } : m)),
+          );
           toast.error(uploadError(item.name, err));
         },
       );
@@ -115,6 +122,7 @@ export function useChatMedia(): ChatMediaDraft {
           kind,
           url: localMediaUrl(file),
           serverId: null,
+          failed: false,
         };
         added.push(item);
         upload(item, file);
@@ -199,9 +207,21 @@ export function useChatMedia(): ChatMediaDraft {
   );
 
   const tiles = React.useMemo(
-    () => items.map((m) => ({ id: m.localId, name: m.name, kind: m.kind, url: m.url })),
+    () =>
+      items.map((m) => ({
+        id: m.localId,
+        name: m.name,
+        kind: m.kind,
+        url: m.url,
+        ...(m.failed ? { status: "failed" as const } : {}),
+      })),
     [items],
   );
+  const blocked = items.some((m) => m.failed)
+    ? msg("agent.media.remove_failed")
+    : items.some((m) => !m.serverId)
+      ? msg("agent.media.uploading")
+      : null;
 
-  return { tiles, addFiles, remove, ready, clear };
+  return { tiles, addFiles, remove, ready, blocked, clear };
 }

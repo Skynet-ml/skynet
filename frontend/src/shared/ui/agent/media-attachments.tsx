@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  ArrowClockwise,
   ArrowsIn,
   ArrowsOut,
   CaretLeft,
@@ -13,12 +14,13 @@ import {
   Play,
   SpeakerHigh,
   SpeakerSlash,
+  WarningCircle,
   X,
 } from "@/shared/ui/icons";
 
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/primitives/dialog";
+import { Dialog as DialogPrimitive } from "radix-ui";
 
 export type MediaKind = "image" | "video" | "audio";
 
@@ -29,6 +31,8 @@ export interface MediaAttachment {
   kind: MediaKind;
   /** Where the file plays from: an object URL in the draft, a stored URL once sent. */
   url: string;
+  /** The upload failed, or the stored file could not be fetched. */
+  status?: "failed";
 }
 
 /**
@@ -47,7 +51,16 @@ export function mediaKind(file: { type: string }): MediaKind | null {
   return top === "image" || top === "video" || top === "audio" ? top : null;
 }
 
-type IconSlot = "remove" | "play" | "pause" | "previous" | "next" | "download" | "close";
+type IconSlot =
+  | "remove"
+  | "play"
+  | "pause"
+  | "previous"
+  | "next"
+  | "download"
+  | "close"
+  | "failed"
+  | "retry";
 type SlotIcon = React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
 
 /** The icons the tiles and the viewer draw; a host can swap in its own set. */
@@ -59,6 +72,8 @@ export const MediaIconsContext = React.createContext<Record<IconSlot, SlotIcon>>
   next: CaretRight,
   download: DownloadSimple,
   close: X,
+  failed: WarningCircle,
+  retry: ArrowClockwise,
 });
 
 /**
@@ -69,9 +84,13 @@ export const MediaUrlContext = React.createContext<
   ((media: MediaAttachment) => Promise<string>) | null
 >(null);
 
-/** The media with URLs from the nearest MediaUrlContext; files whose URL is not ready yet drop out. */
+/**
+ * The media with URLs from the nearest MediaUrlContext. Files whose URL is not
+ * ready yet drop out; files whose URL fails come back marked as failed.
+ */
 function useResolvedMedia(media: readonly MediaAttachment[]): readonly MediaAttachment[] {
   const resolve = React.useContext(MediaUrlContext);
+  // An empty string marks a file whose URL could not be resolved.
   const [urls, setUrls] = React.useState<Readonly<Record<string, string>>>({});
   React.useEffect(() => {
     if (!resolve) return;
@@ -79,7 +98,7 @@ function useResolvedMedia(media: readonly MediaAttachment[]): readonly MediaAtta
     for (const m of media) {
       resolve(m).then(
         (url) => live && setUrls((prev) => (prev[m.id] === url ? prev : { ...prev, [m.id]: url })),
-        () => {},
+        () => live && setUrls((prev) => (m.id in prev ? prev : { ...prev, [m.id]: "" })),
       );
     }
     return () => {
@@ -90,12 +109,11 @@ function useResolvedMedia(media: readonly MediaAttachment[]): readonly MediaAtta
     if (!resolve) return media;
     return media.flatMap((m) => {
       const url = urls[m.id];
-      return url ? [{ ...m, url }] : [];
+      if (url === undefined) return [];
+      return [url ? { ...m, url } : { ...m, status: "failed" as const }];
     });
   }, [resolve, media, urls]);
 }
-
-type Size = "draft" | "sent";
 
 /** Seconds as m:ss; 0:00 until the length is known. */
 function clock(seconds: number): string {
@@ -113,14 +131,28 @@ function fractionAt(e: React.PointerEvent<Element>): number {
   );
 }
 
-const TILE = cn(
-  "relative cursor-pointer overflow-hidden rounded-lg border border-border bg-muted/60",
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-inset",
-  // The hover tint sits above the picture, as Codex's bg-text/5 overlay does.
-  "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:transition-colors hover:after:bg-foreground/5",
+/**
+ * The frame every attachment card shares. Skynet is flat, so a 1px border and
+ * the surface tone separate the card, not a shadow; the border firms up on hover.
+ */
+export const CARD = cn(
+  "relative shrink-0 overflow-hidden rounded-xl border border-border bg-muted",
+  "transition-colors duration-150 hover:border-input",
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
 );
 
-/** The hover X in the tile's corner; touch screens always show it. */
+/** The 120px square of a composer tile, as Claude draws it. */
+export const TILE = "size-[7.5rem]";
+
+/** The small label in a tile's bottom start corner: a length or a file type. */
+export const BADGE =
+  "pointer-events-none absolute bottom-2 start-2 z-[1] max-w-[calc(100%-1rem)] truncate rounded-md bg-background/90 px-1.5 py-1 text-[11px] font-medium leading-none tabular-nums text-foreground";
+
+/** The round play mark in the middle of a video poster. */
+const PLAY_MARK =
+  "flex size-9 items-center justify-center rounded-full bg-background/90 text-foreground";
+
+/** The X in a tile's top end corner. It shows on hover or focus, and always on touch screens. */
 function RemoveButton({ name, onRemove }: { name: string; onRemove: () => void }) {
   const Remove = React.useContext(MediaIconsContext).remove;
   return (
@@ -128,324 +160,501 @@ function RemoveButton({ name, onRemove }: { name: string; onRemove: () => void }
       type="button"
       onClick={onRemove}
       aria-label={msg("shared.agent.media_remove", { name })}
+      title={msg("shared.agent.media_remove", { name })}
       className={cn(
-        "absolute -top-0.5 -end-0.5 z-10 flex size-4 cursor-pointer items-center justify-center rounded-full bg-foreground text-background shadow-sm",
-        "opacity-0 transition-opacity group-hover/media:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
+        "absolute -end-2 -top-2 z-[2] flex size-5 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-muted-foreground transition-[opacity,color] duration-150 hover:text-foreground",
+        // A ring in the surface tone keeps a gap round the X, so it reads on any image.
+        "ring-2 ring-background",
+        // The hit area reaches a little past the 20px circle.
+        "before:absolute before:-inset-1 before:content-['']",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+        "opacity-0 group-hover/tile:opacity-100 group-focus-within/tile:opacity-100 any-pointer-coarse:opacity-100 [@media(hover:none)]:opacity-100",
       )}
     >
-      <Remove className="size-2.5" aria-hidden />
+      <Remove className="size-3" aria-hidden />
     </button>
   );
 }
 
-/** A video's length and width-to-height ratio, read from its metadata. */
-function useVideoShape(url: string): { duration: number; ratio: number } {
-  const [shape, setShape] = React.useState({ duration: NaN, ratio: 16 / 9 });
-  React.useEffect(() => {
-    const el = document.createElement("video");
-    el.preload = "metadata";
-    el.onloadedmetadata = () =>
-      setShape({
-        duration: el.duration,
-        ratio: el.videoHeight ? el.videoWidth / el.videoHeight : 16 / 9,
-      });
-    el.src = url;
-    return () => {
-      el.onloadedmetadata = null;
-      el.removeAttribute("src");
-    };
-  }, [url]);
-  return shape;
+/**
+ * One composer tile with its remove X. Delete or Backspace on the focused tile
+ * removes it; the row then moves the focus to the next tile.
+ */
+export function TileFrame({
+  name,
+  onRemove,
+  children,
+}: {
+  name: string;
+  onRemove?: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      data-media-tile=""
+      className="group/tile relative shrink-0"
+      onKeyDown={(e) => {
+        if (!onRemove || (e.key !== "Backspace" && e.key !== "Delete")) return;
+        e.preventDefault();
+        onRemove();
+      }}
+    >
+      {children}
+      {onRemove && <RemoveButton name={name} onRemove={onRemove} />}
+    </div>
+  );
 }
 
-/** Video as its first frame in the clip's own shape, with a play mark and the length. A click opens the viewer. */
-function VideoTile({
+const FADE_PX = 24;
+
+/**
+ * Claude's composer attachment row: one line that scrolls sideways and never
+ * wraps. An edge fades only while more tiles sit past it.
+ */
+export function TileRow({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const row = React.useRef<HTMLDivElement | null>(null);
+  const refocus = React.useRef<number | null>(null);
+  const [mask, setMask] = React.useState("");
+  const measure = React.useCallback(() => {
+    const el = row.current;
+    if (!el) return;
+    // RTL rows scroll to negative offsets, so the distance from the start is the absolute value.
+    const from = Math.abs(el.scrollLeft);
+    const start = from > 1;
+    const end = from + el.clientWidth < el.scrollWidth - 1;
+    const side = getComputedStyle(el).direction === "rtl" ? "left" : "right";
+    setMask(
+      start || end
+        ? `linear-gradient(to ${side}, ${start ? "transparent" : "#000"}, #000 ${FADE_PX}px, #000 calc(100% - ${FADE_PX}px), ${end ? "transparent" : "#000"})`
+        : "",
+    );
+  }, []);
+  React.useEffect(() => {
+    const frame = requestAnimationFrame(measure);
+    window.addEventListener("resize", measure);
+    const at = refocus.current;
+    refocus.current = null;
+    if (at !== null) {
+      const tiles = row.current?.querySelectorAll<HTMLElement>("[data-media-tile]");
+      const next = tiles?.[Math.min(at, tiles.length - 1)];
+      next?.querySelector<HTMLElement>("button, a, [tabindex]")?.focus();
+    }
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", measure);
+    };
+  }, [children, measure]);
+  return (
+    <div
+      ref={row}
+      onScroll={measure}
+      onKeyDownCapture={(e) => {
+        if (e.key !== "Backspace" && e.key !== "Delete") return;
+        const tile = (e.target as Element).closest("[data-media-tile]");
+        if (!tile) return;
+        refocus.current = Array.from(e.currentTarget.querySelectorAll("[data-media-tile]")).indexOf(
+          tile,
+        );
+      }}
+      // The padding leaves room for each tile's X; the negative margin keeps the row in place.
+      className={cn(
+        "-mx-2 -mt-2.5 flex w-[calc(100%+1rem)] items-end gap-2 overflow-x-auto overscroll-x-contain px-2 pt-2.5 pb-0.5",
+        "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        className,
+      )}
+      style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** A video's first frame with a play mark in the middle and the length in the corner. */
+function VideoPoster({
   media,
-  size,
-  onOpen,
+  className,
+  onError,
 }: {
   media: MediaAttachment;
-  size: Size;
-  onOpen: () => void;
+  className: string;
+  onError?: () => void;
 }) {
   const PlayIcon = React.useContext(MediaIconsContext).play;
-  const { duration, ratio } = useVideoShape(media.url);
-  const height = size === "draft" ? 54 : 96;
-  // The ratio is clamped, so a phone clip stays tall and a wide clip stays short.
-  // 44px is the least width that still fits the length pill.
-  const width = Math.max(44, Math.round(height * Math.min(16 / 9, Math.max(9 / 16, ratio))));
+  const [duration, setDuration] = React.useState(NaN);
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={msg("shared.agent.media_open", { name: media.name })}
-      title={media.name}
-      className={cn(TILE, "flex items-center justify-center")}
-      style={{ width, height }}
-    >
+    <>
       {/* #t=0.1 asks the browser for the first frame as the poster. */}
       <video
         src={`${media.url}#t=0.1`}
         muted
+        playsInline
         preload="metadata"
-        className="size-full object-cover"
+        tabIndex={-1}
+        aria-hidden
+        className={className}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onError={onError}
       />
-      <PlayIcon className="absolute size-4 text-white drop-shadow" aria-hidden />
-      <span className="absolute bottom-1 end-1 rounded-full bg-black/60 px-1.5 py-px text-[10px] font-medium tabular-nums text-white">
-        {clock(duration)}
+      <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <span className={PLAY_MARK}>
+          <PlayIcon className="size-4" aria-hidden />
+        </span>
       </span>
-    </button>
+      {Number.isFinite(duration) && <span className={BADGE}>{clock(duration)}</span>}
+    </>
   );
 }
 
-const peaksCache = new Map<string, Promise<number[]>>();
-
-/**
- * The largest audio file whose waveform the tile draws. A decode holds the whole clip as
- * float samples, so a 20 MB MP3 can take about 450 MB; a larger file gets a flat line.
- */
-export const PEAKS_MAX_BYTES = 2 * 1024 * 1024;
-
-/** Decodes an audio file into samples. */
-async function decodeAudio(
-  buffer: ArrayBuffer,
-): Promise<{ getChannelData(channel: number): Float32Array }> {
-  const context = new AudioContext();
-  try {
-    return await context.decodeAudioData(buffer);
-  } finally {
-    void context.close();
-  }
-}
-
-/**
- * Loudness of an audio file in `count` slices, scaled to 0..1. A file over
- * `PEAKS_MAX_BYTES` is not decoded and gets a flat line.
- */
-export async function loadPeaks(
-  url: string,
-  count: number,
-  decode = decodeAudio,
-): Promise<number[]> {
-  const blob = await fetch(url).then((r) => r.blob());
-  if (blob.size > PEAKS_MAX_BYTES) return Array<number>(count).fill(0.3);
-  const data = (await decode(await blob.arrayBuffer())).getChannelData(0);
-  const step = Math.max(1, Math.floor(data.length / count));
-  // Every 16th sample is enough for a slice's peak and keeps long files fast.
-  const out = Array.from({ length: count }, (_, i) => {
-    let max = 0;
-    for (let j = i * step; j < (i + 1) * step; j += 16) max = Math.max(max, Math.abs(data[j] ?? 0));
-    return max;
-  });
-  const top = Math.max(...out, 0.001);
-  return out.map((v) => Math.max(0.08, v / top));
-}
-
-/** Loudness of an audio file in `count` slices, scaled to 0..1, or null while it decodes. */
-function usePeaks(url: string, count: number): number[] | null {
-  const [peaks, setPeaks] = React.useState<number[] | null>(null);
-  React.useEffect(() => {
-    const key = `${url}#${count}`;
-    let job = peaksCache.get(key);
-    if (!job) {
-      job = loadPeaks(url, count);
-      peaksCache.set(key, job);
-    }
-    let live = true;
-    job.then(
-      (p) => live && setPeaks(p),
-      () => live && setPeaks(Array<number>(count).fill(0.3)),
-    );
-    return () => {
-      live = false;
-    };
-  }, [url, count]);
-  return peaks;
-}
-
-const WAVE_POINTS = 96;
-const WAVE_HEIGHT = 22;
-
-/**
- * Audio as one thin ink line of its loudness, with play in place. The line
- * darkens as the clip plays, and a click on the line seeks.
- */
-function AudioTile({ media, size }: { media: MediaAttachment; size: Size }) {
-  const icons = React.useContext(MediaIconsContext);
+/** An audio element with its play state, and its length read before the first play. */
+function useAudio(media: MediaAttachment) {
   const ref = React.useRef<HTMLAudioElement | null>(null);
+  const probing = React.useRef(false);
   const [playing, setPlaying] = React.useState(false);
   const [time, setTime] = React.useState(0);
   const [duration, setDuration] = React.useState(NaN);
   // Codex swaps play for a download link when the browser cannot play the file.
   const [broken, setBroken] = React.useState(false);
-  const peaks = usePeaks(media.url, WAVE_POINTS);
-  const clipId = `played-${React.useId().replace(/[^\w-]/g, "")}`;
-  const width = size === "draft" ? 150 : 220;
-  const progress = duration > 0 ? time / duration : 0;
-  // Each point swings above or below the middle in turn, so the line reads as a waveform.
-  const path = (peaks ?? Array<number>(WAVE_POINTS).fill(0.1))
-    .map((v, i) => {
-      const x = ((i / (WAVE_POINTS - 1)) * width).toFixed(1);
-      const y = (WAVE_HEIGHT / 2 + v * WAVE_HEIGHT * 0.45 * (i % 2 ? 1 : -1)).toFixed(1);
-      return `${i ? "L" : "M"}${x} ${y}`;
-    })
-    .join(" ");
-  const seek = (fraction: number) => {
+  React.useEffect(() => {
     const el = ref.current;
-    if (el && Number.isFinite(el.duration)) el.currentTime = fraction * el.duration;
-  };
+    return () => el?.pause();
+  }, []);
   const toggle = () => {
     const el = ref.current;
     if (!el) return;
     if (el.paused) void el.play().catch(() => setBroken(true));
     else el.pause();
   };
-  React.useEffect(() => {
+  const seek = (fraction: number) => {
     const el = ref.current;
-    return () => el?.pause();
-  }, []);
-  const Icon = playing ? icons.pause : icons.play;
-  const label = msg(playing ? "shared.agent.media_pause" : "shared.agent.media_play", {
+    if (el && Number.isFinite(el.duration)) el.currentTime = fraction * el.duration;
+  };
+  const element = (
+    <audio
+      ref={ref}
+      src={media.url}
+      preload="metadata"
+      onPlay={() => setPlaying(true)}
+      onPause={() => setPlaying(false)}
+      onTimeUpdate={(e) => !probing.current && setTime(e.currentTarget.currentTime)}
+      onLoadedMetadata={(e) => {
+        const el = e.currentTarget;
+        // A recorded WebM or Opus clip reports no length until the browser reads to
+        // its end, so the card seeks far ahead once to learn it, then goes back.
+        if (el.duration === Infinity) {
+          probing.current = true;
+          el.currentTime = Number.MAX_SAFE_INTEGER;
+        } else setDuration(el.duration);
+      }}
+      onDurationChange={(e) => {
+        const el = e.currentTarget;
+        if (!Number.isFinite(el.duration)) return;
+        setDuration(el.duration);
+        if (!probing.current) return;
+        probing.current = false;
+        el.currentTime = 0;
+      }}
+      // At the end the clip goes back to the start, so the card shows the full length again.
+      onEnded={(e) => {
+        e.currentTarget.currentTime = 0;
+        setTime(0);
+      }}
+      onError={() => setBroken(true)}
+    />
+  );
+  return { element, playing, time, duration, broken, toggle, seek };
+}
+
+/** The square play button of an audio card, or a download link when the browser cannot play the file. */
+function AudioButton({
+  media,
+  audio,
+  tone = "fill",
+}: {
+  media: MediaAttachment;
+  audio: ReturnType<typeof useAudio>;
+  /** "chip" draws the file chip's tinted icon box; "fill" the solid tile button. */
+  tone?: "fill" | "chip";
+}) {
+  const icons = React.useContext(MediaIconsContext);
+  const box = cn(
+    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-[transform,background-color] duration-75 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+    tone === "chip"
+      ? "rounded-md bg-foreground/5 text-foreground hover:bg-foreground/10"
+      : "bg-primary-fill text-primary-foreground",
+  );
+  if (audio.broken) {
+    const label = msg("shared.agent.media_download_name", { name: media.name });
+    return (
+      <a href={media.url} download={media.name} aria-label={label} title={label} className={box}>
+        <icons.download className="size-4" aria-hidden />
+      </a>
+    );
+  }
+  const Icon = audio.playing ? icons.pause : icons.play;
+  const label = msg(audio.playing ? "shared.agent.media_pause" : "shared.agent.media_play", {
     name: media.name,
   });
-  const round =
-    "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-full bg-foreground text-background transition-transform active:scale-95";
+  return (
+    <button type="button" onClick={audio.toggle} aria-label={label} title={label} className={box}>
+      <Icon className="size-4" aria-hidden />
+    </button>
+  );
+}
+
+/** What an audio card shows as its time: the played time once it plays, else the length. */
+function audioClock(audio: ReturnType<typeof useAudio>): string {
+  if (audio.playing || audio.time) return clock(audio.time);
+  return Number.isFinite(audio.duration) ? clock(audio.duration) : "";
+}
+
+/** Audio in the composer: a 120px tile with the name, play in the middle and the length. */
+function AudioTile({ media }: { media: MediaAttachment }) {
+  const audio = useAudio(media);
+  const time = audioClock(audio);
+  return (
+    <div className={cn(CARD, TILE, "flex flex-col bg-card p-2 hover:border-border")}>
+      {audio.element}
+      <span
+        dir="auto"
+        title={media.name}
+        className="line-clamp-2 break-words text-xs leading-tight text-muted-foreground"
+      >
+        {media.name}
+      </span>
+      <span className="flex flex-1 items-center justify-center">
+        <AudioButton media={media} audio={audio} />
+      </span>
+      {time && <span className={cn(BADGE, "bg-muted")}>{time}</span>}
+    </div>
+  );
+}
+
+/**
+ * Audio in a sent message, in the file chip's language: the tinted play box,
+ * the name over a thin seek line, and the played time against the length.
+ */
+function AudioCard({ media }: { media: MediaAttachment }) {
+  const audio = useAudio(media);
+  const known = Number.isFinite(audio.duration);
+  const progress = known && audio.duration > 0 ? Math.min(1, audio.time / audio.duration) : 0;
   return (
     <div
-      className={cn(
-        "relative flex items-center gap-2.5 rounded-lg border border-border bg-card px-2",
-        size === "draft" ? "h-[54px]" : "h-16",
-      )}
+      data-audio-card=""
+      className="flex h-12 w-64 max-w-full items-center gap-2 rounded-lg bg-muted ps-1.5 pe-3 text-muted-foreground"
     >
-      <audio
-        ref={ref}
-        src={media.url}
-        preload="metadata"
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-        // At the end Codex goes back to the start, so the tile shows the full length again.
-        onEnded={(e) => {
-          e.currentTarget.currentTime = 0;
-          setTime(0);
-        }}
-        onError={() => setBroken(true)}
-      />
-      {broken ? (
-        <a
-          href={media.url}
-          download={media.name}
-          aria-label={msg("shared.agent.media_download_name", { name: media.name })}
-          title={msg("shared.agent.media_download_name", { name: media.name })}
-          className={round}
+      {audio.element}
+      <AudioButton media={media} audio={audio} tone="chip" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <span
+          dir="auto"
+          title={media.name}
+          className="truncate text-sm leading-tight text-foreground"
         >
-          <icons.download className="size-3.5" aria-hidden />
-        </a>
-      ) : (
-        <button type="button" onClick={toggle} aria-label={label} title={label} className={round}>
-          <Icon className="size-3.5" aria-hidden />
-        </button>
-      )}
-      <div className="flex flex-col gap-0.5">
-        <svg
-          width={width}
-          height={WAVE_HEIGHT}
-          viewBox={`0 0 ${width} ${WAVE_HEIGHT}`}
-          aria-hidden
-          // Mirrored in RTL, so the line plays from the reading start, as fractionAt reads it.
-          className="cursor-pointer rtl:-scale-x-100"
-          onPointerDown={(e) => seek(fractionAt(e))}
-        >
-          <defs>
-            <clipPath id={clipId}>
-              <rect width={width * progress} height={WAVE_HEIGHT} />
-            </clipPath>
-          </defs>
-          <path
-            d={path}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1"
-            strokeLinejoin="round"
-            className="text-foreground/25"
-          />
-          <path
-            d={path}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1"
-            strokeLinejoin="round"
-            className="text-foreground"
-            clipPath={`url(#${clipId})`}
-          />
-        </svg>
-        <div
-          className="flex justify-between gap-2 text-[10px] text-muted-foreground"
-          style={{ width }}
-        >
-          <span className="truncate" dir="auto">
-            {media.name}
+          {media.name}
+        </span>
+        <div className="flex items-center gap-2">
+          <span
+            aria-hidden
+            className="-my-1.5 flex flex-1 cursor-pointer items-center py-1.5"
+            onPointerDown={(e) => audio.seek(fractionAt(e))}
+          >
+            <span className="relative h-0.5 w-full overflow-hidden rounded-full bg-foreground/10">
+              <span
+                className="absolute inset-y-0 start-0 rounded-full bg-foreground/60"
+                style={{ width: `${progress * 100}%` }}
+              />
+            </span>
           </span>
-          <span className="shrink-0 tabular-nums">{clock(playing || time ? time : duration)}</span>
+          <span data-audio-time="" className="shrink-0 text-[11px] tabular-nums">
+            {known ? `${clock(audio.time)} / ${clock(audio.duration)}` : clock(audio.time)}
+          </span>
         </div>
       </div>
     </div>
   );
 }
 
-/**
- * One attachment as a tile. Images use Codex's sizes: 54px in the composer and
- * 80px in the sent message. Video keeps its own shape; audio plays in place.
- * A hover X removes it.
- */
-function MediaTile({
-  media,
-  onOpen,
-  onRemove,
-  size,
-}: {
-  media: MediaAttachment;
-  onOpen: () => void;
-  onRemove?: () => void;
-  size: Size;
-}) {
+/** A media file that did not load: a tile in the danger tint, never a broken image icon. */
+function FailedTile({ media, className }: { media: MediaAttachment; className?: string }) {
+  const Warning = React.useContext(MediaIconsContext).failed;
   return (
-    <div className="group/media relative shrink-0">
-      {media.kind === "image" && (
-        <button
-          type="button"
-          onClick={onOpen}
-          aria-label={msg("shared.agent.media_open", { name: media.name })}
-          title={media.name}
-          className={cn(
-            TILE,
-            "flex items-center justify-center",
-            size === "draft" ? "size-[54px]" : "size-20",
-          )}
-        >
-          {/* A plain img: object URLs and stored files skip the image optimizer. */}
-          <img
-            src={media.url}
-            alt=""
-            className="size-full rounded-md object-cover"
-            draggable={false}
-          />
-        </button>
+    <span
+      role="img"
+      aria-label={msg(
+        media.kind === "video"
+          ? "shared.agent.media_failed_video"
+          : "shared.agent.media_failed_image",
       )}
-      {media.kind === "video" && <VideoTile media={media} size={size} onOpen={onOpen} />}
-      {media.kind === "audio" && <AudioTile media={media} size={size} />}
-      {onRemove && <RemoveButton name={media.name} onRemove={onRemove} />}
-    </div>
+      title={media.name}
+      className={cn(
+        CARD,
+        TILE,
+        "flex flex-col items-center justify-center gap-1.5 border-destructive/30 bg-destructive/10 p-2 text-destructive hover:border-destructive/30",
+        className,
+      )}
+    >
+      <Warning className="size-5" aria-hidden />
+      <span dir="auto" className="w-full truncate text-center text-xs">
+        {media.name}
+      </span>
+    </span>
   );
 }
 
+/**
+ * A composer image: a pulsing skeleton until the preview decodes, then the
+ * picture. An image that cannot decode shows the failed tile instead.
+ */
+function DraftImage({ media, onOpen }: { media: MediaAttachment; onOpen: OpenHandler }) {
+  const [state, setState] = React.useState<"loading" | "loaded" | "error">("loading");
+  if (state === "error") return <FailedTile media={media} />;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={msg("shared.agent.media_open", { name: media.name })}
+      title={media.name}
+      className={cn(CARD, TILE, "flex cursor-zoom-in")}
+    >
+      {state === "loading" && (
+        <span
+          role="progressbar"
+          aria-label={msg("shared.agent.media_loading_preview", { name: media.name })}
+          className="absolute inset-0 animate-pulse bg-muted motion-reduce:animate-none"
+        />
+      )}
+      {/* A plain img: object URLs and stored files skip the image optimizer. */}
+      <img
+        src={media.url}
+        alt=""
+        draggable={false}
+        onLoad={() => setState("loaded")}
+        onError={() => setState("error")}
+        className={cn(
+          "size-full object-cover motion-safe:transition-opacity motion-safe:duration-150",
+          state === "loading" && "opacity-0",
+        )}
+      />
+    </button>
+  );
+}
+
+/** Opens the viewer; the control that fires it gets the focus back when the viewer closes. */
+type OpenHandler = (e: React.MouseEvent<HTMLElement>) => void;
+
+/** One media file in the composer row: a 120px tile with the remove X. */
+function DraftTile({
+  media,
+  onOpen,
+  onRemove,
+}: {
+  media: MediaAttachment;
+  onOpen: OpenHandler;
+  onRemove?: () => void;
+}) {
+  const failed = media.status === "failed";
+  return (
+    <TileFrame name={media.name} onRemove={onRemove}>
+      {media.kind === "image" && <DraftImage media={media} onOpen={onOpen} />}
+      {media.kind === "video" && (
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={msg("shared.agent.media_play_video", { name: media.name })}
+          title={media.name}
+          className={cn(CARD, TILE, "flex cursor-pointer")}
+        >
+          <VideoPoster media={media} className="size-full object-cover" />
+        </button>
+      )}
+      {media.kind === "audio" && <AudioTile media={media} />}
+      {/* No retry path exists yet, so a failed upload offers only the remove X. */}
+      {failed && (
+        <span className="pointer-events-none absolute inset-x-px bottom-px z-[1] rounded-b-[calc(var(--radius-xl)-1px)] border-t border-destructive/30 bg-background/95 px-2 py-1 text-center text-[11px] font-medium leading-tight text-destructive">
+          {msg("shared.agent.media_upload_failed")}
+        </span>
+      )}
+    </TileFrame>
+  );
+}
+
+/**
+ * One media file in a sent message, in its own shape. One image or video
+ * alone may stand 320px tall; several share the line at up to 240 by 160px.
+ * A file that does not load shows the failed tile.
+ */
+function SentItem({
+  media,
+  alone,
+  onOpen,
+}: {
+  media: MediaAttachment;
+  alone: boolean;
+  onOpen: OpenHandler;
+}) {
+  const [broken, setBroken] = React.useState(false);
+  if (media.kind === "audio")
+    return (
+      <li className="max-w-full">
+        <AudioCard media={media} />
+      </li>
+    );
+  if (broken || media.status === "failed")
+    return (
+      <li>
+        <FailedTile media={media} />
+      </li>
+    );
+  const fit = cn(
+    "block h-auto w-auto max-w-full",
+    alone ? "max-h-80 min-h-[7.5rem] min-w-[7.5rem] object-cover" : "max-h-40",
+  );
+  return (
+    <li className={alone ? "max-w-full" : "max-w-[min(100%,240px,calc(50%-0.25rem))]"}>
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={msg(
+          media.kind === "video" ? "shared.agent.media_play_video" : "shared.agent.media_open",
+          { name: media.name },
+        )}
+        title={media.name}
+        className={cn(
+          CARD,
+          "flex max-w-full rounded-lg",
+          media.kind === "image" ? "cursor-zoom-in" : "cursor-pointer",
+        )}
+      >
+        {media.kind === "image" ? (
+          <img
+            src={media.url}
+            alt=""
+            draggable={false}
+            onError={() => setBroken(true)}
+            className={fit}
+          />
+        ) : (
+          <VideoPoster media={media} className={fit} onError={() => setBroken(true)} />
+        )}
+      </button>
+    </li>
+  );
+}
+
+const VIEWER_IMAGE = "max-h-[70vh] max-w-full select-none rounded-2xl object-contain";
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
 
 /** A zoomable, pannable image: Ctrl or Cmd with the wheel zooms, a pinch zooms, a drag pans, a double click resets. */
-function ZoomImage({ src, alt }: { src: string; alt: string }) {
+function ZoomImage({ src, alt, onError }: { src: string; alt: string; onError: () => void }) {
   const [view, setView] = React.useState({ zoom: 1, x: 0, y: 0 });
+  const [loaded, setLoaded] = React.useState(false);
   const drag = React.useRef<{ x: number; y: number } | null>(null);
   const ref = React.useRef<HTMLDivElement | null>(null);
   // React's onWheel is passive, so preventDefault (no page zoom) needs a native listener.
@@ -468,7 +677,7 @@ function ZoomImage({ src, alt }: { src: string; alt: string }) {
     <div
       ref={ref}
       className={cn(
-        "flex min-h-0 flex-1 items-center justify-center overflow-hidden",
+        "flex size-full items-center justify-center overflow-hidden",
         view.zoom > 1 && "cursor-grab active:cursor-grabbing",
       )}
       onPointerDown={(e) => {
@@ -489,7 +698,13 @@ function ZoomImage({ src, alt }: { src: string; alt: string }) {
         src={src}
         alt={alt}
         draggable={false}
-        className="max-h-[75dvh] max-w-full select-none rounded-lg object-contain"
+        onLoad={() => setLoaded(true)}
+        onError={onError}
+        className={cn(
+          VIEWER_IMAGE,
+          "motion-safe:transition-opacity motion-safe:duration-300",
+          !loaded && "opacity-0",
+        )}
         style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
       />
     </div>
@@ -578,7 +793,7 @@ const SEEK_STEP_S = 5;
  * paused, and a bottom bar has play, the timeline, the time, volume, speed and
  * fullscreen. The bar hides while the clip plays and the pointer rests.
  */
-function VideoPlayer({ src, name }: { src: string; name: string }) {
+function VideoPlayer({ src, name, onError }: { src: string; name: string; onError: () => void }) {
   const icons = React.useContext(MediaIconsContext);
   const box = React.useRef<HTMLDivElement | null>(null);
   const ref = React.useRef<HTMLVideoElement | null>(null);
@@ -652,7 +867,7 @@ function VideoPlayer({ src, name }: { src: string; name: string }) {
     <div
       ref={box}
       className={cn(
-        "relative flex w-full overflow-hidden rounded-lg bg-black",
+        "relative flex max-w-full overflow-hidden rounded-2xl bg-black",
         hidden && "cursor-none",
       )}
       onKeyDown={(e) => {
@@ -672,9 +887,10 @@ function VideoPlayer({ src, name }: { src: string; name: string }) {
         playsInline
         tabIndex={0}
         aria-label={name}
+        onError={onError}
         className={cn(
-          "block w-full cursor-pointer object-contain focus-visible:outline-none",
-          full ? "h-full" : "max-h-[75dvh]",
+          "block max-w-full cursor-pointer object-contain focus-visible:outline-none",
+          full ? "size-full" : "max-h-[70vh]",
         )}
         onClick={toggle}
         onKeyDown={(e) => {
@@ -864,130 +1080,247 @@ function VideoPlayer({ src, name }: { src: string; name: string }) {
   );
 }
 
-/** The full-size viewer: one attachment at a time, with previous and next, download and close. */
+/** The open file in the viewer. A file that fails to load says so and offers Try again. */
+function CurrentSlide({ media }: { media: MediaAttachment }) {
+  const Retry = React.useContext(MediaIconsContext).retry;
+  const [attempt, setAttempt] = React.useState(0);
+  const [failed, setFailed] = React.useState(false);
+  if (failed)
+    return (
+      <div
+        role="alert"
+        className="flex flex-col items-center gap-3 rounded-xl bg-white/5 px-6 py-5 text-sm text-white/80"
+      >
+        <span>{msg("shared.agent.media_load_error")}</span>
+        <button
+          type="button"
+          onClick={() => {
+            setFailed(false);
+            setAttempt((n) => n + 1);
+          }}
+          className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 font-medium text-white transition-[transform,background-color] duration-75 hover:bg-white/15 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+        >
+          <Retry className="size-4" aria-hidden />
+          {msg("shared.agent.media_try_again")}
+        </button>
+      </div>
+    );
+  // A new key on Try again mounts a fresh element, so the browser fetches the file again.
+  return media.kind === "image" ? (
+    <ZoomImage
+      key={`${media.id}-${attempt}`}
+      src={media.url}
+      alt={media.name}
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    <VideoPlayer
+      key={`${media.id}-${attempt}`}
+      src={media.url}
+      name={media.name}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+const SLIDE_GAP_PX = 32;
+const SLIDE_VW = 75;
+const VIEWER_FADE =
+  "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 duration-200 motion-reduce:animate-none";
+
+/**
+ * Claude's lightbox: the media floats on a dark backdrop with no card. The
+ * slides sit side by side and slide into place. Close and download sit at the
+ * top end; previous, "n of total" and next sit at the bottom. The arrow keys,
+ * Home and End move between files, mirrored in RTL, and stop at the ends.
+ */
 export function MediaViewer({
   media,
   index,
   onIndex,
   onClose,
-  onRemove,
+  returnFocus,
 }: {
   media: readonly MediaAttachment[];
   index: number | null;
   onIndex: (i: number) => void;
   onClose: () => void;
-  onRemove?: (id: string) => void;
+  /** The control that opened the viewer; it gets the focus back on close. */
+  returnFocus?: React.RefObject<HTMLElement | null>;
 }) {
   const icons = React.useContext(MediaIconsContext);
   const item = index === null ? null : media[index];
-  const many = media.length > 1;
-  const step = (by: number) =>
-    index !== null && onIndex((index + by + media.length) % media.length);
+  const last = media.length - 1;
+  const go = (i: number) => {
+    if (index !== null && i >= 0 && i <= last && i !== index) onIndex(i);
+  };
   const Previous = icons.previous;
   const Next = icons.next;
   const Download = icons.download;
   const Close = icons.close;
   const tool =
-    "flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
+    "pointer-events-auto flex size-8 cursor-pointer items-center justify-center rounded-full text-white/70 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60";
+  const arrow = (enabled: boolean) =>
+    cn(
+      "pointer-events-auto flex rounded-lg p-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+      enabled ? "cursor-pointer text-white hover:bg-white/10" : "cursor-default text-white/30",
+    );
   return (
-    <Dialog open={item !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent
-        showCloseButton={false}
-        onKeyDown={(e) => {
-          // The arrows follow reading order, so in RTL the right arrow goes back.
-          if (!many || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
-          const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
-          step((e.key === "ArrowRight") !== rtl ? 1 : -1);
-        }}
-        className={cn(
-          "flex flex-col gap-2 p-2",
-          item?.kind === "audio" ? "sm:max-w-[min(28rem,92vw)]" : "sm:max-w-[min(64rem,92vw)]",
-        )}
-      >
-        {item && (
-          <>
-            <div className="flex items-center gap-1 ps-2">
-              <DialogTitle className="min-w-0 flex-1 truncate text-sm font-medium" dir="auto">
+    <DialogPrimitive.Root open={item !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className={cn("fixed inset-0 z-50 bg-black/80", VIEWER_FADE)} />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed inset-0 z-50 flex items-center overflow-hidden outline-none",
+            VIEWER_FADE,
+            "data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95",
+          )}
+          onCloseAutoFocus={(e) => {
+            // Safari does not focus a clicked button, so the viewer names its opener.
+            const el = returnFocus?.current;
+            if (!el?.isConnected) return;
+            e.preventDefault();
+            el.focus();
+          }}
+          onClick={(e) => {
+            // The media floats with no card, so a click on the dark space around it closes.
+            const target = e.target as HTMLElement;
+            if (target === e.currentTarget || target.dataset.slide !== undefined) onClose();
+          }}
+          onKeyDown={(e) => {
+            if (index === null) return;
+            const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
+            if (e.key === "Home") go(0);
+            else if (e.key === "End") go(last);
+            else if (e.key === "ArrowLeft" || e.key === "ArrowRight")
+              go(index + ((e.key === "ArrowRight") !== rtl ? 1 : -1));
+            else return;
+            e.preventDefault();
+          }}
+        >
+          {item && index !== null && (
+            <>
+              <DialogPrimitive.Title className="sr-only">
+                {msg(
+                  item.kind === "video"
+                    ? "shared.agent.media_preview_video"
+                    : "shared.agent.media_preview_image",
+                )}
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Description className="sr-only">
                 {item.name}
-              </DialogTitle>
-              {many && (
-                <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">
-                  {msg("shared.agent.media_position", { index: index! + 1, count: media.length })}
-                </span>
-              )}
-              <a
-                href={item.url}
-                download={item.name}
-                aria-label={msg("shared.agent.media_download")}
-                className={tool}
+              </DialogPrimitive.Description>
+              <div
+                data-slide=""
+                className="flex h-full shrink-0 items-center gap-8 [transform:translateX(var(--slide))] motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out rtl:[transform:translateX(calc(-1*var(--slide)))]"
+                style={
+                  {
+                    "--slide": `calc(${(100 - SLIDE_VW) / 2}vw - ${index * SLIDE_VW}vw - ${index * SLIDE_GAP_PX}px)`,
+                  } as React.CSSProperties
+                }
               >
-                <Download className="size-4" aria-hidden />
-              </a>
-              {/* Tiles past "+N" have no hover X, so a draft removes them here. */}
-              {onRemove && (
-                <button
-                  type="button"
-                  onClick={() => onRemove(item.id)}
-                  aria-label={msg("shared.agent.media_remove", { name: item.name })}
-                  className={cn(tool, "w-auto px-2 text-xs")}
+                {media.map((m, i) => (
+                  <div
+                    key={m.id}
+                    data-slide=""
+                    inert={i !== index}
+                    className={cn(
+                      "flex h-full w-[75vw] shrink-0 items-center justify-center motion-safe:transition-opacity motion-safe:duration-300",
+                      i !== index && "opacity-30",
+                    )}
+                  >
+                    {/* Only the open file and its neighbours load. */}
+                    {Math.abs(i - index) <= 1 &&
+                      (i === index ? (
+                        <CurrentSlide key={m.id} media={m} />
+                      ) : m.kind === "image" ? (
+                        <img src={m.url} alt="" draggable={false} className={VIEWER_IMAGE} />
+                      ) : (
+                        <video
+                          src={`${m.url}#t=0.1`}
+                          muted
+                          preload="metadata"
+                          className="max-h-[70vh] max-w-full rounded-2xl"
+                        />
+                      ))}
+                  </div>
+                ))}
+              </div>
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-end gap-1 bg-linear-to-b from-black/80 to-transparent p-4">
+                <a
+                  href={item.url}
+                  download={item.name}
+                  aria-label={msg("shared.agent.media_download_name", { name: item.name })}
+                  title={msg("shared.agent.media_download")}
+                  className={tool}
                 >
-                  {msg("shared.agent.media_remove_short")}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label={msg("shared.agent.cancel")}
-                className={tool}
-              >
-                <Close className="size-4" aria-hidden />
-              </button>
-            </div>
-            <div className="relative flex min-h-0 items-center justify-center">
-              {item.kind === "image" && <ZoomImage key={item.id} src={item.url} alt={item.name} />}
-              {item.kind === "video" && (
-                <VideoPlayer key={item.id} src={item.url} name={item.name} />
-              )}
-              {item.kind === "audio" && (
-                <audio key={item.id} src={item.url} controls autoPlay className="w-full" />
-              )}
-              {many && (
+                  <Download className="size-4" aria-hidden />
+                </a>
+                <DialogPrimitive.Close
+                  aria-label={msg("shared.dialog.close")}
+                  title={msg("shared.dialog.close")}
+                  className={tool}
+                >
+                  <Close className="size-4" aria-hidden />
+                </DialogPrimitive.Close>
+              </div>
+              {media.length > 1 && (
                 <>
-                  <button
-                    type="button"
-                    onClick={() => step(-1)}
-                    aria-label={msg("shared.agent.media_previous")}
-                    className={cn(
-                      tool,
-                      "absolute start-1 top-1/2 -translate-y-1/2 bg-background/80 shadow-sm",
-                    )}
-                  >
-                    <Previous className="size-4 rtl:-scale-x-100" aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => step(1)}
-                    aria-label={msg("shared.agent.media_next")}
-                    className={cn(
-                      tool,
-                      "absolute end-1 top-1/2 -translate-y-1/2 bg-background/80 shadow-sm",
-                    )}
-                  >
-                    <Next className="size-4 rtl:-scale-x-100" aria-hidden />
-                  </button>
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-0 h-[max(128px,10vh)]"
+                    style={{
+                      background:
+                        "linear-gradient(180deg, transparent 0%, rgb(0 0 0 / 0.8) 66.41%)",
+                    }}
+                  />
+                  <div className="pointer-events-none absolute inset-x-0 bottom-6 z-10 flex h-14 items-center justify-center px-6">
+                    <button
+                      type="button"
+                      onClick={() => go(index - 1)}
+                      aria-disabled={index === 0 || undefined}
+                      aria-label={msg("shared.agent.media_previous")}
+                      title={msg("shared.agent.media_previous")}
+                      className={arrow(index > 0)}
+                    >
+                      <Previous className="size-5 rtl:-scale-x-100" aria-hidden />
+                    </button>
+                    <span
+                      role="status"
+                      className="select-none px-2 text-sm tabular-nums text-white/80"
+                    >
+                      {msg("shared.agent.media_position", {
+                        index: index + 1,
+                        count: media.length,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => go(index + 1)}
+                      aria-disabled={index === last || undefined}
+                      aria-label={msg("shared.agent.media_next")}
+                      title={msg("shared.agent.media_next")}
+                      className={arrow(index < last)}
+                    >
+                      <Next className="size-5 rtl:-scale-x-100" aria-hidden />
+                    </button>
+                  </div>
                 </>
               )}
-            </div>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
+            </>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
 
-const MAX_TILES = 5;
-
-/** A row of media tiles that open one shared viewer; renders nothing when the list is empty. */
+/**
+ * The media of one message. In the composer it is one scrolling row of 120px
+ * tiles; in a sent message it is a wrapping list of cards in their own shape.
+ * Images and videos open one shared viewer; audio plays in place. Renders
+ * nothing when the list is empty.
+ */
 export function MediaTiles({
   media: given,
   onRemove,
@@ -1001,50 +1334,57 @@ export function MediaTiles({
 }) {
   const [open, setOpen] = React.useState<number | null>(null);
   const media = useResolvedMedia(given);
+  const opener = React.useRef<HTMLElement | null>(null);
+  // A sent file marked failed has no URL to show. A draft file that failed to
+  // upload still plays from its local URL, so it stays in the viewer.
+  const visual = React.useMemo(
+    () => media.filter((m) => m.kind !== "audio" && !(size === "sent" && m.status === "failed")),
+    [media, size],
+  );
   if (!media.length) return null;
-  // Past MAX_TILES, the last tile becomes "+N" and opens the viewer, which pages through the rest.
-  const shown = media.length > MAX_TILES ? MAX_TILES - 1 : media.length;
-  const hidden = media.length - shown;
+  const openOf =
+    (m: MediaAttachment): OpenHandler =>
+    (e) => {
+      opener.current = e.currentTarget;
+      setOpen(visual.indexOf(m));
+    };
+  const viewer = (
+    <MediaViewer
+      media={visual}
+      index={open === null || !visual.length ? null : Math.min(open, visual.length - 1)}
+      onIndex={setOpen}
+      onClose={() => setOpen(null)}
+      returnFocus={opener}
+    />
+  );
+  if (size === "draft")
+    return (
+      <>
+        <TileRow className={className}>
+          {media.map((m) => (
+            <DraftTile
+              key={m.id}
+              media={m}
+              onOpen={openOf(m)}
+              onRemove={onRemove && (() => onRemove(m.id))}
+            />
+          ))}
+        </TileRow>
+        {viewer}
+      </>
+    );
   return (
     <>
-      <div className={cn("flex flex-wrap gap-2", className)}>
-        {media.slice(0, shown).map((m, i) => (
-          <MediaTile
-            key={m.id}
-            media={m}
-            size={size}
-            onOpen={() => setOpen(i)}
-            onRemove={onRemove && (() => onRemove(m.id))}
-          />
+      <ul
+        role="list"
+        aria-label={msg("shared.agent.media_list")}
+        className={cn("flex max-w-full flex-wrap items-end justify-end gap-2 p-px", className)}
+      >
+        {media.map((m) => (
+          <SentItem key={m.id} media={m} alone={visual.length === 1} onOpen={openOf(m)} />
         ))}
-        {hidden > 0 && (
-          <button
-            type="button"
-            onClick={() => setOpen(shown)}
-            aria-label={msg("shared.agent.media_more_label", { count: hidden })}
-            title={media
-              .slice(shown)
-              .map((m) => m.name)
-              .join("\n")}
-            className={cn(
-              TILE,
-              "flex shrink-0 items-center justify-center font-medium tabular-nums text-muted-foreground",
-              size === "draft" ? "size-[54px] text-[13px]" : "size-20 text-[15px]",
-            )}
-          >
-            {msg("shared.agent.media_more", { count: hidden })}
-          </button>
-        )}
-      </div>
-      <MediaViewer
-        media={media}
-        index={open === null ? null : Math.min(open, media.length - 1)}
-        onIndex={setOpen}
-        onClose={() => setOpen(null)}
-        onRemove={
-          onRemove && ((id) => (media.length === 1 ? (setOpen(null), onRemove(id)) : onRemove(id)))
-        }
-      />
+      </ul>
+      {viewer}
     </>
   );
 }

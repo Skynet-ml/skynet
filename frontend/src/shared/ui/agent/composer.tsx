@@ -18,9 +18,10 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
-import { isUnsupportedImage, mediaKind } from "./media-attachments";
+import { isUnsupportedImage, mediaKind, TileRow } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
+import { FileTile } from "./file-tiles";
 import {
   attachedFile,
   joinPastes,
@@ -88,6 +89,9 @@ interface ComposerProps {
    *  carries only text, so the composer refuses it, with a reason, until the
    *  reply ends. */
   mediaWaiting?: boolean;
+  /** Why Send must wait, for example while a file uploads. Send then shows
+   *  as off, and its tooltip and a toast give this reason. */
+  sendBlocked?: string | null;
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
@@ -260,6 +264,7 @@ export function Composer({
   onAttachFile,
   onMediaFiles,
   mediaWaiting = false,
+  sendBlocked = null,
   suggest,
   attachments = true,
   dictation: showMic = true,
@@ -594,6 +599,10 @@ export function Composer({
       return;
     }
     if (disabled || dictating || attaching > 0 || !canSend) return;
+    if (sendBlocked) {
+      toast.info(sendBlocked);
+      return;
+    }
     onSubmit();
     resetHeight();
   };
@@ -965,16 +974,22 @@ export function Composer({
                   : ""}
           </p>
           {chips && !inline && <div className="flex flex-wrap gap-2 px-3 pt-3">{chips}</div>}
-          {draft.pastes.length + draft.files.length > 0 && !inline && (
+          {draft.files.length > 0 && !inline && (
+            <div className="flex px-3 pt-3">
+              <TileRow>
+                {draft.files.map((file, i) => (
+                  <FileTile
+                    key={`file-${i}`}
+                    name={file.name}
+                    text={file.text}
+                    onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
+                  />
+                ))}
+              </TileRow>
+            </div>
+          )}
+          {draft.pastes.length > 0 && !inline && (
             <div className="flex flex-wrap gap-2 px-3 pt-3">
-              {draft.files.map((file, i) => (
-                <PastedTextCard
-                  key={`file-${i}`}
-                  name={file.name}
-                  text={file.text}
-                  onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
-                />
-              ))}
               {draft.pastes.map((paste, i) => (
                 <PastedTextCard
                   key={i}
@@ -1214,6 +1229,9 @@ export function Composer({
                 <TooltipButton
                   side="top"
                   tooltip={
+                    !streaming && sendBlocked ? (
+                      sendBlocked
+                    ) : (
                     <TooltipShortcuts
                       rows={
                         streaming && midTurn
@@ -1225,13 +1243,16 @@ export function Composer({
                           : [{ label: sendAriaLabel, keys: ["Enter"] }]
                       }
                     />
+                    )
                   }
                 >
                   <Button
                     type="submit"
                     size="icon"
                     autoTooltip={false}
-                    className="shrink-0 rounded-full"
+                    // A blocked Send stays hoverable and focusable, so its tooltip can say why.
+                    className="shrink-0 rounded-full aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                    aria-disabled={(!streaming && !!sendBlocked) || undefined}
                     disabled={disabled || dictating || attaching > 0 || !canSend}
                     aria-label={streaming && midTurn ? msg("agent.composer.queue") : sendAriaLabel}
                   >

@@ -1091,7 +1091,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const trimmed = draft.trim();
     const media = chatMedia.ready();
     if (media === null) {
-      toast.info(msg("agent.media.uploading"));
+      toast.info(chatMedia.blocked ?? msg("agent.media.uploading"));
       return;
     }
     if (!trimmed && lineComments.length === 0 && media.length === 0) return;
@@ -1936,6 +1936,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         mediaWaiting={chatMedia.tiles.length > 0}
+        sendBlocked={chatMedia.blocked}
         onAttachFile={(file) => {
           setAttachFile(file);
           setAttachOpen(true);
