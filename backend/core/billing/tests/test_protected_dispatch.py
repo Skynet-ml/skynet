@@ -578,8 +578,8 @@ class _BrokenStream(httpx.SyncByteStream):
     def __iter__(self) -> Iterator[bytes]:
         """Yield the first bytes, then raise a transport error.
 
-        Returns:
-            An iterator over the bytes received before the drop.
+        Yields:
+            The body bytes received before the drop.
         """
         yield self._first
         raise httpx.ReadError("connection dropped")
