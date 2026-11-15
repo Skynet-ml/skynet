@@ -3,7 +3,7 @@ import { parser as pythonParser } from "@lezer/python";
 
 import { lineDiff } from "@/shared/lib/line-diff";
 
-import { body } from "../draft-changes";
+import { body, type TurnChange } from "../draft-changes";
 
 /** One file the review pane shows: its repository text and the draft text. */
 export interface RepoFile {
@@ -29,6 +29,46 @@ export function statusOf(file: RepoFile): FileStatus {
   if (file.loading) return "modified";
   // The draft cannot delete a file: an emptied one stays as an empty file, so it reads as modified.
   return before === "" && !file.existed ? "added" : "modified";
+}
+
+/** What the pane diffs: the whole draft against the repository, or the agent's last turn. */
+export type DiffSource = "draft" | "turn";
+
+// Each file's view keeps its object while the file and its turn text stay the
+// same, so the rows of a file do not redraw on every keystroke in another one.
+const turnViews = new WeakMap<RepoFile, RepoFile>();
+
+/**
+ * Show only the agent's last turn: each file the turn changed diffs its text
+ * before the turn against its text at the turn's end, and every other file
+ * reads as unchanged. User edits made after the turn do not show.
+ *
+ * Args:
+ *   files: The pane's files, diffed against the repository.
+ *   turn: Each file the turn changed, with its texts before and after the
+ *     turn. A null before means the draft did not hold the file yet, so its
+ *     base is the repository's.
+ *
+ * Returns:
+ *   The files with the turn's texts.
+ */
+export function turnView(
+  files: readonly RepoFile[],
+  turn: ReadonlyMap<string, TurnChange>,
+): RepoFile[] {
+  return files.map((file) => {
+    const change = turn.get(file.path);
+    const before = change ? (change.before ?? file.before) : file.after;
+    const after = change ? change.after : file.after;
+    // A file the draft held before the turn exists, so an empty text there is not a new file.
+    const existed = change && change.before !== null ? true : file.existed;
+    if (file.before === before && file.after === after && file.existed === existed) return file;
+    const hit = turnViews.get(file);
+    if (hit && hit.before === before && hit.after === after && hit.existed === existed) return hit;
+    const view = { ...file, before, after, existed };
+    turnViews.set(file, view);
+    return view;
+  });
 }
 
 export interface DiffLine {

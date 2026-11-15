@@ -200,3 +200,35 @@ export function fileStats(file: DraftFile): { added: number; removed: number } {
     ? { added: 0, removed: 0 }
     : countChanges(draftRows(file.before, file.after));
 }
+
+/** One file an agent turn changed: its text before the turn, and at the turn's end. */
+export interface TurnChange {
+  /** Null when the draft did not hold the file before the turn. */
+  before: string | null;
+  after: string;
+}
+
+/**
+ * List the files one agent turn changed, with their texts before and after it.
+ * The pane's "Last turn" source diffs these texts, so later user edits do not show.
+ *
+ * Args:
+ *   start: The draft's texts when the turn started, by path.
+ *   end: The draft's texts when the turn ended, or now while it runs.
+ *
+ * Returns:
+ *   Each path the turn changed, mapped to its texts before and after the
+ *   turn. A file the turn only dropped from the draft is left out: the draft
+ *   no longer shows it.
+ */
+export function turnChanges(
+  start: Readonly<Record<string, string>>,
+  end: Readonly<Record<string, string>>,
+): ReadonlyMap<string, TurnChange> {
+  const changes = new Map<string, TurnChange>();
+  for (const [path, after] of Object.entries(end)) {
+    const before = Object.hasOwn(start, path) ? start[path]! : null;
+    if (before === null || body(before) !== body(after)) changes.set(path, { before, after });
+  }
+  return changes;
+}

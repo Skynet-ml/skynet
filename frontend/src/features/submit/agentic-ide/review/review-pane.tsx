@@ -19,6 +19,7 @@ import {
   CaretRight,
   CaretUp,
   ChatText,
+  Check,
   Columns,
   DotsThree,
   Eye,
@@ -29,6 +30,7 @@ import {
   ListBullets,
   MagnifyingGlass,
   Plus,
+  Robot,
   TextAlignLeft,
   X,
 } from "@/shared/ui/icons";
@@ -41,6 +43,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/
 import { commandKey, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
 
+import type { TurnChange } from "../draft-changes";
+
 import { CodeAppearanceStyle } from "./code-style";
 import { CodeEditor, type ChangeNav, type ChangeNavHandle } from "./editor";
 import {
@@ -49,6 +53,8 @@ import {
   dirName,
   fuzzyScore,
   statusOf,
+  turnView,
+  type DiffSource,
   type FileStatus,
   type RepoFile,
 } from "./lib";
@@ -116,6 +122,8 @@ type Props = {
   /** The pane takes the full width; absent where no full view exists. */
   full?: boolean;
   onFull?: () => void;
+  /** The files the agent's last turn changed, with their texts. Absent until a turn ran. */
+  turn?: ReadonlyMap<string, TurnChange> | null;
 };
 
 // A comment opened from the chat rings once, so the eye finds it.
@@ -243,13 +251,113 @@ function MenuRow({
   );
 }
 
-/** What the diffs compare: the draft against the repository, with the line totals. */
-function SourceLabel({ sum }: { sum: { added: number; removed: number } }) {
-  return (
-    <span className="flex h-7 items-center gap-1.5 rounded-md bg-muted px-3 text-[12.5px] font-medium text-foreground">
-      {msg("submit.agentic_ide.review.source")}
+const sourceName = (source: DiffSource) =>
+  source === "turn"
+    ? msg("submit.agentic_ide.review.source_turn")
+    : msg("submit.agentic_ide.review.source");
+const SOURCES: readonly DiffSource[] = ["turn", "draft"];
+const sourcePill =
+  "flex h-7 items-center gap-1.5 rounded-md bg-muted px-3 text-[12.5px] font-medium text-foreground";
+
+/**
+ * What the diffs compare, with the line totals: the whole draft against the
+ * repository, or the agent's last turn. With no turn yet, only the draft
+ * exists, so the label is not a menu.
+ */
+function SourceMenu({
+  source,
+  onSource,
+  sum,
+}: {
+  source: DiffSource;
+  onSource?: (source: DiffSource) => void;
+  sum: { added: number; removed: number };
+}) {
+  const label = (
+    <>
+      {sourceName(source)}
       <Counts {...sum} className="font-sans text-[12px]" />
-    </span>
+    </>
+  );
+  if (!onSource) return <span className={sourcePill}>{label}</span>;
+  return (
+    <DropdownMenu>
+      <TooltipButton delayDuration={250} tooltip={msg("submit.agentic_ide.review.source_menu")}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              sourcePill,
+              "transition-colors duration-150 hover:bg-accent data-[state=open]:bg-accent",
+            )}
+          >
+            {label}
+            <CaretDown className="size-3 text-muted-foreground" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+      </TooltipButton>
+      <PaneMenuContent align="start" className="min-w-52">
+        {SOURCES.map((s) => (
+          <DropdownMenuItem
+            key={s}
+            role="menuitemradio"
+            aria-checked={source === s}
+            onSelect={() => onSource(s)}
+            className={MENU_ROW}
+          >
+            <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground [&>svg]:size-3.5">
+              {s === "turn" ? <Robot /> : <GitDiff />}
+            </span>
+            <span className="min-w-0 flex-1 truncate">{sourceName(s)}</span>
+            <Check
+              className={cn("ms-auto size-3.5 shrink-0", source !== s && "invisible")}
+              aria-hidden
+            />
+          </DropdownMenuItem>
+        ))}
+      </PaneMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The header's list of open tabs: it reaches a tab that the scrolled tab bar hides. */
+function OpenTabsMenu({
+  tabs,
+  active,
+  onSelect,
+}: {
+  tabs: ReadonlyArray<{ id: string; label: string; hint?: string; icon: React.ReactNode }>;
+  active: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <MenuButton label={msg("submit.agentic_ide.review.open_tabs")}>
+        <CaretDown className="size-3.5" />
+      </MenuButton>
+      <PaneMenuContent align="end" className="min-w-52 max-w-80">
+        {tabs.map((tab) => (
+          <DropdownMenuItem
+            key={tab.id}
+            title={tab.hint}
+            aria-current={tab.id === active ? "true" : undefined}
+            onSelect={() => onSelect(tab.id)}
+            className={cn(MENU_ROW, tab.id === active && "font-medium text-foreground")}
+          >
+            <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+              {tab.icon}
+            </span>
+            <span className="min-w-0 flex-1 truncate" dir="ltr">
+              {tab.label}
+            </span>
+            <Check
+              className={cn("ms-auto size-3.5 shrink-0", tab.id !== active && "invisible")}
+              aria-hidden
+            />
+          </DropdownMenuItem>
+        ))}
+      </PaneMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -406,7 +514,7 @@ function FileNotice({ file }: { file: RepoFile }) {
  * editor, and the file list with the whole repository tree.
  */
 export function ReviewPane({
-  files,
+  files: draftFiles,
   request,
   readOnly,
   onEdit,
@@ -419,7 +527,18 @@ export function ReviewPane({
   host,
   full,
   onFull,
+  turn,
 }: Props) {
+  const [chosenSource, setSource] = React.useState<DiffSource>("draft");
+  const source = turn ? chosenSource : "draft";
+  const files = React.useMemo(
+    () => (source === "turn" && turn ? turnView(draftFiles, turn) : draftFiles),
+    [source, turn, draftFiles],
+  );
+  const draftByPath = React.useMemo(
+    () => new Map(draftFiles.map((f) => [f.path, f])),
+    [draftFiles],
+  );
   const changed = React.useMemo(() => files.filter((f) => statusOf(f) !== "unchanged"), [files]);
   const tree = React.useMemo(() => buildTree(files), [files]);
   const byPath = React.useMemo(() => new Map(files.map((f) => [f.path, f])), [files]);
@@ -528,6 +647,11 @@ export function ReviewPane({
     if (active === "changes") setActive(tabs[0]!);
   };
   const closeTab = (tab: string) => keepTabs(tabs.filter((t) => t !== tab));
+  const selectTab = (tab: string) => {
+    // A file that failed to read tries again, as an open from the tree does.
+    if (tab !== "changes" && !isNewTab(tab)) onOpenFile(tab);
+    setActive(tab);
+  };
   // A tab whose file left the draft (a deleted new file, a reverted change) closes.
   const liveTabs = tabs.filter((t) => isNewTab(t) || byPath.has(t));
   React.useEffect(() => {
@@ -572,6 +696,20 @@ export function ReviewPane({
   React.useEffect(() => {
     if (!request) return;
     setTouched(new Set(request.paths ?? []));
+    // A chat card can show an older turn's file, which the last turn did not
+    // change, or a comment, which "Last turn" does not show: the whole draft shows it.
+    const draft = draftByPath.get(request.path);
+    const shown = byPath.get(request.path) ?? draft;
+    if (
+      source === "turn" &&
+      draft &&
+      statusOf(draft) !== "unchanged" &&
+      (request.comment || (shown && statusOf(shown) === "unchanged"))
+    ) {
+      setSource("draft");
+      showDiff(request.path, request.comment);
+      return;
+    }
     go(request.path, "diff", false, request.comment);
     // Only a new request moves the pane.
   }, [request]);
@@ -761,8 +899,9 @@ export function ReviewPane({
         // "Load full files" lets every fold open; off, the diff keeps only the hunks.
         foldable={fullFiles}
         {...options}
-        comments={comments}
-        onComment={onComment}
+        // Comments hold draft line numbers, which the turn's end text does not share.
+        comments={source === "turn" ? [] : comments}
+        onComment={source === "turn" ? undefined : onComment}
         onRemoveComment={onRemoveComment}
         onEditComment={onEditComment}
       />
@@ -779,7 +918,9 @@ export function ReviewPane({
         path={f.path}
         base={f.before}
         value={f.after}
-        readOnly={readOnly}
+        // Under "Last turn" a file the turn changed shows the turn's end text,
+        // not the draft now, so it takes no edits there.
+        readOnly={readOnly || (source === "turn" && !!turn?.has(f.path))}
         onChange={(text) => {
           if (preview === f.path) setPreview(null);
           onEdit(f.path, text);
@@ -828,11 +969,7 @@ export function ReviewPane({
                     id={tabId(tab)}
                     panelId={panelId}
                     selected={active === tab}
-                    onSelect={() => {
-                      // A file that failed to read tries again, as an open from the tree does.
-                      if (!isNewTab(tab)) onOpenFile(tab);
-                      setActive(tab);
-                    }}
+                    onSelect={() => selectTab(tab)}
                     onPin={() => preview === tab && setPreview(null)}
                     onClose={() => closeTab(tab)}
                     icon={
@@ -855,6 +992,34 @@ export function ReviewPane({
             <Plus className="size-4" />
           </ToolButton>
         </div>
+        {/* Outside the scrolled bar, so it stays in reach however many tabs are open. */}
+        {tabs.length + (changesOpen ? 1 : 0) > 1 && (
+          <OpenTabsMenu
+            tabs={[
+              ...(changesOpen
+                ? [
+                    {
+                      id: "changes",
+                      label: msg("submit.agentic_ide.changes_tab"),
+                      icon: <GitDiff className="size-3.5" />,
+                    },
+                  ]
+                : []),
+              ...tabs.map((tab) => ({
+                id: tab,
+                label: isNewTab(tab) ? msg("submit.agentic_ide.review.new_tab") : baseName(tab),
+                hint: isNewTab(tab) ? undefined : tab,
+                icon: isNewTab(tab) ? (
+                  <Plus className="size-3.5" />
+                ) : (
+                  <FileGlyph path={tab} className="size-3.5" />
+                ),
+              })),
+            ]}
+            active={active}
+            onSelect={selectTab}
+          />
+        )}
         {onFull && (
           <ToolButton
             label={
@@ -878,7 +1043,16 @@ export function ReviewPane({
           </span>
         ) : tabFile ? (
           <>
-            {statusOf(tabFile) !== "unchanged" && <SourceLabel sum={totals([tabFile])} />}
+            {(statusOf(tabFile) !== "unchanged" ||
+              // A file the draft changed but the last turn did not keeps the way back to the draft.
+              (source === "turn" &&
+                statusOf(draftByPath.get(tabFile.path) ?? tabFile) !== "unchanged")) && (
+              <SourceMenu
+                source={source}
+                onSource={turn ? setSource : undefined}
+                sum={totals([tabFile])}
+              />
+            )}
             <span className="ms-auto flex items-center gap-0.5">
               {statusOf(tabFile) !== "unchanged" &&
                 !hideChanges.has(tabFile.path) &&
@@ -962,7 +1136,12 @@ export function ReviewPane({
           </>
         ) : (
           <>
-            <SourceLabel sum={sum} />
+            <SourceMenu source={source} onSource={turn ? setSource : undefined} sum={sum} />
+            {source === "turn" && onComment && (
+              <span className="min-w-0 truncate text-[12px] text-muted-foreground">
+                {msg("submit.agentic_ide.review.turn_comments")}
+              </span>
+            )}
             <span className="ms-auto flex items-center gap-0.5">
               {inlineTools && (
                 <>
@@ -1084,11 +1263,24 @@ export function ReviewPane({
             ) : !changed.length ? (
               <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 pb-16 text-center">
                 <h2 className="text-[14px] font-medium text-foreground">
-                  {msg("submit.agentic_ide.empty")}
+                  {source === "turn"
+                    ? msg("submit.agentic_ide.review.turn_empty")
+                    : msg("submit.agentic_ide.empty")}
                 </h2>
-                <p className="max-w-80 text-[13px] text-muted-foreground">
-                  {msg("submit.agentic_ide.empty_hint")}
-                </p>
+                {source === "turn" ? (
+                  <button
+                    type="button"
+                    onClick={() => setSource("draft")}
+                    className="mt-2 flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                  >
+                    <GitDiff className="size-3.5 text-muted-foreground" aria-hidden />
+                    {msg("submit.agentic_ide.review.source")}
+                  </button>
+                ) : (
+                  <p className="max-w-80 text-[13px] text-muted-foreground">
+                    {msg("submit.agentic_ide.empty_hint")}
+                  </p>
+                )}
               </div>
             ) : (
               shownChanges.map((f) => {
