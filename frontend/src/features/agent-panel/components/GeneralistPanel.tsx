@@ -37,6 +37,7 @@ import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ModelChangedNotice } from "@/shared/ui/agent/chat-notices";
+import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
@@ -1697,7 +1698,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         )}
       >
         <AgentThread
-          className="overscroll-contain"
+          // The rail marks are 40px wide at the start edge; keep the text clear of them.
+          className={cn("overscroll-contain", railItems.length >= RAIL_MIN_ITEMS && "ps-11")}
           streaming={streaming}
           isEmpty={agent.messages.length === 0}
           emptyState={emptyState}
@@ -1877,7 +1879,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         modelMenu={
           // The setup chat puts the context meter on the end side, and the model menu on the start side.
           inSetup ? (
-            <ChatContextUsage messages={agent.messages} contextWindow={contextWindow} />
+            <ChatContextUsage
+              messages={agent.messages}
+              contextWindow={contextWindow}
+              streaming={streaming}
+            />
           ) : (
             modelMenuNode
           )

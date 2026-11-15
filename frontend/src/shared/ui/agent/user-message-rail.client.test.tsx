@@ -212,15 +212,24 @@ void test("B on a focused mark bookmarks its turn from the keyboard", async () =
     });
   assert.equal(rail.mark(1).getAttribute("aria-keyshortcuts"), "B");
 
-  await key(rail.mark(1), { key: "b" });
-  await key(rail.mark(1), { key: "b", ctrlKey: true });
+  await key(rail.mark(1), { key: "b", code: "KeyB" });
+  await key(rail.mark(1), { key: "b", code: "KeyB", ctrlKey: true });
   assert.deepEqual(changes, [[2, true]], "B bookmarks the turn; Ctrl+B does not");
 
   await rail.render(new Set([2]));
-  await key(rail.mark(1), { key: "B" });
+  await key(rail.mark(1), { key: "B", code: "KeyB" });
   assert.deepEqual(changes, [
     [2, true],
     [2, false],
+  ]);
+
+  // A Hebrew layout sends key nun (U+05E0) for the physical B key.
+  await rail.render(new Set());
+  await key(rail.mark(1), { key: String.fromCharCode(0x05e0), code: "KeyB" });
+  assert.deepEqual(changes, [
+    [2, true],
+    [2, false],
+    [2, true],
   ]);
   await rail.unmount();
 });

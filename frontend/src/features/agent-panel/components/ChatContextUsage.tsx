@@ -15,11 +15,17 @@ import { DEFAULT_CONTEXT_WINDOW, contextTokens } from "../lib/session-stats";
 export function ChatContextUsage({
   messages,
   contextWindow,
+  streaming = false,
 }: {
   messages: readonly AgentMessage[];
   contextWindow: number | null;
+  streaming?: boolean;
 }) {
   const window = contextWindow && contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW;
-  const used = React.useMemo(() => contextTokens(messages, window), [messages, window]);
+  // Each streamed token makes a new `messages`, and the count stringifies every
+  // tool result. Hold the count of the last settled list until the turn ends.
+  const [settled, setSettled] = React.useState(messages);
+  if (!streaming && settled !== messages) setSettled(messages);
+  const used = React.useMemo(() => contextTokens(settled, window), [settled, window]);
   return <ContextMeter used={used} window={window} />;
 }

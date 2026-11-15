@@ -223,7 +223,7 @@ export function UserMessageRail({
                     // The tooltip's bookmark button is out of the tab order, so B is the keyboard's way.
                     aria-keyshortcuts="B"
                     onKeyDown={(e) => {
-                      if (e.key.toLowerCase() !== "b" || e.ctrlKey || e.metaKey || e.altKey) return;
+                      if (e.code !== "KeyB" || e.ctrlKey || e.metaKey || e.altKey) return;
                       e.preventDefault();
                       onBookmarkChange(item.index, !bookmarked);
                     }}
