@@ -252,7 +252,8 @@ def attach_media_to_chat(
     A file that no chat holds moves to this chat. A file that another chat
     holds gets a copy with a new id, so deleting either chat never removes a
     file that the other chat still shows. A copy is new stored data, so it
-    passes the same storage quota check as an upload.
+    passes the same storage quota check as an upload. An id with no owned row
+    is left out of the map, so a fork keeps a turn that names a deleted file.
 
     Args:
         session: The open session; the caller commits it.
@@ -262,7 +263,8 @@ def attach_media_to_chat(
         conversation_id: The chat that gets the files.
 
     Returns:
-        A map from each attached id to the id that the chat now holds.
+        A map from each attached id to the id that the chat now holds. Ids that
+        name no file of the caller are not in it.
 
     Raises:
         DomainError: ``user.storage.quota_exceeded`` (409) when the copies
@@ -282,7 +284,7 @@ def attach_media_to_chat(
     if copied:
         enforce_storage_quota(job_store, username, copied)
     rows = list(session.scalars(select(ChatMediaModel).options(defer(ChatMediaModel.data)).where(*owned)).all())
-    if len(rows) != len(sizes) or len(sizes) != len(set(media_ids)):
+    if len(rows) != len(sizes):
         raise HTTPException(status_code=404, detail="Attachment not found.")
     held: dict[str, str] = {}
     for row in rows:

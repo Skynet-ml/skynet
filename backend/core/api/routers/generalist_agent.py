@@ -709,6 +709,7 @@ def _persist_user_turn(
 
     Raises:
         DomainError: 409 when copies of the files would go over the storage quota.
+        HTTPException: 404 when an attached file is deleted before it attaches.
     """
     metadata: dict[str, Any] = {"steer": True} if steer else {}
     if compaction:
@@ -718,9 +719,11 @@ def _persist_user_turn(
             held = attach_media_to_chat(
                 session, job_store, media[0].username, [row.id for row in media], conversation_id
             )
-            metadata["media"] = [
-                {"id": held.get(row.id, row.id), "name": row.filename, "kind": row.kind} for row in media
-            ]
+            # A file deleted after the send loaded it must fail the send, not
+            # store a turn that names a missing file.
+            if any(row.id not in held for row in media):
+                raise HTTPException(status_code=404, detail="Attachment not found.")
+            metadata["media"] = [{"id": held[row.id], "name": row.filename, "kind": row.kind} for row in media]
         if replaced:
             _free_unnamed_media(session, conversation_id, {item["id"] for item in metadata.get("media", [])})
         message = AgentMessageModel(

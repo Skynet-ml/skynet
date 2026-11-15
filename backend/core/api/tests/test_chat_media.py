@@ -23,7 +23,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...storage.models import AgentConversationModel, Base, ChatMediaModel
+from ...storage.models import AgentConversationModel, AgentMessageModel, Base, ChatMediaModel
 from ...storage.remote import RemoteDBJobStore
 from ...storage.usage import UNSENT_MEDIA_RETENTION
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -36,6 +36,7 @@ from ..routers.chat_media import (
     load_owned_media,
     sniff_media,
 )
+from ..routers.generalist_agent import _persist_user_turn
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 _ALICE = "alice@example.com"
@@ -418,14 +419,32 @@ def test_file_deleted_during_the_copy_quota_check_is_a_404(
     assert caught.value.status_code == 404
 
 
-def test_file_deleted_before_the_attach_is_a_404(harness: SimpleNamespace) -> None:
-    """A file deleted after the send loaded it fails the attach; the turn names no dead id."""
+def test_attach_leaves_out_an_id_with_no_file(harness: SimpleNamespace) -> None:
+    """A deleted file is left out of the map, so a fork of a turn that names it still works."""
+    kept = _upload(harness.client, _PNG).json()["id"]
+    gone = _upload(harness.client, _PNG).json()["id"]
+    engine = harness.store.engine
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id="chat-a", username=_ALICE, title="a"))
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id == gone))
+        session.commit()
+        held = attach_media_to_chat(session, harness.store, _ALICE, [kept, gone], "chat-a")
+    assert held == {kept: kept}
+
+
+def test_send_with_a_file_deleted_after_the_load_is_a_404(harness: SimpleNamespace) -> None:
+    """A file deleted after the send loaded it fails the send; no turn names a missing file."""
     media_id = _upload(harness.client, _PNG).json()["id"]
     engine = harness.store.engine
     with Session(engine) as session:
         session.add(AgentConversationModel(id="chat-a", username=_ALICE, title="a"))
+        session.commit()
+    rows = load_owned_media(engine, _ALICE, [media_id])
+    with Session(engine) as session:
         session.execute(delete(ChatMediaModel).where(ChatMediaModel.id == media_id))
         session.commit()
-        with pytest.raises(HTTPException) as caught:
-            attach_media_to_chat(session, harness.store, _ALICE, [media_id], "chat-a")
+    with pytest.raises(HTTPException) as caught:
+        _persist_user_turn(harness.store, "chat-a", "look", media=rows)
     assert caught.value.status_code == 404
+    with Session(engine) as session:
+        assert session.scalars(select(AgentMessageModel)).all() == []
