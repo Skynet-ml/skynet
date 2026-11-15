@@ -148,9 +148,13 @@ class SkynetCi:
             .with_env_variable("UV_NO_SYNC", "1")
             .with_env_variable("SKYNET_TEST_SHARD", f"{shard}/{CORE_SHARD_COUNT}")
             .with_env_variable("SKYNET_TEST_DISPATCHED_OUT", f"dispatched-{shard}.txt")
-            # A failed exec has no stdout to read and is not cached. Accept
-            # every exit code, so summary prints the failed tests from the
-            # same cached exec and _check_core_shard fails the check.
+            # A failed exec has no output to read and is not cached. ANY accepts
+            # exit codes 0-127 and 192-255, so summary reads the failed tests
+            # from the same cached exec and _check_core_shard fails the check.
+            # A signal exit (128-191, for example 137) still fails the exec.
+            # The local engine also caches a pytest failure: a rerun with no
+            # source change returns it again. Change a file in backend/ or run
+            # `dagger -c 'engine | local-cache | prune'` to run the shard again.
             .with_exec(
                 ["uv", "run", "pytest", "core/", "-q", "-rfEs", "-n", "auto"],
                 expect=ReturnType.ANY,
@@ -171,6 +175,9 @@ class SkynetCi:
             raise RuntimeError(
                 f"core shard {shard} failed: pytest exit code {exit_code}."
                 f" Run `dagger call skynet-ci summary --shard {shard}` for the failed tests."
+                " The local engine caches this result. To run the shard again,"
+                " change a file in backend/ or run"
+                " `dagger -c 'engine | local-cache | prune'`."
             )
 
     @function
@@ -200,9 +207,16 @@ class SkynetCi:
             shard: The zero-based shard index.
 
         Returns:
-            The pytest stdout of the shard.
+            The stdout of the shard, then its stderr when it is not empty.
+            A failure before collection (for example a conftest import
+            error) writes its cause only to stderr.
         """
-        return await self._core_shard(shard).stdout()
+        shard_run = self._core_shard(shard)
+        stdout = await shard_run.stdout()
+        stderr = await shard_run.stderr()
+        if not stderr.strip():
+            return stdout
+        return f"{stdout}\n--- stderr ---\n{stderr}"
 
     @function
     @check

@@ -84,7 +84,7 @@ type ModuleTypes {
         )
         .withFunction(
           function("summary", typeDef.withKind(TypeDefKind.STRING_KIND))
-            .withDescription("Return the pytest output of one core shard, also when tests failed.\n\nCI prints this after ``dagger check`` ran the same shard, so the\nengine serves it from cache. The log shows the failed tests, the\ncounts and the skip reasons.\n\nArgs:\n    shard: The zero-based shard index.\n\nReturns:\n    The pytest stdout of the shard.")
+            .withDescription("Return the pytest output of one core shard, also when tests failed.\n\nCI prints this after ``dagger check`` ran the same shard, so the\nengine serves it from cache. The log shows the failed tests, the\ncounts and the skip reasons.\n\nArgs:\n    shard: The zero-based shard index.\n\nReturns:\n    The stdout of the shard, then its stderr when it is not empty.\n    A failure before collection (for example a conftest import\n    error) writes its cause only to stderr.")
             .withArg("shard", typeDef.withKind(TypeDefKind.INTEGER_KIND))
         )
         .withConstructor(
