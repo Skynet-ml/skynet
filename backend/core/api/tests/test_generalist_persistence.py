@@ -29,7 +29,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, delete
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -1748,6 +1748,73 @@ def test_attach_failure_fails_the_send_instead_of_dropping_the_turn(
     assert seen == {}
     with Session(engine) as session:
         assert session.query(AgentMessageModel).count() == 0
+
+
+def _delete_before_attach(monkeypatch: pytest.MonkeyPatch, media_id: str) -> None:
+    """Delete a file inside the send's transaction, just before the attach reads it.
+
+    This stands for a delete that commits after the quota check and before
+    the attach locks the rows.
+
+    Args:
+        monkeypatch: Pytest fixture used to wrap the attach.
+        media_id: The file to delete.
+    """
+    real = agent_mod.attach_media_to_chat
+
+    def attach(session: Session, *args: Any) -> dict[str, str]:
+        """Delete the file in the send's session, then attach as usual."""
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id == media_id))
+        return real(session, *args)
+
+    monkeypatch.setattr(agent_mod, "attach_media_to_chat", attach)
+
+
+def test_file_deleted_during_a_new_chat_send_leaves_no_chat(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted after the quota check fails the send and rolls back the new chat."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _delete_before_attach(monkeypatch, "img-1")
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentConversationModel).count() == 0
+        assert session.query(AgentMessageModel).count() == 0
+        assert [row.id for row in session.query(ChatMediaModel)] == ["img-1"]
+
+
+def test_file_deleted_during_an_edit_keeps_the_old_turns(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted after the quota check fails an edit; the turns it would replace stay."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "img-2", "image")
+    _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+        before = [(row.role, row.content) for row in session.query(AgentMessageModel).order_by(AgentMessageModel.id)]
+    _delete_before_attach(monkeypatch, "img-2")
+
+    resp, _ = _media_turn(
+        client, monkeypatch, ["img-2"], vision=True, persist=True, conversation_id=cid, edit_user_text="look"
+    )
+
+    assert resp.status_code == 404
+    with Session(engine) as session:
+        after = [(row.role, row.content) for row in session.query(AgentMessageModel).order_by(AgentMessageModel.id)]
+        owners = {row.id: row.conversation_id for row in session.query(ChatMediaModel)}
+    assert after == before
+    assert owners == {"img-1": cid, "img-2": None}
 
 
 def test_send_loads_bytes_only_for_the_images_the_model_sees(

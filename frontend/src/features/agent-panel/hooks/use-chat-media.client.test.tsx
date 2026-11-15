@@ -35,6 +35,8 @@ let uploads = 0;
 const deleted: string[] = [];
 // A test sets this to hold the next upload until it settles the promise.
 let nextUpload: Promise<Response> | null = null;
+// A test sets this to hold every restore read until it settles the promise.
+let heldReads: Promise<void> | null = null;
 globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   if (init?.method === "DELETE") {
     deleted.push(String(_url).split("/").pop() ?? "");
@@ -42,6 +44,7 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   }
   // A restore reads a stored file's bytes; "gone" is a file the server no longer has.
   if (!init?.method) {
+    if (heldReads) await heldReads;
     if (String(_url).endsWith("/gone")) return new Response(null, { status: 404 });
     return new Response(new Uint8Array(3), { headers: { "content-type": "image/png" } });
   }
@@ -292,5 +295,48 @@ void test("a restored file that does not load shows as failed and blocks Send", 
   assert.equal(latest!.tiles.length, 1);
   assert.equal(latest!.tiles[0]!.status, "failed");
   assert.equal(latest!.blocked, "Remove the files that failed to attach, then send.");
+  await React.act(async () => root.unmount());
+});
+
+void test("a restore drops its files when a newer restore starts or the user adds files", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  const keep = (value: ReturnType<typeof useChatMedia>) => {
+    latest = value;
+  };
+  function Harness({ onDraft }: { onDraft: typeof keep }) {
+    onDraft(useChatMedia());
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness onDraft={keep} />));
+  const sent = (id: string) => [{ id, name: `${id}.png`, kind: "image" as const, url: "" }];
+  let release!: () => void;
+
+  // The user adds a file while the restore loads: only the user's file stays.
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () => latest!.restore(sent("old")));
+  await React.act(async () => latest!.addFiles([image(1)]));
+  await flush();
+  const before = uploads;
+  heldReads = null;
+  release();
+  await flush();
+  assert.equal(latest!.tiles.length, 1);
+  assert.equal(latest!.tiles[0]!.name, "f-1.png");
+  assert.equal(uploads, before, "the dropped restore uploads nothing");
+  await React.act(async () => latest!.clear());
+
+  // A newer restore starts while the first loads: only the newer one fills the draft.
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () => latest!.restore(sent("first")));
+  await React.act(async () => latest!.restore([...sent("second"), ...sent("third")]));
+  heldReads = null;
+  release();
+  await flush();
+  assert.deepEqual(
+    latest!.tiles.map((t) => t.name),
+    ["second.png", "third.png"],
+  );
+  assert.equal(latest!.blocked, null);
   await React.act(async () => root.unmount());
 });
