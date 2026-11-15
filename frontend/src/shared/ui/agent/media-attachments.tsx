@@ -702,7 +702,7 @@ function ZoomImage({ src, alt, onError }: { src: string; alt: string; onError: (
         onError={onError}
         className={cn(
           VIEWER_IMAGE,
-          "motion-safe:transition-opacity motion-safe:duration-300",
+          "motion-safe:transition-opacity motion-safe:duration-150",
           !loaded && "opacity-0",
         )}
         style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
@@ -861,7 +861,7 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
   const Full = full ? ArrowsIn : ArrowsOut;
   const playLabel = msg(playing ? "shared.agent.media_pause" : "shared.agent.media_play", { name });
   const tool =
-    "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white";
+    "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60";
   const hidden = playing && idle && !menu;
   return (
     <div
@@ -920,14 +920,14 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
           onClick={toggle}
           aria-label={playLabel}
           title={playLabel}
-          className="absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-sm transition-transform active:scale-95"
+          className="absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-sm transition-transform duration-75 active:scale-[0.97] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
         >
           <icons.play className="size-5" aria-hidden />
         </button>
       )}
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 flex items-center gap-1 bg-black/75 px-1.5 text-white transition-opacity duration-200",
+          "absolute inset-x-0 bottom-0 flex items-center gap-1 bg-black/75 px-1.5 text-white transition-opacity duration-150",
           hidden && "pointer-events-none opacity-0",
         )}
       >
@@ -987,7 +987,7 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
             <Volume className="size-4" aria-hidden />
           </button>
           {menu === "volume" && (
-            <div className="absolute end-0 bottom-full mb-2 flex w-40 items-center gap-2 rounded-lg bg-black/85 p-1.5 shadow-lg">
+            <div className="absolute end-0 bottom-full mb-2 flex w-40 items-center gap-2 rounded-xl bg-black/85 p-1.5 shadow-[var(--shadow-float)]">
               <button
                 type="button"
                 onClick={() => ref.current && (ref.current.muted = !ref.current.muted)}
@@ -1040,7 +1040,7 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
             <div
               role="radiogroup"
               aria-label={msg("shared.agent.media_speed")}
-              className="absolute end-0 bottom-full mb-2 flex w-36 flex-col rounded-lg bg-black/85 p-1 shadow-lg"
+              className="absolute end-0 bottom-full mb-2 flex w-36 flex-col rounded-xl bg-black/85 p-1 shadow-[var(--shadow-float)]"
             >
               <span className="px-2 pt-1 pb-1.5 text-[11px] text-white/60">
                 {msg("shared.agent.media_speed")}
@@ -1055,7 +1055,7 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
                     if (ref.current) ref.current.playbackRate = s;
                     setMenu(null);
                   }}
-                  className="flex h-7 cursor-pointer items-center justify-between rounded-md px-2 text-xs tabular-nums hover:bg-white/10"
+                  className="flex h-7 cursor-pointer items-center justify-between rounded-md px-2 text-xs tabular-nums hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
                 >
                   {`${s}×`}
                   {rate === s && <Check className="size-3.5" aria-hidden />}
@@ -1126,7 +1126,7 @@ function CurrentSlide({ media }: { media: MediaAttachment }) {
 const SLIDE_GAP_PX = 32;
 const SLIDE_VW = 75;
 const VIEWER_FADE =
-  "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 duration-200 motion-reduce:animate-none";
+  "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 duration-150 motion-reduce:animate-none";
 
 /**
  * Claude's lightbox: the media floats on a dark backdrop with no card. The
@@ -1212,7 +1212,7 @@ export function MediaViewer({
               </DialogPrimitive.Description>
               <div
                 data-slide=""
-                className="flex h-full shrink-0 items-center gap-8 [transform:translateX(var(--slide))] motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out rtl:[transform:translateX(calc(-1*var(--slide)))]"
+                className="flex h-full shrink-0 items-center gap-8 [transform:translateX(var(--slide))] motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-[var(--ease-snappy)] rtl:[transform:translateX(calc(-1*var(--slide)))]"
                 style={
                   {
                     "--slide": `calc(${(100 - SLIDE_VW) / 2}vw - ${index * SLIDE_VW}vw - ${index * SLIDE_GAP_PX}px)`,
@@ -1225,7 +1225,7 @@ export function MediaViewer({
                     data-slide=""
                     inert={i !== index}
                     className={cn(
-                      "flex h-full w-[75vw] shrink-0 items-center justify-center motion-safe:transition-opacity motion-safe:duration-300",
+                      "flex h-full w-[75vw] shrink-0 items-center justify-center motion-safe:transition-opacity motion-safe:duration-150",
                       i !== index && "opacity-30",
                     )}
                   >
