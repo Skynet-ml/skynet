@@ -9,9 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from vercel.sandbox import SandboxApiError
 
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import json_fingerprint
@@ -689,19 +691,19 @@ def test_stage_runtime_without_snapshots_opens_no_builder(tmp_path: Path) -> Non
     assert all(spec.snapshot_id is None for spec in runtime.specs)
 
 
-@pytest.mark.parametrize("fault", ["open", "tree"])
+@pytest.mark.parametrize("fault", ["open", "open-503", "tree"])
 def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: Path, fault: str) -> None:
     """Drop the stage snapshot and score with unpacked boxes when boxes from it fail, for this and later versions.
 
     Args:
         tmp_path: Scratch folder.
-        fault: ``open`` when a box cannot open from the snapshot, ``tree`` when
-            the restored box has no tree.
+        fault: ``open`` when a box cannot open from the snapshot, ``open-503``
+            when the provider refuses that open for now, as a run outside the
+            judge sees it, ``tree`` when the restored box has no tree.
     """
+    open_errors = {"open": ServiceError("refused"), "open-503": SandboxApiError(httpx.Response(503), "HTTP 503")}
     runtime = _StageSnapshotRuntime(
-        tmp_path / "stage-snaps",
-        open_error=ServiceError("refused") if fault == "open" else None,
-        empty_restore=fault == "tree",
+        tmp_path / "stage-snaps", open_error=open_errors.get(fault), empty_restore=fault == "tree"
     )
     scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
     try:
@@ -711,7 +713,7 @@ def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: P
         scorer.close()
     assert len(runtime.keys) == 1
     snapshot_ids = [spec.snapshot_id for spec in runtime.specs[1:]]
-    tried = 1 if fault == "open" else 2
+    tried = 2 if fault == "tree" else 1
     assert snapshot_ids[:tried] == ["stage-0"] * tried
     assert snapshot_ids[tried:] == [None] * 4
 
@@ -742,6 +744,26 @@ def test_a_version_that_does_not_apply_in_restored_stage_boxes_keeps_the_stage_s
     finally:
         scorer.close()
     assert [spec.snapshot_id for spec in runtime.specs[1:]] == ["stage-0"] * 4
+
+
+def test_a_temporary_provider_error_from_a_snapshot_stage_box_keeps_the_stage_snapshot(tmp_path: Path) -> None:
+    """In judge use, raise a 503 from a stage box opened from the snapshot raw, and keep the good snapshot for the retry.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = SandboxApiError(httpx.Response(503), "HTTP 503: provider text")
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", open_error=error)
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            scorer.score("")
+        assert raised.value is error
+        assert scorer._stage_snapshot_id == "stage-0"
+    finally:
+        scorer.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "stage-0"]
 
 
 def test_budget_refusal_from_a_snapshot_stage_box_is_raised(tmp_path: Path) -> None:

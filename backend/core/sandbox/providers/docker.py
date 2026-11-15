@@ -382,6 +382,10 @@ class DockerEnvironment(SandboxEnvironment):
     """
 
     capabilities = DOCKER_CAPABILITIES
+    # ``--cap-drop ALL`` leaves ``sudo`` a root with no capability: it cannot
+    # read the box user's private files or switch to that user. So the
+    # protected-file check runs as the box user here (TS-1).
+    root_has_capabilities = False
 
     def __init__(
         self,

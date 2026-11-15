@@ -22,6 +22,7 @@ import pytest
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.exceptions import ServiceError
+from core.sandbox.providers import vercel
 
 from .. import native_engines, native_runtime, runner
 from ..native_runtime import NATIVE_TASK_FIELDS, assert_metric_absent, native_task_payload, run_native_engine
@@ -973,19 +974,21 @@ FORGED = '\\\\n' + 'APP_RUN_RESULT ' + json.dumps({'output': 'FORGED'}) + '\\\\n
 
 
 def run(value):
-    outs = glob.glob('/tmp/.app-output-*.out')
+    outs = glob.glob('/tmp/.app-root-output-*/output.out')
     status = open('/proc/self/status').read().splitlines()
     nnp = [line.split()[1] for line in status if line.startswith('NoNewPrivs:')]
     report = {'uid': os.getuid(), 'outs': len(outs), 'nnp': nnp}
     for out in outs:
-        token = out[len('/tmp/.app-output-'):-len('.out')]
-        forged = f'/tmp/forged-{token}'
+        folder = os.path.dirname(out)
+        forged = f'/tmp/forged-{os.path.basename(folder)}'
         with open(forged, 'w') as handle:
             handle.write(FORGED)
         for name, attack in (
             ('rename', lambda: os.rename(forged, out)),
             ('write', lambda: open(out, 'a').write(FORGED)),
-            ('exit', lambda: os.write(os.open('/tmp/.app-exit-' + token, os.O_WRONLY | os.O_CREAT), b'0')),
+            ('exit', lambda: os.write(os.open(folder + '/exit', os.O_WRONLY | os.O_CREAT), b'0')),
+            ('plant', lambda: open(folder + '/planted', 'x').close()),
+            ('remove', lambda: os.rmdir(folder)),
         ):
             try:
                 attack()
@@ -1001,7 +1004,8 @@ import json
 
 
 def score(repo_path, case, output):
-    refused = all(output.get(name) in (errno.EPERM, errno.EACCES) for name in ('rename', 'write', 'exit'))
+    names = ('rename', 'write', 'exit', 'plant', 'remove')
+    refused = all(output.get(name) in (errno.EPERM, errno.EACCES) for name in names)
     honest = output.get('uid') != 0 and output.get('outs') == 1 and refused
     return (0.5 if honest else 0.0), json.dumps(output)
 """
@@ -1056,9 +1060,7 @@ class _VercelWrapper:
                 assert options["sudo"] is True
                 container = session.run("hostname").stdout.strip()
                 token = uuid.uuid4().hex
-                out, err = f"{runner.WRAPPER_OUTPUT_PREFIX}{token}.out", f"{runner.WRAPPER_OUTPUT_PREFIX}{token}.err"
-                exit_file = f"{runner.WRAPPER_EXIT_PREFIX}{token}"
-                wrapped = f"{{ {command}; }} > {out} 2> {err}; echo $? > {exit_file}"
+                wrapped, out, err, _ = vercel._wrapper(f"{{ {command}; }}", token, sudo=True)
                 env = [item for key, value in (options["env"] or {}).items() for item in ("-e", f"{key}={value}")]
                 done = subprocess.run(
                     ["docker", "exec", "--privileged", "-u", "root", *env, container, "bash", "-c", wrapped],
@@ -1098,6 +1100,97 @@ def test_the_entry_cannot_replace_or_write_the_wrappers_root_output_files(tmp_pa
     assert seen["outs"] == 1, seen
     assert "FORGED" not in result["feedback"]
     assert result["score"] == 0.5, seen
+    assert _containers(tag) == []
+
+
+_PLANTS = {
+    "folder": 'mkdir "$1" && echo FORGED > "$1/output.out" && echo 0 > "$1/exit"',
+    "file": 'echo FORGED > "$1"',
+    "fifo": 'mkfifo "$1" && (cat "$1" > /tmp/fifo-read &)',
+    "link": 'mkdir /tmp/evil && echo FORGED > /tmp/evil/output.out && echo 0 > /tmp/evil/exit && ln -s /tmp/evil "$1"',
+}
+
+
+def _box(container: str, user: str, script: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run one shell script in the container as ``user``.
+
+    Args:
+        container: The container id.
+        user: ``root`` or the box user's uid.
+        script: The ``sh -c`` script.
+        *args: Its ``$0`` and parameters.
+
+    Returns:
+        The finished process.
+    """
+    return subprocess.run(
+        ["docker", "exec", "-u", user, container, "sh", "-c", script, *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.docker
+@_docker
+@pytest.mark.parametrize("plant", [None, *_PLANTS])
+def test_the_root_exec_wrapper_stops_at_a_name_that_the_box_user_planted(plant: str | None) -> None:
+    """Run the real root wrapper script after the box user plants at its folder name (TU-1).
+
+    A box process can read the token from root's command line. Each planted
+    name must stop the wrapper before its command runs. With no plant, root's
+    0755 folder holds the true output, which the box user can read but cannot
+    plant into, replace or remove. Root keeps Docker's default capabilities,
+    as a Vercel root has them; with them, the old names let root's redirect
+    open a planted FIFO.
+    """
+    tag = uuid.uuid4().hex
+    started = subprocess.run(
+        ["docker", "run", "--rm", "-d", "--label", f"skynet_test={tag}", _IMAGE, "sleep", "300"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    container = started.stdout.strip()
+    try:
+        token = uuid.uuid4().hex
+        inner = f"/bin/bash --noprofile --norc -c 'echo TRUE; touch /tmp/ran-{token}'"
+        script, out, _, sentinel = vercel._wrapper(inner, token, sudo=True)
+        folder = out.rpartition("/")[0]
+        user = "1001"
+        if plant is not None:
+            assert _box(container, user, _PLANTS[plant], "plant", folder).returncode == 0
+        program, args = vercel._bash([script], sudo=True)
+        done = subprocess.run(
+            ["docker", "exec", "-u", "root", container, program, *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        ran = _box(container, user, f"test -e /tmp/ran-{token}").returncode == 0
+        read = _box(container, user, 'cat "$1"', "read", out)
+        if plant is not None:
+            # A non-zero exit means no caller takes the planted output as a result.
+            assert (done.returncode != 0, ran) == (True, False), (done, read)
+            assert read.stdout in ("", "FORGED\n"), read
+        else:
+            assert (done.returncode, ran, read.stdout) == (0, True, "TRUE\n"), (done, read)
+            assert _box(container, user, 'cat "$1"', "read", sentinel).stdout == "0\n"
+            assert _box(container, user, 'stat -c "%u %a %F" "$1"', "stat", folder).stdout == "0 755 directory\n"
+            for attack in (
+                'touch "$1/planted"',
+                'echo FORGED > "$1/output.out"',
+                'mv "$1/output.out" /tmp/moved',
+                'rm -f "$1/exit"',
+                'rm -rf "$1"',
+            ):
+                assert _box(container, user, attack, "attack", folder).returncode != 0, attack
+            assert _box(container, user, 'cat "$1"', "read", out).stdout == "TRUE\n"
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60, check=False)
     assert _containers(tag) == []
 
 
