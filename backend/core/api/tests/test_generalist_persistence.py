@@ -1680,7 +1680,7 @@ def test_send_refuses_a_file_copy_over_the_storage_quota(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn that must copy another chat's file over the quota gets the upload's 409."""
+    """A turn that must copy another chat's file over the quota gets the upload's 409 and makes no chat."""
     client, engine = persistence_client
     _fund(engine)
     _add_media(engine, "img-1", "image")
@@ -1702,6 +1702,7 @@ def test_send_refuses_a_file_copy_over_the_storage_quota(
     with Session(engine) as session:
         assert [row.id for row in session.query(ChatMediaModel)] == ["img-1"]
         assert session.query(AgentMessageModel).count() == 0
+        assert [row.id for row in session.query(AgentConversationModel)] == ["src"]
 
 
 def test_stale_unsent_media_is_a_404_and_stores_nothing(

@@ -226,12 +226,13 @@ def load_media_data(engine: Any, media_ids: list[str]) -> dict[str, bytes]:
         )
 
 
-def media_copy_bytes(rows: list[ChatMediaModel], conversation_id: str) -> int:
+def media_copy_bytes(rows: list[ChatMediaModel], conversation_id: str | None) -> int:
     """Return the bytes that attaching ``rows`` to a chat copies.
 
     Args:
         rows: The files to attach.
-        conversation_id: The chat that gets the files.
+        conversation_id: The chat that gets the files, or None for a chat not
+            created yet; then every file that a chat holds is a copy.
 
     Returns:
         The total size of the files that another chat holds.
@@ -334,10 +335,12 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         Raises:
             HTTPException: 415 for a type that is not allowed, 413 for a file
                 over its kind's limit.
-            DomainError: 429 over the hourly upload cap, 409 over the storage quota.
+            DomainError: 429 over the hourly attachment cap, which file text
+                reads share, 409 over the storage quota.
         """
+        # The same key as the file text route, so media and files share one hourly cap.
         RateLimiter(shared_redis_client()).enforce(
-            f"chat-media:{user.username}",
+            f"attachments:{user.username}",
             limit=settings.rate_limit_attachments_per_hour,
             window_seconds=3600,
         )

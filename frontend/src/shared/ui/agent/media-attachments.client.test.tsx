@@ -56,7 +56,7 @@ dom.window.HTMLMediaElement.prototype.load = () => {};
   buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
-const { MediaTiles } = await import("./media-attachments");
+const { MediaTiles, MediaUrlContext } = await import("./media-attachments");
 const { SentAttachments } = await import("./sent-attachments");
 const { FilePage } = await import("./file-preview-body");
 
@@ -240,12 +240,68 @@ void test("a sent message shows four tiles, and +N opens the viewer at the fourt
   assert.equal(container.querySelectorAll("li").length, 4);
   const more = container.querySelector('button[aria-label="Show 2 more"]');
   assert.equal(more?.textContent, "+2");
+  const covered = container.querySelector('button[aria-label="Open photo-3.png"]');
+  assert.ok(covered?.closest("[inert]"), "the tile under +N leaves the tab order");
 
   await click(more);
   const box = dialog()!;
   assert.equal(box.querySelector('[role="status"]')?.textContent, "4 of 6");
   const description = document.getElementById(box.getAttribute("aria-describedby")!);
   assert.equal(description?.textContent, "photo-3.png");
+  await unmount();
+});
+
+void test("a sent file whose URL arrives late holds its place, and the open viewer stays on its item", async () => {
+  const late: Record<string, (url: string) => void> = {};
+  const resolve = (m: Media) =>
+    m.id === "m-0" ? new Promise<string>((done) => (late[m.id] = done)) : Promise.resolve(m.url);
+  const { container, unmount } = await mount(
+    <MediaUrlContext.Provider value={resolve}>
+      <SentAttachments media={[image(0), image(1)]} files={[]} />
+    </MediaUrlContext.Provider>,
+  );
+  const tiles = () => container.querySelectorAll("li");
+  assert.equal(tiles().length, 2);
+  assert.ok(
+    tiles()[0]?.querySelector('[role="progressbar"]'),
+    "the first tile waits in its own place",
+  );
+  await click(container.querySelector('button[aria-label="Open photo-1.png"]'));
+  const describedBy = () =>
+    document.getElementById(dialog()!.getAttribute("aria-describedby")!)?.textContent;
+  assert.equal(describedBy(), "photo-1.png");
+
+  await React.act(async () => late["m-0"]?.("https://example.test/0.png"));
+  assert.equal(describedBy(), "photo-1.png", "a late URL does not move the open viewer");
+  assert.equal(dialog()!.querySelector('[role="status"]')?.textContent, "2 of 2");
+  await press(dialog()!, "Escape");
+  await unmount();
+});
+
+void test("the audio waveform is a slider that seeks 5 seconds on the arrow keys", async () => {
+  const clip: Media = {
+    id: "a-2",
+    name: "talk.webm",
+    kind: "audio",
+    url: "https://example.test/t.webm",
+  };
+  const { container, unmount } = await mount(<SentAttachments media={[clip]} files={[]} />);
+  const audio = container.querySelector("audio")!;
+  let at = 10;
+  Object.defineProperty(audio, "duration", { configurable: true, value: 60 });
+  Object.defineProperty(audio, "currentTime", {
+    configurable: true,
+    get: () => at,
+    set: (v: number) => (at = v),
+  });
+  await fire(audio, "loadedmetadata");
+  await fire(audio, "timeupdate");
+  const slider = container.querySelector('[role="slider"][aria-label="Seek in audio"]')!;
+  assert.equal(slider.getAttribute("aria-valuemax"), "60");
+  await press(slider, "ArrowRight");
+  assert.equal(at, 15);
+  await press(slider, "Home");
+  assert.equal(at, 0);
   await unmount();
 });
 

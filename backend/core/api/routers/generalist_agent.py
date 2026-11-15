@@ -1726,6 +1726,13 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             if job_store is None or not req.persist:
                 return None, None, None
             try:
+                # Check the quota for file copies before a new chat is created and
+                # before an edit deletes turns, so a refused copy leaves no empty
+                # chat and never loses the turns it would replace. A new chat has
+                # no id yet, so every file that another chat holds is a copy.
+                copied = media_copy_bytes(media, req.conversation_id)
+                if copied:
+                    enforce_storage_quota(job_store, current_user.username, copied)
                 cid, ttl = _ensure_conversation(
                     job_store,
                     req.conversation_id,
@@ -1733,11 +1740,6 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     req.user_message,
                     media[0].filename if media else "",
                 )
-                # Check the quota for file copies before an edit deletes turns,
-                # so a refused copy never loses the turns it would replace.
-                copied = media_copy_bytes(media, cid)
-                if copied:
-                    enforce_storage_quota(job_store, current_user.username, copied)
                 carried = None
                 if req.edit_user_text is not None:
                     found, carried = _discard_from_user_turn(

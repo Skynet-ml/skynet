@@ -11,6 +11,7 @@ import {
   FailedTile,
   type MediaAttachment,
   MediaViewer,
+  PendingTile,
   useResolvedMedia,
   type ViewerItem,
 } from "./media-attachments";
@@ -24,6 +25,8 @@ interface Entry {
   key: string;
   slide: number | null;
   media?: MediaAttachment;
+  /** The media's URL is still on its way. */
+  pending?: boolean;
   file?: AttachedFile;
 }
 
@@ -41,13 +44,21 @@ export function SentAttachments({
   media?: readonly MediaAttachment[];
   files: readonly AttachedFile[];
 }) {
-  const media = useResolvedMedia(given);
-  const [open, setOpen] = React.useState<number | null>(null);
+  const resolved = useResolvedMedia(given);
+  // The open item's id: an index would move to another item as late URLs add slides.
+  const [open, setOpen] = React.useState<string | null>(null);
   const opener = React.useRef<HTMLElement | null>(null);
   const { slides, entries } = React.useMemo(() => {
     const slides: ViewerItem[] = [];
     const entries: Entry[] = [];
-    for (const m of media) {
+    const ready = new Map(resolved.map((m) => [m.id, m]));
+    for (const g of given) {
+      const m = ready.get(g.id);
+      if (!m) {
+        // A placeholder keeps the tile's place, so nothing moves when the URL arrives.
+        entries.push({ key: g.id, slide: null, media: g, pending: true });
+        continue;
+      }
       if (m.status === "failed") {
         entries.push({ key: m.id, slide: null, media: m });
         continue;
@@ -68,7 +79,7 @@ export function SentAttachments({
       });
     });
     return { slides, entries };
-  }, [media, files]);
+  }, [given, resolved, files]);
   if (!entries.length) return null;
   const hidden = entries.length > SENT_LIMIT ? entries.length - SENT_LIMIT : 0;
   const shown = hidden ? entries.slice(0, SENT_LIMIT) : entries;
@@ -76,6 +87,11 @@ export function SentAttachments({
   const moreSlide = hidden
     ? (entries.slice(SENT_LIMIT - 1).find((e) => e.slide !== null)?.slide ?? null)
     : null;
+  const openAt = (slide: number, e: React.MouseEvent<HTMLElement>) => {
+    opener.current = e.currentTarget;
+    setOpen(slides[slide]?.id ?? null);
+  };
+  const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
   return (
     <>
       <ul
@@ -83,60 +99,51 @@ export function SentAttachments({
         aria-label={msg("shared.agent.media_list")}
         className="flex max-w-full flex-wrap items-end justify-end gap-2"
       >
-        {shown.map(({ key, slide, media: m, file }, i) => (
-          <li key={key} className="relative">
-            {file ? (
-              <FileTile
-                name={file.name}
-                text={file.text}
-                onOpen={
-                  slide === null
-                    ? undefined
-                    : (e) => {
-                        opener.current = e.currentTarget;
-                        setOpen(slide);
-                      }
-                }
-              />
-            ) : m?.status === "failed" ? (
-              <FailedTile media={m} />
-            ) : (
-              m && (
-                <DraftTile
-                  media={m}
-                  onOpen={(e) => {
-                    opener.current = e.currentTarget;
-                    setOpen(slide);
-                  }}
-                />
-              )
-            )}
-            {hidden > 0 && i === SENT_LIMIT - 1 && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  if (moreSlide === null) return;
-                  opener.current = e.currentTarget;
-                  setOpen(moreSlide);
-                }}
-                disabled={moreSlide === null}
-                aria-label={msg("shared.agent.media_more", { count: hidden })}
-                className={cn(
-                  "absolute inset-0 z-[3] flex items-center justify-center rounded-xl bg-black/55 text-2xl font-medium text-white tabular-nums",
-                  "transition-colors duration-150 hover:bg-black/65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
-                  moreSlide === null ? "cursor-default" : "cursor-pointer",
+        {shown.map(({ key, slide, media: m, pending, file }, i) => {
+          const covered = hidden > 0 && i === SENT_LIMIT - 1;
+          return (
+            <li key={key} className="relative">
+              {/* Under "+N" the tile is only a picture; the "+N" button takes its place. */}
+              <div inert={covered}>
+                {file ? (
+                  <FileTile
+                    name={file.name}
+                    text={file.text}
+                    onOpen={slide === null ? undefined : (e) => openAt(slide, e)}
+                  />
+                ) : pending && m ? (
+                  <PendingTile media={m} />
+                ) : m?.status === "failed" ? (
+                  <FailedTile media={m} />
+                ) : (
+                  m && slide !== null && <DraftTile media={m} onOpen={(e) => openAt(slide, e)} />
                 )}
-              >
-                +{hidden}
-              </button>
-            )}
-          </li>
-        ))}
+              </div>
+              {covered && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    if (moreSlide !== null) openAt(moreSlide, e);
+                  }}
+                  disabled={moreSlide === null}
+                  aria-label={msg("shared.agent.media_more", { count: hidden })}
+                  className={cn(
+                    "absolute inset-0 z-[3] flex items-center justify-center rounded-xl bg-black/55 text-2xl font-medium text-white tabular-nums",
+                    "transition-colors duration-150 hover:bg-black/65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+                    moreSlide === null ? "cursor-default" : "cursor-pointer",
+                  )}
+                >
+                  +{hidden}
+                </button>
+              )}
+            </li>
+          );
+        })}
       </ul>
       <MediaViewer
         media={slides}
-        index={open === null || !slides.length ? null : Math.min(open, slides.length - 1)}
-        onIndex={setOpen}
+        index={openIndex < 0 ? null : openIndex}
+        onIndex={(i) => setOpen(slides[i]?.id ?? null)}
         onClose={() => setOpen(null)}
         returnFocus={opener}
       />

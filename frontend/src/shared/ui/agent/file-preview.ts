@@ -20,6 +20,9 @@ export type FilePreview =
 /** More rows than this render as plain text: a table that big would stall the page. */
 export const MAX_TABLE_ROWS = 2000;
 
+/** The most grid cells (rows times the widest row) a preview draws; one very wide row pads every row. */
+export const MAX_TABLE_CELLS = 100_000;
+
 // The backend's stand-in for a file it could not read: one bracketed line.
 const UNREADABLE_RE = /^\[Attached file [^\n]*\]$/;
 // The backend ends a cut file with one bracketed "[Truncated: …]" line.
@@ -93,7 +96,12 @@ export function filePreview(ext: string, isCode: boolean, text: string): FilePre
         : null;
   if (tables) {
     const count = tables.reduce((n, t) => n + t.rows.length, 0);
-    if (count > 0 && count <= MAX_TABLE_ROWS) return { kind: "tables", tables, note };
+    const cells = tables.reduce(
+      (n, t) => n + t.rows.length * t.rows.reduce((w, row) => Math.max(w, row.length), 0),
+      0,
+    );
+    if (count > 0 && count <= MAX_TABLE_ROWS && cells <= MAX_TABLE_CELLS)
+      return { kind: "tables", tables, note };
     return { kind: "plain", text: body, note };
   }
   if (MARKDOWN_EXTS.has(ext)) return { kind: "markdown", text: body, note };

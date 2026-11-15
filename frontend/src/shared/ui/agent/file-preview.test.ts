@@ -71,4 +71,9 @@ void describe("filePreview", () => {
     assert.equal(filePreview("txt", false, "  \n"), null);
     assert.equal(filePreview("pdf", false, "[Attached file report.pdf could not be read]"), null);
   });
+
+  void it("shows a CSV file as plain text when one wide row would pad the grid past the cell cap", () => {
+    const text = `${",".repeat(2000)}\n${"a\n".repeat(100)}`;
+    assert.equal(filePreview("csv", false, text)?.kind, "plain");
+  });
 });

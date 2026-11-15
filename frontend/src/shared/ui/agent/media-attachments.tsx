@@ -246,20 +246,27 @@ export function TileRow({
     );
   }, []);
   React.useEffect(() => {
+    const el = row.current;
+    if (!el) return;
     const frame = requestAnimationFrame(measure);
-    window.addEventListener("resize", measure);
-    const at = refocus.current;
-    refocus.current = null;
-    if (at !== null) {
-      const tiles = row.current?.querySelectorAll<HTMLElement>("[data-media-tile]");
-      const next = tiles?.[Math.min(at, tiles.length - 1)];
+    // Tiles come and go without a resize, so the row measures again when its content changes.
+    const observer = new MutationObserver(() => {
+      measure();
+      const at = refocus.current;
+      refocus.current = null;
+      if (at === null) return;
+      const tiles = el.querySelectorAll<HTMLElement>("[data-media-tile]");
+      const next = tiles[Math.min(at, tiles.length - 1)];
       next?.querySelector<HTMLElement>("button, a, [tabindex]")?.focus();
-    }
+    });
+    observer.observe(el, { childList: true, subtree: true });
+    window.addEventListener("resize", measure);
     return () => {
       cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [children, measure]);
+  }, [measure]);
   return (
     <div
       ref={row}
@@ -454,7 +461,8 @@ function waveBars(name: string, count = 20): number[] {
 /**
  * A clip's waveform that fills as it plays; a press seeks. The bar under the
  * playhead stands a little taller, so the eye finds the place. Hover tints the
- * bars up to the pointer, to show where a press will seek.
+ * bars up to the pointer, to show where a press will seek. It is a slider:
+ * the arrow keys step 5 seconds, mirrored in RTL, and Home and End jump to the ends.
  */
 function Waveform({
   name,
@@ -477,10 +485,34 @@ function Waveform({
       ? Math.min(1, audio.time / audio.duration)
       : 0;
   const head = audio.playing ? Math.min(bars.length - 1, Math.floor(progress * bars.length)) : -1;
+  const known = Number.isFinite(audio.duration) && audio.duration > 0;
   return (
     <span
-      aria-hidden
-      className={cn("flex cursor-pointer items-center", className)}
+      role="slider"
+      tabIndex={0}
+      aria-label={msg("shared.agent.media_seek_audio")}
+      aria-valuemin={0}
+      aria-valuemax={known ? Math.round(audio.duration) : 0}
+      aria-valuenow={Math.round(audio.time)}
+      aria-valuetext={clock(audio.time)}
+      className={cn(
+        "flex cursor-pointer items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+        className,
+      )}
+      onKeyDown={(e) => {
+        if (!known) return;
+        const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
+        let at: number;
+        if (e.key === "Home") at = 0;
+        else if (e.key === "End") at = audio.duration;
+        else if (e.key === "ArrowLeft" || e.key === "ArrowRight")
+          at = audio.time + ((e.key === "ArrowRight") !== rtl ? 5 : -5);
+        else return;
+        // The viewer pages on the same keys, so the slider keeps them.
+        e.preventDefault();
+        e.stopPropagation();
+        audio.seek(Math.min(1, Math.max(0, at / audio.duration)));
+      }}
       onPointerDown={(e) => audio.seek(fractionAt(e))}
       onPointerMove={(e) => setAim(fractionAt(e))}
       onPointerLeave={() => setAim(null)}
@@ -551,7 +583,9 @@ export function FailedTile({ media, className }: { media: MediaAttachment; class
       aria-label={msg(
         media.kind === "video"
           ? "shared.agent.media_failed_video"
-          : "shared.agent.media_failed_image",
+          : media.kind === "audio"
+            ? "shared.agent.media_failed_audio"
+            : "shared.agent.media_failed_image",
       )}
       title={media.name}
       className={cn(
@@ -566,6 +600,18 @@ export function FailedTile({ media, className }: { media: MediaAttachment; class
         {media.name}
       </span>
     </span>
+  );
+}
+
+/** A sent file whose URL is still on its way: a pulsing tile in the same place and size. */
+export function PendingTile({ media }: { media: MediaAttachment }) {
+  return (
+    <span
+      role="progressbar"
+      aria-label={msg("shared.agent.media_loading_preview", { name: media.name })}
+      title={media.name}
+      className={cn(CARD, TILE, "block animate-pulse motion-reduce:animate-none")}
+    />
   );
 }
 
@@ -664,6 +710,13 @@ function clampZoom(zoom: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
 }
 
+/** Keep a pan inside the zoomed image, so an edge never comes past the stage's edge. */
+function clampPan(pan: { x: number; y: number }, box: DOMRect, zoom: number) {
+  const x = (box.width * (zoom - 1)) / 2;
+  const y = (box.height * (zoom - 1)) / 2;
+  return { x: Math.min(x, Math.max(-x, pan.x)), y: Math.min(y, Math.max(-y, pan.y)) };
+}
+
 /**
  * A zoomable, pannable image, as WhatsApp's viewer: a click zooms in at the
  * pointer and a second click zooms out, a drag pans, and Ctrl or Cmd with the
@@ -723,7 +776,7 @@ function ZoomImage({
         if (!start.moved && Math.hypot(x - pan.x, y - pan.y) < 4) return;
         start.moved = true;
         setPanning(true);
-        setPan({ x, y });
+        setPan(clampPan({ x, y }, e.currentTarget.getBoundingClientRect(), zoom));
       }}
       onPointerUp={(e) => {
         const start = drag.current;
@@ -731,13 +784,19 @@ function ZoomImage({
         setPanning(false);
         if (!start || start.moved) return;
         if (zoom > 1) return onZoom(1);
-        // Zoom in on the clicked point: move it toward the center as the image grows.
+        // Zoom in on the clicked point: it stays under the pointer as the image grows.
         const box = e.currentTarget.getBoundingClientRect();
         const next = 2.5;
-        setPan({
-          x: (box.left + box.width / 2 - e.clientX) * (next - 1),
-          y: (box.top + box.height / 2 - e.clientY) * (next - 1),
-        });
+        setPan(
+          clampPan(
+            {
+              x: (box.left + box.width / 2 - e.clientX) * (next - 1),
+              y: (box.top + box.height / 2 - e.clientY) * (next - 1),
+            },
+            box,
+            next,
+          ),
+        );
         onZoom(next);
       }}
       onPointerCancel={() => {
@@ -761,7 +820,11 @@ function ZoomImage({
           panning && "motion-safe:transition-none",
           !loaded && "opacity-0",
         )}
-        style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+        // A zoom out from the header or the wheel can leave the stored pan too far; the
+        // CSS clamp keeps the drawn image on the stage. Percents are of the image box.
+        style={{
+          transform: `translate(clamp(${-(zoom - 1) * 50}%, ${pan.x}px, ${(zoom - 1) * 50}%), clamp(${-(zoom - 1) * 50}%, ${pan.y}px, ${(zoom - 1) * 50}%)) scale(${zoom})`,
+        }}
       />
     </div>
   );
@@ -1078,7 +1141,7 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
 /** A file in the viewer, drawn the way its own app shows it. */
 function FileSlide({ file }: { file: ViewerFile }) {
   return (
-    <div className="flex h-full w-full items-center justify-center">
+    <div data-file-page="" className="flex h-full w-full items-center justify-center">
       <FilePage name={file.name} preview={file.preview} />
     </div>
   );
@@ -1126,7 +1189,8 @@ function AudioSlide({ media }: { media: MediaAttachment }) {
 
 /** A slide next to the open one: a still preview that loads nothing heavy. */
 function NeighbourSlide({ item }: { item: ViewerItem }) {
-  if (item.kind === "file") return <FileSlide file={item} />;
+  // A file page can be a large table, so a neighbour shows only the file's type.
+  if (item.kind === "file") return <Thumb item={item} className="size-24" />;
   if (item.kind === "audio") return <AudioSlide media={item} />;
   if (item.kind === "image")
     return <img src={item.url} alt="" draggable={false} className={VIEWER_IMAGE} />;
@@ -1269,7 +1333,7 @@ const VIEWER_FADE =
  */
 export function MediaViewer({
   media,
-  index,
+  index: openIndex,
   onIndex,
   onClose,
   returnFocus,
@@ -1283,6 +1347,10 @@ export function MediaViewer({
 }) {
   const icons = React.useContext(MediaIconsContext);
   const strip = React.useRef<HTMLDivElement | null>(null);
+  // The last open item stays on the stage while the viewer fades out.
+  const [kept, setKept] = React.useState(openIndex);
+  if (openIndex !== null && openIndex !== kept) setKept(openIndex);
+  const index = openIndex ?? (kept !== null && kept < media.length ? kept : null);
   const [zoom, setZoom] = React.useState({ index, value: 1 });
   const item = index === null ? null : media[index];
   // Each item opens at its fitted size.
@@ -1319,7 +1387,10 @@ export function MediaViewer({
     );
   const many = media.length > 1;
   return (
-    <DialogPrimitive.Root open={item !== null} onOpenChange={(open) => !open && onClose()}>
+    <DialogPrimitive.Root
+      open={openIndex !== null && item !== null}
+      onOpenChange={(open) => !open && onClose()}
+    >
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className={cn("fixed inset-0 z-50 bg-black/95", VIEWER_FADE)} />
         <DialogPrimitive.Content
@@ -1346,7 +1417,13 @@ export function MediaViewer({
             if (target === e.currentTarget || target.dataset.slide !== undefined) onClose();
           }}
           onKeyDown={(e) => {
-            if (index === null) return;
+            // A slider took the key, or the focus is in a file page that scrolls on these keys.
+            if (
+              index === null ||
+              e.defaultPrevented ||
+              (e.target as HTMLElement).closest("[data-file-page]")
+            )
+              return;
             const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
             if (e.key === "Home") go(0);
             else if (e.key === "End") go(last);
