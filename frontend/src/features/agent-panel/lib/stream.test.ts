@@ -225,3 +225,74 @@ test("a stop during the reconnect wait ends quietly and clears the notice", asyn
   assert.deepEqual(progress, [{ attempt: 1, maxAttempts: MAX_RECONNECTS }, null]);
   assert.deepEqual(errors, []);
 });
+
+test("a Skynet 503 such as hosted_link.unreachable does not resend the turn", async () => {
+  let calls = 0;
+  const progress: unknown[] = [];
+  const errors: Array<[string, string | undefined]> = [];
+  await withFetch(
+    async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ detail: "Hosted is unreachable", code: "hosted_link.unreachable" }), {
+        status: 503,
+      });
+    },
+    () =>
+      streamGeneralistAgent({} as never, {
+        onReconnect: (p) => progress.push(p),
+        onDone: () => assert.fail("no done expected"),
+        onError: (message: string, code?: string) => errors.push([message, code]),
+      } as never),
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(progress, []);
+  assert.deepEqual(errors, [["Hosted is unreachable", "hosted_link.unreachable"]]);
+});
+
+test("an edge 503, then a good answer, streams the turn with no error", async () => {
+  let calls = 0;
+  let done = false;
+  await withFetch(
+    async () => {
+      calls += 1;
+      return calls === 1 ? new Response("<html>Service Unavailable</html>", { status: 503 }) : doneResponse();
+    },
+    () =>
+      streamGeneralistAgent({} as never, {
+        onDone: () => {
+          done = true;
+        },
+        onError: () => assert.fail("no error expected"),
+      } as never),
+  );
+  assert.equal(calls, 2);
+  assert.equal(done, true);
+});
+
+test("a connection that drops after the send while it was online does not resend the turn", async () => {
+  const nav = { onLine: true };
+  const before = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true });
+  let calls = 0;
+  const errors: string[] = [];
+  try {
+    await withFetch(
+      async () => {
+        calls += 1;
+        nav.onLine = false;
+        throw new TypeError("Failed to fetch");
+      },
+      () =>
+        streamGeneralistAgent({} as never, {
+          onReconnect: () => assert.fail("no reconnect expected"),
+          onDone: () => assert.fail("no done expected"),
+          onError: (message: string) => errors.push(message),
+        } as never),
+    );
+  } finally {
+    if (before) Object.defineProperty(globalThis, "navigator", before);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+  assert.equal(calls, 1);
+  assert.equal(errors.length, 1);
+});

@@ -263,3 +263,33 @@ test("a new chat with no cut title asks no title read", async () => {
     await unmount();
   }
 });
+
+test("capacity errors count up, and done or another error resets the count and the reconnect notice", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  try {
+    await act(() => agent().send("one"));
+    await act(() => calls[0]!.handlers.onError!("busy", "capacity"));
+    assert.equal(agent().capacityFailures, 1);
+    assert.equal(agent().error, "agent.error.capacity");
+
+    await act(() => agent().retry());
+    await act(() => calls[1]!.handlers.onError!("busy", "capacity"));
+    assert.equal(agent().capacityFailures, 2);
+
+    await act(() => agent().retry());
+    await act(() => calls[2]!.handlers.onReconnect!({ attempt: 1, maxAttempts: 5 }));
+    assert.deepEqual(agent().reconnect, { attempt: 1, maxAttempts: 5 });
+    await act(() => calls[2]!.handlers.onError!("model failed"));
+    assert.equal(agent().capacityFailures, 0);
+    assert.equal(agent().reconnect, null);
+
+    await act(() => agent().retry());
+    await act(() => calls[3]!.handlers.onError!("busy", "capacity"));
+    assert.equal(agent().capacityFailures, 1);
+    await act(() => agent().retry());
+    await act(() => calls[4]!.handlers.onDone!(done));
+    assert.equal(agent().capacityFailures, 0);
+  } finally {
+    await unmount();
+  }
+});

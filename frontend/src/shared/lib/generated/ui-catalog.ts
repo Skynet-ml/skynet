@@ -30454,7 +30454,7 @@ const ui_fa: Partial<Record<MessageKey, string>> = {
   "shared.agent.rail_remove_bookmark": "حذف نشانه",
   "shared.agent.reconnecting": "در حال اتصال دوباره {progress}",
   "shared.agent.regenerate": "دوباره تلاش کنید",
-  "shared.agent.retry_in": "تلاش دوباره تا {seconds} ثانیه",
+  "shared.agent.retry_in": "تلاش دوباره پس از {seconds} ثانیه",
   "shared.agent.run_code": "اجرای کد",
   "shared.agent.run_code_prompt": "قطعه‌کد زیر را ({language}) اجرا کنید و نتایج را برگردانید:\n\n```{language}\n{code}\n```",
   "shared.agent.seconds_short": "ثانیه",
