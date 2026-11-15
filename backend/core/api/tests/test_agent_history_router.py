@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -245,8 +246,12 @@ def test_fork_saves_a_copy_that_loads_again() -> None:
     assert len(client.get("/agent/conversations/c-1").json()["messages"]) == 4
 
 
-def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
-    """A fork holds its own copies of the files, so deleting the source keeps them.
+@pytest.mark.parametrize(
+    ("name", "kind", "mime"),
+    [("m-2.png", "image", "image/png"), ("m-2.pdf", "document", "application/pdf")],
+)
+def test_fork_keeps_its_media_after_the_source_chat_is_deleted(name: str, kind: str, mime: str) -> None:
+    """A fork holds its own copies of the files, documents too, so deleting the source keeps them.
 
     Two files make the fork write a copy before it reads the next file.
     """
@@ -259,14 +264,17 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
                     ChatMediaModel(
                         id=media_id,
                         username="alice",
-                        filename=f"{media_id}.png",
-                        kind="image",
-                        mime_type="image/png",
+                        filename=filename,
+                        kind=media_kind,
+                        mime_type=media_mime,
                         byte_size=3,
                         data=data,
                         conversation_id="c-1",
                     )
-                    for media_id, data in (("m-1", b"abc"), ("m-2", b"def"))
+                    for media_id, filename, media_kind, media_mime, data in (
+                        ("m-1", "m-1.png", "image", "image/png", b"abc"),
+                        ("m-2", name, kind, mime, b"def"),
+                    )
                 ),
                 AgentMessageModel(
                     conversation_id="c-1",
@@ -275,7 +283,7 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
                     router_metadata={
                         "media": [
                             {"id": "m-1", "name": "m-1.png", "kind": "image"},
-                            {"id": "m-2", "name": "m-2.png", "kind": "image"},
+                            {"id": "m-2", "name": name, "kind": kind},
                         ]
                     },
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -290,7 +298,7 @@ def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
     assert client.delete("/agent/conversations/c-1").status_code < 300
 
     media = client.get(f"/agent/conversations/{fork['id']}").json()["messages"][0]["media"]
-    assert [(m["name"], m["kind"]) for m in media] == [("m-1.png", "image"), ("m-2.png", "image")]
+    assert [(m["name"], m["kind"]) for m in media] == [("m-1.png", "image"), (name, kind)]
     with store._session_factory() as session:
         assert session.get(ChatMediaModel, "m-1") is None
         copies = [session.get(ChatMediaModel, m["id"]) for m in media]

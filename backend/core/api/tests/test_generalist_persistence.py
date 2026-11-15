@@ -1856,6 +1856,34 @@ def test_split_media_sends_images_only_up_to_the_turn_budget(monkeypatch: pytest
     assert [row.id for row in references] == ["img-2"]
 
 
+def test_split_media_leaves_document_originals_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document original is neither model input nor a reference note: the message holds its text."""
+    rows = [
+        ChatMediaModel(id="doc-1", filename="a.pdf", kind="document", mime_type="application/pdf", byte_size=3),
+        ChatMediaModel(id="vid-1", filename="v.mp4", kind="video", mime_type="video/mp4", byte_size=3),
+    ]
+
+    images, references = agent_mod._split_media(rows, sees_images=True)
+
+    assert images == []
+    assert [row.id for row in references] == ["vid-1"]
+
+
+def test_history_names_media_but_not_document_originals() -> None:
+    """A past turn's media gets a short note; its document original gets none."""
+    turn = agent_mod.ChatTurn(
+        role="user",
+        content="see",
+        media=[{"name": "a.pdf", "kind": "document"}, {"name": "v.mp4", "kind": "video"}],
+    )
+    only_document = agent_mod.ChatTurn(role="user", content="read", media=[{"name": "a.pdf", "kind": "document"}])
+
+    history = history_for_agent([turn, only_document])
+
+    assert history[0]["content"] == "see\n[video: v.mp4]"
+    assert history[1]["content"] == "read"
+
+
 def test_turn_without_media_keeps_the_message(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,

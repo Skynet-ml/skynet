@@ -52,7 +52,10 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   nextUpload = null;
   if (held) return held;
   uploads += 1;
-  return Response.json({ id: `s-${uploads}`, name: "f.png", kind: "image" });
+  const file = (init?.body as FormData | undefined)?.get("file");
+  const name = file instanceof File ? file.name : "f.png";
+  const kind = /\.(pdf|docx|xlsx)$/.test(name) ? "document" : "image";
+  return Response.json({ id: `s-${uploads}`, name, kind });
 }) as typeof fetch;
 
 const { createRoot } = await import("react-dom/client");
@@ -339,4 +342,139 @@ void test("a restore drops its files when a newer restore starts or the user add
   );
   assert.equal(latest!.blocked, null);
   await React.act(async () => root.unmount());
+});
+
+/** Mount the hook alone and return a getter for its latest value. */
+async function mountDraft() {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  function Harness() {
+    latest = useChatMedia();
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness />));
+  return { draft: () => latest!, unmount: () => React.act(async () => root.unmount()) };
+}
+
+const pdf = (name: string) => new File([new Uint8Array(3)], name, { type: "application/pdf" });
+const documents = <T extends { kind: string }>(media: readonly T[] | null) =>
+  (media ?? []).filter((m) => m.kind === "document");
+
+void test("a failed original upload sends no original for any file with its name", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  nextUpload = Promise.resolve(new Response(null, { status: 500 }));
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
+  await flush();
+  const second = `s-${uploads}`;
+  // The second file's original must not pair with the first file's text.
+  await React.act(async () => draft().keepOriginals([{ name: "a.pdf" }, { name: "a.pdf" }]));
+  assert.deepEqual(documents(draft().ready()), []);
+  assert.deepEqual(deleted.slice(before), [second]);
+  await unmount();
+});
+
+void test("removing one of two same-name files deletes both originals", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
+  await flush();
+  const ids = documents(draft().ready()).map((m) => m.id);
+  assert.equal(ids.length, 2);
+  await React.act(async () => draft().keepOriginals([{ name: "a.pdf" }]));
+  assert.deepEqual(documents(draft().ready()), []);
+  assert.deepEqual(deleted.slice(before).sort(), ids.sort());
+  await unmount();
+});
+
+void test("Send waits for an original upload, and an unmount deletes one that ends later", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  let settle: (res: Response) => void = () => {};
+  nextUpload = new Promise<Response>((resolve) => (settle = resolve));
+  await React.act(async () => draft().addOriginals([pdf("late.pdf")]));
+  assert.equal(draft().blocked, "Wait for the files to finish uploading.");
+  assert.equal(draft().ready(), null);
+  await unmount();
+  settle(Response.json({ id: "late-1", name: "late.pdf", kind: "document" }));
+  await flush();
+  assert.deepEqual(deleted.slice(before), ["late-1"]);
+});
+
+void test("an original past the file limit stays out of the message and goes on clear", async () => {
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () =>
+    draft().addFiles(Array.from({ length: MAX_MEDIA_PER_MESSAGE - 1 }, (_, n) => image(n))),
+  );
+  await React.act(async () => draft().addOriginals([pdf("b.pdf"), pdf("c.pdf")]));
+  await flush();
+  const media = draft().ready()!;
+  assert.equal(media.length, MAX_MEDIA_PER_MESSAGE);
+  assert.deepEqual(
+    documents(media).map((m) => m.name),
+    ["b.pdf"],
+  );
+  const before = deleted.length;
+  const last = `s-${uploads}`;
+  await React.act(async () => draft().clear());
+  assert.deepEqual(deleted.slice(before), [last]);
+  await unmount();
+});
+
+void test("two same-name originals that do not both fit stay out together and go on clear", async () => {
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () =>
+    draft().addFiles(Array.from({ length: MAX_MEDIA_PER_MESSAGE - 1 }, (_, n) => image(n))),
+  );
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf"), pdf("c.pdf")]));
+  await flush();
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["c.pdf"],
+  );
+  const before = deleted.length;
+  await React.act(async () => draft().clear());
+  assert.deepEqual(deleted.slice(before), [`s-${uploads - 2}`, `s-${uploads - 1}`]);
+  await unmount();
+});
+
+void test("a restore sends a document again as an original, not a tile", async () => {
+  const { draft, unmount } = await mountDraft();
+  const errorsBefore = errors.length;
+  await React.act(async () =>
+    draft().restore([
+      { id: "sent-img", name: "a.png", kind: "image", url: "" },
+      { id: "sent-doc", name: "r.pdf", kind: "document", url: "" },
+      { id: "gone", name: "lost.pdf", kind: "document", url: "" },
+    ]),
+  );
+  await flush();
+  assert.deepEqual(
+    draft().tiles.map((t) => t.name),
+    ["a.png"],
+  );
+  // A document that does not load stays out with no error: its file still goes as text.
+  assert.equal(errors.length, errorsBefore);
+  await React.act(async () => draft().keepOriginals([{ name: "r.pdf" }]));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["r.pdf"],
+  );
+  await unmount();
+});
+
+void test("a media file the server stores as a document fails and its copy goes", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  const errorsBefore = errors.length;
+  // An image name and type, but the fake server sees a PDF.
+  nextUpload = Promise.resolve(Response.json({ id: "doc-1", name: "scan.png", kind: "document" }));
+  await React.act(async () =>
+    draft().addFiles([new File([new Uint8Array(3)], "scan.png", { type: "image/png" })]),
+  );
+  await flush();
+  assert.equal(draft().tiles[0]!.status, "failed");
+  assert.deepEqual(deleted.slice(before), ["doc-1"]);
+  assert.equal(errors.length, errorsBefore + 1);
+  await unmount();
 });

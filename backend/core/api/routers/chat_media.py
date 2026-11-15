@@ -1,4 +1,4 @@
-"""Store images, video and audio attached in agent chats (SKY-707). [INTERNAL]
+"""Store images, video, audio and documents attached in agent chats (SKY-707). [INTERNAL]
 
 ``POST /agent/media`` takes one file, finds its real type from its first
 bytes, and stores it for the caller. ``GET /agent/media/{media_id}`` returns
@@ -9,12 +9,18 @@ an id never confirms that a file exists.
 The upload header's content type is never trusted. SVG, HEIC and every type
 that is not on the allow-list get a 415, because a browser can run script in
 SVG and a model provider cannot read HEIC.
+
+A ``document`` is the original bytes of an attached PDF, DOCX or XLSX file
+(SKY-735). The agent reads the file's extracted text, which travels in the
+message; the original exists only so the chat viewer can show the real file.
 """
 
 from __future__ import annotations
 
+import io
 import re
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -28,6 +34,7 @@ from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.orm import Session, defer
 
 from ...config import settings
+from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import ChatMediaModel
 from ...storage.usage import sweep_unsent_chat_media
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -41,6 +48,9 @@ MAX_MEDIA_BYTES: dict[str, int] = {
     "image": 3 * 1024 * 1024,
     "audio": 20 * 1024 * 1024,
     "video": 50 * 1024 * 1024,
+    # The same limit as the text read of an attached file, so every file
+    # whose text the chat holds can keep its original too.
+    "document": MAX_ATTACHMENT_BYTES,
 }
 MAX_MEDIA_PER_MESSAGE = 10
 # The image bytes one turn sends to the model. Gemini refuses a request over
@@ -49,6 +59,28 @@ MAX_MEDIA_PER_MESSAGE = 10
 MAX_MODEL_IMAGE_BYTES = 12 * 1024 * 1024
 _SNIFF_BYTES = 64
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f"\\/]')
+_ZIP_MAGIC = b"PK\x03\x04"
+# The part each Office Open XML format must hold, and the type it is served as.
+_OFFICE_PARTS = {
+    "word/document.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xl/workbook.xml": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+# The viewer picks how to draw an original from its file name, so a document
+# must carry the extension of its real type.
+_DOCUMENT_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    _OFFICE_PARTS["word/document.xml"]: ".docx",
+    _OFFICE_PARTS["xl/workbook.xml"]: ".xlsx",
+}
+_ZIP_END_MAGIC = b"PK\x05\x06"
+_ZIP64_LOCATOR_MAGIC = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
+_ZIP_END_SIZE = 22
+# A zip's comment can be at most this long, so its end record is in this tail.
+_ZIP_END_SEARCH = _ZIP_END_SIZE + 0xFFFF
+# Real DOCX and XLSX directories are a few KiB. The cap stops a zip of many
+# small entries from costing memory and CPU in the request thread.
+MAX_ZIP_DIRECTORY_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -56,7 +88,7 @@ class SniffedMedia:
     """The real type of an uploaded file, read from its bytes.
 
     Attributes:
-        kind: ``image``, ``video`` or ``audio``.
+        kind: ``image``, ``video``, ``audio`` or ``document``.
         mime_type: The content type the server sends back for the file.
     """
 
@@ -105,6 +137,12 @@ def sniff_media(head: bytes, declared: str = "") -> SniffedMedia | None:
         The sniffed type, or ``None`` when the file is not an allowed type.
     """
     declared = declared.lower()
+    if head.startswith(b"%PDF-"):
+        return SniffedMedia("document", "application/pdf")
+    if head.startswith(_ZIP_MAGIC):
+        # Any zip passes here; ``office_document_type`` finds its real type
+        # once the whole file is read.
+        return SniffedMedia("document", "application/zip")
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return SniffedMedia("image", "image/png")
     if head.startswith(b"\xff\xd8\xff"):
@@ -137,6 +175,35 @@ def sniff_media(head: bytes, declared: str = "") -> SniffedMedia | None:
         if b1 & 0xE0 == 0xE0 and b1 & 0x18 != 0x08 and b1 & 0x06 in (0x02, 0x04):
             return SniffedMedia("audio", "audio/mpeg")
     return None
+
+
+def office_document_type(data: bytes) -> str | None:
+    """Find the Office Open XML type of a zip file from its part names.
+
+    Args:
+        data: The whole file.
+
+    Returns:
+        The DOCX or XLSX content type, or ``None`` for any other zip.
+    """
+    # zipfile reads the central directory that this end record names. A ZIP64
+    # locator just before the record makes zipfile use the ZIP64 size instead,
+    # which the cap below does not see. DOCX and XLSX under the upload limit
+    # never need ZIP64, so a zip that has one is refused.
+    end = data.rfind(_ZIP_END_MAGIC, max(0, len(data) - _ZIP_END_SEARCH))
+    if end < 0 or len(data) - end < _ZIP_END_SIZE:
+        return None
+    if data[max(0, end - _ZIP64_LOCATOR_SIZE) : end].startswith(_ZIP64_LOCATOR_MAGIC):
+        return None
+    if int.from_bytes(data[end + 12 : end + 16], "little") > MAX_ZIP_DIRECTORY_BYTES:
+        return None
+    try:
+        # Only the central directory is read; no part is decompressed.
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+    except (zipfile.BadZipFile, ValueError):
+        return None
+    return next((mime for part, mime in _OFFICE_PARTS.items() if part in names), None)
 
 
 def _safe_filename(raw: str | None) -> str:
@@ -369,7 +436,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         "/agent/media",
         response_model=ChatMediaResponse,
         status_code=201,
-        summary="Upload an image, video or audio file for an agent chat",
+        summary="Upload an image, video, audio or document file for an agent chat",
     )
     def upload_media(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
@@ -385,26 +452,40 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             The stored file's id, name, kind, real type and size.
 
         Raises:
-            HTTPException: 415 for a type that is not allowed, 413 for a file
-                over its kind's limit.
-            DomainError: 429 over the hourly attachment cap, which file text
-                reads share, 409 over the storage quota.
+            HTTPException: 415 for a type that is not allowed or a document
+                whose name has another type's extension, 413 for a file over
+                its kind's limit.
+            DomainError: 429 over the hourly cap (file text reads share it,
+                and document originals have their own), 409 over the storage
+                quota.
         """
-        # The same key as the file text route, so media and files share one hourly cap.
-        RateLimiter(shared_redis_client()).enforce(
-            f"attachments:{user.username}",
-            limit=settings.rate_limit_attachments_per_hour,
-            window_seconds=3600,
-        )
         engine = _engine(job_store)
         head = file.file.read(_SNIFF_BYTES)
         sniffed = sniff_media(head, file.content_type or "")
+        # Media shares the file text route's hourly cap. A document original
+        # (SKY-735) gets its own: its file's text read already counted there.
+        # So a direct caller can store more files an hour, but the storage quota
+        # still caps the total bytes.
+        bucket = "chat-originals" if sniffed and sniffed.kind == "document" else "attachments"
+        RateLimiter(shared_redis_client()).enforce(
+            f"{bucket}:{user.username}",
+            limit=settings.rate_limit_attachments_per_hour,
+            window_seconds=3600,
+        )
         if sniffed is None:
             raise HTTPException(status_code=415, detail="This file type is not supported.")
         limit = MAX_MEDIA_BYTES[sniffed.kind]
         data = head + file.file.read(limit + 1 - len(head))
         if len(data) > limit:
             raise HTTPException(status_code=413, detail="This file is too large.")
+        if sniffed.mime_type == "application/zip":
+            office = office_document_type(data)
+            if office is None:
+                raise HTTPException(status_code=415, detail="This file type is not supported.")
+            sniffed = SniffedMedia("document", office)
+        filename = _safe_filename(file.filename)
+        if sniffed.kind == "document" and not filename.lower().endswith(_DOCUMENT_EXTENSIONS[sniffed.mime_type]):
+            raise HTTPException(status_code=415, detail="This file type is not supported.")
         # The quota check measures storage, and that measure first sweeps the
         # user's stale unsent files, so they never block this upload.
         enforce_storage_quota(job_store, user.username, len(data))
@@ -413,7 +494,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         row = ChatMediaModel(
             id=str(uuid4()),
             username=user.username,
-            filename=_safe_filename(file.filename),
+            filename=filename,
             kind=sniffed.kind,
             mime_type=sniffed.mime_type,
             byte_size=len(data),

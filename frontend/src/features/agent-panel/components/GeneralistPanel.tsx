@@ -43,6 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
@@ -1094,8 +1095,14 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
+  // A file taken out of the draft takes its stored original with it.
+  const keepOriginals = chatMedia.keepOriginals;
+  React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
+    // An upload that failed since the last edit can leave a name with fewer
+    // originals than files; this drops them before they go.
+    keepOriginals(splitPastes(draft).files);
     const media = chatMedia.ready();
     if (media === null) {
       toast.info(chatMedia.blocked ?? msg("agent.media.uploading"));
@@ -1114,7 +1121,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     setDraft("");
     chatMedia.clear();
     clearLineComments?.();
-  }, [agent, draft, lineComments, clearLineComments, chatMedia]);
+  }, [agent, draft, lineComments, clearLineComments, chatMedia, keepOriginals]);
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],
@@ -1938,6 +1945,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
+        onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
         mediaWaiting={chatMedia.tiles.length > 0}
         sendBlocked={chatMedia.blocked}
         onAttachFile={(file) => {

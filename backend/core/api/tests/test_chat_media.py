@@ -1,6 +1,7 @@
 """Tests for the agent chat media routes (SKY-707).
 
-Covers type sniffing from file bytes, the size limit for each kind, the
+Covers type sniffing from file bytes, the PDF, DOCX and XLSX originals
+(SKY-735), the size limit for each kind, the
 storage quota, owner-only reads and deletes, the response headers, the
 sweep of unsent files, the delete of a chat's files with the chat, and the
 media loader that the generalist route uses. The routes run over an
@@ -9,6 +10,9 @@ in-memory SQLite job store, with the auth dependency overridden.
 
 from __future__ import annotations
 
+import io
+import struct
+import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -23,6 +27,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import AgentConversationModel, AgentMessageModel, Base, ChatMediaModel
 from ...storage.remote import RemoteDBJobStore
 from ...storage.usage import UNSENT_MEDIA_RETENTION
@@ -34,11 +39,15 @@ from ..routers.chat_media import (
     create_chat_media_router,
     load_media_data,
     load_owned_media,
+    office_document_type,
     sniff_media,
 )
 from ..routers.generalist_agent import _persist_user_turn
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+_PDF = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _ALICE = "alice@example.com"
 _BOB = "bob@example.com"
 
@@ -140,6 +149,8 @@ def _upload(client: TestClient, data: bytes, name: str = "shot.png", content_typ
         (b"ID3\x04" + b"\x00" * 16, "", ("audio", "audio/mpeg")),
         (b"\xff\xfb\x90\x00" + b"\x00" * 16, "", ("audio", "audio/mpeg")),
         (b"\xff\xf1\x50\x80" + b"\x00" * 16, "", ("audio", "audio/aac")),
+        (_PDF, "", ("document", "application/pdf")),
+        (b"PK\x03\x04" + b"\x00" * 16, "", ("document", "application/zip")),
     ],
 )
 def test_sniff_media_reads_the_type_from_the_bytes(head: bytes, declared: str, expected: tuple[str, str]) -> None:
@@ -156,14 +167,13 @@ def test_sniff_media_reads_the_type_from_the_bytes(head: bytes, declared: str, e
         b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>',
         b"\x00\x00\x00\x18ftypheic" + b"\x00" * 8,
         b"\x00\x00\x00\x1cftypavif" + b"\x00" * 8,
-        b"%PDF-1.7\n",
         b"<html><body>hi</body></html>",
         "Hello".encode("utf-16"),
         b"",
     ],
 )
 def test_sniff_media_rejects_types_off_the_allow_list(head: bytes) -> None:
-    """SVG, HEIC, AVIF, documents, HTML, UTF-16 text and empty files are not media."""
+    """SVG, HEIC, AVIF, HTML, UTF-16 text and empty files are not media."""
     assert sniff_media(head, "image/png") is None
 
 
@@ -182,6 +192,110 @@ def test_upload_stores_the_file_for_the_caller(harness: SimpleNamespace) -> None
         assert row is not None
         assert row.username == _ALICE
         assert row.data == _PNG
+
+
+def _zip(*parts: str) -> bytes:
+    """Build a zip file that holds the given part names.
+
+    Args:
+        *parts: The part names, each with a tiny XML body.
+
+    Returns:
+        The zip bytes.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for part in parts:
+            archive.writestr(part, "<x/>")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("data", "name", "mime"),
+    [
+        (_PDF, "brief.pdf", "application/pdf"),
+        (_zip("[Content_Types].xml", "word/document.xml"), "brief.docx", _DOCX_MIME),
+        (_zip("[Content_Types].xml", "xl/workbook.xml"), "budget.xlsx", _XLSX_MIME),
+    ],
+)
+def test_upload_keeps_a_document_original_and_serves_its_real_type(
+    harness: SimpleNamespace, data: bytes, name: str, mime: str
+) -> None:
+    """A PDF, DOCX or XLSX is stored as a document and read back with its own type and safe headers."""
+    body = _upload(harness.client, data, name=name, content_type="application/octet-stream").json()
+
+    assert (body["kind"], body["mime_type"], body["name"]) == ("document", mime, name)
+    resp = harness.client.get(f"/agent/media/{body['id']}")
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert resp.headers["content-type"] == mime
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert "sandbox" in resp.headers["content-security-policy"]
+    harness.user[0] = _BOB
+    assert harness.client.get(f"/agent/media/{body['id']}").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "data",
+    [_zip("ppt/presentation.xml"), _zip("payload.js"), b"PK\x03\x04 not a real zip"],
+)
+def test_upload_rejects_a_zip_that_is_not_docx_or_xlsx(harness: SimpleNamespace, data: bytes) -> None:
+    """A PPTX, any other zip, or a broken zip gets a 415 and stores nothing."""
+    assert _upload(harness.client, data, name="x.docx").status_code == 415
+    with Session(harness.store.engine) as session:
+        assert session.scalars(select(ChatMediaModel)).all() == []
+
+
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [
+        (_zip("[Content_Types].xml", "word/document.xml"), "brief.pdf"),
+        (_PDF, "brief.docx"),
+        (_zip("xl/workbook.xml"), "budget"),
+    ],
+)
+def test_upload_rejects_a_document_named_as_another_type(harness: SimpleNamespace, data: bytes, name: str) -> None:
+    """The viewer draws an original by its name's extension, so a name that hides the real type gets a 415."""
+    assert _upload(harness.client, data, name=name, content_type="application/octet-stream").status_code == 415
+    with Session(harness.store.engine) as session:
+        assert session.scalars(select(ChatMediaModel)).all() == []
+
+
+def test_upload_rejects_a_zip_whose_directory_passes_the_cap(harness: SimpleNamespace) -> None:
+    """A zip of many small entries gets a 415 before its directory is parsed."""
+    names = ["word/document.xml", *(f"pad/{n:08d}-{'x' * 40}" for n in range(12_000))]
+    data = _zip(*names)
+    assert len(data) < chat_media.MAX_MEDIA_BYTES["document"]
+    assert _upload(harness.client, data, name="big.docx").status_code == 415
+
+
+def test_a_zip64_end_cannot_hide_a_large_directory_from_the_cap() -> None:
+    """A ZIP64 end names the real directory size, which a small 32-bit size must not hide."""
+    plain = _zip("word/document.xml", *(f"pad/{n:08d}-{'x' * 40}" for n in range(12_000)))
+    end = plain.rfind(b"PK\x05\x06")
+    _, _, _, on_disk, total, size, offset, _ = struct.unpack("<4s4H2LH", plain[end : end + 22])
+    record = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, on_disk, total, size, offset)
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, end, 1)
+    small_end = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 16, 0xFFFFFFFF, 0)
+    data = plain[:end] + record + locator + small_end
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert "word/document.xml" in archive.namelist()
+    assert office_document_type(data) is None
+
+
+def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document original does not use the cap that its file's text read already counted against."""
+    monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
+
+    assert _upload(harness.client, _PNG).status_code == 201
+    assert _upload(harness.client, _PNG).status_code == 429
+    assert _upload(harness.client, _PDF, name="a.pdf", content_type="application/pdf").status_code == 201
+    assert _upload(harness.client, _PDF, name="b.pdf", content_type="application/pdf").status_code == 429
+
+
+def test_document_limit_matches_the_file_text_limit() -> None:
+    """Every file whose text the chat can read can keep its original."""
+    assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES
 
 
 def test_safe_filename_drops_paths_quotes_and_control_characters() -> None:
@@ -477,3 +591,9 @@ def test_send_with_a_file_deleted_after_the_load_is_a_404(harness: SimpleNamespa
     assert caught.value.status_code == 404
     with Session(engine) as session:
         assert session.scalars(select(AgentMessageModel)).all() == []
+
+
+def test_the_content_type_column_holds_every_office_type() -> None:
+    """Check that Postgres can store the DOCX and XLSX types, which SQLite never checks."""
+    width = ChatMediaModel.__table__.c.mime_type.type.length
+    assert width >= max(len(_DOCX_MIME), len(_XLSX_MIME))

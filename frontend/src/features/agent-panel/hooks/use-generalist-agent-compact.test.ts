@@ -29,6 +29,8 @@ const stubs: Record<string, string> = {
     "export const streamCompaction = (req, handlers) => new Promise((resolve) =>" +
     " globalThis.compactTestCalls.push({ req, handlers, close: resolve }));" +
     "export const confirmGeneralistApproval = async () => true;",
+  "../lib/chat-media":
+    "export const deleteChatMedia = async (id) => void globalThis.deletedTestMedia?.push(id);",
   "../lib/conversation-api":
     "export const loadConversation = async (id) => {" +
     " globalThis.loadTestCalls?.push(id);" +
@@ -175,6 +177,33 @@ for (const [name, fail] of [
     }
   });
 }
+
+test("a send with only file originals during /compact queues its text and deletes the originals", async () => {
+  const { agent, compacts, act, unmount } = await mountChat();
+  const deleted: string[] = [];
+  Object.assign(globalThis, { deletedTestMedia: deleted });
+  try {
+    await act(() => agent().compact(""));
+    await act(settle);
+    assert.equal(compacts.length, 1);
+    let sent: boolean | null = null;
+    const media = [{ id: "d-1", name: "brief.pdf", kind: "document" as const, url: "" }];
+    await act(() => {
+      sent = agent().send("read this", undefined, { media });
+    });
+    await act(settle);
+    // The queue holds text only, so no message names the original: it goes now.
+    assert.equal(sent, true);
+    assert.deepEqual(
+      agent().midTurn.queued.map((item) => item.text),
+      ["read this"],
+    );
+    assert.deepEqual(deleted, ["d-1"]);
+  } finally {
+    Object.assign(globalThis, { deletedTestMedia: undefined });
+    await unmount();
+  }
+});
 
 test("a send with files during /compact is refused, so the composer keeps the files", async () => {
   const { agent, calls, compacts, act, unmount } = await mountChat();

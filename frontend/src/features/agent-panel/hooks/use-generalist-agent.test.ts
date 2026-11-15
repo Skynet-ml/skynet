@@ -29,6 +29,7 @@ const stubs: Record<string, string> = {
     "export const streamCompaction = async () => {};" +
     "export const confirmGeneralistApproval = async () => true;",
   "../lib/conversation-api": "export const loadConversation = async () => ({ detail: null });",
+  "../lib/chat-media": "export const deleteChatMedia = async () => {};",
 };
 const src = new URL("../../../", import.meta.url);
 registerHooks({
@@ -309,6 +310,33 @@ test("a capacity error after a tool call gets no automatic retry", async () => {
     assert.equal(agent().errorCode, "capacity");
     assert.equal(agent().error, "agent.error.capacity");
     assert.equal(agent().capacityFailures, 0);
+  } finally {
+    await unmount();
+  }
+});
+
+test("an edit that drops a file's block also drops that file's original, and a retry keeps it out", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  const block = (name: string) => `<attached_file name="${name}">\ntext\n</attached_file>\n\n`;
+  const doc = (id: string, name: string) => ({ id, name, kind: "document" as const, url: "" });
+  try {
+    await act(() =>
+      agent().send(`${block("a.pdf")}${block("b.docx")}look`, undefined, {
+        media: [doc("m-a", "a.pdf"), doc("m-b", "b.docx")],
+      }),
+    );
+    assert.deepEqual(calls[0]!.req.media_ids, ["m-a", "m-b"]);
+    await act(() => {
+      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "look" });
+      calls[0]!.handlers.onDone!(done);
+    });
+
+    await act(() => agent().editAndResend(0, `${block("b.docx")}look`));
+    assert.deepEqual(calls[1]!.req.media_ids, ["m-b"]);
+    assert.deepEqual(agent().messages[0]?.media?.map((m) => m.id), ["m-b"]);
+
+    await act(() => agent().retry());
+    assert.deepEqual(calls[2]!.req.media_ids, ["m-b"]);
   } finally {
     await unmount();
   }

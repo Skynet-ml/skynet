@@ -24,14 +24,19 @@ import type { FilePreview } from "./file-preview";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 
 import { FilePage } from "./file-preview-body";
+import { OriginalFile } from "./original-file";
 
 export type MediaKind = "image" | "video" | "audio";
 
-/** An image, video or audio file that goes with a message and renders as itself, not as text. */
+/**
+ * An image, video or audio file that goes with a message and renders as itself, not as text.
+ * A `document` is the stored original of an attached PDF, DOCX or XLSX (SKY-735): it has no
+ * tile of its own and shows only in its file's slide.
+ */
 export interface MediaAttachment {
   id: string;
   name: string;
-  kind: MediaKind;
+  kind: MediaKind | "document";
   /** Where the file plays from: an object URL in the draft, a stored URL once sent. */
   url: string;
   /** The upload failed, or the stored file could not be fetched. */
@@ -43,7 +48,10 @@ export interface ViewerFile {
   kind: "file";
   id: string;
   name: string;
-  preview: FilePreview;
+  /** The file's text as a page; null when only its original can show. */
+  preview: FilePreview | null;
+  /** The stored original, which the slide shows in place of the text. */
+  original?: MediaAttachment;
 }
 
 /** One slide of the viewer. */
@@ -1143,9 +1151,19 @@ function VideoPlayer({ src, name, onError }: { src: string; name: string; onErro
 
 /** A file in the viewer, drawn the way its own app shows it. */
 function FileSlide({ file }: { file: ViewerFile }) {
+  const resolve = React.useContext(MediaUrlContext);
+  const page = file.preview ? (
+    <FilePage name={file.name} preview={file.preview} />
+  ) : (
+    <p className="text-sm text-white/80">{msg("shared.agent.media_load_error")}</p>
+  );
   return (
     <div data-file-page="" className="flex h-full w-full items-center justify-center">
-      <FilePage name={file.name} preview={file.preview} />
+      {file.original && resolve ? (
+        <OriginalFile name={file.name} original={file.original} resolve={resolve} fallback={page} />
+      ) : (
+        page
+      )}
     </div>
   );
 }

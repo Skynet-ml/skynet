@@ -1783,7 +1783,8 @@ class AgentStagedDatasetModel(Base):
     __table_args__ = (Index("ix_agent_staged_datasets_user_created", "username", "created_at"),)
 
 
-# An image, video or audio file a user attached in an agent chat (SKY-707).
+# An image, video or audio file a user attached in an agent chat (SKY-707),
+# or the original of an attached PDF, DOCX or XLSX (SKY-735).
 # Only ``username`` reads it. ``mime_type`` comes from the file's own bytes,
 # not from the upload header. The bytes count in the "agent_chats" storage.
 # ``conversation_id`` names the stored chat that sent the file; deleting the
@@ -1795,7 +1796,7 @@ class ChatMediaModel(Base):
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[str] = mapped_column(String(8), nullable=False)
-    mime_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

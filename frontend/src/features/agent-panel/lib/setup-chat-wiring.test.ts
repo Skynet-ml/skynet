@@ -811,3 +811,19 @@ test("leaving /submit before the wizard mounts drops the setup mark", () => {
   assert.deepEqual(run("/submit"), { id: "c1" });
   assert.equal(run("/runs"), null);
 });
+
+test("Send drops file originals before it reads the ready media (SKY-735)", () => {
+  const calls: string[] = [];
+  const submit = expression(panel, "handleSubmit", {
+    draft: "see report.pdf",
+    lineComments: [],
+    splitPastes: () => ({ files: [{ name: "report.pdf" }] }),
+    keepOriginals: (files: { name: string }[]) =>
+      calls.push(`keep ${files.map((f) => f.name).join()}`),
+    chatMedia: { ready: () => (calls.push("ready"), null), blocked: "wait" },
+    toast: { info: () => calls.push("toast") },
+    msg: (key: string) => key,
+  });
+  submit();
+  assert.deepEqual(calls, ["keep report.pdf", "ready", "toast"]);
+});

@@ -155,7 +155,8 @@ def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
     Without the trace the model only sees its own prose from earlier turns, so
     it cannot tell which id a past submit returned or why a past call failed.
     A user turn's files go only as a short note with their kind and name: the
-    bytes went with that turn, and resending them would fill the context.
+    bytes went with that turn, and resending them would fill the context. A
+    ``document`` gets no note: its text is already in the turn's content.
 
     Args:
         turns: The client-supplied prior turns, oldest first.
@@ -167,8 +168,9 @@ def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
     for turn in turns:
         content = turn.content
-        if turn.role == "user" and turn.media:
-            notes = " ".join(f"[{item.get('kind', 'file')}: {item.get('name', '')}]" for item in turn.media)
+        noted = [item for item in turn.media if item.get("kind") != "document"] if turn.role == "user" else []
+        if noted:
+            notes = " ".join(f"[{item.get('kind', 'file')}: {item.get('name', '')}]" for item in noted)
             content = f"{content}\n{notes}" if content else notes
         entry: dict[str, Any] = {"role": turn.role, "content": content}
         if turn.role == "assistant" and turn.tool_calls:
@@ -299,9 +301,10 @@ class GeneralistAgentRequest(BaseModel):
         default_factory=list,
         max_length=MAX_MEDIA_PER_MESSAGE,
         description=(
-            "Ids from ``POST /agent/media`` of the images, video and audio attached to this message. "
-            "The model sees the images when it accepts image input; every other file is a reference, "
-            "listed in a ``media_notice`` event."
+            "Ids from ``POST /agent/media`` of the images, video, audio and document originals attached "
+            "to this message. The model sees the images when it accepts image input. Every other "
+            "image, video and audio file is a reference, listed in a ``media_notice`` event. A document "
+            "original is only for the chat viewer: the model reads the file's text in the message."
         ),
     )
 
@@ -1242,12 +1245,15 @@ def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[C
     Returns:
         ``(images, references)``: the images the model sees, and the files it
         only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in total are
-        references.
+        references. A ``document`` is in neither list: the message already
+        holds its text, and the original is only for the chat viewer.
     """
     images: list[ChatMediaModel] = []
     references: list[ChatMediaModel] = []
     image_bytes = 0
     for row in media:
+        if row.kind == "document":
+            continue
         if sees_images and row.kind == "image" and image_bytes + row.byte_size <= MAX_MODEL_IMAGE_BYTES:
             image_bytes += row.byte_size
             images.append(row)
