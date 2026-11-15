@@ -4,50 +4,14 @@
 // jump", Tab again to apply), so one Tab chain finishes a change across the file.
 
 import { closeCompletion, completionStatus } from "@codemirror/autocomplete";
-import { Prec, StateEffect, StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
+import { Prec, type EditorState, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 
 import { formatMsg, msg } from "@/shared/lib/messages";
 
 import { fetchCompletion } from "./completion";
-import {
-  cleanCompletion,
-  completionWindow,
-  consumeTyped,
-  DEBOUNCE_MS,
-  nextEditLine,
-  nextWord,
-  shouldSuggest,
-  type NextEdit,
-} from "./suggestions";
-
-type Suggest =
-  | { kind: "ghost"; pos: number; text: string; next: NextEdit | null }
-  | { kind: "jump"; line: number; next: NextEdit }
-  | { kind: "edit"; line: number; next: NextEdit };
-
-const setSuggest = StateEffect.define<Suggest | null>();
-
-const field = StateField.define<Suggest | null>({
-  create: () => null,
-  update(value, tr) {
-    for (const e of tr.effects) if (e.is(setSuggest)) return e.value;
-    if (!value) return null;
-    if (tr.docChanged) {
-      if (value.kind !== "ghost") return null;
-      let typed: string | null = null;
-      let single = true;
-      tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-        if (typed !== null || fromA !== value.pos || toA !== fromA) single = false;
-        else typed = inserted.toString();
-      });
-      const rest = single && typed !== null ? consumeTyped(value.text, typed) : null;
-      return rest === null ? null : { ...value, pos: value.pos + typed!.length, text: rest };
-    }
-    if (value.kind === "ghost" && tr.selection && tr.selection.main.head !== value.pos) return null;
-    return value;
-  },
-});
+import { accept, acceptWord, dismiss, setSuggest, suggestField as field } from "./ghost-state";
+import { cleanCompletion, completionWindow, DEBOUNCE_MS, shouldSuggest } from "./suggestions";
 
 // ---------- drawing ----------
 
@@ -148,67 +112,6 @@ function decorate(state: EditorState): DecorationSet {
     ranges.push(Decoration.widget({ widget: new BlockLines(s.next.lines, "cm-ghost-add", true), block: true, side: 1 }).range(line.to));
   }
   return Decoration.set(ranges, true);
-}
-
-// ---------- keys ----------
-
-/** After a full accept, offer the next edit if the file still needs it. */
-function afterAccept(doc: string, next: NextEdit | null): Suggest | null {
-  const line = nextEditLine(doc, next);
-  return line && next ? { kind: "jump", line, next } : null;
-}
-
-function accept(view: EditorView): boolean {
-  const s = view.state.field(field);
-  if (!s) return false;
-  if (s.kind === "ghost") {
-    const at = s.pos + s.text.length;
-    const doc = view.state.doc.sliceString(0, s.pos) + s.text + view.state.doc.sliceString(s.pos);
-    view.dispatch({
-      changes: { from: s.pos, insert: s.text },
-      selection: { anchor: at },
-      effects: setSuggest.of(afterAccept(doc, s.next)),
-      userEvent: "input.complete",
-    });
-  } else if (s.kind === "jump") {
-    const to = view.state.doc.line(s.line).to;
-    view.dispatch({
-      selection: { anchor: to },
-      effects: [setSuggest.of({ kind: "edit", line: s.line, next: s.next }), EditorView.scrollIntoView(to, { y: "center" })],
-    });
-  } else {
-    const at = view.state.doc.line(s.line).to;
-    const insert = s.next.lines.map((l) => `\n${l}`).join("");
-    view.dispatch({
-      changes: { from: at, insert },
-      selection: { anchor: at + insert.length },
-      effects: setSuggest.of(null),
-      userEvent: "input.complete",
-    });
-  }
-  return true;
-}
-
-function acceptWord(view: EditorView): boolean {
-  const s = view.state.field(field);
-  if (s?.kind !== "ghost") return false;
-  const word = nextWord(s.text);
-  const rest = s.text.slice(word.length);
-  const pos = s.pos + word.length;
-  const doc = view.state.doc.sliceString(0, s.pos) + word + view.state.doc.sliceString(s.pos);
-  view.dispatch({
-    changes: { from: s.pos, insert: word },
-    selection: { anchor: pos },
-    effects: setSuggest.of(rest ? { ...s, pos, text: rest } : afterAccept(doc, s.next)),
-    userEvent: "input.complete",
-  });
-  return true;
-}
-
-function dismiss(view: EditorView): boolean {
-  if (!view.state.field(field)) return false;
-  view.dispatch({ effects: setSuggest.of(null) });
-  return true;
 }
 
 /** Inline agent completion for one file. It binds Tab at the highest precedence, so a shown suggestion wins. */

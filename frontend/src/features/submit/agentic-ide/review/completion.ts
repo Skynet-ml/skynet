@@ -1,13 +1,12 @@
 // The editor's call to POST /agent-ide/completions (SKY-703). Each call is a
-// paid model call, so a refusal (no funds, no key, over the rate limit) pauses
+// paid model call, so a refusal or a provider failure pauses
 // the calls for a while instead of asking again after every key.
 
 import { apiUrl, fetchWithAuthRetry } from "@/shared/lib/api";
 
-import type { Suggestion } from "./suggestions";
+import { pausesCompletions, type Suggestion } from "./suggestions";
 
 const PAUSE_MS = 60_000;
-const PAUSE_STATUSES = new Set([402, 403, 409, 429, 503]);
 let pausedUntil = 0;
 
 /** Ask the model for the completion at the caret; null on any failure or while paused. */
@@ -24,7 +23,7 @@ export async function fetchCompletion(
       signal,
     });
     if (!res.ok) {
-      if (PAUSE_STATUSES.has(res.status)) pausedUntil = Date.now() + PAUSE_MS;
+      if (pausesCompletions(res.status)) pausedUntil = Date.now() + PAUSE_MS;
       return null;
     }
     const data = (await res.json()) as { completion?: string; next_edit?: Suggestion["next"] };

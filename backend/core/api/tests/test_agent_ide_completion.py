@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -17,10 +19,13 @@ from sqlalchemy.orm import Session
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.routers import agent_ide_completion
+from core.billing.byok_vault import STATUS_UNVERIFIED, ProviderKeyVault
 from core.billing.tests.test_protected_dispatch import CATALOG
 from core.storage.models import Base, BillingCustomerModel, ExecutionBudgetModel, ExecutionOperationModel
 
 REQUEST = {"path": "src/app.py", "prefix": "def add(a, b):\n    ret", "suffix": "\n"}
+# The fixture replaces the lookup in every test; these tests call the real one.
+REAL_OWN_KEY = agent_ide_completion._own_openrouter_key
 ANSWER = {"completion": "urn a + b", "next_edit": {"after": "def main():", "lines": ["    print(add(1, 2))"]}}
 
 
@@ -266,6 +271,104 @@ def test_rate_limit_stops_the_call_before_spending(ide: SimpleNamespace, monkeyp
     assert ide.client.post("/agent-ide/completions", json=REQUEST).status_code == 429
     assert keys == ["agent-ide-complete:alice"]
     assert ide.requests == []
+
+
+def _vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configure a fresh vault key, so the vault can store and read keys.
+
+    Args:
+        monkeypatch: Set the vault key on the settings.
+    """
+    monkeypatch.setattr(agent_ide_completion.settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
+
+
+def _save_key(engine: Any, secret: str, api_base: str | None = None) -> None:
+    """Store an OpenRouter key for alice, with the entry probe answering 200.
+
+    Args:
+        engine: The test database.
+        secret: The key to store.
+        api_base: Optional custom endpoint of the connection.
+    """
+    ok = SimpleNamespace(status_code=200, is_success=True)
+    with patch("core.billing.byok_vault.httpx.get", return_value=ok):
+        ProviderKeyVault(engine=engine).save_key("alice", "openrouter", secret, api_base=api_base)
+
+
+def test_real_lookup_returns_a_verified_openrouter_key(ide: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return the secret of a verified OpenRouter connection on openrouter.ai.
+
+    Args:
+        ide: The router fixture.
+        monkeypatch: Configure the vault key.
+    """
+    _vault(monkeypatch)
+    _save_key(ide.engine, "alice-own-key")
+    assert REAL_OWN_KEY(ide.engine, "alice") == "alice-own-key"
+    assert REAL_OWN_KEY(None, "alice") is None
+    assert REAL_OWN_KEY(ide.engine, "bob") is None
+
+
+def test_real_lookup_without_a_vault_key_returns_none(ide: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return None when the server has no vault key, even with a stored connection.
+
+    Args:
+        ide: The router fixture.
+        monkeypatch: Configure, then remove, the vault key.
+    """
+    _vault(monkeypatch)
+    _save_key(ide.engine, "alice-own-key")
+    monkeypatch.setattr(agent_ide_completion.settings, "byok_vault_key", None)
+    assert REAL_OWN_KEY(ide.engine, "alice") is None
+
+
+def test_real_lookup_skips_an_unverified_key(ide: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return None for a stored key that the provider did not verify.
+
+    Args:
+        ide: The router fixture.
+        monkeypatch: Configure the vault key and make the entry probe unverified.
+    """
+    _vault(monkeypatch)
+    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: STATUS_UNVERIFIED)
+    _save_key(ide.engine, "alice-own-key")
+    assert REAL_OWN_KEY(ide.engine, "alice") is None
+
+
+def test_real_lookup_falls_back_when_the_vault_fails(ide: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return None, so the call uses the platform key, when the vault raises a DomainError.
+
+    Args:
+        ide: The router fixture.
+        monkeypatch: Configure the vault key and make the vault read fail.
+    """
+    _vault(monkeypatch)
+    _save_key(ide.engine, "alice-own-key")
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        """Fail as a vault with a rotated key does."""
+        raise DomainError("billing.byok_vault_unavailable", status=503)
+
+    monkeypatch.setattr(ProviderKeyVault, "resolve_connection", broken)
+    assert REAL_OWN_KEY(ide.engine, "alice") is None
+
+
+def test_key_for_another_host_never_goes_to_openrouter(ide: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a key for a custom api_base off openrouter.ai, and pay the call on the platform key.
+
+    Args:
+        ide: The router fixture.
+        monkeypatch: Configure the vault, accept the custom host, and restore the real lookup.
+    """
+    _vault(monkeypatch)
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
+    _save_key(ide.engine, "proxy-secret", api_base="https://proxy.example.com/v1")
+    assert REAL_OWN_KEY(ide.engine, "alice") is None
+    monkeypatch.setattr(agent_ide_completion, "_own_openrouter_key", REAL_OWN_KEY)
+    _sign_in(ide)
+    assert ide.client.post("/agent-ide/completions", json=REQUEST).status_code == 200
+    assert [request.headers["authorization"] for request in ide.requests] == ["Bearer synthetic-platform-key"]
 
 
 @pytest.mark.parametrize(

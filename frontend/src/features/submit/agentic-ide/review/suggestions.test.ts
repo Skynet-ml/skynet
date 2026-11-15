@@ -10,6 +10,7 @@ import {
   findLine,
   nextEditLine,
   nextWord,
+  pausesCompletions,
   PREFIX_CHARS,
   shouldSuggest,
   SUFFIX_CHARS,
@@ -66,4 +67,9 @@ test("the next edit anchors on its line, and not twice", () => {
   assert.equal(nextEditLine(classify, null), 0);
   assert.equal(nextEditLine(classify, { after: next.after, lines: [] }), 0);
   assert.equal(nextEditLine(classify, { after: "  ", lines: ["x"] }), 0);
+});
+
+test("a refusal or a provider failure pauses requests, other answers do not", () => {
+  for (const status of [402, 403, 409, 422, 424, 429, 502, 503]) assert.ok(pausesCompletions(status), String(status));
+  for (const status of [200, 400, 401, 404, 500]) assert.equal(pausesCompletions(status), false, String(status));
 });

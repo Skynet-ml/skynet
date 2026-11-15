@@ -15,6 +15,17 @@ export const SUFFIX_CHARS = 1500;
 /** Wait after the last key before a request, so a typist sends few calls. */
 export const DEBOUNCE_MS = 400;
 
+// Each of these answers repeats on the next key: no funds (402, 409), a key the
+// provider refuses (403), an unpriced model (422), unsettled usage (424), a
+// provider failure (502), the rate limit (429) or no model (503). Some of them
+// open a paid budget first, so the editor stops asking for a while.
+const PAUSE_STATUSES = new Set([402, 403, 409, 422, 424, 429, 502, 503]);
+
+/** Whether a failed answer pauses completion requests. */
+export function pausesCompletions(status: number): boolean {
+  return PAUSE_STATUSES.has(status);
+}
+
 /** The text before and after the caret, cut to the request window. */
 export function completionWindow(doc: string, pos: number): { prefix: string; suffix: string } {
   return { prefix: doc.slice(Math.max(0, pos - PREFIX_CHARS), pos), suffix: doc.slice(pos, pos + SUFFIX_CHARS) };
