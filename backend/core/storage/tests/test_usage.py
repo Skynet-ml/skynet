@@ -27,9 +27,12 @@ from core.config import settings
 from core.storage import remote as remote_store
 from core.storage.models import (
     EMBEDDING_DIM,
+    AgentConversationModel,
+    AgentMessageModel,
     AgentStagedDatasetModel,
     Base,
     BillingCustomerModel,
+    ChatMediaModel,
     DatasetModel,
     JobEmbeddingModel,
     LogEntryModel,
@@ -39,6 +42,7 @@ from core.storage.models import (
 from core.storage.remote import RemoteDBJobStore
 from core.storage.usage import (
     STORAGE_CATEGORIES,
+    UNSENT_MEDIA_RETENTION,
     compute_user_storage,
     compute_user_storage_category_items,
     compute_user_storage_items,
@@ -415,6 +419,86 @@ def test_tagging_sessions_count_toward_storage(store: _SQLiteJobStore) -> None:
     assert usage.total == sum(usage.breakdown.values())
     assert usage.counts["tagging_sessions"] == 1
     assert compute_user_storage(store.engine, "bob").breakdown["tagging_sessions"] == 0
+
+
+def test_chat_media_counts_toward_agent_chats(store: _SQLiteJobStore) -> None:
+    """Unsent chat media bytes land in the owner's chat category and total, with no cleanup item."""
+    with store._session_factory() as session:
+        session.add(
+            ChatMediaModel(
+                id="m-1",
+                username="alice",
+                filename="shot.png",
+                kind="image",
+                mime_type="image/png",
+                byte_size=1234,
+                data=b"x" * 1234,
+            )
+        )
+        session.commit()
+
+    usage = compute_user_storage(store.engine, "Alice")
+    assert usage.breakdown["agent_chats"] == 1234
+    assert usage.total == 1234
+    assert usage.counts["agent_chats"] == 0
+    assert compute_user_storage(store.engine, "bob").breakdown["agent_chats"] == 0
+
+
+def test_sent_chat_media_folds_into_its_chat_item(store: _SQLiteJobStore) -> None:
+    """A file that a chat sent adds its bytes to that chat's cleanup item in both lists."""
+    with store._session_factory() as session:
+        session.add(AgentConversationModel(id="c-1", username="alice", title="Chat"))
+        session.flush()
+        session.add(AgentMessageModel(conversation_id="c-1", role="user", content="look"))
+        session.add(
+            ChatMediaModel(
+                id="m-1",
+                username="alice",
+                filename="shot.png",
+                kind="image",
+                mime_type="image/png",
+                byte_size=1000,
+                data=b"x" * 1000,
+                conversation_id="c-1",
+            )
+        )
+        session.commit()
+
+    usage = compute_user_storage(store.engine, "alice")
+    (drawer_item,) = compute_user_storage_category_items(store.engine, "alice", "agent_chats")
+    (top_item,) = compute_user_storage_items(store.engine, "alice")
+    assert drawer_item.id == top_item.id == "c-1"
+    assert drawer_item.bytes == top_item.bytes == usage.breakdown["agent_chats"]
+    assert drawer_item.bytes > 1000
+
+
+def test_storage_measure_sweeps_stale_unsent_chat_media(store: _SQLiteJobStore) -> None:
+    """The meter deletes and stops counting unsent files past the retention time, and keeps recent ones."""
+    now = datetime.now(UTC)
+    with store._session_factory() as session:
+        session.add_all(
+            ChatMediaModel(
+                id=media_id,
+                username="alice",
+                filename="clip.mp4",
+                kind="video",
+                mime_type="video/mp4",
+                byte_size=1000,
+                data=b"x" * 1000,
+                created_at=created_at,
+            )
+            for media_id, created_at in (
+                ("stale", now - UNSENT_MEDIA_RETENTION - timedelta(hours=1)),
+                ("recent", now),
+            )
+        )
+        session.commit()
+
+    usage = compute_user_storage(store.engine, "alice")
+
+    with store._session_factory() as session:
+        assert [row.id for row in session.query(ChatMediaModel)] == ["recent"]
+    assert usage.total == 1000
 
 
 def test_category_items_lists_tagging_sessions(store: _SQLiteJobStore) -> None:

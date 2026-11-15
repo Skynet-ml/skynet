@@ -41,6 +41,7 @@ from ...storage.models import (
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from .chat_media import attach_media_to_chat
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,8 @@ class ConversationMessage(BaseModel):
     compaction: dict[str, Any] | None = None
     # The cost of summary calls that stored no compaction, from router_metadata.
     side_cents: float | None = None
+    # The files attached to a user turn (id, name, kind), from router_metadata.
+    media: list[dict[str, Any]] | None = None
     # The row id; a compaction names the user message it starts at by this id.
     id: int | None = None
     created_at: datetime
@@ -343,7 +346,8 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             The new conversation projected as ``ConversationSummary``.
 
         Raises:
-            DomainError: 404 when unknown, 403 when the caller does not own it.
+            DomainError: 404 when unknown, 403 when the caller does not own it,
+                409 when the copies of its files would go over the storage quota.
         """
         with Session(job_store.engine) as session:
             source = session.get(AgentConversationModel, conversation_id)
@@ -368,6 +372,12 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 created_at=now,
                 updated_at=now,
             )
+            # The fork gets its own copies of the files, so deleting either
+            # chat never removes a file that the other chat still shows. The
+            # copies pass the quota check before the fork writes anything.
+            held = attach_media_to_chat(
+                session, job_store, user.username, [media_id for m in kept for media_id in _media_ids(m)], row.id
+            )
             session.add(row)
             # The wizard state stays on the source rows, so one turn never
             # counts twice in the training-ground export. The source chat paid
@@ -379,7 +389,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                     content=m.content,
                     tool_calls=m.tool_calls,
                     model=m.model,
-                    router_metadata=_fork_metadata(m.router_metadata),
+                    router_metadata=_fork_metadata(m.router_metadata, held),
                     created_at=m.created_at,
                 )
                 for m in kept
@@ -485,6 +495,7 @@ def conversation_detail(
                 thinking=meta.get("thinking"),
                 compaction=meta.get("compaction"),
                 side_cents=meta.get("side_cents"),
+                media=meta.get("media"),
                 id=cast(int, m.id),
                 created_at=cast(datetime, m.created_at),
             )
@@ -511,7 +522,23 @@ def conversation_detail(
     )
 
 
-def _fork_metadata(meta: Any) -> dict[str, Any] | None:
+def _media_ids(m: AgentMessageModel) -> list[str]:
+    """Return the ids of the files that one stored turn names.
+
+    Args:
+        m: A stored turn.
+
+    Returns:
+        The ids in ``router_metadata["media"]``, or an empty list.
+    """
+    meta = m.router_metadata
+    media = meta.get("media") if isinstance(meta, dict) else None
+    if not isinstance(media, list):
+        return []
+    return [item["id"] for item in media if isinstance(item, dict) and isinstance(item.get("id"), str)]
+
+
+def _fork_metadata(meta: Any, held: dict[str, str]) -> dict[str, Any] | None:
     """Copy one row's ``router_metadata`` for a fork, without the turn's cost.
 
     The compaction summary stays, because the fork's next turn needs it; only
@@ -519,6 +546,7 @@ def _fork_metadata(meta: Any) -> dict[str, Any] | None:
 
     Args:
         meta: The source row's ``router_metadata``.
+        held: A map from each source file id to the fork's copy of it.
 
     Returns:
         The copy, or ``None`` when the source row has none.
@@ -528,6 +556,11 @@ def _fork_metadata(meta: Any) -> dict[str, Any] | None:
     copy = {key: value for key, value in meta.items() if key not in ("stats", "side_cents")}
     if isinstance(copy.get("compaction"), dict):
         copy["compaction"] = {**copy["compaction"], "cents": None}
+    if isinstance(copy.get("media"), list):
+        copy["media"] = [
+            {**item, "id": held.get(item.get("id"), item.get("id"))} if isinstance(item, dict) else item
+            for item in copy["media"]
+        ]
     return copy
 
 

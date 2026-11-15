@@ -49,6 +49,7 @@ from ..storage.models import (
     BillingCustomerModel,
     BillingOpenRouterKeyModel,
     BillingProviderKeyModel,
+    ChatMediaModel,
     ConversationEmbeddingModel,
     DatasetBlobModel,
     DatasetModel,
@@ -465,6 +466,23 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         }
     )
 
+    # Metadata only: the export is JSON-shaped, and the user can fetch each
+    # file's bytes through the media route while the account exists.
+    media_rows = session.scalars(
+        select(ChatMediaModel).where(ChatMediaModel.username == username).order_by(ChatMediaModel.created_at)
+    ).all()
+    chat_media = [
+        {
+            "id": media.id,
+            "filename": media.filename,
+            "kind": media.kind,
+            "mime_type": media.mime_type,
+            "byte_size": media.byte_size,
+            "created_at": _iso(media.created_at),
+        }
+        for media in media_rows
+    ]
+
     return {
         "export_format": EXPORT_FORMAT,
         "exported_at": _iso(datetime.now(UTC)),
@@ -475,6 +493,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "tagging_sessions": tagging_out,
         "agent_conversations": conversations_out,
         "setup_draft": setup_draft,
+        "chat_media": chat_media,
         "billing": billing,
         "api_token": api_token,
         "desktop_links": desktop_links,
@@ -625,6 +644,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserQuotaOverrideModel).where(UserQuotaOverrideModel.username == username))
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
+    _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))

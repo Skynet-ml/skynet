@@ -74,6 +74,11 @@ export function dispatchGeneralistEvent(
     case "message_reset":
       handlers.onMessageReset?.();
       break;
+    case "media_notice": {
+      const ids = Array.isArray(data.reference_ids) ? data.reference_ids.map(String) : [];
+      if (ids.length) handlers.onMediaNotice?.(ids);
+      break;
+    }
     case "steer_applied":
       handlers.onSteerApplied?.({
         ids: Array.isArray(data.ids) ? data.ids.map(String) : [],

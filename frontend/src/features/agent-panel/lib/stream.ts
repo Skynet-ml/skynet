@@ -48,6 +48,8 @@ export interface GeneralistAgentRequest {
   persist?: boolean;
   /** The summary that stands in for the turns before `chat_history`, after a compaction. */
   compaction_summary?: string | null;
+  /** Ids of the stored images, video and audio sent with this message. */
+  media_ids?: string[];
 }
 
 interface ConversationMetaPayload {
@@ -79,6 +81,8 @@ export interface GeneralistAgentHandlers {
   onConversationTitle?: (ev: ConversationMetaPayload & { cut_title: string }) => void;
   /** The agent read these steered messages at a step boundary; `text` joins them. */
   onSteerApplied?: (ev: { ids: string[]; text: string; message_id?: number }) => void;
+  /** The model cannot view these attached files, so they go to it only as references. */
+  onMediaNotice?: (referenceIds: string[]) => void;
   onDone: (result: {
     assistant_message: string;
     model: string | null;

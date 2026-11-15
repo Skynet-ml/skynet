@@ -18,6 +18,7 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
+import { isUnsupportedImage, mediaKind } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
 import {
@@ -80,6 +81,9 @@ interface ComposerProps {
   claimsFile?: (file: File) => boolean;
   /** Receives the one file `claimsFile` claimed. */
   onAttachFile?: (file: File) => void;
+  /** Receives picked, pasted or dropped image, video and audio files, which
+   *  then go with the message as files, not as text. */
+  onMediaFiles?: (files: File[]) => void;
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
@@ -250,6 +254,7 @@ export function Composer({
   acceptsMidTurn,
   claimsFile,
   onAttachFile,
+  onMediaFiles,
   suggest,
   attachments = true,
   dictation: showMic = true,
@@ -421,11 +426,18 @@ export function Composer({
     const {
       claimed,
       extra,
-      rest: files,
+      rest: kept,
     } = claimsFile ? splitClaimed(picked, claimsFile) : { claimed: null, extra: [], rest: picked };
+    const rest = kept.filter((file) => !isUnsupportedImage(file));
+    for (const file of kept)
+      if (isUnsupportedImage(file))
+        toast.error(msg("agent.media.unsupported", { name: file.name }));
     if (claimed) onAttachFile?.(claimed);
     for (const file of extra)
       toast.error(msg("agent.composer.attach_one_dataset", { name: file.name }));
+    const media = onMediaFiles ? rest.filter((file) => mediaKind(file)) : [];
+    if (media.length) onMediaFiles?.(media);
+    const files = rest.filter((file) => !media.includes(file));
     if (!files.length) return;
     setAttaching((n) => n + 1);
     try {

@@ -176,6 +176,33 @@ for (const [name, fail] of [
   });
 }
 
+test("a send with files during /compact is refused, so the composer keeps the files", async () => {
+  const { agent, calls, compacts, act, unmount } = await mountChat();
+  try {
+    await act(() => agent().compact(""));
+    await act(settle);
+    let sent: boolean | null = null;
+    const media = [{ id: "m-1", name: "shot.png", kind: "image" as const, url: "" }];
+    await act(() => {
+      sent = agent().send("look", undefined, { media });
+    });
+    await act(settle);
+    assert.equal(sent, false);
+    assert.deepEqual(agent().midTurn.queued, []);
+
+    await act(() => compacts[0]!.close());
+    await act(settle);
+    await act(() => {
+      sent = agent().send("look", undefined, { media });
+    });
+    assert.equal(sent, true);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[2]!.req.media_ids, ["m-1"]);
+  } finally {
+    await unmount();
+  }
+});
+
 test("a stop during /compact holds the queued message, as after a stopped turn", async () => {
   const { agent, calls, compacts, act, unmount } = await mountChat();
   try {

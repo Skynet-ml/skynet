@@ -18,6 +18,7 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 import { CollapsibleMessage } from "./collapsible-message";
 import { MessageTime } from "./message-actions";
 import { PastedTextCard } from "./pasted-text-card";
+import { MediaTiles, type MediaAttachment } from "./media-attachments";
 import { joinPastes, shouldAttachPaste, splitPastes, type SplitMessage } from "./pasted-text";
 import { joinLineComments, splitLineComments, type LineComment } from "./line-comments";
 
@@ -82,6 +83,8 @@ interface UserBubbleProps {
   createdAt?: number;
   /** Start a new chat from before this message; no button without it. */
   onFork?: () => void;
+  /** Images, video and audio sent with the message. */
+  media?: readonly MediaAttachment[];
 }
 
 // The user's turns sit at the end side as bubbles; the agent's answers sit
@@ -92,6 +95,7 @@ export function UserBubble({
   editable = true,
   createdAt,
   onFork,
+  media,
 }: UserBubbleProps) {
   const automatic = automaticTurnBody(content);
   if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
@@ -101,6 +105,7 @@ export function UserBubble({
   return (
     <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
+        {media && <MediaTiles media={media} size="sent" className="justify-end" />}
         {pastes.length + files.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {files.map((file, i) => (

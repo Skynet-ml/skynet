@@ -1783,6 +1783,32 @@ class AgentStagedDatasetModel(Base):
     __table_args__ = (Index("ix_agent_staged_datasets_user_created", "username", "created_at"),)
 
 
+# An image, video or audio file a user attached in an agent chat (SKY-707).
+# Only ``username`` reads it. ``mime_type`` comes from the file's own bytes,
+# not from the upload header. The bytes count in the "agent_chats" storage.
+# ``conversation_id`` names the stored chat that sent the file; deleting the
+# chat deletes the file. A file no chat sent has none, and a sweep removes it.
+class ChatMediaModel(Base):
+    __tablename__ = "chat_media"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
+    __table_args__ = (Index("ix_chat_media_user_created", "username", "created_at"),)
+
+
 # One left run-wizard setup per account, offered back on any device until the
 # user submits or starts new. ``staged_dataset_id`` names the upload the setup
 # uses, so the staged-dataset sweep keeps that upload while the draft exists.

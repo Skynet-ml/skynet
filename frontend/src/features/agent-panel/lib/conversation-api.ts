@@ -15,6 +15,7 @@ import { apiUrl, fetchWithAuthRetry, hostedRunsAvailable, webPicked } from "@/sh
 import { parseSourceKey, sourceKey } from "@/shared/lib/api-route";
 import type { ApiSource } from "@/shared/lib/api-route";
 import { parseCompaction } from "./compaction";
+import { parseStoredMedia } from "./stored-media";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
@@ -57,6 +58,7 @@ interface RawMessage {
   thinking?: unknown;
   compaction?: unknown;
   side_cents?: number | null;
+  media?: unknown;
   id?: number | null;
   created_at: string;
 }
@@ -84,6 +86,7 @@ function toMessage(raw: RawMessage): AgentMessage {
     : undefined;
   const role: AgentMessage["role"] = raw.role === "assistant" ? "assistant" : "user";
   const compaction = parseCompaction(raw.compaction);
+  const media = role === "user" ? parseStoredMedia(raw.media) : undefined;
   return {
     role,
     content: raw.content,
@@ -95,6 +98,7 @@ function toMessage(raw: RawMessage): AgentMessage {
     thinkingSegments: parseThinkingRows(raw.thinking),
     createdAt: parseMessageTime(raw.created_at),
     ...(compaction ? { compaction } : {}),
+    ...(media ? { media } : {}),
     ...(typeof raw.id === "number" ? { id: raw.id } : {}),
     ...(typeof raw.side_cents === "number" && raw.side_cents > 0 ? { sideCents: raw.side_cents } : {}),
   };

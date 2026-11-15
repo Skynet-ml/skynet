@@ -19,8 +19,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, Text, cast, exists, func, literal, select
+from sqlalchemy import Engine, Text, cast, delete, exists, func, literal, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.selectable import ScalarSelect
 
 from ..config import settings
 from ..constants import PAYLOAD_OVERVIEW_NAME
@@ -30,6 +31,7 @@ from .models import (
     AgentMessageModel,
     AgentStagedDatasetModel,
     BlackboxAgentRunModel,
+    ChatMediaModel,
     ConversationEmbeddingModel,
     DatasetModel,
     GepaCheckpointModel,
@@ -205,6 +207,32 @@ def _tagging_session_bytes(dialect_name: str):
     )
 
 
+# A chat file that a stored chat sent lives until that chat is deleted. A file
+# that no chat sent (removed, abandoned or never stored) goes after this time.
+UNSENT_MEDIA_RETENTION = timedelta(days=1)
+
+
+def sweep_unsent_chat_media(engine: Engine, username: str) -> None:
+    """Delete the user's chat files that no chat sent within the retention time.
+
+    Every storage measure runs this first, so a stale unsent file never
+    counts in the meter or blocks an upload with the quota.
+
+    Args:
+        engine: The shared SQLAlchemy engine.
+        username: The owner, already normalized.
+    """
+    with Session(engine) as session:
+        session.execute(
+            delete(ChatMediaModel).where(
+                ChatMediaModel.username == username,
+                ChatMediaModel.conversation_id.is_(None),
+                ChatMediaModel.created_at < datetime.now(UTC) - UNSENT_MEDIA_RETENTION,
+            )
+        )
+        session.commit()
+
+
 def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
     """Sum every byte the user owns across the database into one budget figure.
 
@@ -226,6 +254,7 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
     if not normalized:
         return empty
 
+    sweep_unsent_chat_media(engine, normalized)
     dialect = engine.dialect.name
     with Session(engine) as session:
         user_job_ids = select(JobModel.optimization_id).where(JobModel.username == normalized)
@@ -276,6 +305,11 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                     0,
                 )
             ).where(AgentMessageModel.conversation_id.in_(user_conversation_ids))
+        )
+        # A sent file folds into its chat's cleanup item. A file no chat sent
+        # has no item; the upload sweep removes it after a day.
+        chat_media = scalar(
+            select(func.coalesce(func.sum(ChatMediaModel.byte_size), 0)).where(ChatMediaModel.username == normalized)
         )
         staged_uploads = scalar(
             select(func.coalesce(func.sum(_byte_size(AgentStagedDatasetModel.rows, dialect)), 0)).where(
@@ -340,7 +374,7 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + optimization_embeddings,
         "datasets": datasets,
         "tagging_sessions": tagging_sessions,
-        "agent_chats": agent_chats + chat_embeddings,
+        "agent_chats": agent_chats + chat_embeddings + chat_media,
         "staged_uploads": staged_uploads + setup_draft,
     }
     return StorageUsage(total=sum(breakdown.values()), breakdown=breakdown, counts=counts)
@@ -440,12 +474,13 @@ def compute_user_storage_items(engine: Engine, username: str, limit: int = 20) -
         chat_bytes = func.sum(
             _byte_size(AgentMessageModel.content, dialect) + _byte_size(AgentMessageModel.tool_calls, dialect)
         )
+        chat_size = func.coalesce(chat_bytes, 0) + _chat_media_bytes()
         conversation_rows = session.execute(
-            select(AgentConversationModel.id, AgentConversationModel.title, chat_bytes.label("chat_size"))
+            select(AgentConversationModel.id, AgentConversationModel.title, chat_size.label("chat_size"))
             .join(AgentMessageModel, AgentMessageModel.conversation_id == AgentConversationModel.id)
             .where(AgentConversationModel.username == normalized)
             .group_by(AgentConversationModel.id, AgentConversationModel.title)
-            .order_by(func.coalesce(chat_bytes, 0).desc())
+            .order_by(chat_size.desc())
             .limit(limit)
         ).all()
         for conversation_id, title, chat_size in conversation_rows:
@@ -456,6 +491,19 @@ def compute_user_storage_items(engine: Engine, username: str, limit: int = 20) -
 
     items.sort(key=lambda item: item.bytes, reverse=True)
     return items[:limit]
+
+
+def _chat_media_bytes() -> ScalarSelect[int]:
+    """Build the bytes of the files a conversation sent, for a per-chat query.
+
+    Returns:
+        A scalar subquery correlated on ``AgentConversationModel.id``.
+    """
+    return (
+        select(func.coalesce(func.sum(ChatMediaModel.byte_size), 0))
+        .where(ChatMediaModel.conversation_id == AgentConversationModel.id)
+        .scalar_subquery()
+    )
 
 
 def _tagging_session_items(session: Session, username: str, dialect_name: str, limit: int) -> list[StorageItem]:
@@ -594,7 +642,7 @@ def compute_user_storage_category_items(
                 if settings.embeddings_enabled
                 else literal(0)
             )
-            footprint = (func.coalesce(chat_bytes, 0) + embedding_bytes).label("chat_size")
+            footprint = (func.coalesce(chat_bytes, 0) + embedding_bytes + _chat_media_bytes()).label("chat_size")
             conversation_rows = session.execute(
                 select(AgentConversationModel.id, AgentConversationModel.title, footprint)
                 .join(AgentMessageModel, AgentMessageModel.conversation_id == AgentConversationModel.id)

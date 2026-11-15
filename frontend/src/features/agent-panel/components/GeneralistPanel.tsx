@@ -42,6 +42,7 @@ import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
+import { MediaTiles, MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
   joinLineComments,
   lineCommentId,
@@ -100,6 +101,8 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useFork } from "../hooks/use-fork";
+import { useChatMedia } from "../hooks/use-chat-media";
+import { freeFetchedMediaUrls, resolveChatMediaUrl } from "../lib/chat-media";
 import { latestCompactionIndex } from "../lib/compaction";
 import { expandOnAttention } from "../lib/float-attention";
 import { forkPoints } from "../lib/fork";
@@ -510,6 +513,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const sameChat = chatView.id === null && streaming;
     setChatView({ id: agent.conversationId, key: sameChat ? chatView.key : chatView.key + 1 });
   }
+  // A layout effect, so the old chat's files are freed before the new chat's tiles fetch theirs.
+  React.useLayoutEffect(() => freeFetchedMediaUrls, [chatView.key]);
   // Any conversation still streaming or waiting its turn keeps the user's
   // notification pending; it fires once they have all settled.
   useCompletionNotification(
@@ -1079,13 +1084,28 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
+  const chatMedia = useChatMedia();
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
-    if (!trimmed && lineComments.length === 0) return;
-    agent.send(joinLineComments(trimmed, lineComments));
+    const media = chatMedia.ready();
+    if (media === null) {
+      toast.info(msg("agent.media.uploading"));
+      return;
+    }
+    if (!trimmed && lineComments.length === 0 && media.length === 0) return;
+    const sent = agent.send(
+      joinLineComments(trimmed, lineComments),
+      undefined,
+      media.length ? { media } : undefined,
+    );
+    if (!sent && media.length) {
+      toast.info(msg("agent.media.wait_compact"));
+      return;
+    }
     setDraft("");
+    chatMedia.clear();
     clearLineComments?.();
-  }, [agent, draft, lineComments, clearLineComments]);
+  }, [agent, draft, lineComments, clearLineComments, chatMedia]);
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],
@@ -1728,6 +1748,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           )}
         >
           <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
+          <MediaUrlContext.Provider value={resolveChatMediaUrl}>
             <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
               <ChatTranscript
                 key={chatView.key}
@@ -1841,6 +1862,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                 )}
               />
             </LineCommentLinkContext.Provider>
+          </MediaUrlContext.Provider>
           </ChatSourceContext.Provider>
         </AgentThread>
       </div>
@@ -1860,15 +1882,20 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   : "auto.features.agent.panel.components.generalistpanel.literal.5",
               )
         }
-        sendsEmpty={lineComments.length > 0}
+        sendsEmpty={lineComments.length > 0 || chatMedia.tiles.length > 0}
         chips={
-          lineComments.length > 0 && (
+          (lineComments.length > 0 || chatMedia.tiles.length > 0) && (
+            <>
+            <MediaTiles media={chatMedia.tiles} onRemove={chatMedia.remove} />
+            {lineComments.length > 0 && (
             <QueuedComments
               comments={lineComments}
               onOpen={(c) => wizardCtx?.viewChanges?.(c.path, undefined, lineCommentId(c))}
               onRemove={wizardCtx?.removeLineComment}
               onEdit={wizardCtx?.updateLineComment}
             />
+            )}
+            </>
           )
         }
         mentions={wizardCtx?.repoPaths ?? undefined}
@@ -1891,6 +1918,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // Dataset files keep their column-mapping card; any other file is
         // read as text by the composer.
         claimsFile={isDatasetFile}
+        // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
+        onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onAttachFile={(file) => {
           setAttachFile(file);
           setAttachOpen(true);

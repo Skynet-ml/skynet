@@ -18,6 +18,7 @@ All endpoints are hidden from the public Scalar reference (none are in
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -29,6 +30,7 @@ from uuid import uuid4
 import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
@@ -37,7 +39,7 @@ from ...billing.metering import estimate_run_cents, meter_llm_run
 from ...config import settings
 from ...connectors import github
 from ...connectors.vault import ConnectorVault
-from ...constants import TOKEN_SOURCE_MANAGED
+from ...constants import TOKEN_SOURCE_MANAGED, TOKEN_SOURCE_SUBSCRIPTION
 from ...local.cli_catalog import RetiredEffort
 from ...models import ModelConfig
 from ...service_gateway.agents import compaction
@@ -67,7 +69,7 @@ from ...service_gateway.agents.steering import (
 )
 from ...service_gateway.embedding_pipeline import queue_conversation_embed
 from ...service_gateway.language_models import usage_by_model_from_history
-from ...storage.models import AgentConversationModel, AgentMessageModel
+from ...storage.models import AgentConversationModel, AgentMessageModel, ChatMediaModel
 from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -75,7 +77,14 @@ from ..model_catalog import ReasoningEffort, catalog_snapshot
 from ..model_fast_mode import with_fast_mode
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
 from ..suggest_model import hosted_suggest_model
-from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
+from ._helpers import enforce_llm_balance, enforce_storage_quota, sse_from_events, stream_with_llm_metering
+from .chat_media import (
+    MAX_MEDIA_PER_MESSAGE,
+    MAX_MODEL_IMAGE_BYTES,
+    attach_media_to_chat,
+    load_owned_media,
+    media_copy_bytes,
+)
 from .connectors import connector_secret
 
 logger = logging.getLogger(__name__)
@@ -125,6 +134,10 @@ class ChatTurn(BaseModel):
         default_factory=list,
         description="Assistant turns only: the tool calls that turn made, oldest first.",
     )
+    media: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="User turns only: the ``{name, kind}`` of each file the turn attached.",
+    )
 
 
 def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
@@ -136,6 +149,8 @@ def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
 
     Without the trace the model only sees its own prose from earlier turns, so
     it cannot tell which id a past submit returned or why a past call failed.
+    A user turn's files go only as a short note with their kind and name: the
+    bytes went with that turn, and resending them would fill the context.
 
     Args:
         turns: The client-supplied prior turns, oldest first.
@@ -146,7 +161,11 @@ def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
     """
     history: list[dict[str, Any]] = []
     for turn in turns:
-        entry: dict[str, Any] = {"role": turn.role, "content": turn.content}
+        content = turn.content
+        if turn.role == "user" and turn.media:
+            notes = " ".join(f"[{item.get('kind', 'file')}: {item.get('name', '')}]" for item in turn.media)
+            content = f"{content}\n{notes}" if content else notes
+        entry: dict[str, Any] = {"role": turn.role, "content": content}
         if turn.role == "assistant" and turn.tool_calls:
             entry["tools"] = [
                 {
@@ -261,6 +280,15 @@ class GeneralistAgentRequest(BaseModel):
         description=(
             "Summary of the turns before ``chat_history`` from the chat's latest compaction. The "
             "agent gets it in place of those turns, and the next compaction updates it."
+        ),
+    )
+    media_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_MEDIA_PER_MESSAGE,
+        description=(
+            "Ids from ``POST /agent/media`` of the images, video and audio attached to this message. "
+            "The model sees the images when it accepts image input; every other file is a reference, "
+            "listed in a ``media_notice`` event."
         ),
     )
 
@@ -441,17 +469,19 @@ def next_prompt_suggestion(job_store, username: str, req: NextPromptRequest) -> 
         )
 
 
-def _derive_title(user_message: str) -> str:
+def _derive_title(user_message: str, media_name: str = "") -> str:
     """Auto-title a fresh conversation from the user's opening message.
 
     Truncates whitespace-collapsed text to ``TITLE_MAX_CHARS`` and appends an
     ellipsis when truncation actually loses characters. Attached-file and
     pasted-text blocks are left out; a message with only files is titled
-    from the first file's name. A setup wizard kickoff gives no title, and a
-    wizard Back turn is titled from its request without the marker.
+    from the first file's name. A message with no text and only media files
+    is titled from the first media file's name. A setup wizard kickoff gives
+    no title, and a wizard Back turn is titled from its request without the marker.
 
     Args:
         user_message: The first user turn's text.
+        media_name: The name of the turn's first media file, if any.
 
     Returns:
         A short, single-line title suitable for the conversation header.
@@ -462,14 +492,16 @@ def _derive_title(user_message: str) -> str:
     typed = _COMPOSER_BLOCK_RE.sub(" ", user_message)
     if not typed.strip():
         files = [m.group(1) for m in _COMPOSER_BLOCK_RE.finditer(user_message) if m.group(1)]
-        typed = files[0] if files else ""
+        typed = files[0] if files else media_name
     collapsed = " ".join(typed.split())
     if len(collapsed) <= TITLE_MAX_CHARS:
         return collapsed
     return collapsed[: TITLE_MAX_CHARS - 1].rstrip() + "…"
 
 
-def _ensure_conversation(job_store, conversation_id: str | None, username: str, user_message: str) -> tuple[str, str]:
+def _ensure_conversation(
+    job_store, conversation_id: str | None, username: str, user_message: str, media_name: str = ""
+) -> tuple[str, str]:
     """Create a new conversation row when one isn't supplied; touch existing rows.
 
     A fresh conversation gets an auto-derived title from the user's first
@@ -481,6 +513,7 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
         conversation_id: Optional caller-supplied conversation id.
         username: Authenticated principal that owns the row.
         user_message: First user message (used for auto-title on creation).
+        media_name: The first media file's name; it titles a message with no text.
 
     Returns:
         ``(conversation_id, title)`` — the id is freshly generated when input
@@ -502,7 +535,7 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
             session.commit()
             return cast(str, row.id), cast(str, row.title)
         new_id = str(uuid4())
-        title = _derive_title(user_message)
+        title = _derive_title(user_message, media_name)
         row = AgentConversationModel(
             id=new_id,
             username=username,
@@ -626,7 +659,14 @@ def _start_title_task(
 
 
 def _persist_user_turn(
-    job_store, conversation_id: str, content: str, *, steer: bool = False, compaction: dict[str, Any] | None = None
+    job_store,
+    conversation_id: str,
+    content: str,
+    *,
+    steer: bool = False,
+    compaction: dict[str, Any] | None = None,
+    media: list[ChatMediaModel] | None = None,
+    replaced: bool = False,
 ) -> int:
     """Insert the user's message into ``agent_messages``.
 
@@ -637,14 +677,31 @@ def _persist_user_turn(
         steer: True for a message sent while a turn runs. A run's setup chat
             keeps a steer as part of that turn, not as a later turn.
         compaction: The compaction entry of the turn this message replaces, if any.
+        media: The caller's attached files. The row names them, so a reload
+            shows them again. The conversation holds its own rows for them, so
+            deleting the chat deletes them and never touches another chat.
+        replaced: True when this message replaces stored turns (an edit or a
+            regenerate). The files that only those turns named are deleted.
 
     Returns:
         The id of the new row.
+
+    Raises:
+        DomainError: 409 when copies of the files would go over the storage quota.
     """
     metadata: dict[str, Any] = {"steer": True} if steer else {}
     if compaction:
         metadata["compaction"] = compaction
     with Session(job_store.engine) as session:
+        if media:
+            held = attach_media_to_chat(
+                session, job_store, media[0].username, [row.id for row in media], conversation_id
+            )
+            metadata["media"] = [
+                {"id": held.get(row.id, row.id), "name": row.filename, "kind": row.kind} for row in media
+            ]
+        if replaced:
+            _free_unnamed_media(session, conversation_id, {item["id"] for item in metadata.get("media", [])})
         message = AgentMessageModel(
             conversation_id=conversation_id,
             role="user",
@@ -657,6 +714,35 @@ def _persist_user_turn(
         session.add(message)
         session.commit()
         return message.id
+
+
+def _free_unnamed_media(session: Session, conversation_id: str, keep: set[str]) -> None:
+    """Delete the chat's files that no stored user turn names any more.
+
+    An edit or a regenerate deletes the turns that named the old files, so
+    without this the files stay, and count against storage, until the chat goes.
+
+    Args:
+        session: The open session; the caller commits it.
+        conversation_id: The chat to clean.
+        keep: The ids that the new, not yet flushed, turn names.
+    """
+    held = set(session.scalars(select(ChatMediaModel.id).where(ChatMediaModel.conversation_id == conversation_id)))
+    if not held - keep:
+        return
+    metas = session.scalars(
+        select(AgentMessageModel.router_metadata).where(
+            AgentMessageModel.conversation_id == conversation_id, AgentMessageModel.role == "user"
+        )
+    )
+    named = set(keep)
+    for meta in metas:
+        media = meta.get("media") if isinstance(meta, dict) else None
+        if isinstance(media, list):
+            named.update(item.get("id") for item in media if isinstance(item, dict))
+    unnamed = held - named
+    if unnamed:
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id.in_(unnamed)))
 
 
 def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> dict[str, Any] | None:
@@ -1055,6 +1141,65 @@ def _context_window(model_name: str) -> int:
     catalog = catalog_snapshot()
     entry = next((m for m in catalog.models if m.value == model_name), None) if catalog else None
     return entry.max_input_tokens if entry and entry.max_input_tokens else compaction.DEFAULT_CONTEXT_WINDOW
+
+
+def _sees_images(model_config: ModelConfig) -> bool:
+    """Tell whether a turn's model accepts image input.
+
+    Args:
+        model_config: The turn's resolved model config.
+
+    Returns:
+        ``True`` when the catalog marks the model as a vision model and the
+        route is not a local CLI subscription, whose text protocol drops images.
+    """
+    if model_config.token_source == TOKEN_SOURCE_SUBSCRIPTION:
+        return False
+    catalog = catalog_snapshot()
+    entry = next((m for m in catalog.models if m.value == model_config.name), None) if catalog else None
+    return bool(entry and entry.supports_vision)
+
+
+def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[str], list[ChatMediaModel]]:
+    """Split a message's media into model image input and reference-only files.
+
+    Args:
+        media: The message's owned media rows, in order.
+        sees_images: Whether the turn's model accepts image input.
+
+    Returns:
+        ``(image_data_uris, references)``: the images the model sees, and the
+        files it only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in
+        total are references.
+    """
+    images: list[str] = []
+    references: list[ChatMediaModel] = []
+    image_bytes = 0
+    for row in media:
+        if sees_images and row.kind == "image" and image_bytes + row.byte_size <= MAX_MODEL_IMAGE_BYTES:
+            image_bytes += row.byte_size
+            images.append(f"data:{row.mime_type};base64,{base64.b64encode(row.data).decode('ascii')}")
+        else:
+            references.append(row)
+    return images, references
+
+
+def _with_media_references(user_message: str, references: list[ChatMediaModel]) -> str:
+    """Name the files the model cannot view in the message the agent reads.
+
+    Args:
+        user_message: The user's text.
+        references: The files the model only gets named.
+
+    Returns:
+        The text with one note for each reference file, or the text unchanged.
+    """
+    notes = [
+        f"[Attached {row.kind} file: {row.filename}. You cannot view this file. Tell the user that you cannot "
+        "see it, and use it only as a reference.]"
+        for row in references
+    ]
+    return "\n\n".join([user_message, *notes]) if notes else user_message
 
 
 def _anchor_by_text(
@@ -1469,7 +1614,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         Event types: ``conversation_meta`` (only when persistence is on),
         ``reasoning_patch``, ``tool_start``, ``tool_end``, ``status_patch``,
         ``pending_approval``, ``approval_resolved``, ``message_patch``,
-        ``message_reset``, ``done``, ``error``.
+        ``message_reset``, ``media_notice`` (the attached files the model cannot
+        view), ``done``, ``error``.
 
         Args:
             req: Request body with user message, chat history, wizard
@@ -1502,7 +1648,18 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             if job_store is None or not req.persist:
                 return None, None, None
             try:
-                cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
+                cid, ttl = _ensure_conversation(
+                    job_store,
+                    req.conversation_id,
+                    current_user.username,
+                    req.user_message,
+                    media[0].filename if media else "",
+                )
+                # Check the quota for file copies before an edit deletes turns,
+                # so a refused copy never loses the turns it would replace.
+                copied = media_copy_bytes(media, cid)
+                if copied:
+                    enforce_storage_quota(job_store, current_user.username, copied)
                 carried = None
                 if req.edit_user_text is not None:
                     found, carried = _discard_from_user_turn(
@@ -1518,7 +1675,14 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     # A retry of a send refused before it was stored also
                     # sends regenerate; the text check keeps the previous turn.
                     carried = _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
-                user_message_id = _persist_user_turn(job_store, cid, req.user_message, compaction=carried)
+                user_message_id = _persist_user_turn(
+                    job_store,
+                    cid,
+                    req.user_message,
+                    compaction=carried,
+                    media=media,
+                    replaced=req.edit_user_text is not None or req.regenerate,
+                )
             except DomainError:
                 raise
             except Exception:
@@ -1531,6 +1695,15 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         model_config = await _turn_model_config(current_user.username, req.model, req.reasoning_effort, req.fast_mode)
         window = await asyncio.to_thread(_context_window, model_config.name)
+        if req.media_ids and engine is None:
+            raise HTTPException(status_code=503, detail="Chat media storage is not available.")
+        media = (
+            await asyncio.to_thread(load_owned_media, engine, current_user.username, req.media_ids)
+            if req.media_ids
+            else []
+        )
+        images, media_references = _split_media(media, await asyncio.to_thread(_sees_images, model_config))
+        agent_message = _with_media_references(req.user_message, media_references)
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
@@ -1538,7 +1711,15 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # A new chat gets a model title in parallel with the turn. The setup
         # wizard kickoff has no cut title and gets no model title either.
         title_task = (
-            _start_title_task(job_store, current_user.username, req.model, conversation_id, req.user_message, title)
+            _start_title_task(
+                job_store,
+                current_user.username,
+                req.model,
+                conversation_id,
+                # A message with only media files gives the model the file name to title.
+                req.user_message if req.user_message.strip() else title,
+                title,
+            )
             if conversation_id and title and not req.conversation_id
             else None
         )
@@ -1649,10 +1830,12 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 # A failed summary, or one large recent turn, would still
                 # overflow the window; the oldest turns go so the turn can run.
                 history = compaction.fit_history(history, req.user_message, summary, window)
+            if media_references:
+                yield {"event": "media_notice", "data": {"reference_ids": [row.id for row in media_references]}}
             async for event in run_generalist_agent(
                 wizard_state=wizard_state,
                 chat_history=compaction.history_with_summary(summary, history),
-                user_message=req.user_message,
+                user_message=agent_message,
                 trust_mode=req.trust_mode,
                 auth_header=authorization,
                 approval_owner=current_user.username,
@@ -1663,6 +1846,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 github_token=_github_token,
                 feedback_target=feedback_target,
                 on_steer=_store_steer if conversation_id and job_store is not None else None,
+                images=images or None,
             ):
                 yield event
 
