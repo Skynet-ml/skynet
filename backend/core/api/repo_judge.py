@@ -544,9 +544,11 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
     Raises:
         Exception: The raw error of an unexpected type from the scorer, not
             wrapped in a ``ServiceError``, so the caller shows only its type
-            name. It keeps its own cause.
+            name. It keeps its own cause. A stage box's temporary provider
+            error is one of them, so the caller can store a retryable failure.
     """
     scorer = staged.scorers[0]
+    scorer.raw_provider_errors = True
 
     def score(candidate: str, case: Any) -> tuple[float, dict[str, Any]]:
         """Score one case through the scorer's guest endpoint, as a run's guest does.
@@ -698,23 +700,25 @@ def _temporary(error: BaseException) -> bool:
     )
 
 
-def _log_api_failure(session_id: str, error: BaseException, *, temporary: bool) -> None:
-    """Log the HTTP status and provider code when a sandbox API error stopped a call.
+def _log_api_failure(session_id: str, error: BaseException, *, temporary: bool, what: str = "A call") -> None:
+    """Log the HTTP status and provider code when a sandbox API error stopped a score.
 
     The provider's message can quote the response body, so it stays out of
     this line; the sandbox command log keeps a scrubbed, capped copy.
 
     Args:
         session_id: The judge session.
-        error: The error of the call.
-        temporary: Whether the call stored a temporary failure, not a lasting one.
+        error: The error of the score.
+        temporary: Whether the score stored a temporary failure, not a lasting one.
+        what: The failed step, for the log line.
     """
     api = sandbox_api_error(error)
     if api is None:
         return
     code = getattr(api, "code", None)
     logger.warning(
-        "A call of judge session %s stored a %s failure: sandbox API status %s, code %s",
+        "%s of judge session %s stored a %s failure: sandbox API status %s, code %s",
+        what,
         session_id,
         "temporary" if temporary else "lasting",
         api.status_code,  # type: ignore[attr-defined]
@@ -1490,7 +1494,9 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
             except (BudgetReached, BudgetInsufficientError):
                 _stop(job_store, job, "stopped", _NO_FINAL_MESSAGE)
             except Exception as error:
-                if _temporary(error) and failures + 1 < _TEMPORARY_FAILURE_LIMIT:
+                temporary = _temporary(error) and failures + 1 < _TEMPORARY_FAILURE_LIMIT
+                _log_api_failure(session_id, error, temporary=temporary, what="The final score")
+                if temporary:
                     store.finish(
                         identity,
                         claim_token=token,

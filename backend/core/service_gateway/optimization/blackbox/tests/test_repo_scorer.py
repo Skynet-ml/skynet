@@ -30,11 +30,15 @@ from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 from core.api import repo_judge
 from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.model_gateway import ModelGateway
+from core.billing.model_mailbox import ModelMailbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
-from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
+from core.billing.tests.test_model_gateway_transport import (
+    _OneCallSession,
+    gateway,  # noqa: F401 - pytest fixture
+)
 from core.billing.usage_tags import box_tag, usage_scope
 from core.config import settings
 from core.exceptions import ServiceError
@@ -1368,7 +1372,7 @@ def _api_error(status: int) -> SandboxApiError:
     "error", [_api_error(429), _api_error(503), SandboxTransientError("busy")], ids=["429", "503", "transient"]
 )
 def test_a_temporary_provider_error_on_a_stage_open_stays_raw(tmp_path: Path, error: Exception) -> None:
-    """A stage box open that the provider refuses for now raises the raw error, so a caller can retry, and no box stays open.
+    """In judge use, a stage box open that the provider refuses for now raises the raw error, and no box stays open.
 
     Args:
         tmp_path: Scratch folder.
@@ -1376,6 +1380,7 @@ def test_a_temporary_provider_error_on_a_stage_open_stays_raw(tmp_path: Path, er
     """
     runtime = RecordingRuntime(fail_on="shout", error=error)
     scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer.raw_provider_errors = True
     try:
         with pytest.raises(type(error)) as raised:
             scorer.dispatch({"candidate": "", "case": None})
@@ -1416,6 +1421,7 @@ def test_a_temporary_stage_open_error_reaches_the_judge_as_temporary(tmp_path: P
         scorer.close()
     assert raised.value is error
     assert repo_judge._temporary(raised.value)
+    assert scorer.raw_provider_errors is True
 
 
 def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
@@ -1638,7 +1644,7 @@ def test_a_layout_failure_gets_no_score_and_closes_every_box(tmp_path: Path) -> 
 
 
 def test_a_temporary_provider_error_in_the_layout_stays_raw_and_closes_every_box(tmp_path: Path) -> None:
-    """A stage box write that the provider refuses for now raises the raw error, and every box closes.
+    """In judge use, a stage box write that the provider refuses for now raises the raw error, and every box closes.
 
     Args:
         tmp_path: Scratch folder.
@@ -1675,6 +1681,7 @@ def test_a_temporary_provider_error_in_the_layout_stays_raw_and_closes_every_box
 
     runtime = _BusyRuntime()
     scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer.raw_provider_errors = True
     try:
         with pytest.raises(SandboxApiError) as raised:
             scorer.score("")
@@ -1766,6 +1773,74 @@ def test_a_stage_write_error_keeps_its_api_status_through_the_judge_score(
         assert isinstance(raised.value, ServiceError)
         assert "could not lay out the version" in str(raised.value)
     assert repo_judge._temporary(raised.value) is temporary
+
+
+_STAGE_FAILURES = {
+    "open": "The stage boxes could not open, so the version has no score.",
+    "layout": "A stage box could not lay out the version, so it has no score.",
+}
+
+
+def _temporary_stage_scorer(tmp_path: Path, where: str, status: int) -> tuple[RepoScorer, RecordingRuntime]:
+    """Open a scorer whose stage box open or layout gets a temporary sandbox API error.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: ``open`` or ``layout``, the step that fails.
+        status: The HTTP status, 429 or 5xx.
+
+    Returns:
+        The scorer, with the default flag, and its stage runtime.
+    """
+    error = _api_error(status)
+    runtime = RecordingRuntime(fail_on="shout", error=error) if where == "open" else _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    return scorer, runtime
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_in_a_run_answers_the_guest_and_the_engine_command_ends(
+    tmp_path: Path, where: str, status: int
+) -> None:
+    """In a run, a temporary stage box error gives the guest the 422 of the base, and the mailbox does not raise.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    body = base64.b64encode(json.dumps({"candidate": "", "case": None}).encode()).decode()
+    session = _OneCallSession({"id": "e" * 32, "path": "/v1/_evaluator", "body": body, "headers": {}})
+    try:
+        ModelMailbox(lambda _t, _p, b, _h: scorer.dispatch(b), concurrency=1).run(session, "engine")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    answer = session.answer()
+    assert answer["status"] == 422
+    assert base64.b64decode(answer["body"]).decode() == _STAGE_FAILURES[where]
+    assert runtime.closed == len(runtime.specs)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_with_the_default_flag_gets_no_score(tmp_path: Path, where: str, status: int) -> None:
+    """With the default flag, ``dispatch`` answers a temporary stage box error with the 422 of the base.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    try:
+        reply = scorer.dispatch({"candidate": "", "case": None})
+    finally:
+        scorer.close()
+    assert scorer.raw_provider_errors is False
+    assert (reply.status, reply.body.decode()) == (422, _STAGE_FAILURES[where])
+    assert runtime.closed == len(runtime.specs)
 
 
 class _Workspace:

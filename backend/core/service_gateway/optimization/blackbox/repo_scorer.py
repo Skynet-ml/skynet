@@ -293,6 +293,12 @@ def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
 class RepoScorer:
     """Score one repository version at a time in the parent's workspace box."""
 
+    # Only the judge sets this: it calls dispatch directly and must see a stage
+    # box's temporary provider error raw to store a retryable failure. In a run,
+    # a raw error escapes the model mailbox and fails the whole run, so a run
+    # keeps the 422 answer and the stage snapshot retry.
+    raw_provider_errors = False
+
     def __init__(
         self,
         workspace: RepoWorkspace,
@@ -758,8 +764,8 @@ class RepoScorer:
         Raises:
             RepoScoreError: When a stage box cannot open for a reason other
                 than the budget, or cannot lay out the version.
-            Exception: A temporary provider error from a stage box, raw; the
-                stage snapshot stays.
+            Exception: A temporary provider error from a stage box, raw, only
+                when ``raw_provider_errors`` is set; the stage snapshot stays.
             BudgetReached: When the budget refuses a stage box.
             BudgetError: When a stage box's hold does not fit the budget.
             UsagePendingError: When earlier usage still needs reconciliation.
@@ -805,7 +811,8 @@ class RepoScorer:
             RepoScoreError: When an unpacked stage box cannot open for a reason
                 other than the budget, or a box cannot lay out the version.
             Exception: A temporary provider error (``SandboxTransientError``,
-                or a sandbox API 429 or 5xx) from a box open or layout, raw.
+                or a sandbox API 429 or 5xx) from a box open or layout, raw,
+                only when ``raw_provider_errors`` is set.
             BudgetReached: And the other budget errors, from a stage box.
         """
         evaluation_id = uuid.uuid4().hex
@@ -825,10 +832,10 @@ class RepoScorer:
         except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
             raise
         except Exception as error:
-            # A provider refusal for now (429, 5xx) must stay raw: as a
-            # RepoScoreError the judge would store it as a lasting failure,
-            # and as a _StageSnapshotError it would drop a good snapshot.
-            if is_temporary_provider_error(error):
+            # For the judge, a provider refusal for now (429, 5xx) stays raw: as a
+            # RepoScoreError it would store a lasting failure, and as a
+            # _StageSnapshotError it would drop a good snapshot.
+            if self.raw_provider_errors and is_temporary_provider_error(error):
                 raise
             logger.warning("Stage boxes did not open: %s", error)
             failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
@@ -844,7 +851,7 @@ class RepoScorer:
             except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
                 raise
             except Exception as error:
-                if is_temporary_provider_error(error):
+                if self.raw_provider_errors and is_temporary_provider_error(error):
                     raise
                 logger.warning("Stage box layout failed: %s", error)
                 laid_out = [False]

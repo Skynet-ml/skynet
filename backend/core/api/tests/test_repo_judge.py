@@ -47,8 +47,6 @@ from ..routers.optimizations.lifecycle import cancel_optimization
 USER = "alice@example.com"
 ADMIN = AuthenticatedUser(username="admin1", role="admin", groups=())
 BASE = "a" * 40
-# The real score, kept before the boxes fixture replaces it.
-_REAL_SCORE = repo_judge._score
 GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
 CONTRACT_PATCH = (
     "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n@@ -1 +1 @@\n-a\n+b\n"
@@ -949,6 +947,44 @@ def test_a_client_error_write_through_the_real_score_is_stored_at_once(
     assert failed.value.code == "judge.score_failed"
     assert "stored a lasting failure: sandbox API status 400, code bad_request" in caplog.text
     assert "A call of judge session" in caplog.text
+    assert "private provider text" not in caplog.text
+
+
+def test_a_lasting_sandbox_api_failure_of_the_final_score_logs_its_status_and_code(
+    store: SQLiteJobStore, boxes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail the session on a 400 of the final score as before, and log the status and code with no provider text."""
+    caplog.set_level("WARNING", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    boxes["raise"] = _caused(_api_error(400, "bad_request"), ServiceError("scorer failed"))
+    ended = repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert ended.status == "failed"
+    lines = [r.getMessage() for r in caplog.records if "sandbox API" in r.getMessage()]
+    assert lines == [
+        f"The final score of judge session {session_id} stored a lasting failure: "
+        "sandbox API status 400, code bad_request"
+    ]
+    assert "private provider text" not in caplog.text
+
+
+def test_a_temporary_sandbox_api_failure_of_the_final_score_logs_its_status_and_code(
+    store: SQLiteJobStore, boxes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep the session open on a 503 of the final score as before, and log that the failure is temporary."""
+    caplog.set_level("WARNING", logger=repo_judge.logger.name)
+    session_id = _session(store, _cases(10))
+    _call(store, session_id)
+    boxes["raise"] = _caused(_api_error(503, "busy"), ServiceError("scorer failed"))
+    with pytest.raises(DomainError) as pending:
+        repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run")
+    assert pending.value.code == "budget.pending"
+    assert store.get_job(session_id)["status"] == "running"
+    assert repo_judge._final_row(store.engine, _budget_id(store, session_id)).status == "pending"
+    lines = [r.getMessage() for r in caplog.records if "sandbox API" in r.getMessage()]
+    assert lines == [
+        f"The final score of judge session {session_id} stored a temporary failure: sandbox API status 503, code busy"
+    ]
     assert "private provider text" not in caplog.text
 
 
