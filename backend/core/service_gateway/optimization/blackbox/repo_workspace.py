@@ -128,6 +128,11 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
     else:
         archive.extractall(".", filter=data_filter)
 """
+# The base image's root-owned interpreter. The box PATH puts the box-writable
+# /app/.venv/bin first, so a `python3` that the [setup] or [run] code plants
+# there could print a clean hash. ``-S`` skips site-packages, which the image
+# leaves group-writable; the hash scripts need only the standard library.
+BASE_PYTHON = "/usr/local/bin/python3"
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -136,17 +141,66 @@ _ANSWER_ENV_BYTES = 100_000
 # and special files are recorded rather than followed or opened. Besides the
 # contents it records each file's and folder's inode and change times: any
 # write, rename or link moves the change time, so a file rewritten and then
-# restored while the ``[run]`` entry runs still shows.
-# Given APP_ANSWER_PATH, it then writes APP_ANSWER there from inside the box:
-# unlike a Vercel file write, that moves no protected file's change time, so
-# a relay answer needs no fresh stamps after it.
+# restored while the ``[run]`` entry runs still shows. A path or folder that
+# it cannot read stops it with no output, so no protected file is left out.
+# A version process can read the output file's name from a root command line
+# and create the file first. So the check prints nothing unless its output is
+# a pipe, or a regular file that a root start owns, that only root can write,
+# with one link, and that its name still opens (model: runner.unsafe_output).
+# A check that does not start as root and writes to a file stops too, because
+# its own user could rewrite that file.
+# On a provider whose root has capabilities, the parent starts it as root. It
+# becomes the tree's owner before it reads anything in the tree, and it writes
+# nothing there. So no root read follows a link that the version plants, and
+# the kernel marks it not dumpable, so the version's processes cannot trace
+# it or open its fds. The version can point the tree at a root-owned folder,
+# so a check that stays root stops before it reads the tree, and the parent
+# gives no score. A root that cannot switch users, as a local Docker root with
+# no capability, also stops: it cannot read the box user's private files, so
+# its fingerprint could leave files out. The parent runs the check as the box
+# user there (``root_has_capabilities`` on the provider class).
 _HASH_PROTECTED = r"""
-import hashlib, json, os, sys
+import hashlib, json, os, stat, sys
+
+def unsafe_output():
+    try:
+        info = os.fstat(1)
+    except OSError:
+        return True
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.geteuid() != 0 or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+        return True
+    try:
+        named = os.lstat(os.readlink("/proc/self/fd/1"))
+    except OSError:
+        return True
+    return (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
+
+if unsafe_output():
+    sys.exit("the check's output file is not root's own, so another user could rewrite it")
+
+if os.geteuid() == 0:
+    owner = os.stat(".")
+    if owner.st_uid == 0:
+        sys.exit("root owns the tree, so the check has no other user to run as")
+    try:
+        os.setgroups([])
+        os.setgid(owner.st_gid)
+        os.setuid(owner.st_uid)
+    except OSError as error:
+        sys.exit(f"the check cannot leave root: {error}")
+    if os.geteuid() == 0:
+        sys.exit("the check is still root after the switch")
+
+def fail(error):
+    raise error
 
 def digest(path):
-    if os.path.islink(path):
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode):
         return "link:" + os.readlink(path)
-    if not os.path.isfile(path):
+    if not stat.S_ISREG(info.st_mode):
         return "special"
     sha = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -160,25 +214,49 @@ def stamp(path):
 
 found, stamps = {}, {}
 for top in sys.argv[1:]:
-    if os.path.isdir(top) and not os.path.islink(top):
-        for folder, folders, files in os.walk(top):
+    try:
+        info = os.lstat(top)
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+    if stat.S_ISDIR(info.st_mode):
+        for folder, folders, files in os.walk(top, onerror=fail):
             folders[:] = [name for name in folders if name != ".git"]
             stamps[os.path.normpath(folder)] = stamp(folder)
-            linked = [name for name in folders if os.path.islink(os.path.join(folder, name))]
+            linked = [name for name in folders if stat.S_ISLNK(os.lstat(os.path.join(folder, name)).st_mode)]
             for name in files + linked:
                 path = os.path.normpath(os.path.join(folder, name))
                 found[path] = digest(path)
                 stamps[path] = stamp(path)
-    elif os.path.lexists(top):
+    else:
         found[os.path.normpath(top)] = digest(top)
         stamps[os.path.normpath(top)] = stamp(top)
-answer = os.environ.get("APP_ANSWER_PATH")
-if answer:
-    os.makedirs(os.path.dirname(answer), exist_ok=True)
-    with open(answer + ".tmp", "w", encoding="utf-8") as handle:
-        handle.write(os.environ["APP_ANSWER"])
-    os.replace(answer + ".tmp", answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
+"""
+# Writes APP_ANSWER to the path in its argument from inside the box, after the
+# check. Unlike a Vercel file write, a box command moves the change time
+# only of the files it writes, so the stamps from before the run stay valid.
+# It runs as the box user, not with the root check: the parent's file write
+# makes each call folder as the box user with mode 0755, and a local Docker
+# root has no capability to write there. The version controls that user, so
+# a process it leaves running can forge or break only this answer. A change in
+# the gap between the check and this write is like a change just after the
+# write, and the final protected-file check after the run still catches it.
+# The temporary file is opened without following a link, and a leftover one is
+# removed first, so a planted file blocks only this answer.
+_WRITE_ANSWER = r"""
+import os, sys
+
+answer = sys.argv[1]
+os.makedirs(os.path.dirname(answer), exist_ok=True)
+temporary = answer + ".tmp"
+try:
+    os.unlink(temporary)
+except FileNotFoundError:
+    pass
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+with os.fdopen(os.open(temporary, flags, 0o666), "w", encoding="utf-8") as handle:
+    handle.write(os.environ["APP_ANSWER"])
+os.replace(temporary, answer)
 """
 # Hashes the whole prepared tree, ``.git`` included: each path's type, mode,
 # link target and content. A candidate box from the saved state must hold the
@@ -202,6 +280,20 @@ for folder, folders, files in os.walk(".", followlinks=False):
         sha.update(b"\0")
 print(sha.hexdigest())
 """
+
+
+def _pick_base_python() -> str:
+    """Set ``p`` in a box command to the base interpreter.
+
+    It falls back to ``python3`` from PATH only where no base interpreter
+    exists, such as the local test runtime. The box user cannot remove the
+    root-owned one in the image, so the fallback never runs there.
+
+    Returns:
+        A shell prefix that sets ``p`` and ends in ``&& ``. It keeps one
+        ``&&`` chain, so a failed ``cd`` before it still stops the hash.
+    """
+    return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
 class RepoSetupError(RuntimeError):
@@ -414,9 +506,11 @@ class CandidateBox:
     def answer(self, path: str, text: str) -> tuple[str, ...] | None:
         """Check the protected files while the version runs, then write one relay answer into the box.
 
-        The check and the write share one box command, so the stamps taken
-        before the run stay valid; an answer too large for that is written
-        with a file write and the files are stamped again after it.
+        A root check runs first, then a box-user command writes the answer,
+        also after a change, so the version ends now and not at its timeout.
+        Box commands keep the stamps taken before the run valid. An answer
+        too large for the environment is written with a file write, and the
+        files are stamped again after it.
 
         Args:
             path: Where the waiting client reads the answer, relative to the box.
@@ -424,7 +518,8 @@ class CandidateBox:
 
         Returns:
             Like :meth:`protected_changes`, or ``None`` when the files could
-            not be checked or the answer could not be written.
+            not be checked, or when nothing changed and the answer could not
+            be written.
         """
         workspace = self._workspace
         with self._lock:
@@ -432,11 +527,16 @@ class CandidateBox:
             if not workspace.watched:
                 return () if _deliver(self.session, path, text) else None
             if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
-                current = workspace.fingerprint(self.session, WORK_DIR, answer=(path, text))
-                if current is not None:
-                    return workspace.changes(current, before)
-                _deliver(self.session, path, text)
-                return None
+                current = workspace.fingerprint(self.session, WORK_DIR)
+                if current is None:
+                    _deliver(self.session, path, text)
+                    return None
+                changes = workspace.changes(current, before)
+                written = _write_answer(self.session, path, text)
+                if not written:
+                    # The answer stays unchecked, but the call ends now, not at its timeout.
+                    _deliver(self.session, path, text)
+                return changes if changes or written else None
             current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
             if not _deliver(self.session, path, text) or current is None or before is None:
                 return None
@@ -504,6 +604,25 @@ class MetricBox:
             return
         self._closed = True
         self.session.close()
+
+
+def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
+    """Write one relay answer with a box-user command, which moves no protected file's change time.
+
+    Args:
+        session: The box the answer goes to.
+        path: Where the answer goes, relative to the box.
+        text: The answer.
+
+    Returns:
+        Whether the write succeeded.
+    """
+    result = session.run(
+        f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
+        env={"APP_ANSWER": text},
+        timeout_seconds=_HASH_TIMEOUT_SECONDS,
+    )
+    return result.ok
 
 
 def _deliver(session: SandboxSession, path: str, text: str) -> bool:
@@ -1100,22 +1219,19 @@ class RepoWorkspace:
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f"cd {PREPARED_DIR} && python3 -I -c {shlex.quote(_HASH_PREPARED)}", timeout_seconds=_HASH_TIMEOUT_SECONDS
+            f'cd {PREPARED_DIR} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
+            timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         lines = result.stdout.strip().splitlines() if result.ok else []
         digest = lines[-1] if lines else ""
         return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
-    def fingerprint(
-        self, session: SandboxSession, directory: str, answer: tuple[str, str] | None = None
-    ) -> tuple[dict[str, str], dict[str, str]] | None:
+    def fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
         """Hash every file under the protected paths of one tree in a box.
 
         Args:
             session: The box holding the tree.
             directory: The tree's folder, relative to the box.
-            answer: A path relative to the box and the text to write there
-                once the hashing is done, in the same command.
 
         Returns:
             Repository-relative path to digest, and path to inode and change
@@ -1123,11 +1239,16 @@ class RepoWorkspace:
             command failed or printed something unreadable.
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
-        target = f'export APP_ANSWER_PATH="$PWD"/{shlex.quote(answer[0])} && ' if answer is not None else ""
         result = session.run(
-            f"{target}cd {shlex.quote(directory)} && python3 -I -c {shlex.quote(_HASH_PROTECTED)} {paths}",
-            env={"APP_ANSWER": answer[1]} if answer is not None else None,
+            f'cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
+            # A box-user command's output files belong to the box user, so a
+            # process that the version leaves running could replace a clean
+            # result there. The script itself drops root before it reads the tree.
+            # Only a provider whose root has no capability, local Docker, runs
+            # it as the box user: there the output is a pipe. An unknown
+            # session keeps root.
+            sudo=getattr(session, "root_has_capabilities", True),
         )
         if not result.ok:
             return None
