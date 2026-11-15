@@ -158,7 +158,11 @@ candidate returns the stored score and does not pay again, also when the
 budget cannot pay for a new call. An answer with `status: in_progress`
 means: call again with the same arguments. Skynet answers `in_progress`
 while other calls of the session hold its budget, and after a temporary
-repository or sandbox failure while the candidate is scored. A retry after
+repository or sandbox failure while the candidate is scored. A sandbox API
+rate limit (HTTP 429) or server error (HTTP 5xx) is a temporary failure.
+A call that does not finish in 25 seconds also answers `in_progress`. The
+score continues, and a later call with the same arguments returns its
+result and does not pay again. A retry after
 such a failure pays for its own work. After three temporary failures of the
 same candidate, the call answers `judge.score_failed`. Any other failure,
 for example a saved secret that the user deleted, answers

@@ -31,6 +31,7 @@ from typing import Any
 
 from .... import run_log
 from ....billing.usage_tags import usage_scope
+from ....sandbox.errors import sandbox_api_error
 from .runner import EVENT_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ stream_logger.setLevel(logging.DEBUG)
 
 _TAIL_LINES = 40
 _LABEL_CHARS = 120
+_ERROR_CODE_CHARS = 64
 # Shorter values (ports, flags, "1") are not secrets, and scrubbing them would mangle ordinary text.
 _SECRET_MIN_CHARS = 8
 _CONTROL = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b-\x1f\x7f]")
@@ -366,7 +368,29 @@ class SandboxOutputLog:
                 self._line(self._pending)
                 self._pending = ""
             self._groups.flush()
-        self._summary(logging.WARNING, f"raised {type(error).__name__}: {self.label}")
+        self._summary(logging.WARNING, f"raised {type(error).__name__}{self._api_detail(error)}: {self.label}")
+
+    def _api_detail(self, error: BaseException) -> str:
+        """Describe the HTTP answer behind the Vercel SDK's ``SandboxApiError``.
+
+        Only the SDK's own API error gets a detail: an ``AppError`` has a
+        default ``status_code`` that no provider sent. The provider's message
+        can quote the response body, and this log reaches the user's run log,
+        so the detail holds only the status and the code.
+
+        Args:
+            error: The exception leaving ``run``.
+
+        Returns:
+            `` (status …, code …)``, or an empty string for any other error.
+        """
+        if sandbox_api_error(error) is not error:
+            return ""
+        parts = [f"status {error.status_code}"]  # type: ignore[attr-defined]
+        code = getattr(error, "code", None)
+        if isinstance(code, str) and code.strip():
+            parts.append(f"code {self.scrub.text(code)[:_ERROR_CODE_CHARS]}")
+        return f" ({', '.join(parts)})"
 
     def _summary(self, level: int, headline: str) -> None:
         """Log one record with the headline and the last stderr lines.
