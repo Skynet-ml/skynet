@@ -83,18 +83,30 @@ test("without the opener in the window, both texts have an excess and the answer
   assert.equal(cleanCompletion("b)\n", "    a, ", "):"), "b)");
 });
 
+test("a closer that matches nothing in the window before the caret does not stop the cut", () => {
+  assert.equal(cleanCompletion("x)", "  return 1;\n}\n\nfoo(", ")"), "x");
+  assert.equal(cleanCompletion("x)", "# 1) step\nfoo(", ")"), "x");
+  assert.equal(cleanCompletion("x)", "fn f<'a>(s: &'a str) -> &'a str {\n    s\n}\n\nfoo(", ")"), "x");
+  assert.equal(cleanCompletion("x)", "const re = /\\)/;\nfoo(", ")"), "x");
+});
+
+test("an opener in a JS regex counts as a bracket, so the answer stays whole (known gap: no regex parsing)", () => {
+  assert.equal(cleanCompletion("x)", "const re = /\\(/;\nfoo(", ")"), "x)");
+});
+
 test("the excess scan reads brackets outside strings, escapes and triple quotes", () => {
-  assert.equal(hasExcess("f(x[0], {a: 1})"), false);
-  assert.equal(hasExcess('print(")")'), false);
-  assert.equal(hasExcess('"a\\"b"'), false);
-  assert.equal(hasExcess(`print("don't")`), false);
-  assert.equal(hasExcess('"""a " b"""'), false);
-  assert.equal(hasExcess("f(\n  a,\n"), false, "an open bracket is not an excess");
-  assert.equal(hasExcess("x = 'it\ny = (1)"), false, "a one-quote string ends at a line break");
-  assert.ok(hasExcess("a)"));
-  assert.ok(hasExcess("(a]"));
-  assert.ok(hasExcess('"open'));
-  assert.ok(hasExcess('"""a""""""'));
+  assert.equal(hasExcess("", "f(x[0], {a: 1})"), false);
+  assert.equal(hasExcess("", 'print(")")'), false);
+  assert.equal(hasExcess("", '"a\\"b"'), false);
+  assert.equal(hasExcess("", `print("don't")`), false);
+  assert.equal(hasExcess("", '"""a " b"""'), false);
+  assert.equal(hasExcess("", "f(\n  a,\n"), false, "an open bracket is not an excess");
+  assert.equal(hasExcess("x = 'it\n", "y = (1)"), false, "a one-quote string ends at a line break");
+  assert.equal(hasExcess("a)\n(", "b)"), false, "a closer before the caret that matches nothing is skipped");
+  assert.ok(hasExcess("", "a)"));
+  assert.ok(hasExcess("(", "a]"));
+  assert.ok(hasExcess("", '"open'));
+  assert.ok(hasExcess("", '"""a""""""'));
 });
 
 test("typing through a ghost eats into it, and a mismatch drops it", () => {
@@ -113,15 +125,23 @@ test("next word keeps leading space with the word", () => {
 
 test("the next edit anchors on its line, and not twice", () => {
   const caret = classify.length;
-  assert.equal(findLine(classify, "def classify(ticket: Ticket) -> str:", caret), 1);
-  assert.equal(findLine(classify, "nothing", caret), 0);
-  assert.equal(nextEditLine(classify, next, caret), 1);
-  const applied = classify.replace("\n", "\n    if is_security(ticket):\n");
-  assert.equal(nextEditLine(applied, next, caret), 0);
-  assert.equal(nextEditLine("", next, 0), 0);
-  assert.equal(nextEditLine(classify, null, caret), 0);
-  assert.equal(nextEditLine(classify, { after: next.after, lines: [] }, caret), 0);
-  assert.equal(nextEditLine(classify, { after: "  ", lines: ["x"] }, caret), 0);
+  assert.equal(findLine(classify, "def classify(ticket: Ticket) -> str:", caret, caret), 1);
+  assert.equal(findLine(classify, "nothing", caret, caret), 0);
+  assert.equal(nextEditLine(classify, next, caret, caret), 1);
+  const applied = classify.replace("\n", "\n" + next.lines.join("\n") + "\n");
+  assert.equal(nextEditLine(applied, next, caret, caret), 0);
+  const firstOnly = classify.replace("\n", "\n" + next.lines[0] + "\n");
+  assert.equal(nextEditLine(firstOnly, next, caret, caret), 1, "only part of the edit is in the file");
+  assert.equal(nextEditLine("", next, 0, 0), 0);
+  assert.equal(nextEditLine(classify, null, caret, caret), 0);
+  assert.equal(nextEditLine(classify, { after: next.after, lines: [] }, caret, caret), 0);
+  assert.equal(nextEditLine(classify, { after: "  ", lines: ["x"] }, caret, caret), 0);
+});
+
+test("a next edit that starts with a blank line is kept when a blank line follows the anchor", () => {
+  const doc = "def a():\n    return 1\n\ndef b():\n    a()";
+  const edit = { after: "    return 1", lines: ["", "def helper():", "    pass"] };
+  assert.equal(nextEditLine(doc, edit, doc.length, doc.length), 2);
 });
 
 test("the next edit takes the anchor nearest the caret, inside the window", () => {
@@ -131,10 +151,22 @@ test("the next edit takes the anchor nearest the caret, inside the window", () =
   const lines = doc.split("\n");
   const middle = lines.indexOf("    return result", 2) + 1;
   const caret = doc.indexOf("    return result", block.length) + 4;
-  assert.equal(findLine(doc, "return result", caret), middle);
+  assert.equal(findLine(doc, "return result", caret, caret), middle);
   const far = "def f():\n    return result\n" + "x".repeat(PREFIX_CHARS + 100) + "\n";
-  assert.equal(findLine(far, "return result", far.length), 0);
-  assert.equal(nextEditLine(far, { after: "return result", lines: ["    log()"] }, far.length), 0);
+  assert.equal(findLine(far, "return result", far.length, far.length), 0);
+  assert.equal(nextEditLine(far, { after: "return result", lines: ["    log()"] }, far.length, far.length), 0);
+});
+
+test("the window ends before the line that starts at the suffix cap, and starts at the request caret", () => {
+  const edge = "x".repeat(SUFFIX_CHARS - 1) + "\nanchor\n";
+  assert.equal(edge.indexOf("anchor"), SUFFIX_CHARS);
+  assert.equal(findLine(edge, "anchor", 0, 0), 0, "the model saw doc.slice(0, SUFFIX_CHARS), not the anchor");
+  assert.equal(findLine(edge, "anchor", 0, 1), 2, "one accepted character moves the end by one");
+  const doc = "anchor\n" + "y".repeat(PREFIX_CHARS - 3);
+  const asked = doc.length - 5;
+  assert.equal(findLine(doc, "anchor", asked, asked), 1, "the request caret sees the anchor");
+  assert.equal(findLine(doc, "anchor", asked + 20, asked + 20), 0, "a later caret alone would not");
+  assert.equal(findLine(doc, "anchor", asked, asked + 20), 1);
 });
 
 test("a refusal or a provider failure pauses requests, other answers do not", () => {

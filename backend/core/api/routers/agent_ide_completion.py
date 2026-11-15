@@ -23,15 +23,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ...billing.budgets import MAX_CENTS, BudgetError, BudgetService
-from ...billing.byok_vault import ProviderKeyVault
 from ...billing.data_policy import data_policy_for
 from ...billing.model_dispatch import OpenRouterDispatcher
 from ...billing.operation_pricing import ChargePolicy, UnpricedOperationError
-from ...billing.protected_credentials import _openrouter_endpoint
 from ...billing.runtime import BudgetRuntime, UsagePendingError
 from ...config import settings
 from ..auth import AuthenticatedUser, get_authenticated_user
-from ..errors import DomainError
+from ..openrouter_byok import own_openrouter_key
 from ..rate_limit import RateLimiter, shared_redis_client
 from ..suggest_model import byok_suggest_model, hosted_suggest_model
 from .execution_budgets import budget_http_error
@@ -51,7 +49,6 @@ MAX_OUTPUT_TOKENS = 256
 # about two calls a second at most. This cap stops a loop, not a person.
 RATE_LIMIT_PER_MINUTE = 60
 _TIMEOUT_SECONDS = 20.0
-_BYOK_PROVIDER = "openrouter"
 _CARET = "<CARET>"
 
 _SYSTEM = (
@@ -88,30 +85,6 @@ class CompletionResponse(BaseModel):
 
     completion: str = Field(description="Text to insert at the caret; empty when there is no suggestion.")
     next_edit: NextEdit | None = Field(default=None, description="A follow-up edit elsewhere in the file.")
-
-
-def _own_openrouter_key(engine: Any, username: str) -> str | None:
-    """Return the caller's verified OpenRouter BYOK secret, or None.
-
-    Args:
-        engine: SQLAlchemy engine backing the vault, or ``None``.
-        username: The caller.
-
-    Returns:
-        The decrypted key of a verified connection that targets openrouter.ai,
-        or None, which routes the call to the platform key and the wallet.
-    """
-    if engine is None or settings.byok_vault_key is None:
-        return None
-    try:
-        connection = ProviderKeyVault(engine=engine).resolve_connection(username, _BYOK_PROVIDER, verified_only=True)
-    except DomainError as err:
-        logger.warning("openrouter byok key unusable for %s: %s", username, err.code)
-        return None
-    # A custom base holds a credential for another host; never send it to openrouter.ai.
-    if connection is None or not _openrouter_endpoint(connection.api_base):
-        return None
-    return connection.secret
 
 
 def _messages(req: CompletionRequest) -> list[dict[str, str]]:
@@ -210,7 +183,7 @@ def create_agent_ide_completion_router(*, job_store: Any) -> APIRouter:
             f"agent-ide-complete:{user.username}", limit=RATE_LIMIT_PER_MINUTE, window_seconds=60
         )
         engine = getattr(job_store, "engine", None)
-        own_key = _own_openrouter_key(engine, user.username)
+        own_key = own_openrouter_key(engine, user.username)
         if own_key is not None:
             picked, api_key, policy, data_policy = byok_suggest_model(), own_key, ChargePolicy("byok_model"), None
         else:

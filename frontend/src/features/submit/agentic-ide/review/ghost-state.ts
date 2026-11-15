@@ -9,12 +9,13 @@ import { EditorView } from "@codemirror/view";
 import { consumeTyped, nextEditLine, nextWord, type NextEdit } from "./suggestions.ts";
 
 /**
- * What the editor shows. A ghost sits at `pos`. A jump hint and a next edit
+ * What the editor shows. A ghost sits at `pos`, and `asked` is the caret
+ * when its request went out. A jump hint and a next edit
  * stay only while the caret is at `at`, where the user last accepted, so a
  * caret move gives Tab back to indentation.
  */
 export type Suggest =
-  | { kind: "ghost"; pos: number; text: string; next: NextEdit | null }
+  | { kind: "ghost"; pos: number; asked: number; text: string; next: NextEdit | null }
   | { kind: "jump"; at: number; line: number; next: NextEdit }
   | { kind: "edit"; at: number; line: number; next: NextEdit };
 
@@ -45,9 +46,9 @@ export const suggestField = StateField.define<Suggest | null>({
   },
 });
 
-/** After a full accept at `at`, offer the next edit if the file still needs it. */
-function afterAccept(doc: string, at: number, next: NextEdit | null): Suggest | null {
-  const line = nextEditLine(doc, next, at);
+/** After a full accept at `at`, offer the next edit if the file still needs it. `asked` is the request caret. */
+function afterAccept(doc: string, asked: number, at: number, next: NextEdit | null): Suggest | null {
+  const line = nextEditLine(doc, next, asked, at);
   return line && next ? { kind: "jump", at, line, next } : null;
 }
 
@@ -61,7 +62,7 @@ export function accept(view: CommandTarget): boolean {
     view.dispatch({
       changes: { from: s.pos, insert: s.text },
       selection: { anchor: at },
-      effects: setSuggest.of(afterAccept(doc, at, s.next)),
+      effects: setSuggest.of(afterAccept(doc, s.asked, at, s.next)),
       userEvent: "input.complete",
     });
   } else if (s.kind === "jump") {
@@ -94,7 +95,7 @@ export function acceptWord(view: CommandTarget): boolean {
   view.dispatch({
     changes: { from: s.pos, insert: word },
     selection: { anchor: pos },
-    effects: setSuggest.of(rest ? { ...s, pos, text: rest } : afterAccept(doc, pos, s.next)),
+    effects: setSuggest.of(rest ? { ...s, pos, text: rest } : afterAccept(doc, s.asked, pos, s.next)),
     userEvent: "input.complete",
   });
   return true;

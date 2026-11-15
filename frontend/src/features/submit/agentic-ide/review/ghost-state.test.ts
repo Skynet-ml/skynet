@@ -26,7 +26,7 @@ function editor(doc = DOC, pos = CARET) {
 const kind = (view: ReturnType<typeof editor>) => view.state.field(suggestField)?.kind ?? null;
 
 function showGhost(view: ReturnType<typeof editor>, text = "urn ticket", next: typeof NEXT | null = NEXT) {
-  view.dispatch({ effects: setSuggest.of({ kind: "ghost", pos: CARET, text, next }) });
+  view.dispatch({ effects: setSuggest.of({ kind: "ghost", pos: CARET, asked: CARET, text, next }) });
 }
 
 test("Tab inserts the ghost, then jumps to the next edit, then inserts it", () => {
@@ -82,7 +82,7 @@ test("a ghost follows matching typing, and a caret move drops it", () => {
   const view = editor();
   showGhost(view);
   view.dispatch({ changes: { from: CARET, insert: "ur" }, selection: { anchor: CARET + 2 } });
-  assert.deepEqual(view.state.field(suggestField), { kind: "ghost", pos: CARET + 2, text: "n ticket", next: NEXT });
+  assert.deepEqual(view.state.field(suggestField), { kind: "ghost", pos: CARET + 2, asked: CARET, text: "n ticket", next: NEXT });
   view.dispatch({ selection: { anchor: 0 } });
   assert.equal(kind(view), null);
 });

@@ -152,7 +152,7 @@ export function agentComplete(path: string): Extension {
         const text = cleanCompletion(answer.text, around.prefix, line.text.slice(head - line.from));
         if (!text || this.view.state.field(field)) return;
         closeCompletion(this.view);
-        this.view.dispatch({ effects: setSuggest.of({ kind: "ghost", pos: head, text, next: answer.next }) });
+        this.view.dispatch({ effects: setSuggest.of({ kind: "ghost", pos: head, asked: head, text, next: answer.next }) });
       }
       destroy() {
         this.cancel();

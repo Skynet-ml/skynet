@@ -25,7 +25,7 @@ from core.storage.models import Base, BillingCustomerModel, ExecutionBudgetModel
 
 REQUEST = {"path": "src/app.py", "prefix": "def add(a, b):\n    ret", "suffix": "\n"}
 # The fixture replaces the lookup in every test; these tests call the real one.
-REAL_OWN_KEY = agent_ide_completion._own_openrouter_key
+REAL_OWN_KEY = agent_ide_completion.own_openrouter_key
 ANSWER = {"completion": "urn a + b", "next_edit": {"after": "def main():", "lines": ["    print(add(1, 2))"]}}
 
 
@@ -71,7 +71,7 @@ def ide(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(agent_ide_completion, "hosted_suggest_model", lambda: "openrouter/fixture/text")
     monkeypatch.setattr(agent_ide_completion, "byok_suggest_model", lambda: "openrouter/fixture/text")
     monkeypatch.setattr(agent_ide_completion, "data_policy_for", lambda username: "deny")
-    monkeypatch.setattr(agent_ide_completion, "_own_openrouter_key", lambda engine, username: None)
+    monkeypatch.setattr(agent_ide_completion, "own_openrouter_key", lambda engine, username: None)
     state = SimpleNamespace(requests=[], status=200, reply=_reply(json.dumps(ANSWER)))
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -183,7 +183,7 @@ def test_byok_key_pays_the_provider_with_no_wallet_charge(
         monkeypatch: Return a verified OpenRouter key for alice.
     """
     _sign_in(ide)
-    monkeypatch.setattr(agent_ide_completion, "_own_openrouter_key", lambda engine, username: "alice-own-key")
+    monkeypatch.setattr(agent_ide_completion, "own_openrouter_key", lambda engine, username: "alice-own-key")
     monkeypatch.setattr(agent_ide_completion.settings, "openrouter_api_key", None)
     response = ide.client.post("/agent-ide/completions", json=REQUEST)
     assert response.status_code == 200, response.text
@@ -365,7 +365,7 @@ def test_key_for_another_host_never_goes_to_openrouter(ide: SimpleNamespace, mon
     monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
     _save_key(ide.engine, "proxy-secret", api_base="https://proxy.example.com/v1")
     assert REAL_OWN_KEY(ide.engine, "alice") is None
-    monkeypatch.setattr(agent_ide_completion, "_own_openrouter_key", REAL_OWN_KEY)
+    monkeypatch.setattr(agent_ide_completion, "own_openrouter_key", REAL_OWN_KEY)
     _sign_in(ide)
     assert ide.client.post("/agent-ide/completions", json=REQUEST).status_code == 200
     assert [request.headers["authorization"] for request in ide.requests] == ["Bearer synthetic-platform-key"]
