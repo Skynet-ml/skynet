@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only
 
@@ -37,10 +37,13 @@ from ...service_gateway.embedding_pipeline.embeddings import get_embedder
 from ...storage.models import (
     AgentConversationModel,
     AgentMessageModel,
+    ChatMediaModel,
     JobModel,
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ._helpers import enforce_storage_quota
+from .chat_media import attach_media_to_chat
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,8 @@ class ConversationMessage(BaseModel):
     compaction: dict[str, Any] | None = None
     # The cost of summary calls that stored no compaction, from router_metadata.
     side_cents: float | None = None
+    # The files attached to a user turn (id, name, kind), from router_metadata.
+    media: list[dict[str, Any]] | None = None
     # The row id; a compaction names the user message it starts at by this id.
     id: int | None = None
     created_at: datetime
@@ -343,7 +348,10 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             The new conversation projected as ``ConversationSummary``.
 
         Raises:
-            DomainError: 404 when unknown, 403 when the caller does not own it.
+            DomainError: 404 when unknown, 403 when the caller does not own it,
+                409 when the copies of its files would go over the storage quota,
+                and 409 ``agent.media.changed`` when its files change during the fork.
+            HTTPException: 404 when one of its files is deleted during the fork.
         """
         with Session(job_store.engine) as session:
             source = session.get(AgentConversationModel, conversation_id)
@@ -368,7 +376,26 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 created_at=now,
                 updated_at=now,
             )
+            # The fork gets its own copies of the files, so deleting either
+            # chat never removes a file that the other chat still shows. The
+            # quota measure sweeps in its own transaction, so it runs before
+            # the fork writes anything. The fork row is flushed before the
+            # copies, because each copy names it.
+            media_ids = [media_id for m in kept for media_id in _media_ids(m)]
+            copied = sum(
+                session.scalars(
+                    select(ChatMediaModel.byte_size).where(
+                        ChatMediaModel.id.in_(media_ids),
+                        ChatMediaModel.username == user.username,
+                        ChatMediaModel.conversation_id.is_not(None),
+                    )
+                )
+            )
+            if copied:
+                enforce_storage_quota(job_store, user.username, copied)
             session.add(row)
+            session.flush()
+            held = attach_media_to_chat(session, job_store, user.username, media_ids, row.id, copied)
             # The wizard state stays on the source rows, so one turn never
             # counts twice in the training-ground export. The source chat paid
             # for its turns, so the copies carry no cost.
@@ -379,7 +406,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                     content=m.content,
                     tool_calls=m.tool_calls,
                     model=m.model,
-                    router_metadata=_fork_metadata(m.router_metadata),
+                    router_metadata=_fork_metadata(m.router_metadata, held),
                     created_at=m.created_at,
                 )
                 for m in kept
@@ -485,6 +512,7 @@ def conversation_detail(
                 thinking=meta.get("thinking"),
                 compaction=meta.get("compaction"),
                 side_cents=meta.get("side_cents"),
+                media=meta.get("media"),
                 id=cast(int, m.id),
                 created_at=cast(datetime, m.created_at),
             )
@@ -511,7 +539,23 @@ def conversation_detail(
     )
 
 
-def _fork_metadata(meta: Any) -> dict[str, Any] | None:
+def _media_ids(m: AgentMessageModel) -> list[str]:
+    """Return the ids of the files that one stored turn names.
+
+    Args:
+        m: A stored turn.
+
+    Returns:
+        The ids in ``router_metadata["media"]``, or an empty list.
+    """
+    meta = m.router_metadata
+    media = meta.get("media") if isinstance(meta, dict) else None
+    if not isinstance(media, list):
+        return []
+    return [item["id"] for item in media if isinstance(item, dict) and isinstance(item.get("id"), str)]
+
+
+def _fork_metadata(meta: Any, held: dict[str, str]) -> dict[str, Any] | None:
     """Copy one row's ``router_metadata`` for a fork, without the turn's cost.
 
     The compaction summary stays, because the fork's next turn needs it; only
@@ -519,6 +563,7 @@ def _fork_metadata(meta: Any) -> dict[str, Any] | None:
 
     Args:
         meta: The source row's ``router_metadata``.
+        held: A map from each source file id to the fork's copy of it.
 
     Returns:
         The copy, or ``None`` when the source row has none.
@@ -528,6 +573,11 @@ def _fork_metadata(meta: Any) -> dict[str, Any] | None:
     copy = {key: value for key, value in meta.items() if key not in ("stats", "side_cents")}
     if isinstance(copy.get("compaction"), dict):
         copy["compaction"] = {**copy["compaction"], "cents": None}
+    if isinstance(copy.get("media"), list):
+        copy["media"] = [
+            {**item, "id": held.get(item.get("id"), item.get("id"))} if isinstance(item, dict) else item
+            for item in copy["media"]
+        ]
     return copy
 
 

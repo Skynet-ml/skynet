@@ -216,6 +216,7 @@ export function ChatTranscript({
             <UserBubble
               content={pair.user.msg.content}
               createdAt={pair.user.msg.createdAt}
+              media={pair.user.msg.media}
               editable={!streaming}
               onEdit={() => pair.user && startEdit(pair.user.index, pair.user.msg.content)}
               onFork={onFork && (() => pair.user && onFork(pair.user.index))}

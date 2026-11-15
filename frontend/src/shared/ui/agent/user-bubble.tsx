@@ -18,6 +18,9 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 import { CollapsibleMessage } from "./collapsible-message";
 import { MessageTime } from "./message-actions";
 import { PastedTextCard } from "./pasted-text-card";
+import { TileRow, type MediaAttachment } from "./media-attachments";
+import { FileTile } from "./file-tiles";
+import { SentAttachments } from "./sent-attachments";
 import { joinPastes, shouldAttachPaste, splitPastes, type SplitMessage } from "./pasted-text";
 import { joinLineComments, splitLineComments, type LineComment } from "./line-comments";
 
@@ -82,6 +85,8 @@ interface UserBubbleProps {
   createdAt?: number;
   /** Start a new chat from before this message; no button without it. */
   onFork?: () => void;
+  /** Images, video and audio sent with the message. */
+  media?: readonly MediaAttachment[];
 }
 
 // The user's turns sit at the end side as bubbles; the agent's answers sit
@@ -92,20 +97,23 @@ export function UserBubble({
   editable = true,
   createdAt,
   onFork,
+  media,
 }: UserBubbleProps) {
   const automatic = automaticTurnBody(content);
+  // Memoized so the sent file tiles do not parse their text again on every render.
+  const parts = React.useMemo(() => {
+    const { rest, comments } = splitLineComments(content);
+    return { comments, ...splitSent(rest) };
+  }, [content]);
   if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
-  const { rest, comments } = splitLineComments(content);
-  const { text, pastes, files } = splitSent(rest);
+  const { comments, text, pastes, files } = parts;
 
   return (
     <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
-        {pastes.length + files.length > 0 && (
+        <SentAttachments media={media} files={files} />
+        {pastes.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {files.map((file, i) => (
-              <PastedTextCard key={`file-${i}`} name={file.name} text={file.text} />
-            ))}
             {pastes.map((paste, i) => (
               <PastedTextCard key={i} text={paste} />
             ))}
@@ -229,16 +237,24 @@ export function UserBubbleEditor({
   return (
     <div className="flex justify-end">
       <div className="max-w-[80%] w-full space-y-2">
-        {draft.pastes.length + draft.files.length > 0 && (
+        {draft.files.length > 0 && (
+          <div className="flex pt-2.5">
+            <TileRow>
+              {draft.files.map((file, i) => (
+                <FileTile
+                  key={`file-${i}`}
+                  name={file.name}
+                  text={file.text}
+                  onRemove={() =>
+                    change({ ...draft, files: draft.files.filter((_, j) => j !== i) })
+                  }
+                />
+              ))}
+            </TileRow>
+          </div>
+        )}
+        {draft.pastes.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {draft.files.map((file, i) => (
-              <PastedTextCard
-                key={`file-${i}`}
-                name={file.name}
-                text={file.text}
-                onRemove={() => change({ ...draft, files: draft.files.filter((_, j) => j !== i) })}
-              />
-            ))}
             {draft.pastes.map((paste, i) => (
               <PastedTextCard
                 key={i}

@@ -4,11 +4,11 @@ import assert from "node:assert/strict";
 import { CONTEXT_DOTS, contextUsage, dotColor, litDots } from "./context-usage.ts";
 
 test("contextUsage rounds percent and thousands", () => {
-  assert.deepEqual(contextUsage(84_400, 200_000), { usage: 42, remaining: 58, usedK: 84, windowK: 200 });
+  assert.deepEqual(contextUsage(84_400, 200_000), { usage: 42, usedK: 84, windowK: 200 });
 });
 
 test("contextUsage caps usage at the window", () => {
-  assert.deepEqual(contextUsage(250_000, 200_000), { usage: 100, remaining: 0, usedK: 200, windowK: 200 });
+  assert.deepEqual(contextUsage(250_000, 200_000), { usage: 100, usedK: 200, windowK: 200 });
 });
 
 test("contextUsage is null for unknown or invalid counts", () => {

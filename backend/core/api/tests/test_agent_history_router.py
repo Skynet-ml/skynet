@@ -15,17 +15,27 @@ from datetime import UTC, datetime, timedelta
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...storage.models import AgentConversationModel, AgentMessageModel, Base
+from ...storage.models import AgentConversationModel, AgentMessageModel, Base, ChatMediaModel
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers.agent_history import create_agent_history_router
 
 _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
+
+
+def _foreign_keys_on(dbapi_connection: object, _record: object) -> None:
+    """Turn on SQLite foreign keys, so a chat delete cascades as in Postgres.
+
+    Args:
+        dbapi_connection: The new DB-API connection.
+        _record: The pool record (unused).
+    """
+    dbapi_connection.execute("PRAGMA foreign_keys=ON")  # type: ignore[attr-defined]
 
 
 class _MemStore(RemoteDBJobStore):
@@ -38,6 +48,7 @@ class _MemStore(RemoteDBJobStore):
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
+        event.listen(self._engine, "connect", _foreign_keys_on)
         Base.metadata.create_all(self._engine)
         self._session_factory = sessionmaker(bind=self._engine)
 
@@ -171,6 +182,37 @@ def _seed_turns(store: _MemStore, conversation_id: str, turns: list[tuple[str, s
         session.commit()
 
 
+def test_reload_returns_the_media_of_a_user_turn() -> None:
+    """A user turn's stored files come back on reload; a turn with none has no media."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    media = [{"id": "m-1", "name": "shot.png", "kind": "image"}]
+    with store._session_factory() as session:
+        session.add_all(
+            [
+                AgentMessageModel(
+                    conversation_id="c-1",
+                    role="user",
+                    content="look",
+                    router_metadata={"media": media},
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                AgentMessageModel(
+                    conversation_id="c-1",
+                    role="assistant",
+                    content="ok",
+                    created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+
+    resp = client.get("/agent/conversations/c-1")
+
+    assert resp.status_code == 200, resp.text
+    assert [m["media"] for m in resp.json()["messages"]] == [media, None]
+
+
 def test_fork_saves_a_copy_that_loads_again() -> None:
     """A fork saves the turns before the chosen user turn in a new owned chat."""
     client, store = _client(_ALICE)
@@ -201,6 +243,96 @@ def test_fork_saves_a_copy_that_loads_again() -> None:
             {"served_model": "m", "compaction": {"summary": "s", "cents": None}}
         ] * 2
     assert len(client.get("/agent/conversations/c-1").json()["messages"]) == 4
+
+
+def test_fork_keeps_its_media_after_the_source_chat_is_deleted() -> None:
+    """A fork holds its own copies of the files, so deleting the source keeps them.
+
+    Two files make the fork write a copy before it reads the next file.
+    """
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    with store._session_factory() as session:
+        session.add_all(
+            [
+                *(
+                    ChatMediaModel(
+                        id=media_id,
+                        username="alice",
+                        filename=f"{media_id}.png",
+                        kind="image",
+                        mime_type="image/png",
+                        byte_size=3,
+                        data=data,
+                        conversation_id="c-1",
+                    )
+                    for media_id, data in (("m-1", b"abc"), ("m-2", b"def"))
+                ),
+                AgentMessageModel(
+                    conversation_id="c-1",
+                    role="user",
+                    content="look",
+                    router_metadata={
+                        "media": [
+                            {"id": "m-1", "name": "m-1.png", "kind": "image"},
+                            {"id": "m-2", "name": "m-2.png", "kind": "image"},
+                        ]
+                    },
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+
+    resp = client.post("/agent/conversations/c-1/fork", json={"user_turns": 1})
+    assert resp.status_code == 200, resp.text
+    fork = resp.json()
+    assert client.delete("/agent/conversations/c-1").status_code < 300
+
+    media = client.get(f"/agent/conversations/{fork['id']}").json()["messages"][0]["media"]
+    assert [(m["name"], m["kind"]) for m in media] == [("m-1.png", "image"), ("m-2.png", "image")]
+    with store._session_factory() as session:
+        assert session.get(ChatMediaModel, "m-1") is None
+        copies = [session.get(ChatMediaModel, m["id"]) for m in media]
+        assert [(c.conversation_id, c.data) for c in copies] == [(fork["id"], b"abc"), (fork["id"], b"def")]
+
+
+def test_fork_refuses_file_copies_over_the_storage_quota() -> None:
+    """A fork whose file copies would go over the quota gets the upload's 409 and saves nothing."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    with store._session_factory() as session:
+        session.add_all(
+            [
+                ChatMediaModel(
+                    id="m-1",
+                    username="alice",
+                    filename="shot.png",
+                    kind="image",
+                    mime_type="image/png",
+                    byte_size=3,
+                    data=b"abc",
+                    conversation_id="c-1",
+                ),
+                AgentMessageModel(
+                    conversation_id="c-1",
+                    role="user",
+                    content="look",
+                    router_metadata={"media": [{"id": "m-1", "name": "shot.png", "kind": "image"}]},
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    store.get_effective_user_storage_quota = lambda username: 0  # type: ignore[method-assign]
+
+    resp = client.post("/agent/conversations/c-1/fork", json={"user_turns": 1})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "user.storage.quota_exceeded"
+    assert _ids(store) == {"c-1"}
+    with store._session_factory() as session:
+        assert [row.id for row in session.query(ChatMediaModel)] == ["m-1"]
 
 
 def test_fork_past_the_last_user_turn_copies_every_turn() -> None:

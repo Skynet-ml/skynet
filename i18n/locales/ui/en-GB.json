@@ -129,5 +129,16 @@
   "settings.code.markers.color": "Color",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Reset to default",
-  "submit.agentic_ide.review.open_on_host": "Open in {host}"
+  "submit.agentic_ide.review.open_on_host": "Open in {host}",
+  "shared.agent.media_open": "Open {name}",
+  "shared.agent.media_play": "Play {name}",
+  "shared.agent.media_pause": "Pause {name}",
+  "shared.agent.media_remove": "Remove {name}",
+  "shared.agent.media_position": "{index} of {count}",
+  "shared.agent.media_download": "Download",
+  "shared.agent.media_previous": "Previous",
+  "shared.agent.media_next": "Next",
+  "shared.agent.media_seek": "Seek in video",
+  "shared.agent.media_speed": "Playback speed",
+  "shared.agent.media_download_name": "Download {name}"
 }

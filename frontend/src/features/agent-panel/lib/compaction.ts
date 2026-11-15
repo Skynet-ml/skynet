@@ -49,13 +49,15 @@ export function chatWindow(history: readonly AgentMessage[]): ChatWindow {
   const turns: ChatTurn[] = [];
   const indices: number[] = [];
   history.forEach((m, i) => {
-    if (i < start || m.content.trim().length === 0) return;
+    const media = m.role === "user" ? (m.media ?? []) : [];
+    if (i < start || (m.content.trim().length === 0 && media.length === 0)) return;
     const toolCalls = historyToolCalls(m);
     turns.push({
       role: m.role,
       content: m.content,
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
       ...(m.id !== undefined ? { id: m.id } : {}),
+      ...(media.length ? { media: media.map(({ name, kind }) => ({ name, kind })) } : {}),
     });
     indices.push(i);
   });

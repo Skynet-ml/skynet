@@ -43,6 +43,7 @@ from ...storage.models import (
     ApiTokenModel,
     Base,
     BillingCustomerModel,
+    ChatMediaModel,
     DatasetModel,
     JobModel,
     NotificationModel,
@@ -286,6 +287,35 @@ def test_delete_removes_and_counts_the_feedback_reports(harness: SimpleNamespace
     assert resp.json()["deleted_rows"] == baseline.deleted_rows + 2
     with Session(harness.engine) as session:
         owners = session.scalars(select(AgentFeedbackReportModel.username)).all()
+    assert owners == [_OTHER]
+
+
+def test_export_lists_and_delete_removes_the_chat_media(harness: SimpleNamespace) -> None:
+    """Export lists only the account's chat media without bytes; deletion removes only that media."""
+    with Session(harness.engine) as session:
+        for owner in (_EMAIL, _OTHER):
+            session.add(
+                ChatMediaModel(
+                    id=str(uuid4()),
+                    username=owner,
+                    filename="shot.png",
+                    kind="image",
+                    mime_type="image/png",
+                    byte_size=4,
+                    data=b"\x89PNG",
+                )
+            )
+        session.commit()
+
+    exported = harness.client.get("/account/export").json()["chat_media"]
+    assert [(m["filename"], m["kind"], m["byte_size"]) for m in exported] == [("shot.png", "image", 4)]
+    assert "data" not in exported[0]
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    with Session(harness.engine) as session:
+        owners = session.scalars(select(ChatMediaModel.username)).all()
     assert owners == [_OTHER]
 
 

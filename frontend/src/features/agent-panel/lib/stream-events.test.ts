@@ -36,6 +36,7 @@ function recorder(): { calls: Call[]; handlers: GeneralistAgentHandlers } {
       onCompaction: record("compaction"),
       onCompactionError: record("compactionError"),
       onSteerApplied: record("steerApplied"),
+      onMediaNotice: record("mediaNotice"),
     },
   };
 }
@@ -216,4 +217,13 @@ test("compaction events reach their handlers in order", () => {
     ["compactionError", { cents: null }],
     ["compactionError", { cents: 2.5 }],
   ]);
+});
+
+test("a media notice passes the reference ids, and an empty one is dropped", () => {
+  const calls = dispatch([
+    ["media_notice", { reference_ids: ["a", "b"] }],
+    ["media_notice", { reference_ids: [] }],
+    ["media_notice", {}],
+  ]);
+  assert.deepEqual(calls, [["mediaNotice", ["a", "b"]]]);
 });

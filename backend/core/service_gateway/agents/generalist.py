@@ -2821,6 +2821,9 @@ def _emit_to_queue_threadsafe(loop: asyncio.AbstractEventLoop, out_queue: asynci
 SHARE_PLAN_TOOL = "share_plan"
 # Tools that get no pending row: the reply's ``submit`` and the plan.
 _PENDING_SKIP = frozenset({"submit", "finish", SHARE_PLAN_TOOL})
+# The input field that carries a message's images (SKY-707). DSPy sends each
+# ``dspy.Image`` in it as an image part of the user message.
+_IMAGES_FIELD = "attached_images"
 _MAX_PLAN_CHARS = 300
 # Shorter reasoning reads fine as its own summary; a model call would cost
 # more than it says.
@@ -3573,6 +3576,7 @@ async def _drive_generalist_agent(
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
     on_steer: Callable[[str], None] | None = None,
+    images: list[str] | None = None,
     chat_allowed_tools: list[str] | None = None,
     auto_review: AutoReviewer | None = None,
 ) -> str:
@@ -3608,6 +3612,8 @@ async def _drive_generalist_agent(
             on; ``None`` (a chat that is not stored) leaves the tool out.
         on_steer: Runs in a worker thread with each steered text before the
             agent reads it; the router stores the steer message there.
+        images: Data URIs of the images attached to this message, which the
+            model sees as image input; ``None`` adds no image field.
         chat_allowed_tools: Tool names the user allowed earlier in this chat;
             :func:`chat_rules` drops every name a rule may not cover.
         auto_review: Reviews the safe mutations that auto-safe mode would run
@@ -3722,6 +3728,12 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
+        if images:
+            signature = signature.append(
+                _IMAGES_FIELD,
+                dspy.InputField(desc="Images the user attached to this message."),
+                type_=list[dspy.Image],
+            )
         react = AgentProgram(
             signature,
             tools=dspy_tools,
@@ -3746,6 +3758,8 @@ async def _drive_generalist_agent(
             "user_message": user_message,
             "history": _history_from_chat(chat_history),
         }
+        if images:
+            inputs[_IMAGES_FIELD] = [dspy.Image(url=uri) for uri in images]
         reply_text = await run_react_turn_on_pi(
             react,
             inputs,
@@ -3878,6 +3892,7 @@ async def run_generalist_agent(
     github_token: Callable[[], str | None] | None = None,
     feedback_target: FeedbackTarget | None = None,
     on_steer: Callable[[str], None] | None = None,
+    images: list[str] | None = None,
     chat_allowed_tools: list[str] | None = None,
     auto_review_send: Callable[[dict[str, Any]], bytes] | None = None,
 ) -> AsyncGenerator[dict, None]:
@@ -3937,6 +3952,8 @@ async def run_generalist_agent(
             on, or ``None`` when the chat is not stored.
         on_steer: Runs in a worker thread with each steered text before the
             agent reads it, or ``None``.
+        images: Data URIs of the images attached to this message. Pass them
+            only when the model accepts image input.
         chat_allowed_tools: Tool names the user allowed earlier in this chat.
         auto_review_send: Sends one paid TypeSafe Jev review through the
             protected dispatch of a managed turn. When set in auto-safe mode,
@@ -3991,6 +4008,7 @@ async def run_generalist_agent(
             github_token=github_token,
             feedback_target=feedback_target,
             on_steer=on_steer,
+            images=images,
             chat_allowed_tools=chat_allowed_tools,
             auto_review=reviewer,
         )

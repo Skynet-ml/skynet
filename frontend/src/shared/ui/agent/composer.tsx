@@ -18,8 +18,16 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
+import {
+  isUnsupportedImage,
+  type MediaAttachment,
+  mediaKind,
+  MediaTiles,
+  TileRow,
+} from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
+import { FileTile } from "./file-tiles";
 import {
   attachedFile,
   joinPastes,
@@ -80,6 +88,16 @@ interface ComposerProps {
   claimsFile?: (file: File) => boolean;
   /** Receives the one file `claimsFile` claimed. */
   onAttachFile?: (file: File) => void;
+  /** Receives picked, pasted or dropped image, video and audio files, which
+   *  then go with the message as files, not as text. */
+  onMediaFiles?: (files: File[]) => void;
+  /** Files wait to go with the next message. A queued or steered message
+   *  carries only text, so the composer refuses it, with a reason, until the
+   *  reply ends. */
+  mediaWaiting?: boolean;
+  /** Why Send must wait, for example while a file uploads. Send then shows
+   *  as off, and its tooltip and a toast give this reason. */
+  sendBlocked?: string | null;
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
@@ -103,6 +121,8 @@ interface ComposerProps {
   };
   /** Items that go with the next message, such as line comments, shown above the draft. */
   chips?: React.ReactNode;
+  /** Images, video and audio for the next message. They share one row with the attached files, as in Claude. */
+  media?: { items: readonly MediaAttachment[]; onRemove: (id: string) => void };
   /** The next message has content besides the draft, so an empty draft can still be sent. */
   sendsEmpty?: boolean;
   /** Repository file paths that "@" lists, as in Codex; a pick puts "@path " in the draft. */
@@ -250,11 +270,15 @@ export function Composer({
   acceptsMidTurn,
   claimsFile,
   onAttachFile,
+  onMediaFiles,
+  mediaWaiting = false,
+  sendBlocked = null,
   suggest,
   attachments = true,
   dictation: showMic = true,
   slash,
   chips,
+  media,
   sendsEmpty = false,
   mentions,
 }: ComposerProps) {
@@ -421,11 +445,18 @@ export function Composer({
     const {
       claimed,
       extra,
-      rest: files,
+      rest: kept,
     } = claimsFile ? splitClaimed(picked, claimsFile) : { claimed: null, extra: [], rest: picked };
+    const rest = kept.filter((file) => !isUnsupportedImage(file));
+    for (const file of kept)
+      if (isUnsupportedImage(file))
+        toast.error(msg("agent.media.unsupported", { name: file.name }));
     if (claimed) onAttachFile?.(claimed);
     for (const file of extra)
       toast.error(msg("agent.composer.attach_one_dataset", { name: file.name }));
+    const media = onMediaFiles ? rest.filter((file) => mediaKind(file)) : [];
+    if (media.length) onMediaFiles?.(media);
+    const files = rest.filter((file) => !media.includes(file));
     if (!files.length) return;
     setAttaching((n) => n + 1);
     try {
@@ -546,7 +577,12 @@ export function Composer({
   };
 
   const sendMidTurn = (mode: "steer" | "queue") => {
-    if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
+    if (!midTurn || disabled || dictating || attaching > 0) return;
+    if (mediaWaiting) {
+      toast.info(msg("agent.media.wait_reply"));
+      return;
+    }
+    if (!hasDraft) return;
     if (value.trim().length > maxLength) {
       setLengthNotice(value);
       return;
@@ -572,6 +608,10 @@ export function Composer({
       return;
     }
     if (disabled || dictating || attaching > 0 || !canSend) return;
+    if (sendBlocked) {
+      toast.info(sendBlocked);
+      return;
+    }
     onSubmit();
     resetHeight();
   };
@@ -943,16 +983,23 @@ export function Composer({
                   : ""}
           </p>
           {chips && !inline && <div className="flex flex-wrap gap-2 px-3 pt-3">{chips}</div>}
-          {draft.pastes.length + draft.files.length > 0 && !inline && (
+          {(draft.files.length > 0 || Boolean(media?.items.length)) && !inline && (
+            <div className="flex px-3 pt-3">
+              <TileRow>
+                {media && <MediaTiles media={media.items} onRemove={media.onRemove} bare />}
+                {draft.files.map((file, i) => (
+                  <FileTile
+                    key={`file-${i}`}
+                    name={file.name}
+                    text={file.text}
+                    onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
+                  />
+                ))}
+              </TileRow>
+            </div>
+          )}
+          {draft.pastes.length > 0 && !inline && (
             <div className="flex flex-wrap gap-2 px-3 pt-3">
-              {draft.files.map((file, i) => (
-                <PastedTextCard
-                  key={`file-${i}`}
-                  name={file.name}
-                  text={file.text}
-                  onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
-                />
-              ))}
               {draft.pastes.map((paste, i) => (
                 <PastedTextCard
                   key={i}
@@ -1192,24 +1239,33 @@ export function Composer({
                 <TooltipButton
                   side="top"
                   tooltip={
-                    <TooltipShortcuts
-                      rows={
-                        streaming && midTurn
-                          ? [
-                              { label: msg("agent.composer.queue"), keys: ["Enter"] },
-                              { label: msg("agent.pending.steer"), keys: [commandKey(), "Enter"] },
-                              ...(onStop ? [{ label: stopAriaLabel, keys: ["Esc"] }] : []),
-                            ]
-                          : [{ label: sendAriaLabel, keys: ["Enter"] }]
-                      }
-                    />
+                    !streaming && sendBlocked ? (
+                      sendBlocked
+                    ) : (
+                      <TooltipShortcuts
+                        rows={
+                          streaming && midTurn
+                            ? [
+                                { label: msg("agent.composer.queue"), keys: ["Enter"] },
+                                {
+                                  label: msg("agent.pending.steer"),
+                                  keys: [commandKey(), "Enter"],
+                                },
+                                ...(onStop ? [{ label: stopAriaLabel, keys: ["Esc"] }] : []),
+                              ]
+                            : [{ label: sendAriaLabel, keys: ["Enter"] }]
+                        }
+                      />
+                    )
                   }
                 >
                   <Button
                     type="submit"
                     size="icon"
                     autoTooltip={false}
-                    className="shrink-0 rounded-full"
+                    // A blocked Send stays hoverable and focusable, so its tooltip can say why.
+                    className="shrink-0 rounded-full aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                    aria-disabled={(!streaming && !!sendBlocked) || undefined}
                     disabled={disabled || dictating || attaching > 0 || !canSend}
                     aria-label={streaming && midTurn ? msg("agent.composer.queue") : sendAriaLabel}
                   >

@@ -99,12 +99,13 @@ export interface GeneralistAgentState {
   /** Fast mode for the next turns on a local CLI model that takes it. */
   fastMode: boolean;
   setFastMode: (on: boolean) => void;
-  /** Send a chat turn; ``hidden`` sends it without a user bubble (a kickoff the app started). */
+  /** Send a chat turn; ``hidden`` sends it without a user bubble (a kickoff the app started).
+   *  Returns false when the chat refuses the turn and the caller keeps its draft. */
   send: (
     message: string,
     wizardStateOverride?: WizardState,
-    options?: { hidden?: boolean },
-  ) => void;
+    options?: { hidden?: boolean; media?: AgentMessage["media"] },
+  ) => boolean;
   /** The displayed chat's messages sent mid-turn: steered into the running
    *  turn or queued to run after it. */
   midTurn: MidTurnQueue;
@@ -228,6 +229,8 @@ interface PendingRun {
   regenerate: boolean;
   /** User turn this message edits; the backend drops its stored copy and every later row. */
   editUserTurn: { text: string; occurrence: number } | null;
+  /** Ids of the stored images, video and audio sent with the message. */
+  mediaIds: string[];
 }
 
 /** Per-session mutable machinery that must never trigger a render. */
@@ -699,12 +702,16 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             steer_key: steerKey,
             compaction_summary: run.compactionSummary,
             chat_allowed_tools: [...rt.chatAllowedTools],
+            ...(run.mediaIds.length ? { media_ids: run.mediaIds } : {}),
           },
           {
             signal: controller.signal,
             onReconnect: (progress) => {
               if (settled) return;
               patchSession(key, { reconnect: progress });
+            },
+            onMediaNotice: () => {
+              if (!ended()) toast.info(msg("agent.media.reference_only"));
             },
             onCompactionStart: ({ reason, summarizedTurns }) => {
               if (ended()) return;
@@ -1086,6 +1093,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       hidden = false,
       editUserTurn: { text: string; occurrence: number } | null = null,
       compaction: AgentMessage["compaction"] = undefined,
+      media: AgentMessage["media"] = undefined,
     ) => {
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
@@ -1102,6 +1110,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         // A resend of the message a compaction is stored on keeps it, as the
         // server does: its summary covers only the turns before this one.
         ...(compaction ? { compaction } : {}),
+        ...(media?.length ? { media } : {}),
       };
       // The window is read with the new message, so a compaction on it sends
       // its summary and none of the turns it summarized; then the message goes.
@@ -1128,6 +1137,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         trustMode: tm,
         regenerate,
         editUserTurn,
+        mediaIds: media?.map((m) => m.id) ?? [],
       };
 
       commit((draft) => {
@@ -1158,9 +1168,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const send = React.useCallback(
-    (message: string, wizardStateOverride?: WizardState, options?: { hidden?: boolean }) => {
+    (
+      message: string,
+      wizardStateOverride?: WizardState,
+      options?: { hidden?: boolean; media?: AgentMessage["media"] },
+    ): boolean => {
       const trimmed = message.trim();
-      if (!trimmed) return;
+      if (!trimmed && !options?.media?.length) return false;
       const key = activeKeyRef.current;
       if (wizardStateOverride) {
         const rt = getRuntime(key);
@@ -1172,19 +1186,33 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // A message sent during a manual /compact waits in the chat's queue and
       // runs as the next turn when the compaction ends (Gilad, 2026-11-12).
       if (sessionsRef.current.get(key)?.compacting?.reason === "manual") {
+        // The chat's queue holds text only. A turn with files waits in the
+        // composer until the compaction ends, so no file is lost.
+        if (options?.media?.length) return false;
         // A hidden send (a wizard Back, a screen kickoff) is not the user's
         // to edit, so it waits on the runtime instead of in the queue.
         if (options?.hidden) {
           getRuntime(key).afterCompact = { message: trimmed, override: wizardStateOverride };
-          return;
+          return true;
         }
         const queue = steerQueueFor(key);
         queue.setBusy(true);
         queue.enqueue(trimmed);
-        return;
+        return true;
       }
       const history = sessionsRef.current.get(key)?.messages ?? [];
-      requestRun(key, trimmed, history, wizardStateOverride, false, options?.hidden ?? false);
+      requestRun(
+        key,
+        trimmed,
+        history,
+        wizardStateOverride,
+        false,
+        options?.hidden ?? false,
+        null,
+        undefined,
+        options?.media,
+      );
+      return true;
     },
     [getRuntime, requestRun, steerQueueFor],
   );
@@ -1234,6 +1262,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         false,
         editUserTurn,
         current[messageIndex]?.compaction,
+        current[messageIndex]?.media,
       );
       if (rt && held) rt.afterCompact = held;
     },
@@ -1270,6 +1299,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       lastUser.hidden ?? false,
       editUserTurn,
       lastUser.compaction,
+      lastUser.media,
     );
   }, [requestRun, steerQueueFor]);
 

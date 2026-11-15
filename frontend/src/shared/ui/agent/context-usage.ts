@@ -3,8 +3,6 @@
 export interface ContextUsage {
   /** Whole percent used, 0 to 100. */
   usage: number;
-  /** Whole percent left, 0 to 100. */
-  remaining: number;
   /** Used and total tokens, in thousands. */
   usedK: number;
   windowK: number;
@@ -20,7 +18,6 @@ export function contextUsage(usedTokens: number | null, contextWindow: number | 
   const usage = Math.round((used / contextWindow) * 100);
   return {
     usage,
-    remaining: 100 - usage,
     usedK: Math.round(used / 1000),
     windowK: Math.round(contextWindow / 1000),
   };

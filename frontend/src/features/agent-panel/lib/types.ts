@@ -13,6 +13,8 @@ export interface ChatTurn {
   tool_calls?: Array<{ tool: string; status: "done" | "error"; result?: string }>;
   /** The saved message id; the backend stores a compaction on the user message it names. */
   id?: number;
+  /** User turns only: the files the turn attached, so the model knows they existed. */
+  media?: Array<{ name: string; kind: string }>;
 }
 
 /**

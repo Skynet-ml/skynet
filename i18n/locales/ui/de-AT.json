@@ -72,5 +72,16 @@
   "settings.code.markers.color": "Farbe",
   "settings.code.markers.signs": "+/−",
   "settings.code.reset": "Auf Standard zurücksetzen",
-  "submit.agentic_ide.review.open_on_host": "In {host} öffnen"
+  "submit.agentic_ide.review.open_on_host": "In {host} öffnen",
+  "shared.agent.media_open": "{name} öffnen",
+  "shared.agent.media_play": "{name} abspielen",
+  "shared.agent.media_pause": "{name} pausieren",
+  "shared.agent.media_remove": "{name} entfernen",
+  "shared.agent.media_position": "{index} von {count}",
+  "shared.agent.media_download": "Herunterladen",
+  "shared.agent.media_previous": "Zurück",
+  "shared.agent.media_next": "Weiter",
+  "shared.agent.media_seek": "Im Video springen",
+  "shared.agent.media_speed": "Wiedergabegeschwindigkeit",
+  "shared.agent.media_download_name": "{name} herunterladen"
 }
