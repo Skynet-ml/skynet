@@ -385,6 +385,28 @@ void test("an @word shows as a token only in a chat with file mentions", async (
   await files.unmount();
 });
 
+void test("the @file menu picks a file with Enter and with Tab", async () => {
+  const files = ["src/app.py", "src/lib/util.py", "README.md"];
+  const composer = await mount("", false, undefined, files);
+  await React.act(async () => composer.textarea.focus());
+  await composer.type("see @ut");
+  assert.equal(listbox()?.getAttribute("aria-label"), "Files");
+  assert.deepEqual(
+    [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+    ["util.pysrc/lib"],
+  );
+  await composer.press("Enter");
+  assert.equal(composer.textarea.value, "see @src/lib/util.py ");
+  assert.equal(listbox(), null, "the pick closes the menu");
+  assert.deepEqual(composer.sent, [], "Enter picks the file and does not send");
+
+  await composer.type("see @src/lib/util.py and @app");
+  await composer.press("Tab");
+  assert.equal(composer.textarea.value, "see @src/lib/util.py and @src/app.py ");
+  assert.deepEqual(composer.sent, []);
+  await composer.unmount();
+});
+
 void test("a reply without mid-turn input locks the draft, so the token does not show", async () => {
   const container = document.createElement("div");
   document.body.append(container);

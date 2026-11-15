@@ -308,6 +308,8 @@ export function AgenticIde({
       if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey || e.code !== "KeyB") return;
       // Windows reports AltGr as Ctrl+Alt; AltGr+B types a character on some layouts.
       if (e.getModifierState?.("AltGraph")) return;
+      // The wizard keeps a step it left mounted and hidden; its shortcut must not act unseen.
+      if (rootRef.current?.checkVisibility?.({ opacityProperty: true }) === false) return;
       e.preventDefault();
       if (tabs) setTab((t) => (t === "chat" ? "changes" : "chat"));
       else setPaneOpen((open) => !open);
@@ -496,7 +498,9 @@ export function AgenticIde({
       active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
     );
   const showPane = tabs ? tab === "changes" : paneOpen;
-  const floating = full && showPane && !tabs;
+  // The step docks the chat here only while the IDE is on screen. Off screen the
+  // chat docks on another step, which must not get the floating bar.
+  const floating = full && showPane && !tabs && chat != null;
   // The floating chat draws its own bar: it holds the thread, which minimizes
   // while the composer stays.
   React.useEffect(() => {

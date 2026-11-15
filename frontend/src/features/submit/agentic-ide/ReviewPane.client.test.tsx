@@ -468,6 +468,68 @@ void test("a queued comment opens the pane at its line", async () => {
   await ide.unmount();
 });
 
+void test("Ctrl+Alt+B does nothing while the IDE is off screen", async () => {
+  const ide = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{ "a.py": "x = 1\n" }}
+      repo={null}
+      busy={false}
+      onWrite={noop}
+    />,
+  );
+  const pane = ide.container.querySelector<HTMLElement>('section[aria-label="Changes"]')!;
+  // jsdom does not lay out, so the hidden step reports itself unseen here.
+  (ide.container.firstElementChild as HTMLElement).checkVisibility = () => false;
+  const e = new dom.window.KeyboardEvent("keydown", {
+    code: "KeyB",
+    key: "b",
+    ctrlKey: true,
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  await React.act(async () => {
+    dom.window.dispatchEvent(e);
+  });
+  assert.equal(e.defaultPrevented, false, "the key keeps its default");
+  assert.equal(pane.hasAttribute("inert"), false, "the pane stays open");
+  await ide.unmount();
+});
+
+void test("the chat floats only while the IDE docks it", async () => {
+  let state: ReturnType<typeof useWizardStateOptional>;
+  function Probe() {
+    state = useWizardStateOptional();
+    return null;
+  }
+  const ide = (chat: React.ReactNode) => (
+    <Session>
+      <WizardStateProvider>
+        <AgenticIde
+          chat={chat}
+          texts={{ "a.py": "x = 1\n" }}
+          repo={null}
+          busy={false}
+          onWrite={noop}
+        />
+        <Probe />
+      </WizardStateProvider>
+    </Session>
+  );
+  const view = await mount(ide(<div />));
+  await click(byLabel(view.container, "Enter full view")[0]!);
+  assert.ok(state!.chatFloat, "the full view floats the docked chat");
+
+  // The wizard left the step: it keeps the IDE mounted, and the chat docks elsewhere.
+  await view.render(ide(null));
+  assert.equal(state!.chatFloat, null, "another step shows the chat docked");
+
+  await view.render(ide(<div />));
+  assert.ok(state!.chatFloat, "back on the step, the full view floats the chat again");
+  await view.unmount();
+});
+
 void test("the full view button shows only with a handler, and names its state", async () => {
   let presses = 0;
   const pane = await mount(<ReviewPane {...props()} />);

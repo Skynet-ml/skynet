@@ -43,6 +43,7 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   Event: dom.window.Event,
   MouseEvent: dom.window.MouseEvent,
+  KeyboardEvent: dom.window.KeyboardEvent,
   MutationObserver: dom.window.MutationObserver,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
@@ -55,6 +56,10 @@ dom.window.matchMedia = (query: string) =>
   ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as never;
 dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 dom.window.HTMLElement.prototype.scrollTo = () => {};
+dom.window.HTMLElement.prototype.setPointerCapture = () => {};
+// jsdom does not lay out; the test names the mark under the pointer.
+let under: Element | null = null;
+dom.window.document.elementFromPoint = () => under;
 (dom.window as unknown as { __APP_MESSAGES__: unknown }).__APP_MESSAGES__ =
   buildActiveCatalog("en");
 
@@ -130,4 +135,92 @@ void test("the rail follows turns that mount again after an edit is cancelled", 
   await React.act(async () => root.unmount());
   container.remove();
   box.remove();
+});
+
+async function mountRail(
+  bookmarks: ReadonlySet<number>,
+  onBookmarkChange = (_i: number, _b: boolean) => {},
+) {
+  const box = document.createElement("div");
+  INDEXES.forEach((index) => box.append(turn(index)));
+  document.body.append(box);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (marks: ReadonlySet<number>) =>
+    React.act(async () =>
+      root.render(
+        <UserMessageRail
+          items={items}
+          scrollBox={box}
+          bookmarks={marks}
+          onBookmarkChange={onBookmarkChange}
+        />,
+      ),
+    );
+  await render(bookmarks);
+  return {
+    box,
+    container,
+    render,
+    mark: (position: number) =>
+      container.querySelector<HTMLElement>(`[data-rail-position="${position}"]`)!,
+    unmount: async () => {
+      await React.act(async () => root.unmount());
+      container.remove();
+      box.remove();
+    },
+  };
+}
+
+const pointer = (el: Element, type: string, buttons: number) =>
+  React.act(async () => {
+    el.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, button: 0, buttons }));
+  });
+
+void test("a press released outside the rail does not leave it scrubbing", async () => {
+  const rail = await mountRail(new Set());
+  let scrolls = 0;
+  rail.box.scrollTo = () => void scrolls++;
+  const list = rail.mark(0).parentElement!;
+
+  under = rail.mark(0);
+  await pointer(rail.mark(0), "pointerdown", 1);
+  // The button comes up outside the rail, so the rail gets no pointerup.
+  under = rail.mark(2);
+  await pointer(rail.mark(2), "pointermove", 0);
+  assert.equal(scrolls, 0, "a hover with no button does not jump the thread");
+  assert.equal(list.hasAttribute("data-scrubbing"), false);
+
+  // A held button still scrubs.
+  under = rail.mark(0);
+  await pointer(rail.mark(0), "pointerdown", 1);
+  under = rail.mark(3);
+  await pointer(rail.mark(3), "pointermove", 1);
+  assert.equal(scrolls, 1, "a drag jumps to the turn under the pointer");
+  await pointer(rail.mark(3), "pointerup", 0);
+  under = null;
+  await rail.unmount();
+});
+
+void test("B on a focused mark bookmarks its turn from the keyboard", async () => {
+  const changes: Array<[number, boolean]> = [];
+  const rail = await mountRail(new Set(), (index, bookmarked) => changes.push([index, bookmarked]));
+  const key = (el: Element, init: KeyboardEventInit) =>
+    React.act(async () => {
+      el.dispatchEvent(new dom.window.KeyboardEvent("keydown", { bubbles: true, ...init }));
+    });
+  assert.equal(rail.mark(1).getAttribute("aria-keyshortcuts"), "B");
+
+  await key(rail.mark(1), { key: "b" });
+  await key(rail.mark(1), { key: "b", ctrlKey: true });
+  assert.deepEqual(changes, [[2, true]], "B bookmarks the turn; Ctrl+B does not");
+
+  await rail.render(new Set([2]));
+  await key(rail.mark(1), { key: "B" });
+  assert.deepEqual(changes, [
+    [2, true],
+    [2, false],
+  ]);
+  await rail.unmount();
 });

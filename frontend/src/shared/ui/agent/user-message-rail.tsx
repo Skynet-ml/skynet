@@ -182,6 +182,8 @@ export function UserMessageRail({
           onPointerMove={(e) => {
             const s = scrub.current;
             if (!s) return;
+            // A release outside the rail before the capture starts sends no pointerup here.
+            if (e.buttons === 0) return endScrub();
             const at = markAt(e.clientY);
             if (at == null || at === s.last) return;
             if (!s.moved) e.currentTarget.setPointerCapture(e.pointerId);
@@ -191,6 +193,8 @@ export function UserMessageRail({
             jump(items[at]!.index, false);
           }}
           onPointerUp={endScrub}
+          // Once the capture starts, the pointer does not leave; before it, a leave ends the press.
+          onPointerLeave={endScrub}
           onPointerCancel={endScrub}
           onLostPointerCapture={endScrub}
         >
@@ -216,6 +220,13 @@ export function UserMessageRail({
                     onFocus={(e) => e.currentTarget.matches(":focus-visible") && setPointed(position)}
                     onBlur={() => setPointed((p) => (p === position ? null : p))}
                     onClick={() => !swallowClick.current && jump(item.index, true)}
+                    // The tooltip's bookmark button is out of the tab order, so B is the keyboard's way.
+                    aria-keyshortcuts="B"
+                    onKeyDown={(e) => {
+                      if (e.key.toLowerCase() !== "b" || e.ctrlKey || e.metaKey || e.altKey) return;
+                      e.preventDefault();
+                      onBookmarkChange(item.index, !bookmarked);
+                    }}
                     className="flex h-2.5 w-9 shrink-0 cursor-pointer items-center outline-none"
                   >
                     <span
