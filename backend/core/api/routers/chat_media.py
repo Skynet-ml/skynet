@@ -73,6 +73,8 @@ _DOCUMENT_EXTENSIONS = {
     _OFFICE_PARTS["xl/workbook.xml"]: ".xlsx",
 }
 _ZIP_END_MAGIC = b"PK\x05\x06"
+_ZIP64_LOCATOR_MAGIC = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
 _ZIP_END_SIZE = 22
 # A zip's comment can be at most this long, so its end record is in this tail.
 _ZIP_END_SEARCH = _ZIP_END_SIZE + 0xFFFF
@@ -184,10 +186,14 @@ def office_document_type(data: bytes) -> str | None:
     Returns:
         The DOCX or XLSX content type, or ``None`` for any other zip.
     """
-    # zipfile reads the central directory that this end record names. A
-    # ZIP64 file marks its size 0xFFFFFFFF, which the cap also refuses.
+    # zipfile reads the central directory that this end record names. A ZIP64
+    # locator just before the record makes zipfile use the ZIP64 size instead,
+    # which the cap below does not see. DOCX and XLSX under the upload limit
+    # never need ZIP64, so a zip that has one is refused.
     end = data.rfind(_ZIP_END_MAGIC, max(0, len(data) - _ZIP_END_SEARCH))
     if end < 0 or len(data) - end < _ZIP_END_SIZE:
+        return None
+    if data[max(0, end - _ZIP64_LOCATOR_SIZE) : end].startswith(_ZIP64_LOCATOR_MAGIC):
         return None
     if int.from_bytes(data[end + 12 : end + 16], "little") > MAX_ZIP_DIRECTORY_BYTES:
         return None

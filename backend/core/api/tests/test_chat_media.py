@@ -11,6 +11,7 @@ in-memory SQLite job store, with the auth dependency overridden.
 from __future__ import annotations
 
 import io
+import struct
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,7 @@ from ..routers.chat_media import (
     create_chat_media_router,
     load_media_data,
     load_owned_media,
+    office_document_type,
     sniff_media,
 )
 from ..routers.generalist_agent import _persist_user_turn
@@ -265,6 +267,20 @@ def test_upload_rejects_a_zip_whose_directory_passes_the_cap(harness: SimpleName
     data = _zip(*names)
     assert len(data) < chat_media.MAX_MEDIA_BYTES["document"]
     assert _upload(harness.client, data, name="big.docx").status_code == 415
+
+
+def test_a_zip64_end_cannot_hide_a_large_directory_from_the_cap() -> None:
+    """A ZIP64 end names the real directory size, which a small 32-bit size must not hide."""
+    plain = _zip("word/document.xml", *(f"pad/{n:08d}-{'x' * 40}" for n in range(12_000)))
+    end = plain.rfind(b"PK\x05\x06")
+    _, _, _, on_disk, total, size, offset, _ = struct.unpack("<4s4H2LH", plain[end : end + 22])
+    record = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, on_disk, total, size, offset)
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, end, 1)
+    small_end = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 16, 0xFFFFFFFF, 0)
+    data = plain[:end] + record + locator + small_end
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert "word/document.xml" in archive.namelist()
+    assert office_document_type(data) is None
 
 
 def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
