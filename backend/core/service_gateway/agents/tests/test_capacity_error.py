@@ -62,6 +62,22 @@ def test_spent_quota_429_is_not_capacity() -> None:
     assert "code" not in _turn_error_payload(exc)
 
 
+def test_openai_429_with_a_billing_link_is_capacity() -> None:
+    """A rate limit that only links to the billing page still clears with time."""
+    exc = _rate_limit(
+        "Rate limit reached for gpt-4o in organization org-test on requests per min (RPM): Limit 3, Used 3, "
+        "Requested 1. Please try again in 20s. Visit https://platform.openai.com/account/billing to add a "
+        "payment method."
+    )
+    assert _turn_error_payload(exc)["code"] == "capacity"
+
+
+def test_billing_details_429_is_not_capacity() -> None:
+    """A 429 that asks for billing details does not clear with time."""
+    exc = _rate_limit("Your request was rejected. Please check your plan and billing details.")
+    assert "code" not in _turn_error_payload(exc)
+
+
 def test_anthropic_spend_cap_429_is_not_capacity() -> None:
     """Anthropic's spend-cap 429 stays until the cap changes, so it gets no retry code."""
     exc = _rate_limit(

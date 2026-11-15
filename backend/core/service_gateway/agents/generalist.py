@@ -3676,7 +3676,10 @@ _CAPACITY_ERROR_TYPES = frozenset({"RateLimitError", "ServiceUnavailableError"})
 _QUOTA_PATTERNS = (
     "insufficient_quota",
     "exceeded your current quota",
-    "billing",
+    # Not a bare "billing": OpenAI's passing 429 for an org without a payment
+    # method links to .../account/billing and still clears with time.
+    "billing details",
+    "plan and billing",
     "credit balance",
     # Anthropic's 429 when the workspace spend cap is reached.
     "reached your specified api usage limits",
