@@ -715,6 +715,15 @@ def test_source_signature_sets_the_column_roles() -> None:
     assert SCREEN_FOCUS["source"] in screen_signature("source").instructions
 
 
+def test_agent_infers_the_roles_of_an_uploaded_dataset() -> None:
+    """An upload carries no roles (SKY-742): the agent infers them and states the mapping."""
+    assert "infer which ``dataset_columns`` are the inputs" in SCREEN_FOCUS["source"]
+    assert "tell the user the mapping in one line" in SCREEN_FOCUS["source"]
+    prompt = GENERALIST_SYSTEM_PROMPT or ""
+    assert "The user tags no columns." in prompt
+    assert "the user confirms which" not in prompt
+
+
 def test_screen_signature_names_the_reply_language() -> None:
     """The screen prompt names the language outright, so Hebrew tool results can't pull it."""
     instructions = screen_signature("source", "English").instructions

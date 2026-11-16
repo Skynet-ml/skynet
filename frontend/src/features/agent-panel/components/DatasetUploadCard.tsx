@@ -4,37 +4,15 @@ import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Button } from "@/shared/ui/primitives/button";
 import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import {
-  ArrowClockwise,
-  ArrowRight,
-  Check,
-  CheckCircle,
-  CircleNotch,
-  FileXls,
-  UploadSimple,
-} from "@/shared/ui/icons";
-import { formatMsg, msg } from "@/shared/lib/messages";
+import { Check, CircleNotch, FileXls, UploadSimple } from "@/shared/ui/icons";
+import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 
 import type { AgentToolCall } from "@/shared/ui/agent/types";
-import {
-  ColumnRoleRow,
-  defaultRoleFor,
-  type ColumnKind,
-  type ColumnRole,
-} from "@/shared/ui/column-role-row";
 
+/** A read dataset file. It carries no column roles: the setup agent infers them (SKY-742). */
 export interface ConfirmedDataset {
-  fileName: string;
-  rows: Array<Record<string, unknown>>;
-  rowCount: number;
-  columns: string[];
-  columnRoles: Record<string, ColumnRole>;
-  columnKinds: Record<string, ColumnKind>;
-}
-
-interface ParsedFile {
   fileName: string;
   rows: Array<Record<string, unknown>>;
   rowCount: number;
@@ -64,14 +42,16 @@ export function DatasetUploadCard({
 }: DatasetUploadCardProps) {
   const reduceMotion = useReducedMotion();
   const inputRef = React.useRef<HTMLInputElement | null>(null);
-  const [parsed, setParsed] = React.useState<ParsedFile | null>(null);
-  const [roles, setRoles] = React.useState<Record<string, ColumnRole>>({});
-  const [kinds, setKinds] = React.useState<Record<string, ColumnKind>>({});
+  const [parsed, setParsed] = React.useState<ConfirmedDataset | null>(null);
   const [parsing, setParsing] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const [parseError, setParseError] = React.useState<string | null>(null);
-  const [validationError, setValidationError] = React.useState<string | null>(null);
   const [confirmed, setConfirmed] = React.useState(!!alreadyConfirmed);
+  // A new onConfirm on each parent render must not re-read the initial file.
+  const onConfirmRef = React.useRef(onConfirm);
+  React.useEffect(() => {
+    onConfirmRef.current = onConfirm;
+  }, [onConfirm]);
 
   React.useEffect(() => {
     if (alreadyConfirmed) setConfirmed(true);
@@ -80,30 +60,20 @@ export function DatasetUploadCard({
   const handleFile = React.useCallback(async (file: File) => {
     setParsing(true);
     setParseError(null);
-    setValidationError(null);
     try {
       const result = await parseDatasetFile(file);
       if (!result.columns.length) throw new Error("empty");
-      const initialRoles: Record<string, ColumnRole> = {};
-      result.columns.forEach((c, idx) => {
-        initialRoles[c] = defaultRoleFor(idx, result.columns.length);
-      });
-      setParsed({
+      const read: ConfirmedDataset = {
         fileName: file.name,
         rows: result.rows,
         rowCount: result.rowCount,
         columns: result.columns,
-      });
-      setRoles(initialRoles);
-      const initialKinds: Record<string, ColumnKind> = {};
-      result.columns.forEach((c) => {
-        initialKinds[c] = "text";
-      });
-      setKinds(initialKinds);
+      };
+      setParsed(read);
+      setConfirmed(true);
+      onConfirmRef.current(read);
     } catch {
       setParsed(null);
-      setRoles({});
-      setKinds({});
       setParseError(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
     } finally {
       setParsing(false);
@@ -142,61 +112,6 @@ export function DatasetUploadCard({
     [handleFile],
   );
 
-  const setRoleFor = React.useCallback(
-    (col: string, role: ColumnRole) => {
-      if (confirmed) return;
-      setRoles((prev) => ({ ...prev, [col]: role }));
-      setValidationError(null);
-    },
-    [confirmed],
-  );
-
-  const toggleKindFor = React.useCallback(
-    (col: string) => {
-      if (confirmed) return;
-      setKinds((prev) => ({
-        ...prev,
-        [col]: (prev[col] ?? "text") === "image" ? "text" : "image",
-      }));
-    },
-    [confirmed],
-  );
-
-  const counts = React.useMemo(() => {
-    let input = 0;
-    let output = 0;
-    let ignore = 0;
-    Object.values(roles).forEach((r) => {
-      if (r === "input") input += 1;
-      else if (r === "output") output += 1;
-      else ignore += 1;
-    });
-    return { input, output, ignore };
-  }, [roles]);
-
-  const canConfirm = parsed !== null && counts.input >= 1 && counts.output >= 1 && !confirmed;
-
-  const handleConfirm = React.useCallback(() => {
-    if (!parsed) return;
-    if (counts.input < 1 || counts.output < 1) {
-      setValidationError(msg("auto.features.agent.panel.components.datasetuploadcard.need_io"));
-      return;
-    }
-    setConfirmed(true);
-    const finalKinds: Record<string, ColumnKind> = {};
-    for (const col of parsed.columns) {
-      finalKinds[col] = roles[col] === "input" ? (kinds[col] ?? "text") : "text";
-    }
-    onConfirm({
-      fileName: parsed.fileName,
-      rows: parsed.rows,
-      rowCount: parsed.rowCount,
-      columns: parsed.columns,
-      columnRoles: { ...roles },
-      columnKinds: finalKinds,
-    });
-  }, [counts.input, counts.output, kinds, onConfirm, parsed, roles]);
-
   const fade = reduceMotion
     ? { initial: false, animate: { opacity: 1 }, exit: { opacity: 0 } }
     : {
@@ -229,7 +144,7 @@ export function DatasetUploadCard({
             <div className="min-w-0 flex-1">
               <div className="text-[0.8125rem] font-semibold text-primary leading-tight">
                 {confirmed
-                  ? msg("auto.features.agent.panel.components.datasetuploadcard.confirmed")
+                  ? msg("auto.features.agent.panel.components.datasetuploadcard.attached")
                   : msg("auto.features.agent.panel.components.datasetuploadcard.title")}
               </div>
             </div>
@@ -324,73 +239,18 @@ export function DatasetUploadCard({
                     </div>
                   </div>
                 </div>
-                {!confirmed && (
-                  <button
-                    type="button"
-                    onClick={onPickClick}
-                    aria-label={msg(
-                      "auto.features.agent.panel.components.datasetuploadcard.replace",
-                    )}
-                    className={cn(
-                      "shrink-0 inline-flex items-center gap-1 text-[0.6875rem]",
-                      "rounded-md px-1.5 py-1 text-[#6B5B4A] dark:text-[#cfbdaa] hover:text-primary",
-                      "hover:bg-white/70 dark:hover:bg-white/10 transition-colors cursor-pointer",
-                    )}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {parsed.columns.map((col) => (
+                  <span
+                    key={col}
+                    dir="auto"
+                    className="max-w-full truncate rounded-md bg-white/60 dark:bg-white/10 px-1.5 py-0.5 text-[0.6875rem] text-[#6B5B4A] dark:text-[#cfbdaa]"
                   >
-                    <ArrowClockwise className="size-3" />
-                    {msg("auto.features.agent.panel.components.datasetuploadcard.replace")}
-                  </button>
-                )}
+                    {col}
+                  </span>
+                ))}
               </div>
-
-              {!confirmed && (
-                <div className="text-[0.6875rem] text-[#8A7866] dark:text-[#cdbaa7]">
-                  {msg("auto.features.agent.panel.components.datasetuploadcard.role_legend")}
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                {parsed.columns.map((col) => {
-                  const role = roles[col] ?? "ignore";
-                  const kind = kinds[col] ?? "text";
-                  return (
-                    <ColumnRoleRow
-                      key={col}
-                      column={col}
-                      role={role}
-                      kind={kind}
-                      disabled={confirmed}
-                      onChangeRole={(next) => setRoleFor(col, next)}
-                      onToggleKind={() => toggleKindFor(col)}
-                    />
-                  );
-                })}
-              </div>
-
-              {validationError && <InlineErrorRow message={validationError} className="py-2" />}
-
-              {!confirmed && (
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={handleConfirm}
-                  disabled={!canConfirm || disabled}
-                  className="w-full"
-                >
-                  {msg("auto.features.agent.panel.components.datasetuploadcard.confirm")}
-                  <ArrowRight className="size-3.5 rtl:rotate-180" />
-                </Button>
-              )}
-
-              {confirmed && (
-                <div className="flex items-center gap-1.5 text-[0.6875rem] text-primary/80 bg-white/50 dark:bg-white/5 rounded-md px-2.5 py-1.5">
-                  <CheckCircle className="size-3 text-primary" />
-                  {formatMsg(
-                    "auto.features.agent.panel.components.datasetuploadcard.confirmed",
-                    {},
-                  )}
-                </div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>

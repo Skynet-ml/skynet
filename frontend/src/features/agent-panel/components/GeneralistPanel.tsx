@@ -202,7 +202,11 @@ const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset column-mapping card instead of being read as text. */
+// Rows and characters per row of an uploaded dataset that the agent's note shows.
+const DATASET_NOTE_SAMPLE_ROWS = 3;
+const DATASET_NOTE_ROW_CHARS = 300;
+
+/** Whether a file opens the dataset upload card instead of being read as text. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -970,8 +974,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const [attachOpen, setAttachOpen] = React.useState(false);
   // The composer's attach button opens the OS file picker; the popover only
-  // appears once a dataset file was chosen, already parsed into the
-  // column-mapping card.
+  // appears while a chosen dataset file is read, or when it cannot be read.
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
 
@@ -1001,12 +1004,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         dataset: confirmed.rows,
         dataset_filename: confirmed.fileName,
         staged_dataset_id: stagedDatasetId,
+        // No column roles: the agent infers them and sets them with its
+        // column-role tool, which also marks the columns configured (SKY-742).
         wizard_state: {
           dataset_ready: true,
-          columns_configured: true,
           dataset_columns: confirmed.columns,
-          column_kinds: confirmed.columnKinds,
-          column_roles: confirmed.columnRoles,
         },
       };
       // Persist before dispatch so the wizard can replay it after navigation;
@@ -1027,26 +1029,34 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         wizardCtx.setField("staged_dataset_id", stagedDatasetId, "user");
         wizardCtx.setField("dataset_columns", confirmed.columns, "user");
         wizardCtx.setField("dataset_ready", true, "user");
-        wizardCtx.setField("columns_configured", true, "user");
+        // Roles set for an earlier file do not fit this one.
+        wizardCtx.setField("columns_configured", false, "user");
       }
-      const mappingLine = confirmed.columns
-        .map((c) => {
-          const role = confirmed.columnRoles[c];
-          if (role === "ignore") return null;
-          return `- ${c} → ${role}`;
+      // The agent reads the columns and a few rows to infer the input and
+      // output columns.
+      const sampleLines = confirmed.rows
+        .slice(0, DATASET_NOTE_SAMPLE_ROWS)
+        .map((row) => {
+          const line = JSON.stringify(row);
+          return line.length > DATASET_NOTE_ROW_CHARS
+            ? `${line.slice(0, DATASET_NOTE_ROW_CHARS)}…`
+            : line;
         })
-        .filter(Boolean)
         .join("\n");
-      const note = formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
-        p1: confirmed.fileName,
-        p2: confirmed.rowCount,
-        p3: mappingLine,
-      });
+      const note = formatMsg(
+        "auto.features.agent.panel.components.generalistpanel.dataset_attached_note",
+        {
+          p1: confirmed.fileName,
+          p2: confirmed.rowCount,
+          p3: confirmed.columns.join(", "),
+          p4: sampleLines,
+        },
+      );
       const wizardOverride: WizardState | undefined = stagedDatasetId
         ? {
             staged_dataset_id: stagedDatasetId,
             dataset_ready: true,
-            columns_configured: true,
+            columns_configured: false,
             dataset_columns: confirmed.columns,
           }
         : undefined;
@@ -1945,7 +1955,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             {!inSetup && modelMenuNode}
           </>
         }
-        // Dataset files keep their column-mapping card; any other file is
+        // Dataset files go to the dataset upload card; any other file is
         // read as text by the composer.
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.

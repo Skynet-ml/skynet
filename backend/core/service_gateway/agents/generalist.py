@@ -1137,8 +1137,8 @@ _ALWAYS_TOOLS = frozenset(
         # they patch wizard state, they don't consume rows.
         "set_column_roles_datasets_column_roles_post",
         # UI-trigger tool — calling it renders an inline upload card in the
-        # chat. The card handles parsing + column-role confirmation
-        # client-side and dispatches wizard:dataset-staged on confirm.
+        # chat. The card parses the file client-side and dispatches
+        # wizard:dataset-staged; the agent then sets the column roles.
         "request_user_dataset_datasets_request_upload_post",
         # Saved dataset library: a read tool to surface the caller's datasets,
         # and a UI-trigger picker whose selection hydrates the wizard with a
@@ -2313,14 +2313,18 @@ Capabilities worth knowing about:
   with a short ``prompt`` sentence (in ``reply_language``) asking the
   user to attach a
   dataset file. That renders an upload card inline in the chat — the
-  user picks the file, the panel parses it, the user confirms which
-  columns are input/output, and the wizard hydrates automatically.
+  user picks the file, the panel parses it, and the wizard hydrates
+  automatically. The user tags no columns.
   Do **not** ask the user to upload in plain text; always call this
-  tool so they get the rich upload affordance. After the card
-  reports back via the next user message (with filename, row count,
-  and the confirmed column roles), you can validate or refine the
-  configuration with ``set_column_roles`` if needed. Never invent
-  column names — use what the user confirms verbatim.
+  tool so they get the rich upload affordance. The upload reports
+  back via the next user message (filename, row count, columns and
+  the first rows); the user can also attach a file without the card.
+  When the data fits the task, infer which columns are inputs and
+  which one is the expected output from the columns, those rows and
+  what the user said about the task. Set them with
+  ``set_column_roles`` and tell the user the mapping in one line, so
+  they can correct it here or on the Data screen. Ask only when you
+  cannot tell. Never invent column names — copy them verbatim.
 * Sample datasets: when the user has no data of their own, wants a
   demo, or asks "what can I try?", call ``list_sample_datasets`` and
   offer the matches; ``stage_sample_dataset(sample_id=…)`` then loads
@@ -2643,8 +2647,9 @@ SCREEN_FOCUS: dict[str, str] = {
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
         "pairs, get a dataset attached with ``request_user_dataset`` or a sample or library dataset. "
-        "Then set which ``dataset_columns`` are the inputs and which one is the expected output with "
-        "``set_column_roles``."
+        "Then infer which ``dataset_columns`` are the inputs and which one is the expected output from the "
+        "column names, the first rows and the task, set them with ``set_column_roles``, and tell the user "
+        "the mapping in one line so they can correct it. Ask only when you cannot tell."
     ),
     "plan": (
         "Plan: choose ``optimizer_choice`` (``auto`` unless the user names one) and the task and reflection "
