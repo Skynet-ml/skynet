@@ -117,11 +117,13 @@ export function applyDatasetUpload(
     wizard.setField("dataset_columns", dataset.columns, "user");
     wizard.setField("dataset_ready", true, "user");
   }
-  // Roles set for an earlier file do not fit this one.
+  // Roles set for an earlier file do not fit this one. The flag is cleared,
+  // not set to false: roles the user then sets on the Data screen do not
+  // write the flag, and a stale false would tell the agent to redo them.
   if (wizard) {
     wizard.clearField("input_fields");
     wizard.clearField("expected_field");
-    wizard.setField("columns_configured", false, "user");
+    wizard.clearField("columns_configured");
   }
   return {
     detail: {

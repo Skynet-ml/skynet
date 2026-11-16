@@ -311,7 +311,7 @@ void test("an upload clears the earlier roles and hands off no roles", () => {
     ["set", "dataset_ready", true],
     ["clear", "input_fields"],
     ["clear", "expected_field"],
-    ["set", "columns_configured", false],
+    ["clear", "columns_configured"],
   ]);
   assert.deepEqual(detail, {
     dataset: dataset.rows,
@@ -331,6 +331,6 @@ void test("an upload clears the earlier roles and hands off no roles", () => {
   assert.deepEqual(calls, [
     ["clear", "input_fields"],
     ["clear", "expected_field"],
-    ["set", "columns_configured", false],
+    ["clear", "columns_configured"],
   ]);
 });
