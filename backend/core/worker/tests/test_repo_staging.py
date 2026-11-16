@@ -3584,7 +3584,7 @@ def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
 
     body = repo_staging._description(result, _EDIT, "https://x/run")
 
-    assert "- Change SHA-256: none, the reported version is the start version" in body
+    assert "- Change SHA-256: none, the reported patch is empty" in body
     assert "- Baseline score: none" in body
     assert "- Final score: none" in body
     assert _json_block(body) == result["details"]["record"]
@@ -3711,8 +3711,8 @@ def test_the_record_names_the_start_commit_the_change_hash_and_both_scores(monke
 
 
 @pytest.mark.parametrize("best", ["", "  \n", None], ids=["empty", "blank", "missing"])
-def test_the_start_version_has_no_change_hash(monkeypatch: pytest.MonkeyPatch, best: str | None) -> None:
-    """When the reported version is the start version, there is no change to hash."""
+def test_an_empty_patch_has_no_change_hash(monkeypatch: pytest.MonkeyPatch, best: str | None) -> None:
+    """When the reported patch is empty, there is no change to hash."""
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.5, best=best)

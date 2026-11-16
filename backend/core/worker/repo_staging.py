@@ -1461,7 +1461,7 @@ def _record_block(result: dict[str, Any]) -> str:
             listed = "; ".join(f"{name} {positions}" for name, positions in parts.items())
             split_line = f"`{split.get('rule')}`, seed {split.get('seed')}: {listed}"
     change = record.get("change_sha256")
-    change_line = f"`{change}`" if change else "none, the reported version is the start version"
+    change_line = f"`{change}`" if change else "none, the reported patch is empty"
     fields = [
         f"- Record version: {record.get('record_version')}",
         f"- Base commit: `{record.get('base_commit')}`",

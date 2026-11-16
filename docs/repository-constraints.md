@@ -134,16 +134,19 @@ The run writes no record file into the repository. The record holds no secret, n
 content and no metric code. It has these keys:
 
 - `record_version`: the integer `1`.
-- `base_commit`: the full commit SHA that the run started from. Staging
+- `base_commit`: the full commit SHA that the patch applies to. Staging
   pins this commit.
 - `change_sha256`: the SHA-256 of the reported version's patch text, as
   UTF-8 bytes. The reported version is `best_candidate` in the `get_run`
   result. The patch never holds an edit to a hidden path. It is null when
-  the reported version is the start version (an empty patch). To compute it
-  by hand, write `best_candidate` with no added newline and hash the bytes:
-  `jq -j '.result.best_candidate' run.json | sha256sum`. The pull request
-  branch can also hold a test suite from hardening, so its diff can differ
-  from `best_candidate`.
+  the patch is empty: the reported version is then `base_commit` with no
+  change. A run that starts from a patch (`seed_candidate`, for example a
+  continuous check) keeps a hash, also when no version scores better. To
+  compute it by hand, write `best_candidate` with no added newline and hash
+  the bytes: `jq -j '.result.best_candidate' run.json | sha256sum`. The
+  patch applies to `base_commit` after the run's draft files apply. The
+  pull request branch also holds those draft files, and can hold a test
+  suite from hardening. So its diff can differ from `best_candidate`.
 - `baseline_score`: the score of the start version (`baseline_score` of the
   run result), at full precision. It is null when the run has no such score.
 - `final_score`: the score that the `[outcome]` verdict judges
