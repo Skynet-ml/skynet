@@ -30,6 +30,7 @@ const {
   rolesFromFields,
   rowsToCases,
   singleInputCase,
+  stagedDatasetRoles,
   withColumnRole,
 } = await import(inputsModeUrl);
 
@@ -223,4 +224,18 @@ test("an agent roles write that adds an Output turns one input into pairs over e
 
 test("with no table loaded, an agent roles write changes only the names", () => {
   assert.deepEqual(inputsWithRoles([], ["q"], "a", []), { inputFields: ["q"], expectedField: "a" });
+});
+
+test("a wizard that mounts later keeps the agent's roles; the live event gets none", () => {
+  const columns = ["address", "lat"];
+  const shared = { input_fields: ["address"], expected_field: "lat" };
+  assert.deepEqual(stagedDatasetRoles({}, columns, shared), { address: "input", lat: "output" });
+  assert.equal(stagedDatasetRoles({}, columns, undefined), null, "the live event sets no roles");
+  assert.equal(
+    stagedDatasetRoles({}, columns, { input_fields: ["old"], expected_field: "answer" }),
+    null,
+    "roles of another file do not fit",
+  );
+  const handoff = { address: "input", lat: "ignore" } as const;
+  assert.deepEqual(stagedDatasetRoles({ column_roles: handoff }, columns, shared), handoff);
 });

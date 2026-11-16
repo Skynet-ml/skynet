@@ -195,3 +195,35 @@ export function inputsIssue(s: InputsCheck): string | null {
   if (splitSum(s.split) !== 1) return "submit.v2.inputs.issue.split_sum";
   return null;
 }
+
+/**
+ * Pick the column roles for a dataset that the agent panel staged.
+ *
+ * Roles in the handoff win. Otherwise a wizard that mounts after the upload
+ * passes the shared context as ``shared``: it can already hold the roles the
+ * agent set for this file (SKY-742). The live event passes no ``shared``,
+ * because it comes before the panel clears the earlier file's roles.
+ *
+ * Args:
+ *   ws: The handoff's ``wizard_state``.
+ *   columns: The dataset's columns.
+ *   shared: The shared wizard state, or undefined for the live event.
+ *
+ * Returns:
+ *   The role of each column, or null when no source gives full roles.
+ */
+export function stagedDatasetRoles(
+  ws: Record<string, unknown>,
+  columns: string[],
+  shared: { input_fields?: string[]; expected_field?: string } | undefined,
+): Record<string, ColumnRole> | null {
+  if (ws.column_roles && typeof ws.column_roles === "object") {
+    return ws.column_roles as Record<string, ColumnRole>;
+  }
+  if (!shared) return null;
+  return rolesFromFields(
+    columns,
+    shared.input_fields,
+    typeof shared.expected_field === "string" ? shared.expected_field : null,
+  );
+}
