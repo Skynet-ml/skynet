@@ -131,6 +131,15 @@ function UnifiedWizardFrame() {
   const lastScreen = position === steps.length - 1 && page === pageCount - 1;
   const { goNext, goPrev, submitting } = w;
   const visibleScreen = stepPages(current, w.state)[page] ?? "";
+  // The screen Continue shows next, the same way ``moveForward`` advances;
+  // the screen agent names it when it continues (SKY-744).
+  const nextStep = steps[position + 1];
+  const nextScreen =
+    page < pageCount - 1
+      ? (stepPages(current, w.state)[page + 1] ?? null)
+      : nextStep
+        ? (stepPages(nextStep, w.state)[0] ?? null)
+        : null;
   useEffect(() => keepSessionValue(WIZARD_SCREEN_KEY, visibleScreen), [visibleScreen]);
   const { totalCents, available: balanceKnown, shown } = useBalance();
   const { runFloor, budgetUncapped, maxCostCents } = w;
@@ -394,6 +403,7 @@ function UnifiedWizardFrame() {
   const setWizardScreen = wizardCtx?.setWizardScreen;
   const setScreenIssue = wizardCtx?.setScreenIssue;
   const setScreenNavigator = wizardCtx?.setScreenNavigator;
+  const setNextScreen = wizardCtx?.setNextScreen;
   const blockedIssue = w.stepIssue("inputs");
   const blockedText =
     !inputsOpen && blockedIssue
@@ -430,6 +440,9 @@ function UnifiedWizardFrame() {
     setScreenIssue?.(blockedText);
   }, [blockedText, setScreenIssue]);
   useLayoutEffect(() => {
+    setNextScreen?.(nextScreen);
+  }, [nextScreen, setNextScreen]);
+  useLayoutEffect(() => {
     setScreenNavigator?.({
       screen: visibleScreen,
       forward: agentForward,
@@ -443,9 +456,10 @@ function UnifiedWizardFrame() {
     () => () => {
       setWizardScreen?.(null);
       setScreenIssue?.(null);
+      setNextScreen?.(null);
       setScreenNavigator?.(null);
     },
-    [setWizardScreen, setScreenIssue, setScreenNavigator],
+    [setWizardScreen, setScreenIssue, setNextScreen, setScreenNavigator],
   );
 
   useEffect(() => {

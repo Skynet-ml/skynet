@@ -305,11 +305,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
     const back = wizardCtx?.returnScreen;
+    const next = wizardCtx?.nextScreen;
     return {
       ...merged,
       wizard_screen: screen,
       ...(issue ? { screen_issue: issue } : {}),
       ...(back ? { return_screen: back } : {}),
+      ...(next ? { next_screen: next } : {}),
     };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:

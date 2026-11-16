@@ -44,6 +44,9 @@ interface WizardStateContextValue {
   /** What the Continue button refuses on the screen on view; null when it is open. */
   screenIssue: string | null;
   setScreenIssue: (issue: string | null) => void;
+  /** The screen the wizard's Continue shows next; null on the last screen or off the wizard. */
+  nextScreen: string | null;
+  setNextScreen: (screen: string | null) => void;
   /** The wizard frame registers its own Continue / Back handlers here. */
   setScreenNavigator: (navigator: ScreenNavigator | null) => void;
   /**
@@ -167,6 +170,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const agentWrittenRef = React.useRef<Set<string>>(new Set());
   const [wizardScreen, setWizardScreen] = React.useState<string | null>(null);
   const [screenIssue, setScreenIssue] = React.useState<string | null>(null);
+  const [nextScreen, setNextScreen] = React.useState<string | null>(null);
   const [reopenedScreen, setReopenedScreen] = React.useState<string | null>(null);
   const [restoredSetup, setRestoredSetup] = React.useState(false);
   const [agentBusy, setAgentBusy] = React.useState(false);
@@ -365,6 +369,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setWizardScreen,
       screenIssue,
       setScreenIssue,
+      nextScreen,
+      setNextScreen,
       setScreenNavigator,
       navigateScreen,
       returnScreen,
@@ -413,6 +419,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       reset,
       wizardScreen,
       screenIssue,
+      nextScreen,
       setScreenNavigator,
       navigateScreen,
       returnScreen,

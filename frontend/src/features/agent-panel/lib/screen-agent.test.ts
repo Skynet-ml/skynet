@@ -63,10 +63,45 @@ test("a continue with a return screen jumps straight back there", () => {
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
   };
-  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "optimizer", to: "budget" } });
-  assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget" });
+  const nav = parseScreenNav({
+    screen_nav: { action: "continue", from: "optimizer", to: "budget", jump: true },
+  });
+  assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget", jump: true });
   runScreenNav(nav!, navigator);
   assert.deepEqual(calls, ["to:budget"]);
+});
+
+test("every continue names the next screen, and a plain next move runs Continue (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "brief",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "brief", to: "artifact" } });
+  assert.deepEqual(nav, { action: "continue", from: "brief", to: "artifact" });
+  runScreenNav(nav!, navigator);
+  assert.deepEqual(calls, ["forward"]);
+});
+
+test("a plain continue runs Continue even when its screen is stale (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "source",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  // The turn's data_mode write turned the next screen into plan; the snapshot said optimizer.
+  const nav = parseScreenNav({
+    screen_nav: { action: "continue", from: "source", to: "optimizer" },
+  });
+  assert.deepEqual(nav, { action: "continue", from: "source", to: "optimizer" });
+  runScreenNav(nav!, navigator);
+  // The move to the last screen.
+  runScreenNav({ action: "continue", from: "source", to: "overview" }, navigator);
+  assert.deepEqual(calls, ["forward", "forward"]);
 });
 
 test("the return screen is the latest screen a go-back left, until the wizard reaches it", () => {
@@ -75,7 +110,10 @@ test("the return screen is the latest screen a go-back left, until the wizard re
   assert.equal(nextReturnScreen("budget", back("optimizer")), "budget");
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "brief" }), "budget");
   // A held jump keeps the screen; the wizard clears it when it gets there.
-  assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
+  assert.equal(
+    nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget", jump: true }),
+    "budget",
+  );
   // A go-back from past the old screen means the user moved on: the newer screen wins.
   assert.equal(nextReturnScreen("budget", back("overview")), "overview");
   // The user moved on to metric while the agent's turn from budget ran.
