@@ -476,7 +476,7 @@ void it("keeps the live header away while the only history is a thinking row", a
   }
 });
 
-void it("keeps an opened thinking row open when a dropped card merges the bursts around it", async () => {
+void it("keeps an opened thinking row open when a dropped card merges the bursts before it", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);

@@ -162,7 +162,7 @@ export function TurnActivity({
     );
   };
 
-  const renderPiece = (piece: (typeof pieces)[number], i: number) =>
+  const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "thinking" ? (
       <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
     ) : piece.kind === "card" ? (
@@ -194,14 +194,14 @@ export function TurnActivity({
     </Reveal>
   );
   const reduceMotion = Boolean(useReducedMotion());
-  const renderFolded = (piece: (typeof pieces)[number], i: number) =>
+  const renderFolded = (piece: (typeof pieces)[number]) =>
     piece.kind === "thinking" ? (
-      fold(`thinking-${piece.segment.order}`, renderPiece(piece, i))
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece))
     ) : piece.kind === "card" ? (
-      renderPiece(piece, i)
+      renderPiece(piece)
     ) : piece.kind === "steps" ? (
       <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
-        {fold("steps", renderPiece(piece, i))}
+        {fold("steps", renderPiece(piece))}
         {!historyOpen &&
           piece.steps
             .filter(({ call }) => call.status === "error")
