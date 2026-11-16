@@ -32,6 +32,7 @@ Object.assign(globalThis, {
 after(() => dom.window.close());
 
 let uploads = 0;
+const originalUploads: string[] = [];
 const deleted: string[] = [];
 // A test sets this to hold the next upload until it settles the promise.
 let nextUpload: Promise<Response> | null = null;
@@ -52,9 +53,13 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   nextUpload = null;
   if (held) return held;
   uploads += 1;
-  const file = (init?.body as FormData | undefined)?.get("file");
+  const form = init?.body as FormData | undefined;
+  const file = form?.get("file");
   const name = file instanceof File ? file.name : "f.png";
-  const kind = /\.(pdf|docx|xlsx)$/.test(name) ? "document" : "image";
+  // The server stores an upload marked as an original as a document, whatever its type.
+  const original = form?.get("original") === "true";
+  if (original) originalUploads.push(name);
+  const kind = original || /\.(pdf|docx|xlsx)$/.test(name) ? "document" : "image";
   return Response.json({ id: `s-${uploads}`, name, kind });
 }) as typeof fetch;
 
@@ -364,7 +369,7 @@ void test("a failed original upload sends no original for any file with its name
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));
-  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
   await flush();
   const second = `s-${uploads}`;
   // The second file's original must not pair with the first file's text.
@@ -377,13 +382,47 @@ void test("a failed original upload sends no original for any file with its name
 void test("removing one of two same-name files deletes both originals", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
-  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
   await flush();
   const ids = documents(draft().ready()).map((m) => m.id);
   assert.equal(ids.length, 2);
   await React.act(async () => draft().keepOriginals([{ name: "a.pdf" }]));
   assert.deepEqual(documents(draft().ready()), []);
   assert.deepEqual(deleted.slice(before).sort(), ids.sort());
+  await unmount();
+});
+
+void test("a file of any type keeps its original, which goes out on Send (SKY-782)", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = originalUploads.length;
+  const csv = new File(["a,b\n1,2\n"], "rows.csv", { type: "text/csv" });
+  await React.act(async () => void draft().addOriginals([csv, pdf("a.pdf")]));
+  await flush();
+  assert.deepEqual(originalUploads.slice(before), ["rows.csv", "a.pdf"]);
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["rows.csv", "a.pdf"],
+  );
+  await unmount();
+});
+
+void test("dropOriginal takes out only that original, and deletes its stored copy", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  let first: string[] = [];
+  await React.act(async () => void (first = draft().addOriginals([pdf("a.pdf")])));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf")]));
+  await flush();
+  const [firstStored, secondStored] = documents(draft().ready()).map((m) => m.id);
+  await React.act(async () => draft().dropOriginal(first[0]!));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.id),
+    [secondStored],
+  );
+  assert.deepEqual(deleted.slice(before), [firstStored]);
+  // An id that already left the draft does nothing.
+  await React.act(async () => draft().dropOriginal(first[0]!));
+  assert.deepEqual(deleted.slice(before), [firstStored]);
   await unmount();
 });
 
@@ -404,7 +443,7 @@ const both = [{ name: "a.pdf" }, { name: "b.pdf" }];
 void test("the draft shows its originals from local URLs, and frees each one that leaves (SKY-736)", async () => {
   await recordingRevokes(async (revoked) => {
     const { draft, unmount } = await mountDraft();
-    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
     await flush();
     const [a, b] = draft().shownOriginals(both);
     assert.deepEqual(
@@ -439,7 +478,7 @@ void test("a failed original upload and an unmount free the draft's local URLs",
     nextUpload = new Promise<Response>(
       (resolve) => (fail = () => resolve(new Response(null, { status: 500 }))),
     );
-    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
     const urls = draft()
       .shownOriginals(both)
       .map((o) => o.url);
@@ -528,7 +567,7 @@ void test("a failed original's URL is freed only after the draft without it rend
 
 void test("a kept-out or sent original's URL is freed only after the draft without it renders", async () => {
   const { draft, unmount } = await mountDraft();
-  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
   await flush();
   const urls = new Map(
     draft()
@@ -587,7 +626,7 @@ void test("an unmount before the draft commits frees each left original's URL on
 void test("a draft shows no original for two same-name files when one upload fails", async () => {
   const { draft, unmount } = await mountDraft();
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));
-  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
   await flush();
   // The one left could be either file's, and Send drops it, so no tile shows it.
   assert.deepEqual(draft().shownOriginals([{ name: "a.pdf" }, { name: "a.pdf" }]), []);

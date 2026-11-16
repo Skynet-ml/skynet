@@ -11,7 +11,7 @@ import {
   pairOriginals,
 } from "./file-originals.ts";
 
-test("only pdf, docx and xlsx keep an original", () => {
+test("the viewer draws only a pdf, docx or xlsx original", () => {
   assert.equal(originalFormat("Brief.PDF"), "pdf");
   assert.equal(originalFormat("plan.docx"), "docx");
   assert.equal(originalFormat("data.xlsx"), "xlsx");
@@ -87,10 +87,17 @@ test("a name's originals fit in a message together or not at all", () => {
   assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
 });
 
-test("a read file keeps its original only in a kept format and when its text went in", () => {
+test("every read file keeps its original when its text went in (SKY-782)", () => {
   const files = [{ name: "a.pdf" }, { name: "b.csv" }, { name: "big.xlsx" }, { name: "bad.docx" }, { name: "c.docx" }];
   assert.deepEqual(
     originalsToKeep(files, ["big.xlsx", "bad.docx"]).map((f) => f.name),
-    ["a.pdf", "c.docx"],
+    ["a.pdf", "b.csv", "c.docx"],
   );
+});
+
+test("a file the viewer does not draw keeps its original in the message (SKY-782)", () => {
+  const csv = { name: "rows.csv", id: "1" };
+  const bin = { name: "README", id: "2" };
+  assert.deepEqual(keptOriginals([{ name: "rows.csv" }, { name: "README" }], [csv, bin]), [csv, bin]);
+  assert.deepEqual(keptOriginals([], [csv]), []);
 });

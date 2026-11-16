@@ -1,12 +1,13 @@
 /**
  * The original bytes of an attached file (SKY-735). The agent reads a file's
- * text, which travels in the message as an `<attached_file>` block. A PDF,
- * DOCX or XLSX also keeps its original as a stored `document`, so the viewer
- * can show the real file. The message names a file only by its name, so an
- * original pairs with its block by name, in order.
+ * text, which travels in the message as an `<attached_file>` block. Every file
+ * also keeps its original as a stored `document` (SKY-782). The viewer draws a
+ * PDF, DOCX or XLSX original; any other file shows its text page. The message
+ * names a file only by its name, so an original pairs with its block by name,
+ * in order.
  */
 
-/** The formats whose original the chat keeps and the viewer draws. */
+/** The formats whose original the viewer draws. */
 export type OriginalFormat = "pdf" | "docx" | "xlsx";
 
 const FORMATS: readonly string[] = ["pdf", "docx", "xlsx"];
@@ -15,7 +16,7 @@ const FORMATS: readonly string[] = ["pdf", "docx", "xlsx"];
 // that either one may change gives one key for both.
 const CHANGED = new Set(['"', "<", ">", "_"]);
 
-/** The format of a file whose original the chat keeps, from its name, or null. */
+/** The format of a file whose original the viewer draws, from its name, or null. */
 export function originalFormat(name: string): OriginalFormat | null {
   const dot = name.lastIndexOf(".");
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
@@ -28,7 +29,7 @@ export function originalsToKeep<T extends { name: string }>(
   skipped: Iterable<string>,
 ): T[] {
   const names = new Set(skipped);
-  return files.filter((f) => originalFormat(f.name) && !names.has(f.name));
+  return files.filter((f) => !names.has(f.name));
 }
 
 function nameKey(name: string): string {
@@ -69,16 +70,15 @@ export function keptOriginals<T extends { name: string }>(
   originals: readonly T[],
 ): T[] {
   const count = new Map<string, number>();
-  for (const file of files)
-    if (originalFormat(file.name)) {
-      const key = nameKey(file.name);
-      count.set(key, (count.get(key) ?? 0) + 1);
-    }
+  for (const file of files) {
+    const key = nameKey(file.name);
+    count.set(key, (count.get(key) ?? 0) + 1);
+  }
   for (const o of originals) {
     const key = nameKey(o.name);
     count.set(key, (count.get(key) ?? 0) - 1);
   }
-  return originals.filter((o) => originalFormat(o.name) && count.get(nameKey(o.name)) === 0);
+  return originals.filter((o) => count.get(nameKey(o.name)) === 0);
 }
 
 /**

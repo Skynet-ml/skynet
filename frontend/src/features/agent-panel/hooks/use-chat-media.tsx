@@ -34,7 +34,7 @@ interface DraftMedia {
   failed: boolean;
 }
 
-/** The stored original of a PDF, DOCX or XLSX in the draft (SKY-735). It has no tile. */
+/** The stored original of an attached file in the draft (SKY-735, SKY-782). It has no tile. */
 interface DraftOriginal {
   localId: string;
   name: string;
@@ -52,10 +52,12 @@ export interface ChatMediaDraft {
   shownOriginals: (files: ReadonlyArray<{ name: string }>) => readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
-  /** Keep the originals of attached PDF, DOCX and XLSX files, which the viewer shows. */
-  addOriginals: (files: File[]) => void;
+  /** Keep the originals of attached files; the viewer draws a PDF, DOCX or XLSX one. */
+  addOriginals: (files: File[]) => string[];
   /** Drop the originals whose files left the draft; ``files`` are the draft's files. */
   keepOriginals: (files: ReadonlyArray<{ name: string }>) => void;
+  /** Drop one original by the local id ``addOriginals`` gave; an id not in the draft does nothing. */
+  dropOriginal: (localId: string) => void;
   /** Take a tile out of the draft, with Undo; the stored file goes when the toast closes. */
   remove: (localId: string) => void;
   /** The files to send, by stored id, originals last; null while an upload still runs. */
@@ -196,8 +198,8 @@ export function useChatMedia(): ChatMediaDraft {
   );
 
   const addOriginals = React.useCallback(
-    (files: File[]) => {
-      if (closedRef.current) return;
+    (files: File[]): string[] => {
+      if (closedRef.current) return [];
       const added = files.map((file): DraftOriginal => {
         const localId = crypto.randomUUID();
         // The viewer shows a PDF in an unsandboxed frame before the server checks
@@ -221,7 +223,7 @@ export function useChatMedia(): ChatMediaDraft {
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
-        uploadChatMedia(files[i]!).then((stored) => {
+        uploadChatMedia(files[i]!, { original: true }).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
             void deleteChatMedia(stored.id);
             return;
@@ -238,6 +240,18 @@ export function useChatMedia(): ChatMediaDraft {
           );
         }, drop);
       });
+      return added.map((item) => item.localId);
+    },
+    [syncOriginals],
+  );
+
+  const dropOriginal = React.useCallback(
+    (localId: string) => {
+      const gone = originalsRef.current.find((o) => o.localId === localId);
+      if (!gone) return;
+      syncOriginals(originalsRef.current.filter((o) => o !== gone));
+      unshownRef.current.push(gone.shown.url);
+      if (gone.serverId) void deleteChatMedia(gone.serverId);
     },
     [syncOriginals],
   );
@@ -440,6 +454,7 @@ export function useChatMedia(): ChatMediaDraft {
     addFiles,
     addOriginals,
     keepOriginals,
+    dropOriginal,
     remove,
     ready,
     blocked,

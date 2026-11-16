@@ -6,13 +6,15 @@ the bytes, and ``DELETE /agent/media/{media_id}`` removes them; both answer
 only to the owner. Another user's id gets the same 404 as an unknown id, so
 an id never confirms that a file exists.
 
-The upload header's content type is never trusted. SVG, HEIC and every type
-that is not on the allow-list get a 415, because a browser can run script in
-SVG and a model provider cannot read HEIC.
+The upload header's content type is never trusted. As media, SVG, HEIC and
+every type that is not on the allow-list get a 415, because a browser can run
+script in SVG and a model provider cannot read HEIC.
 
-A ``document`` is the original bytes of an attached PDF, DOCX or XLSX file
-(SKY-735). The agent reads the file's extracted text, which travels in the
-message; the original exists only so the chat viewer can show the real file.
+A ``document`` is the original bytes of an attached file (SKY-735). The agent
+reads the file's extracted text, which travels in the message; the original
+exists only so the chat viewer can show the real file. An upload marked
+``original`` keeps any file (SKY-782): a PDF, DOCX or XLSX keeps its real
+type, which the viewer draws, and every other file is stored as opaque bytes.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from typing import Annotated, Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, literal, select
@@ -72,6 +74,9 @@ _DOCUMENT_EXTENSIONS = {
     _OFFICE_PARTS["word/document.xml"]: ".docx",
     _OFFICE_PARTS["xl/workbook.xml"]: ".xlsx",
 }
+# An original with no drawn type. The read route serves it with nosniff and a
+# sandbox policy, so a browser never runs or renders it as a page.
+_OPAQUE_DOCUMENT = "application/octet-stream"
 _ZIP_END_MAGIC = b"PK\x05\x06"
 _ZIP64_LOCATOR_MAGIC = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
@@ -204,6 +209,45 @@ def office_document_type(data: bytes) -> str | None:
     except (zipfile.BadZipFile, ValueError):
         return None
     return next((mime for part, mime in _OFFICE_PARTS.items() if part in names), None)
+
+
+def _named_document_type(filename: str) -> str | None:
+    """Return the document type that a file name's extension claims.
+
+    Args:
+        filename: The cleaned upload filename.
+
+    Returns:
+        The PDF, DOCX or XLSX content type, or ``None`` for any other name.
+    """
+    lower = filename.lower()
+    return next((mime for mime, ext in _DOCUMENT_EXTENSIONS.items() if lower.endswith(ext)), None)
+
+
+def _original_type(head: bytes, data: bytes, filename: str) -> str:
+    """Find the stored type of an attached file's original.
+
+    Args:
+        head: The first bytes of the file.
+        data: The whole file.
+        filename: The cleaned upload filename.
+
+    Returns:
+        The real PDF, DOCX or XLSX type when the name claims one, else the opaque type.
+
+    Raises:
+        HTTPException: 415 when the name claims a PDF, DOCX or XLSX that the
+            bytes are not; the viewer would fail to draw it.
+    """
+    named = _named_document_type(filename)
+    if named is None:
+        return _OPAQUE_DOCUMENT
+    real = "application/pdf" if head.startswith(b"%PDF-") else None
+    if real is None and head.startswith(_ZIP_MAGIC):
+        real = office_document_type(data)
+    if real != named:
+        raise HTTPException(status_code=415, detail="This file type is not supported.")
+    return named
 
 
 def _safe_filename(raw: str | None) -> str:
@@ -441,12 +485,15 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
     def upload_media(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
         file: Annotated[UploadFile, File()],
+        original: Annotated[bool, Form()] = False,
     ) -> ChatMediaResponse:
         """Store one media file for the caller.
 
         Args:
             user: The authenticated caller, who owns the stored file.
             file: The uploaded file.
+            original: Whether the file is an attached file's original, which
+                is stored as a ``document`` whatever its type.
 
         Returns:
             The stored file's id, name, kind, real type and size.
@@ -461,7 +508,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         """
         engine = _engine(job_store)
         head = file.file.read(_SNIFF_BYTES)
-        sniffed = sniff_media(head, file.content_type or "")
+        sniffed = SniffedMedia("document", _OPAQUE_DOCUMENT) if original else sniff_media(head, file.content_type or "")
         # Media shares the file text route's hourly cap. A document original
         # (SKY-735) gets its own: its file's text read already counted there.
         # So a direct caller can store more files an hour, but the storage quota
@@ -478,13 +525,17 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         data = head + file.file.read(limit + 1 - len(head))
         if len(data) > limit:
             raise HTTPException(status_code=413, detail="This file is too large.")
-        if sniffed.mime_type == "application/zip":
+        filename = _safe_filename(file.filename)
+        if original:
+            sniffed = SniffedMedia("document", _original_type(head, data, filename))
+        elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)
             if office is None:
                 raise HTTPException(status_code=415, detail="This file type is not supported.")
             sniffed = SniffedMedia("document", office)
-        filename = _safe_filename(file.filename)
-        if sniffed.kind == "document" and not filename.lower().endswith(_DOCUMENT_EXTENSIONS[sniffed.mime_type]):
+        if sniffed.kind == "document" and _named_document_type(filename) != (
+            None if sniffed.mime_type == _OPAQUE_DOCUMENT else sniffed.mime_type
+        ):
             raise HTTPException(status_code=415, detail="This file type is not supported.")
         # The quota check measures storage, and that measure first sweeps the
         # user's stale unsent files, so they never block this upload.
