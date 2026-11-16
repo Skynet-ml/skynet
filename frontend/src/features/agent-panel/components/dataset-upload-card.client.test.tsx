@@ -67,3 +67,52 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   await React.act(async () => root.unmount());
   container.remove();
 });
+
+void test("a Strict Mode remount attaches once, and a closed card attaches nothing", async () => {
+  const csv = "question,answer\nWhat is 2+2?,4\n";
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  };
+
+  const strictContainer = document.createElement("div");
+  document.body.append(strictContainer);
+  const strictRoot = createRoot(strictContainer);
+  const strictAttached: ConfirmedDataset[] = [];
+  await React.act(async () =>
+    strictRoot.render(
+      <React.StrictMode>
+        <DatasetUploadCard
+          initialFile={new File([csv], "qa.csv", { type: "text/csv" })}
+          onConfirm={(d) => strictAttached.push(d)}
+        />
+      </React.StrictMode>,
+    ),
+  );
+  await settle();
+  assert.equal(
+    strictAttached.length,
+    1,
+    "Strict Mode runs the read effect twice but attaches once",
+  );
+  await React.act(async () => strictRoot.unmount());
+  strictContainer.remove();
+
+  const closedContainer = document.createElement("div");
+  document.body.append(closedContainer);
+  const closedRoot = createRoot(closedContainer);
+  const closedAttached: ConfirmedDataset[] = [];
+  await React.act(async () => {
+    closedRoot.render(
+      <DatasetUploadCard
+        initialFile={new File([csv], "qa.csv", { type: "text/csv" })}
+        onConfirm={(d) => closedAttached.push(d)}
+      />,
+    );
+    closedRoot.unmount();
+  });
+  await settle();
+  assert.equal(closedAttached.length, 0, "a card closed during the read attaches nothing");
+  closedContainer.remove();
+});

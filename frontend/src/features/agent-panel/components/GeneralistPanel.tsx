@@ -1029,7 +1029,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         wizardCtx.setField("staged_dataset_id", stagedDatasetId, "user");
         wizardCtx.setField("dataset_columns", confirmed.columns, "user");
         wizardCtx.setField("dataset_ready", true, "user");
-        // Roles set for an earlier file do not fit this one.
+      }
+      // Roles set for an earlier file do not fit this one.
+      if (wizardCtx) {
+        wizardCtx.clearField("input_fields");
+        wizardCtx.clearField("expected_field");
         wizardCtx.setField("columns_configured", false, "user");
       }
       // The agent reads the columns and a few rows to infer the input and

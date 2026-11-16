@@ -57,11 +57,17 @@ export function DatasetUploadCard({
     if (alreadyConfirmed) setConfirmed(true);
   }, [alreadyConfirmed]);
 
+  // Each read gets a number; a newer read, an unmount or a Strict Mode
+  // remount drops an older one, so a closed card attaches nothing.
+  const readRef = React.useRef(0);
+
   const handleFile = React.useCallback(async (file: File) => {
+    const readId = ++readRef.current;
     setParsing(true);
     setParseError(null);
     try {
       const result = await parseDatasetFile(file);
+      if (readId !== readRef.current) return;
       if (!result.columns.length) throw new Error("empty");
       const read: ConfirmedDataset = {
         fileName: file.name,
@@ -73,15 +79,19 @@ export function DatasetUploadCard({
       setConfirmed(true);
       onConfirmRef.current(read);
     } catch {
+      if (readId !== readRef.current) return;
       setParsed(null);
       setParseError(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
     } finally {
-      setParsing(false);
+      if (readId === readRef.current) setParsing(false);
     }
   }, []);
 
   React.useEffect(() => {
     if (initialFile) void handleFile(initialFile);
+    return () => {
+      readRef.current += 1;
+    };
   }, [initialFile, handleFile]);
 
   const onPickClick = React.useCallback(() => {
