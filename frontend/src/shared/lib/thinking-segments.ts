@@ -330,3 +330,45 @@ export function interleaveThinking<
   for (; s < segments.length; s++) out.push({ kind: "thinking", segment: segments[s] as S });
   return out;
 }
+
+type TimedThinking = { reasoning: string; startedAt: number | null; endedAt: number | null };
+
+/**
+ * Join thinking rows that end up side by side into one row. A step between
+ * two segments can drop out (a card that renders nothing), and two
+ * "Thought for" rows in a row then read as one stretch split for no reason.
+ *
+ * Args:
+ *   pieces: The interleaved pieces from ``interleaveThinking``.
+ *
+ * Returns:
+ *   The pieces, with no two thinking rows next to each other. A joined row
+ *   keeps the first row's identity, and its span is the sum of both spans.
+ */
+export function mergeAdjacentThinking<S extends TimedThinking, T>(
+  pieces: ReadonlyArray<ActivityPiece<S, T>>,
+): Array<ActivityPiece<S, T>> {
+  const out: Array<ActivityPiece<S, T>> = [];
+  for (const piece of pieces) {
+    const prev = out[out.length - 1];
+    if (piece.kind === "thinking" && prev?.kind === "thinking") {
+      out[out.length - 1] = { kind: "thinking", segment: joinThinking(prev.segment, piece.segment) };
+    } else {
+      out.push(piece);
+    }
+  }
+  return out;
+}
+
+function joinThinking<S extends TimedThinking>(a: S, b: S): S {
+  const span = (s: TimedThinking) =>
+    s.startedAt !== null && s.endedAt !== null ? s.endedAt - s.startedAt : null;
+  const spanA = span(a);
+  const spanB = span(b);
+  const reasoning = `${a.reasoning}\n\n${b.reasoning}`;
+  // The gap between the two rows is not thinking, so the row shows the sum of
+  // the known spans. Old saved rows can lack a timestamp; a known span still counts.
+  if (spanA === null && spanB === null) return { ...a, reasoning, endedAt: b.endedAt ?? a.endedAt };
+  const endedAt = (spanB !== null ? b.endedAt : a.endedAt) as number;
+  return { ...a, reasoning, startedAt: endedAt - (spanA ?? 0) - (spanB ?? 0), endedAt };
+}

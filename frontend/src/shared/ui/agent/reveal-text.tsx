@@ -14,9 +14,6 @@ interface RevealTextProps {
   text: string;
   /** Write the line in; false for text that was already there (a reopened chat). */
   animate: boolean;
-  /** Words written in first, in `leadClassName`, before `text`. */
-  lead?: string;
-  leadClassName?: string;
   className?: string;
 }
 
@@ -24,32 +21,29 @@ interface RevealTextProps {
  * A line that writes itself in word by word, as streamed text does. Reduced
  * motion renders it at once; screen readers get the whole line once.
  */
-export function RevealText({ text, animate, lead, leadClassName, className }: RevealTextProps) {
+export function RevealText({ text, animate, className }: RevealTextProps) {
   const reduce = useReducedMotion();
-  const key = lead ? `${lead}\n${text}` : text;
-  const [writing] = React.useState(() => animate || revealing.has(key));
+  const [writing] = React.useState(() => animate || revealing.has(text));
   const active = !reduce && writing;
 
   React.useEffect(() => {
     if (!active) return;
-    revealing.add(key);
-  }, [active, key]);
+    revealing.add(text);
+  }, [active, text]);
 
   if (!active) {
     return (
       <span dir="auto" className={className}>
-        {lead && <span className={leadClassName}>{lead} </span>}
         {text}
       </span>
     );
   }
-  const leadParts = lead ? [...lead.split(/(\s+)/), " "] : [];
-  const parts = [...leadParts, ...text.split(/(\s+)/)];
+  const parts = text.split(/(\s+)/);
   const lastWord = parts.findLastIndex((part) => !/^\s*$/.test(part));
   let word = 0;
   return (
     <span dir="auto" className={className}>
-      <span className="sr-only">{lead ? `${lead} ${text}` : text}</span>
+      <span className="sr-only">{text}</span>
       {/* A finished turn rebuilds its rows under AnimatePresence initial={false},
           which would show the words already written; they keep their own entrance. */}
       <PresenceContext.Provider value={null}>
@@ -60,7 +54,6 @@ export function RevealText({ text, animate, lead, leadClassName, className }: Re
             ) : (
               <motion.span
                 key={i}
-                className={i < leadParts.length ? leadClassName : undefined}
                 initial={{ opacity: 0, filter: "blur(3px)" }}
                 animate={{ opacity: 1, filter: "blur(0px)" }}
                 transition={{
@@ -68,7 +61,7 @@ export function RevealText({ text, animate, lead, leadClassName, className }: Re
                   delay: Math.min(word++ * WORD_STAGGER_S, MAX_REVEAL_DELAY_S),
                   ease: [0.2, 0.8, 0.2, 1],
                 }}
-                onAnimationComplete={i === lastWord ? () => revealing.delete(key) : undefined}
+                onAnimationComplete={i === lastWord ? () => revealing.delete(text) : undefined}
               >
                 {part}
               </motion.span>

@@ -282,7 +282,7 @@ export function DatasetUploadCard({
       <motion.div
         layout={!reduceMotion}
         className={cn(
-          "relative overflow-hidden rounded-2xl border bg-card",
+          "relative overflow-hidden rounded-md border bg-card",
           "border-primary-fill/40",
           confirmed && "from-[#F4F0E8] dark:from-[#423b2f] to-[#EEE6D7] dark:to-[#464034] border-primary-fill/30",
         )}
@@ -345,7 +345,7 @@ export function DatasetUploadCard({
                 onDrop={onDrop}
                 disabled={disabled}
                 className={cn(
-                  "group flex h-[164px] w-full flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-4",
+                  "group flex h-[164px] w-full flex-col items-center justify-center gap-3 rounded-md border-2 border-dashed px-4",
                   "cursor-pointer bg-muted outline-none transition-colors duration-150",
                   "focus-visible:ring-2 focus-visible:ring-primary/45",
                   dragOver

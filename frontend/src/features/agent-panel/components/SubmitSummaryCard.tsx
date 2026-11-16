@@ -77,7 +77,7 @@ export function SubmitSummaryCard({ call, className }: SubmitSummaryCardProps) {
   return (
     <div
       className={cn(
-        "rounded-2xl border border-[#5E7A5E]/25 bg-[#F0F4EC] dark:bg-[#383e31] overflow-hidden",
+        "rounded-md border border-[#5E7A5E]/25 bg-[#F0F4EC] dark:bg-[#383e31] overflow-hidden",
         className,
       )}
     >
