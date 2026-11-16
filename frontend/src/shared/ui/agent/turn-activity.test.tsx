@@ -234,3 +234,70 @@ void it("folds a run of reads and searches apart from the edits after it", async
   assert.match(groups[0]?.textContent ?? "", /xplored/, "the first group names what it explored");
   await unmount();
 });
+
+// SKY-743: plain rows, group summaries, setup-write rows and rows in an open
+// group all sit the same distance apart: each row has py-1, and nothing
+// between them adds a gap, padding or margin.
+void it("spaces every step-like row the same, in a group or out of it", async () => {
+  const { StepRow } = await import("./activity-steps");
+  const { Wrench } = await import("@/shared/ui/icons");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const steps: Props["steps"] = [
+    { call: call("edit-a"), isRetry: false, index: 0 },
+    { call: call("write-b"), isRetry: false, index: 1 },
+    { call: call("ask"), isRetry: false, index: 2, card: true },
+    { call: call("read-c"), isRetry: false, index: 3 },
+  ];
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={steps}
+        stepKind={(c) => (c.id.startsWith("read") ? "read" : "edit")}
+        renderStep={(c) =>
+          // The ask-user card renders nothing, as in the setup chat.
+          c.id === "ask" ? null : (
+            <StepRow icon={Wrench} label={c.id} status="done">
+              {c.id === "write-b" ? <span data-details="" /> : undefined}
+            </StepRow>
+          )
+        }
+      />,
+    );
+  });
+  const turn = await openTurn(host);
+  const summary = [...host.querySelectorAll("button[aria-expanded]")].find((b) => b !== turn);
+  assert.ok(summary, "the edits fold under one summary line");
+  await act(async () => (summary as HTMLButtonElement).click());
+
+  const label = (id: string) =>
+    [...host.querySelectorAll("span")].find((s) => s.textContent === id)!.parentElement!;
+  const rows = [summary, label("edit-a"), label("write-b"), label("read-c")];
+  for (const row of rows) assert.ok(row.classList.contains("py-1"), `${row.textContent} has py-1`);
+
+  const SPACING = /^(gap|gap-y|space-y|p|py|pt|pb|m|my|mt|mb)-/;
+  const history = host.querySelector(".pt-1\\.5")!;
+  for (const row of rows) {
+    for (let node = row.parentElement; node && node !== history; node = node.parentElement) {
+      const extra = [...node.classList].filter((c) => SPACING.test(c));
+      assert.deepEqual(extra, [], `nothing between rows adds spacing: ${node.className}`);
+    }
+  }
+  assert.ok(
+    [...history.querySelectorAll("div")].every(
+      (d) => d.childNodes.length > 0 || !d.className.includes("py-") || d.classList.contains("empty:hidden"),
+    ),
+    "an empty card leaves no padded box",
+  );
+
+  // A row with details is a toggle with a chevron; a row without them is neither.
+  assert.equal(label("write-b").tagName, "BUTTON");
+  assert.ok(label("write-b").querySelector("svg:last-child"), "the row with details has a chevron");
+  assert.equal(label("edit-a").tagName, "DIV");
+  assert.equal(label("edit-a").querySelectorAll("svg").length, 1, "the row without details shows only its icon");
+  await act(async () => root.unmount());
+});

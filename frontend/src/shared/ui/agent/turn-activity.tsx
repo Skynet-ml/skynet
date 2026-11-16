@@ -147,7 +147,8 @@ export function TurnActivity({
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
-      <div key={`card-${piece.step.call.id}`} className="py-1.5">
+      // A card that renders nothing (the ask-user call) leaves no padded gap.
+      <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
       </div>
     ) : piece.kind === "steps" ? (

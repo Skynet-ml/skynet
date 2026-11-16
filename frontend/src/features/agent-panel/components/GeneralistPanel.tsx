@@ -158,7 +158,7 @@ import {
   type SetupChat,
 } from "../lib/screen-agent";
 import { messageEdits } from "../lib/turn-edits";
-import { isWizardWrite, liveValues, mergedPatch, writingFields } from "../lib/wizard-write";
+import { liveValues, mergedPatch, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
@@ -1231,12 +1231,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
 
   // Every call is a step in the turn's activity group except the ones the
-  // user acts on or reads at a glance: the request cards, the submit summary,
-  // which links to the new run, and each wizard write with its old and new values.
+  // user acts on: the request cards and the submit summary, which links to the
+  // new run. A wizard write is a step row that opens to its old and new
+  // values; it stays a step when it finishes, so it keeps its place and
+  // spacing in its group (SKY-743).
   const isStepCall = React.useCallback((call: AgentToolCall) => {
     if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
-    const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
-    return !(card && call.status !== "running");
+    return !(SUBMIT_TOOLS.has(call.tool) && call.status !== "running");
   }, []);
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
