@@ -87,7 +87,7 @@ import {
   type Row,
 } from "../lib/inputs-mode";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
-import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
+import { contractMetricEntry, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   WIZARD_HARDENING_KEY,
   WIZARD_SESSION_KEY,
@@ -472,9 +472,12 @@ export function WizardV2Provider({
     return () => controller.abort();
   }, [mode, runSource, catalogLoads]);
 
+  // A contract that names its own metric needs no wizard metric code (SKY-749).
+  const repoContract = useWizardStateOptional()?.repoBase?.get(OPTIMIZE_TOML);
+  const metricEntry = contractMetricEntry(state.workspace.files[OPTIMIZE_TOML], repoContract);
   const stepIssue = useCallback(
-    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog),
-    [state, optimizerCatalog],
+    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog, { metricEntry }),
+    [state, optimizerCatalog, metricEntry],
   );
 
   // The Optimizer step is blocked only once it has a setup to judge; before
@@ -540,8 +543,8 @@ export function WizardV2Provider({
   // While the wizard's agent works, missing code reads as being written.
   const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
-    () => blockedReason(state, optimizerCatalog, { agentWriting }),
-    [state, optimizerCatalog, agentWriting],
+    () => blockedReason(state, optimizerCatalog, { agentWriting, metricEntry }),
+    [state, optimizerCatalog, agentWriting, metricEntry],
   );
 
   const metricCallsModel = scorerCallsModel(state.workspace.metricCode);
@@ -620,9 +623,20 @@ export function WizardV2Provider({
         maxCostCents: budgetUncapped ? null : maxCostCents,
         // The ids belong to this app's server; a web run from the Mac cannot resolve them.
         savedSecrets: runSource === "local" ? savedSecrets : [],
+        metricEntry,
       },
     );
-  }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders, runSource, savedSecrets]);
+  }, [
+    state,
+    username,
+    tokenSource,
+    budgetUncapped,
+    maxCostCents,
+    sandboxProviders,
+    runSource,
+    savedSecrets,
+    metricEntry,
+  ]);
   const exposedCatalog = optimizerCatalog && optimizerCatalog.data_mode === mode ? optimizerCatalog : null;
   const hostedBlock =
     runOn === "hosted"

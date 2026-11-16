@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "Yazarken fark edildi",
   "submit.v2.metric.issue.metric_code": "Metrik kodunu ekleyin.",
   "submit.v2.metric.issue.metric_code.guided": "Henüz sonuçları puanlayan bir kod yok. Asistandan yazmasını isteyin.",
+  "submit.v2.metric.repo_entry": "Deponun metriğini kullanır:",
   "submit.v2.metric.title": "Kod ve metrik",
   "submit.v2.metric.title.guided": "Nasıl çalışır ve nasıl puanlanır",
   "submit.v2.optimizer.budget.desc": "Puanlayıcı çalıştırmaları kaç adayın puanlanacağını sınırlar; maliyet tavanı harcamayı sınırlar.",

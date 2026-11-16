@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "Repéré pendant la saisie",
   "submit.v2.metric.issue.metric_code": "Ajoutez le code de la métrique.",
   "submit.v2.metric.issue.metric_code.guided": "Il n'y a pas encore de code qui note les résultats. Demandez à l'assistant de l'écrire.",
+  "submit.v2.metric.repo_entry": "Utilise la métrique du dépôt :",
   "submit.v2.metric.title": "Code et métrique",
   "submit.v2.metric.title.guided": "Comment ça s'exécute et comment c'est noté",
   "submit.v2.optimizer.budget.desc": "Les exécutions du scoreur limitent le nombre de candidats notés ; le plafond de coût limite la dépense.",

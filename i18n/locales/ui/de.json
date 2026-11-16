@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "Beim Tippen bemerkt",
   "submit.v2.metric.issue.metric_code": "Fügen Sie den Metrikcode hinzu.",
   "submit.v2.metric.issue.metric_code.guided": "Es gibt noch keinen Code, der die Ergebnisse bewertet. Bitten Sie den Assistenten, ihn zu schreiben.",
+  "submit.v2.metric.repo_entry": "Verwendet die Metrik des Repositorys:",
   "submit.v2.metric.title": "Code und Metrik",
   "submit.v2.metric.title.guided": "Wie es läuft und wie es bewertet wird",
   "submit.v2.optimizer.budget.desc": "Bewertungsläufe begrenzen, wie viele Kandidaten bewertet werden; die Kostenobergrenze begrenzt das Geld.",

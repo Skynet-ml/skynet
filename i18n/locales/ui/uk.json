@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "Помічено під час введення",
   "submit.v2.metric.issue.metric_code": "Додайте код метрики.",
   "submit.v2.metric.issue.metric_code.guided": "Поки немає коду, який оцінює результати. Попросіть асистента написати його.",
+  "submit.v2.metric.repo_entry": "Використовує метрику репозиторію:",
   "submit.v2.metric.title": "Код і метрика",
   "submit.v2.metric.title.guided": "Як це працює і як оцінюється",
   "submit.v2.optimizer.budget.desc": "Кількість запусків оцінювача обмежує, скільки кандидатів буде оцінено; ліміт вартості обмежує витрати.",

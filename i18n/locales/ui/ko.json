@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "입력 중에 발견됨",
   "submit.v2.metric.issue.metric_code": "메트릭 코드를 추가하세요.",
   "submit.v2.metric.issue.metric_code.guided": "아직 결과를 채점하는 코드가 없습니다. 어시스턴트에게 작성을 요청하세요.",
+  "submit.v2.metric.repo_entry": "저장소의 메트릭을 사용합니다:",
   "submit.v2.metric.title": "코드와 메트릭",
   "submit.v2.metric.title.guided": "실행 방식과 채점 방식",
   "submit.v2.optimizer.budget.desc": "스코어러 실행 횟수는 채점할 후보 수를, 비용 상한은 비용을 제한합니다.",

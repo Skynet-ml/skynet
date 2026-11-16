@@ -8,17 +8,21 @@ import {
   useWizardStateOptional,
 } from "@/features/agent-panel";
 import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api";
+import { msg } from "@/shared/lib/messages";
 import { AgenticIde } from "../../agentic-ide/AgenticIde";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
 import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
 import { workspaceTexts } from "../../lib/ide-workspace";
+import { contractMetricEntry } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
+
+const OPTIMIZE_TOML = "optimize.toml";
 
 const HOST_ORIGIN: Record<RepoHost, string> = {
   github: "https://github.com",
@@ -110,6 +114,12 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     if (code !== metricCode) setMetricCode(code);
   }, [page, metricCode, setMetricCode]);
 
+  // A contract that names its own metric needs no metric.py; the screen says which one runs (SKY-749).
+  const metricEntry = contractMetricEntry(
+    workspace.files[OPTIMIZE_TOML],
+    agent?.repoBase?.get(OPTIMIZE_TOML),
+  );
+
   // A repository run's setup is the agentic IDE: the chat beside its changes,
   // which the user edits in place.
   const agentic = isGeneralistAgentEnabled();
@@ -135,22 +145,32 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     <div className="flex h-full min-h-0 flex-col">
       {/* Clip, not hide: a hidden box still scrolls when the editor takes focus. */}
       <WizardScreen active={page === 0} className="flex flex-col overflow-clip">
-        {agentic ? (
-          <AgenticIde
-            chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
-            texts={draftTexts}
-            repo={repoFiles}
-            busy={agent?.agentBusy ?? false}
-            onWrite={setWorkspaceFile}
-            host={repoName ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` } : null}
-          />
-        ) : (
-          ideWorkspace(
-            onScreen && isGeneralistAgentEnabled() ? (
-              <AgentPanelDock className="absolute inset-0" />
-            ) : null,
-          )
+        {metricEntry && (
+          <p className="shrink-0 border-b border-border/60 px-4 py-2 text-sm text-muted-foreground">
+            {msg("submit.v2.metric.repo_entry")}{" "}
+            <bdi className="break-all font-mono text-foreground" dir="ltr">
+              {metricEntry}
+            </bdi>
+          </p>
         )}
+        <div className="flex min-h-0 flex-1 flex-col">
+          {agentic ? (
+            <AgenticIde
+              chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
+              texts={draftTexts}
+              repo={repoFiles}
+              busy={agent?.agentBusy ?? false}
+              onWrite={setWorkspaceFile}
+              host={repoName ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` } : null}
+            />
+          ) : (
+            ideWorkspace(
+              onScreen && isGeneralistAgentEnabled() ? (
+                <AgentPanelDock className="absolute inset-0" />
+              ) : null,
+            )
+          )}
+        </div>
       </WizardScreen>
       <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
         <HardenMetricScreen

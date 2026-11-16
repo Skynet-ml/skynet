@@ -3889,6 +3889,7 @@
   "submit.v2.optimizer.issue.choice.guided": "The chosen method no longer fits what you set up. Pick another one, such as Auto.",
   "submit.v2.metric.issue.metric_code": "Add the metric code.",
   "submit.v2.metric.issue.metric_code.guided": "There's no code that scores the results yet. Ask the assistant to write it.",
+  "submit.v2.metric.repo_entry": "Uses the repository's metric:",
   "submit.v2.task.title": "What do you want to optimize?",
   "submit.v2.task.title.guided": "What should get better?",
   "submit.v2.task.desc": "Describe the task in the chat. The assistant writes the objective and background and works out what will be optimized.",
