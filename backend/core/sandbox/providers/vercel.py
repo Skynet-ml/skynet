@@ -56,6 +56,7 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.vercel_reconciliation import SessionNotFoundError, VercelSessionUsageClient, VercelUsageReconciler
 from core.billing.vercel_usage import (
     SANDBOX_NETWORK_BYTES_CAP,
     SessionNotStoppedError,
@@ -132,6 +133,10 @@ WAIT_ERROR_LIMIT = 20
 WAIT_BACKOFF = 0.5
 WAIT_BACKOFF_MAX = 5.0
 STOP_TIMEOUT = 60.0
+# Vercel's receipt of a snapshot builder can show the session running for a
+# while after the snapshot stopped it; the delete waits this long for it.
+BUILDER_RECEIPT_WAIT = 10.0
+BUILDER_RECEIPT_POLL = 1.0
 EXEC_ATTEMPTS = 3
 SLICE_MS = 600_000
 RENEW_LEAD = 180.0
@@ -505,6 +510,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._snapshot_usage_factory = snapshot_usage_factory
         self._secret_exposed = False
         self._snapshotted = False
+        self._snapshot_orphaned = False
         self._recorder = recorder
         self._egress_log: str | None = None
         self._egress_rows = 0
@@ -994,8 +1000,10 @@ class VercelEnvironment(SandboxEnvironment):
         # The snapshot already stopped the session, so do not stop or destroy
         # the builder here. Other pods look the snapshot up by its source
         # sandbox name. Vercel docs do not say if the builder record stays
-        # after a snapshot of a persistent=False box; that is unverified.
-        if box is not None and not self._snapshotted:
+        # after a snapshot of a persistent=False box; that is unverified. An
+        # orphaned snapshot's delete removes the builder only after its hold
+        # settles, and keeps it so the reconciler can still read its session.
+        if box is not None and not (self._snapshotted or self._snapshot_orphaned):
             try:
                 await asyncio.wait_for(box.stop(), STOP_TIMEOUT)
             except Exception as stop_error:
@@ -1012,7 +1020,8 @@ class VercelEnvironment(SandboxEnvironment):
             except SessionNotStoppedError as billing_error:
                 # The snapshot call stops the builder's session, but Vercel's
                 # receipt can still show it running for a short time after the
-                # stop. The reconciler settles the hold when the receipt is final.
+                # stop. The snapshot delete settles the hold before it removes
+                # the builder, and the reconciler can settle it later.
                 if not (self._snapshotted and box is not None):
                     logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
                     if box is not None:
@@ -1520,8 +1529,10 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(reservation.bind, created.id)
                 except BaseException:
                     # No pod owns an unbound snapshot, so delete it now. The
-                    # delete settles the hold; teardown still removes the builder.
-                    orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation)
+                    # delete settles both holds and removes the builder only
+                    # after the builder hold settles; teardown never removes it.
+                    self._snapshot_orphaned = True
+                    orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation, self._usage)
                     with contextlib.suppress(Exception):
                         await self.delete_snapshot(orphan, client=self._client)
                     raise
@@ -1538,6 +1549,7 @@ class VercelEnvironment(SandboxEnvironment):
             builder_name=self.name,
             expires_at_ms=created.expires_at,
             reservation=reservation,
+            builder_usage=self._usage,
         )
 
     @classmethod
@@ -1563,9 +1575,56 @@ class VercelEnvironment(SandboxEnvironment):
         finally:
             await _close_client(client)
 
+    @staticmethod
+    async def _settle_builder(built: BuiltSnapshot) -> bool:
+        """Read the builder session by its id until its receipt is final, then settle its hold.
+
+        Args:
+            built: The snapshot whose builder hold to settle.
+
+        Returns:
+            True when the builder box may be destroyed.
+        """
+        usage = built.builder_usage
+        if usage is None:
+            return True
+        try:
+            operation_id = usage.operation.id
+            reader = VercelSessionUsageClient(settings.vercel_token.get_secret_value(), str(settings.vercel_team_id))
+            reconciler = VercelUsageReconciler(usage.runtime.service, reader)
+            async with asyncio.timeout(BUILDER_RECEIPT_WAIT):
+                while True:
+                    try:
+                        operation = await asyncio.to_thread(reconciler.reconcile, operation_id, usage.runtime.username)
+                        break
+                    except SessionNotStoppedError:
+                        await asyncio.sleep(BUILDER_RECEIPT_POLL)
+        except SessionNotFoundError:
+            # Vercel has no record of the session, so no later read can settle it.
+            logger.info("Snapshot builder %s has no session to read.", built.builder_name)
+            return True
+        except Exception as error:
+            # A kept builder costs nothing once stopped, and the reconciler can
+            # still read its receipt. A destroyed builder loses that receipt
+            # forever, so keep it on every doubt.
+            logger.warning(
+                "Snapshot builder %s is kept: its usage did not settle (%s).",
+                built.builder_name,
+                type(error).__name__,
+            )
+            return False
+        if operation.state != "settled":
+            logger.warning("Snapshot builder %s is kept: its usage is %s.", built.builder_name, operation.state)
+            return False
+        usage.runtime.unpin(operation_id)
+        return True
+
     @classmethod
     async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
         """Delete a run snapshot, settle its storage, then remove the builder box.
+
+        The builder box goes only after its session hold settles: once the
+        box is destroyed, Vercel no longer answers for its session receipt.
 
         Args:
             built: The snapshot to delete.
@@ -1598,6 +1657,8 @@ class VercelEnvironment(SandboxEnvironment):
                 }
                 state["deleted_at"] = deleted_at
                 await asyncio.to_thread(built.reservation.settle, state)
+            if not await cls._settle_builder(built):
+                return
             try:
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)
                 await asyncio.wait_for(box.destroy(), STOP_TIMEOUT)

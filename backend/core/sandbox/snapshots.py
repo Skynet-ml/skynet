@@ -205,13 +205,16 @@ class BuiltSnapshot:
     """Describe one snapshot that trial boxes can start from.
 
     ``reservation`` is the budget hold for its storage, or ``None`` for an
-    unprotected box or a snapshot that another pod built.
+    unprotected box or a snapshot that another pod built. ``builder_usage``
+    is the usage hold of the builder box's session, with the same ``None``
+    cases; the delete settles it before it removes the builder.
     """
 
     snapshot_id: str
     builder_name: str
     expires_at_ms: int | None = None
     reservation: Any = None
+    builder_usage: Any = None
 
 
 Lookup = Callable[[str], Awaitable[BuiltSnapshot | None]]
