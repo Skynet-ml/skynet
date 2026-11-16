@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ...config import settings
+from .. import model_catalog
 from ..routers.wizard import create_wizard_router
 
 
@@ -304,3 +308,178 @@ def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_clien
     assert resp.status_code == 200
     assert resp.json()["ok"] is False
     assert "is not valid TOML" in resp.json()["errors"][0]["message"]
+
+
+def _catalog_with_efforts(value: str, efforts: list[str] | None) -> SimpleNamespace:
+    """Build a stand-in model catalog with one model and its effort levels.
+
+    Args:
+        value: The model's catalog id.
+        efforts: The model's ``reasoning_efforts`` list.
+
+    Returns:
+        An object shaped like ``ModelCatalogResponse`` for ``get_catalog_cached``.
+    """
+    return SimpleNamespace(models=[SimpleNamespace(value=value, reasoning_efforts=efforts)])
+
+
+_OPUS = "openrouter/anthropic/claude-opus-5.5"
+
+
+@pytest.fixture
+def opus_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve a catalog where Opus accepts low, medium and high.
+
+    Args:
+        monkeypatch: Pytest fixture that replaces the catalog reader.
+    """
+    monkeypatch.setattr(
+        model_catalog, "get_catalog_cached", lambda: _catalog_with_efforts(_OPUS, ["low", "medium", "high"])
+    )
+
+
+@pytest.mark.parametrize("field", ["model_config", "reflection_model_config"])
+def test_unknown_model_config_key_steers_to_extra(wizard_client: TestClient, field: str) -> None:
+    """A top-level reasoning_effort is refused with an error that names the right place (SKY-747)."""
+    resp = wizard_client.post("/wizard/update", json={field: {"name": _OPUS, "reasoning_effort": "medium"}})
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "reasoning_effort" in detail
+    assert "name, token_source, byok_provider, cli_provider, base_url, temperature, max_tokens, extra" in detail
+    assert f"{field}.extra.reasoning_effort" in detail
+
+
+@pytest.mark.parametrize("field", ["model_config", "reflection_model_config"])
+def test_reasoning_effort_in_extra_is_saved(wizard_client: TestClient, opus_catalog: None, field: str) -> None:
+    """A supported level in extra.reasoning_effort is echoed back unchanged."""
+    resp = wizard_client.post("/wizard/update", json={field: {"name": _OPUS, "extra": {"reasoning_effort": "medium"}}})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"][field]["extra"] == {"reasoning_effort": "medium"}
+
+
+@pytest.mark.parametrize("field", ["model_config", "reflection_model_config"])
+def test_unsupported_reasoning_effort_lists_the_levels(
+    wizard_client: TestClient, opus_catalog: None, field: str
+) -> None:
+    """A level the catalog does not list for the model is refused with the supported levels."""
+    resp = wizard_client.post("/wizard/update", json={field: {"name": _OPUS, "extra": {"reasoning_effort": "max"}}})
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "'max'" in detail
+    assert "low, medium, high" in detail
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        _catalog_with_efforts("openai/other-model", ["low"]),
+        _catalog_with_efforts(_OPUS, None),
+        _catalog_with_efforts(_OPUS, []),
+    ],
+    ids=["no-entry", "levels-unknown", "no-levels"],
+)
+def test_extra_kept_as_today_without_catalog_levels(
+    wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch, catalog: SimpleNamespace
+) -> None:
+    """A model with no catalog entry or no levels keeps any extra.reasoning_effort."""
+    monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: catalog)
+    extra = {"reasoning_effort": "max", "top_p": 0.5}
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, "extra": extra}})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"]["model_config"]["extra"] == extra
+
+
+def test_extra_kept_when_the_catalog_fails(wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unavailable catalog does not block the save."""
+
+    def _fail() -> None:
+        """Raise like a catalog that cannot load."""
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(model_catalog, "get_catalog_cached", _fail)
+
+    resp = wizard_client.post(
+        "/wizard/update", json={"model_config": {"name": _OPUS, "extra": {"reasoning_effort": "max"}}}
+    )
+
+    assert resp.status_code == 200
+
+
+def test_ui_model_config_keys_are_kept(wizard_client: TestClient) -> None:
+    """The real ModelConfig keys that the UI sends are echoed, not refused or dropped."""
+    config = {
+        "name": "openai/gpt-4o-mini",
+        "token_source": "byok",
+        "byok_provider": "openai",
+        "cli_provider": None,
+        "base_url": None,
+        "temperature": 0.2,
+        "max_tokens": 100,
+        "extra": {},
+    }
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": config})
+
+    assert resp.status_code == 200
+    echoed = resp.json()["wizard_state"]["model_config"]
+    assert echoed["token_source"] == "byok"
+    assert echoed["byok_provider"] == "openai"
+
+
+@pytest.mark.parametrize("key", ["token_source", "byok_provider", "cli_provider"])
+def test_non_string_ui_model_config_key_rejected(wizard_client: TestClient, key: str) -> None:
+    """A UI key with a non-string value fails with 422."""
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, key: 5}})
+
+    assert resp.status_code == 422
+    assert key in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(("key", "value"), [("token_source", "paid"), ("cli_provider", "gemini")])
+def test_ui_model_config_key_outside_its_values_rejected(wizard_client: TestClient, key: str, value: str) -> None:
+    """A token_source or cli_provider that ModelConfig does not allow fails with the allowed values."""
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, key: value}})
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert f"'{value}'" in detail
+    assert ("managed, byok, subscription" if key == "token_source" else "codex, claude") in detail
+
+
+def test_subscription_without_cli_provider_rejected(wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subscription model with no cli_provider fails now, not later at submit."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, "token_source": "subscription"}})
+
+    assert resp.status_code == 422
+    assert "cli_provider" in resp.json()["detail"]
+
+
+def test_subscription_with_cli_provider_kept_in_local_mode(
+    wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local build keeps a subscription model that names its CLI."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    config = {"name": _OPUS, "token_source": "subscription", "cli_provider": "codex"}
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": config})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"]["model_config"]["cli_provider"] == "codex"
+
+
+def test_subscription_rejected_on_hosted_build(wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hosted build refuses a subscription model, as submit does."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    config = {"name": _OPUS, "token_source": "subscription", "cli_provider": "codex"}
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": config})
+
+    assert resp.status_code == 422
+    assert "subscription" in resp.json()["detail"]

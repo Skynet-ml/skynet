@@ -283,6 +283,19 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "wizard.invalid_role_values": "Invalid role values (must be one of {allowed}): {bad}",
     "wizard.model_base_url_not_string": "{field}.base_url must be a string.",
     "wizard.model_extra_not_object": "{field}.extra must be an object.",
+    "wizard.model_unknown_key": (
+        "{field} has no key '{key}'. Allowed keys: {allowed}. "
+        "Put the reasoning level in {field}.extra.reasoning_effort, not at the top level."
+    ),
+    "wizard.model_field_not_string": "{field}.{key} must be a string.",
+    "wizard.model_field_not_allowed": "{field}.{key} '{value}' is not allowed. Allowed values: {allowed}.",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' needs {field}.cli_provider (codex or claude).",
+    "wizard.model_subscription_local_only": (
+        "{field}.token_source 'subscription' runs only in the Mac app. Use 'managed' or 'byok'."
+    ),
+    "wizard.model_reasoning_effort_unsupported": (
+        "{field}.extra.reasoning_effort '{effort}' is not a level that {name} supports. Supported levels: {levels}."
+    ),
     "wizard.model_max_tokens_int": "{field}.max_tokens must be an integer.",
     "wizard.model_name_missing_prefix": (
         "{field}.name '{name}' is missing a provider prefix. dspy.LM requires "

@@ -16,14 +16,16 @@ Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...models import DataMode, OptimizerChoice, optimizers_for
+from ...config import settings
+from ...models import DataMode, ModelConfig, OptimizerChoice, optimizers_for
 from ...models.blackbox import BlackboxCandidate
 from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
+from .. import model_catalog
 from ..errors import DomainError
 
 
@@ -94,12 +96,18 @@ class WizardUpdateRequest(BaseModel):
     primary_model: dict[str, Any] | None = Field(
         default=None,
         alias="model_config",
-        description="Optimizer step: task model config dict (name required, other fields optional).",
+        description=(
+            "Optimizer step: task model config dict (name required, other fields optional). "
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
+        ),
     )
     reflection_model: dict[str, Any] | None = Field(
         default=None,
         alias="reflection_model_config",
-        description="Optimizer step: reflection model config dict, the model that proposes new versions.",
+        description=(
+            "Optimizer step: reflection model config dict, the model that proposes new versions. "
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
+        ),
     )
     spending_limit_usd: float | None = Field(
         default=None,
@@ -147,6 +155,38 @@ class OptimizeTomlCheckResponse(BaseModel):
     errors: list[OptimizeTomlError]
 
 
+def _check_reasoning_effort(extra: dict[str, Any], name: str | None, field_name: str) -> None:
+    """Refuse an ``extra.reasoning_effort`` level that the model's catalog entry does not list.
+
+    Args:
+        extra: The validated ``extra`` dict.
+        name: The model name in the same dict, or ``None`` when the patch sets no name.
+        field_name: Field label used in error messages.
+
+    Raises:
+        DomainError: 422 when the catalog lists levels for ``name`` and the level is not one of them.
+    """
+    effort = extra.get("reasoning_effort")
+    if effort is None or name is None:
+        return
+    try:
+        models = model_catalog.get_catalog_cached().models
+    except Exception:
+        # An unavailable catalog keeps today's behavior: the level is saved unchecked.
+        return
+    entry = next((m for m in models if m.value == name), None)
+    levels = entry.reasoning_efforts if entry is not None else None
+    if levels and effort not in levels:
+        raise DomainError(
+            "wizard.model_reasoning_effort_unsupported",
+            status=422,
+            field=field_name,
+            effort=effort,
+            name=name,
+            levels=", ".join(levels),
+        )
+
+
 def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
     """Light-weight validation of a ``ModelConfig``-shaped dict.
 
@@ -163,10 +203,23 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
 
     Raises:
         DomainError: 422 with a wizard-prefixed key when the input is not
-            a JSON object or any field fails type validation.
+            a JSON object, has a key that ``ModelConfig`` does not define,
+            names a subscription model that this build or its CLI cannot run,
+            or any field fails type validation.
     """
     if not isinstance(v, dict):
         raise DomainError("wizard.model_not_json_object", status=422, field=field_name)
+    # SKY-747: an unknown key (an agent's top-level reasoning_effort) was dropped
+    # silently. Refuse it so the agent retries with the right key.
+    unknown = sorted(set(v) - set(ModelConfig.model_fields))
+    if unknown:
+        raise DomainError(
+            "wizard.model_unknown_key",
+            status=422,
+            field=field_name,
+            key=", ".join(unknown),
+            allowed=", ".join(ModelConfig.model_fields),
+        )
     out: dict[str, Any] = {}
     name = v.get("name")
     if name is not None:
@@ -183,6 +236,29 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
                 name=cleaned,
             )
         out["name"] = cleaned
+    for key in ("token_source", "byok_provider", "cli_provider"):
+        value = v.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise DomainError("wizard.model_field_not_string", status=422, field=field_name, key=key)
+            # A Literal field allows only its listed values; a plain ``str | None`` field yields none here.
+            allowed = [a for arg in get_args(ModelConfig.model_fields[key].annotation) for a in get_args(arg)]
+            if allowed and value not in allowed:
+                raise DomainError(
+                    "wizard.model_field_not_allowed",
+                    status=422,
+                    field=field_name,
+                    key=key,
+                    value=value,
+                    allowed=", ".join(allowed),
+                )
+            out[key] = value
+    # Submit refuses these pairs; refuse them here so the agent sees the error, not the user.
+    if out.get("token_source") == "subscription":
+        if not settings.local_mode:
+            raise DomainError("wizard.model_subscription_local_only", status=422, field=field_name)
+        if "cli_provider" not in out:
+            raise DomainError("wizard.model_subscription_needs_cli", status=422, field=field_name)
     base_url = v.get("base_url")
     if base_url is not None:
         if not isinstance(base_url, str):
@@ -207,6 +283,7 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
     if extra is not None:
         if not isinstance(extra, dict):
             raise DomainError("wizard.model_extra_not_object", status=422, field=field_name)
+        _check_reasoning_effort(extra, out.get("name"), field_name)
         out["extra"] = extra
     return out
 
