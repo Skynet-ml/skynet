@@ -171,6 +171,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
+  applyDatasetUpload,
   datasetAttachedNote,
   libraryPickOverride,
   useSendAfterRender,
@@ -1003,17 +1004,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // 422 on submit and the user can re-attach. Falling back to no
         // staged id matches the prior behaviour for the dispatched event.
       }
-      const stagedDetail = {
-        dataset: confirmed.rows,
-        dataset_filename: confirmed.fileName,
-        staged_dataset_id: stagedDatasetId,
-        // No column roles: the agent infers them and sets them with its
-        // column-role tool, which also marks the columns configured (SKY-742).
-        wizard_state: {
-          dataset_ready: true,
-          dataset_columns: confirmed.columns,
-        },
-      };
+      const { detail: stagedDetail, override: wizardOverride } = applyDatasetUpload(
+        wizardCtx,
+        confirmed,
+        stagedDatasetId,
+      );
       // Persist before dispatch so the wizard can replay it after navigation;
       // the listener in use-unified-wizard reads+clears this key on mount.
       try {
@@ -1023,32 +1018,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // live event below still covers the same-page case.
       }
       window.dispatchEvent(new CustomEvent("wizard:dataset-staged", { detail: stagedDetail }));
-      // Write the whole dataset descriptor into the shared context (not just
-      // the id) so it is the single source of truth: a wizard mounted on
-      // /submit hydrates the same rows from ``staged_dataset_id`` and reads
-      // columns + roles straight from here, instead of depending on the
-      // (quota-fragile) sessionStorage replay.
-      if (stagedDatasetId && wizardCtx) {
-        wizardCtx.setField("staged_dataset_id", stagedDatasetId, "user");
-        wizardCtx.setField("dataset_columns", confirmed.columns, "user");
-        wizardCtx.setField("dataset_ready", true, "user");
-      }
-      // Roles set for an earlier file do not fit this one.
-      if (wizardCtx) {
-        wizardCtx.clearField("input_fields");
-        wizardCtx.clearField("expected_field");
-        wizardCtx.setField("columns_configured", false, "user");
-      }
       const note = datasetAttachedNote(confirmed);
-      // The override stays on every later turn, so it carries no column
-      // roles: the agent's column-role tool sets those.
-      const wizardOverride: WizardState | undefined = stagedDatasetId
-        ? {
-            staged_dataset_id: stagedDatasetId,
-            dataset_ready: true,
-            dataset_columns: confirmed.columns,
-          }
-        : undefined;
       // Sent after the cleared roles render, so the turn's wizard state does
       // not carry the earlier file's roles.
       sendAfterRender(note, wizardOverride);

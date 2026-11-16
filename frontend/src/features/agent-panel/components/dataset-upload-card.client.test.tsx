@@ -36,6 +36,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
 const { createRoot } = await import("react-dom/client");
 const {
   DatasetUploadCard,
+  applyDatasetUpload,
   datasetAttachedNote,
   libraryPickOverride,
   useSendAfterRender,
@@ -206,4 +207,97 @@ void test("a send queued after a state change reads the state of the next render
   assert.deepEqual(seen, [null], "the turn carries no roles from the first file");
   await React.act(async () => root.unmount());
   container.remove();
+});
+
+void test("two sends queued in one tick both go out, in order", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const sent: string[] = [];
+  let queueTwo: () => void = () => {};
+
+  function Panel() {
+    const send = React.useCallback((note: string) => {
+      sent.push(note);
+    }, []);
+    const sendAfterRender = useSendAfterRender(send);
+    queueTwo = () => {
+      sendAfterRender("first");
+      sendAfterRender("second");
+    };
+    return null;
+  }
+
+  await React.act(async () => root.render(<Panel />));
+  await React.act(async () => queueTwo());
+  assert.deepEqual(sent, ["first", "second"]);
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
+void test("a disabled card attaches nothing", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const attached: ConfirmedDataset[] = [];
+  const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
+
+  await React.act(async () =>
+    root.render(
+      <DatasetUploadCard disabled initialFile={file} onConfirm={(d) => attached.push(d)} />,
+    ),
+  );
+  for (let i = 0; i < 10; i += 1) {
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  }
+
+  assert.equal(attached.length, 0);
+  assert.doesNotMatch(container.textContent ?? "", /File attached/);
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
+void test("an upload clears the earlier roles and hands off no roles", () => {
+  const calls: Array<[string, string, unknown?]> = [];
+  const wizard = {
+    setField: (key: string, value: unknown) => calls.push(["set", key, value]),
+    clearField: (key: string) => calls.push(["clear", key]),
+  };
+  const dataset: ConfirmedDataset = {
+    fileName: "qa.csv",
+    rows: [{ question: "What is 2+2?", answer: "4" }],
+    rowCount: 1,
+    columns: ["question", "answer"],
+  };
+
+  const { detail, override } = applyDatasetUpload(wizard, dataset, "staged-1");
+
+  assert.deepEqual(calls, [
+    ["set", "staged_dataset_id", "staged-1"],
+    ["set", "dataset_columns", ["question", "answer"]],
+    ["set", "dataset_ready", true],
+    ["clear", "input_fields"],
+    ["clear", "expected_field"],
+    ["set", "columns_configured", false],
+  ]);
+  assert.deepEqual(detail, {
+    dataset: dataset.rows,
+    dataset_filename: "qa.csv",
+    staged_dataset_id: "staged-1",
+    wizard_state: { dataset_ready: true, dataset_columns: ["question", "answer"] },
+  });
+  assert.deepEqual(override, {
+    staged_dataset_id: "staged-1",
+    dataset_ready: true,
+    dataset_columns: ["question", "answer"],
+  });
+
+  calls.length = 0;
+  const unstaged = applyDatasetUpload(wizard, dataset, undefined);
+  assert.equal(unstaged.override, undefined, "no staged id, no override");
+  assert.deepEqual(calls, [
+    ["clear", "input_fields"],
+    ["clear", "expected_field"],
+    ["set", "columns_configured", false],
+  ]);
 });

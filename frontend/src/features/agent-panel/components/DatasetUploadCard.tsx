@@ -75,10 +75,73 @@ export function libraryPickOverride(picked: ConfirmedLibraryDataset): WizardStat
   };
 }
 
+/** The wizard writes an upload makes; the shared wizard context fits it. */
+interface DatasetUploadWizard {
+  setField: (key: keyof WizardState, value: WizardState[keyof WizardState], source?: "user") => void;
+  clearField: (key: keyof WizardState) => void;
+}
+
 /**
- * Queue a chat send that runs after the next render.
+ * Write an uploaded file into the wizard and build its staged event and turn override.
  *
- * The send reads the wizard state of that render, so a field the caller
+ * Nothing here carries column roles or ``columns_configured``: the agent
+ * infers the roles and its column-role tool sets both (SKY-742).
+ *
+ * Args:
+ *   wizard: The shared wizard context, or null when no wizard is mounted.
+ *   dataset: The read file.
+ *   stagedDatasetId: The backend's staged id, or undefined when staging failed.
+ *
+ * Returns:
+ *   The ``wizard:dataset-staged`` event detail, and the turn override
+ *   (undefined without a staged id).
+ */
+export function applyDatasetUpload(
+  wizard: DatasetUploadWizard | null,
+  dataset: ConfirmedDataset,
+  stagedDatasetId: string | undefined,
+): {
+  detail: {
+    dataset: Array<Record<string, unknown>>;
+    dataset_filename: string;
+    staged_dataset_id: string | undefined;
+    wizard_state: WizardState;
+  };
+  override: WizardState | undefined;
+} {
+  // A wizard mounted on /submit later hydrates the rows from the staged id
+  // and reads the columns from the shared context, not from the
+  // quota-fragile sessionStorage replay.
+  if (stagedDatasetId && wizard) {
+    wizard.setField("staged_dataset_id", stagedDatasetId, "user");
+    wizard.setField("dataset_columns", dataset.columns, "user");
+    wizard.setField("dataset_ready", true, "user");
+  }
+  // Roles set for an earlier file do not fit this one.
+  if (wizard) {
+    wizard.clearField("input_fields");
+    wizard.clearField("expected_field");
+    wizard.setField("columns_configured", false, "user");
+  }
+  return {
+    detail: {
+      dataset: dataset.rows,
+      dataset_filename: dataset.fileName,
+      staged_dataset_id: stagedDatasetId,
+      wizard_state: { dataset_ready: true, dataset_columns: dataset.columns },
+    },
+    // The override stays on every later turn, so a role in it would outlive
+    // the agent's own column-role call.
+    override: stagedDatasetId
+      ? { staged_dataset_id: stagedDatasetId, dataset_ready: true, dataset_columns: dataset.columns }
+      : undefined,
+  };
+}
+
+/**
+ * Queue chat sends that run after the next render.
+ *
+ * Each send reads the wizard state of that render, so a field the caller
  * clears just before it does not reach the turn (SKY-742).
  *
  * Args:
@@ -90,15 +153,19 @@ export function libraryPickOverride(picked: ConfirmedLibraryDataset): WizardStat
 export function useSendAfterRender(
   send: (note: string, override?: WizardState) => void,
 ): (note: string, override?: WizardState) => void {
-  const [pending, setPending] = React.useState<{ note: string; override?: WizardState } | null>(
-    null,
+  // A queue, so two sends in one tick both go out, in order.
+  const [pending, setPending] = React.useState<Array<{ note: string; override?: WizardState }>>(
+    [],
   );
   React.useEffect(() => {
-    if (!pending) return;
-    setPending(null);
-    send(pending.note, pending.override);
+    if (pending.length === 0) return;
+    setPending([]);
+    for (const item of pending) send(item.note, item.override);
   }, [pending, send]);
-  return React.useCallback((note, override) => setPending({ note, override }), []);
+  return React.useCallback(
+    (note, override) => setPending((queue) => [...queue, { note, override }]),
+    [],
+  );
 }
 
 export function DatasetUploadCard({
@@ -120,6 +187,12 @@ export function DatasetUploadCard({
   React.useEffect(() => {
     onConfirmRef.current = onConfirm;
   }, [onConfirm]);
+  // The drop zone and the initial file reach handleFile without the
+  // disabled controls, so the read itself must refuse a disabled card.
+  const disabledRef = React.useRef(disabled);
+  React.useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
 
   React.useEffect(() => {
     if (alreadyConfirmed) setConfirmed(true);
@@ -130,6 +203,7 @@ export function DatasetUploadCard({
   const readRef = React.useRef(0);
 
   const handleFile = React.useCallback(async (file: File) => {
+    if (disabledRef.current) return;
     const readId = ++readRef.current;
     setParsing(true);
     setParseError(null);
