@@ -46,7 +46,14 @@ async function mount(
     earlier,
     plan,
     stepKind,
-  }: { streaming?: boolean; earlier?: Props["earlier"]; plan?: string; stepKind?: Props["stepKind"] } = {},
+    thinking = [],
+  }: {
+    streaming?: boolean;
+    earlier?: Props["earlier"];
+    plan?: string;
+    stepKind?: Props["stepKind"];
+    thinking?: Props["thinking"];
+  } = {},
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -55,7 +62,7 @@ async function mount(
     act(async () => {
       root.render(
         <TurnActivity
-          thinking={[]}
+          thinking={thinking}
           streaming={live}
           durationMs={5_000}
           steps={steps}
@@ -355,4 +362,78 @@ void it("keeps the live header when the only call is a card that renders nothing
   await render("done");
   assert.ok(turnRow(host, "working"), "the live header stays when the write ends with no change");
   await act(async () => root.unmount());
+});
+
+/** One thinking segment; finished and saved unless told otherwise. */
+function segment(
+  reasoning: string,
+  toolsBefore: number,
+  { endedAt = 1_800, streaming = false }: { endedAt?: number | null; streaming?: boolean } = {},
+): Props["thinking"][number] {
+  return { reasoning, startedAt: 1_500, endedAt, streaming, toolsBefore };
+}
+
+/** The "Thought for" rows; the test loads no catalog, so each shows its key. */
+function thoughtRows(host: HTMLElement): Element[] {
+  return [...host.querySelectorAll("button")].filter((b) => /thought_(for|briefly)/.test(b.textContent ?? ""));
+}
+
+// SKY-773: a finished stretch of reasoning is one folded row in time order.
+void it("shows a finished thinking segment as a folded row between the tools it ran between", async () => {
+  const { host, unmount } = await mount(
+    [
+      { call: call("edit-a"), isRetry: false, index: 0 },
+      { call: call("edit-b"), isRetry: false, index: 1 },
+    ],
+    { thinking: [segment("Check the config first.", 1)], stepKind: () => "edit" },
+  );
+  const turn = await openTurn(host);
+  const rows = thoughtRows(host);
+  assert.equal(rows.length, 1, host.innerHTML);
+  const row = rows[0]!;
+  assert.equal(row.getAttribute("aria-expanded"), "false", "the row starts folded");
+  assert.ok(!host.textContent?.includes("Check the config first."), "the reasoning stays hidden");
+  const before = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const editA = host.querySelector('[data-step="edit-a"]');
+  const editB = host.querySelector('[data-step="edit-b"]');
+  assert.ok(editA && editB && turn, "both edits show once the turn opens");
+  assert.ok(before(editA, row), "the row comes after edit-a");
+  assert.ok(before(row, editB), "the row comes before edit-b");
+  await act(async () => (row as HTMLButtonElement).click());
+  assert.ok(host.textContent?.includes("Check the config first."), "the row opens to the reasoning");
+  await unmount();
+});
+
+void it("shows no row for the segment still being thought, only the thinking line", async () => {
+  const { host, unmount } = await mount([{ call: call("read-a"), isRetry: false, index: 0 }], {
+    streaming: true,
+    thinking: [segment("Still working it out.", 1, { endedAt: null, streaming: true })],
+  });
+  assert.equal(thoughtRows(host).length, 0, host.innerHTML);
+  assert.ok(host.querySelector('[role="status"]'), "the thinking line shows");
+  await unmount();
+});
+
+void it("shows no row for a segment without reasoning", async () => {
+  const { host, unmount } = await mount([{ call: call("read-a"), isRetry: false, index: 0 }], {
+    thinking: [segment("", 0)],
+  });
+  await openTurn(host);
+  assert.equal(thoughtRows(host).length, 0, host.innerHTML);
+  await unmount();
+});
+
+void it("shows an earlier turn's finished segment as a row", async () => {
+  const { host, unmount } = await mount([{ call: call("read-b"), isRetry: false, index: 0 }], {
+    earlier: [
+      {
+        thinking: [segment("Read the first file.", 0)],
+        steps: [{ call: call("read-a"), isRetry: false, index: 0 }],
+        answer: null,
+      },
+    ],
+  });
+  await openTurn(host);
+  assert.equal(thoughtRows(host).length, 1, host.innerHTML);
+  await unmount();
 });
