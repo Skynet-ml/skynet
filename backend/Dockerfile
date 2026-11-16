@@ -234,6 +234,51 @@ RUN case "$(dpkg --print-architecture)" in \
         && rm /tmp/github-mcp-server.tar.gz \
         && chmod 0755 /usr/local/bin/github-mcp-server
 
+# Go and Rust, so a repository or a metric in these languages can build in a
+# box (SKY-739). Sandbox image builds only (--build-arg INCLUDE_GO_RUST=1):
+# API/worker images stay without the two large toolchains. Each toolchain has
+# its own layer, under the VCR limit of 500 MB for each compressed layer.
+# Root owns both trees, because the sudo check below follows the links in
+# /usr/local/bin. The Rust archive is the official standalone installer: it
+# installs only rustc, cargo and the standard library, with no rustup.
+ARG INCLUDE_GO_RUST=false
+ARG GO_VERSION=1.27.4
+RUN if [ "$INCLUDE_GO_RUST" = "1" ] || [ "$INCLUDE_GO_RUST" = "true" ]; then \
+        case "$(dpkg --print-architecture)" in \
+            amd64) GO_ARCH=amd64; GO_SHA256=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+            arm64) GO_ARCH=arm64; GO_SHA256=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+            *) echo "unsupported arch for Go: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://go.dev/dl/go$GO_VERSION.linux-$GO_ARCH.tar.gz" -o /tmp/go.tar.gz \
+        && echo "$GO_SHA256  /tmp/go.tar.gz" | sha256sum -c - \
+        && tar --no-same-owner -xzf /tmp/go.tar.gz -C /usr/local \
+        && rm /tmp/go.tar.gz \
+        && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+        && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+        && go version | grep -Fq "go$GO_VERSION "; \
+    fi
+ARG RUST_VERSION=1.100.0
+RUN if [ "$INCLUDE_GO_RUST" = "1" ] || [ "$INCLUDE_GO_RUST" = "true" ]; then \
+        case "$(dpkg --print-architecture)" in \
+            amd64) RUST_TARGET=x86_64-unknown-linux-gnu; RUST_SHA256=5fb0a7fff979867975f375e23687d265254ffc4129325351bb611c209519cd0b ;; \
+            arm64) RUST_TARGET=aarch64-unknown-linux-gnu; RUST_SHA256=95dabd6b3a6c7114646e067a36f512cbbf03eb09bec8b0dbef454aa2c721c364 ;; \
+            *) echo "unsupported arch for Rust: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://static.rust-lang.org/dist/rust-$RUST_VERSION-$RUST_TARGET.tar.gz" -o /tmp/rust.tar.gz \
+        && echo "$RUST_SHA256  /tmp/rust.tar.gz" | sha256sum -c - \
+        && tar --no-same-owner -xzf /tmp/rust.tar.gz -C /tmp \
+        && "/tmp/rust-$RUST_VERSION-$RUST_TARGET/install.sh" --prefix=/opt/rust --disable-ldconfig \
+            --components="rustc,cargo,rust-std-$RUST_TARGET" \
+        && rm -rf /tmp/rust.tar.gz "/tmp/rust-$RUST_VERSION-$RUST_TARGET" \
+        && for BIN in rustc rustdoc cargo; do \
+            ln -s "/opt/rust/bin/$BIN" "/usr/local/bin/$BIN" || exit 1; \
+        done \
+        && rustc --version | grep -Fq "rustc $RUST_VERSION " \
+        && cargo --version | grep -Fq "cargo $RUST_VERSION "; \
+    fi
+
 COPY --chown=1001:0 . .
 
 # Install the project itself. pip does an editable --no-deps install (every
@@ -327,6 +372,11 @@ ENV PATH="/usr/local/libexec/skynet-path-guard:/app/.venv/bin:$PATH"
 # [run] supervisor gives this PATH back to the entry it starts as the box user.
 ENV APP_ENTRY_PATH="$PATH"
 ENV PYTHONUNBUFFERED=1
+# The Go and Rust caches go to /tmp, because a local Docker box has a
+# read-only root and only /tmp and /workspace are writable. GOTOOLCHAIN=local
+# keeps the pinned Go: a go.mod that asks for a newer one fails instead of
+# downloading it from proxy.golang.org during setup.
+ENV GOCACHE=/tmp/go-build GOPATH=/tmp/go CARGO_HOME=/tmp/cargo GOTOOLCHAIN=local
 ENV WORKER_CONCURRENCY=4
 ENV WORKER_POLL_INTERVAL=2.0
 ENV SKYNET_CODE_VERSION=$GIT_SHA
