@@ -5,13 +5,13 @@ import dynamic from "next/dynamic";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Brain, CaretRight } from "@/shared/ui/icons";
 
+import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { splitSummary, thoughtSeconds } from "@/shared/lib/thinking-segments";
 
 import { RevealText } from "./reveal-text";
 import { ThinkingDots } from "./thinking-dots";
-import { formatSpan } from "./turn-activity";
 import type { AgentThinking } from "./types";
 
 // Lazy for the same reason as in agent-bubble: the parser stays out of the
@@ -163,4 +163,24 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
       </AnimatePresence>
     </div>
   );
+}
+
+/** A duration as Codex writes it: "42s", "1m 5s", "1h 2m 3s", in the active locale. Never under 1s. */
+export function formatSpan(ms: number): string {
+  const total = Math.max(1, Math.floor(ms / 1000));
+  const unit = (value: number, u: "hour" | "minute" | "second") =>
+    new Intl.NumberFormat(getActiveIntlLocale(), {
+      style: "unit",
+      unit: u,
+      unitDisplay: "narrow",
+    }).format(value);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const parts = [
+    hours ? unit(hours, "hour") : "",
+    mins ? unit(mins, "minute") : "",
+    secs ? unit(secs, "second") : "",
+  ].filter(Boolean);
+  return parts.join(" ");
 }

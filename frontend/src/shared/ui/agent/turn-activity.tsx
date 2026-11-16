@@ -15,7 +15,7 @@ import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segment
 import { ActivityGroup } from "./activity-steps";
 import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
-import { ThinkingSection } from "./thinking-section";
+import { formatSpan, ThinkingSection } from "./thinking-section";
 import { deniedCount } from "./denied-count";
 import { DeniedCount } from "./denied-count-note";
 import {
@@ -129,9 +129,14 @@ export function TurnActivity({
   const pieces = interleaveThinking(thinkingRows, shown(steps));
   const earlierPieces = earlier.map((t) => interleaveThinking(finishedThinking(t.thinking), shown(t.steps)));
   // Every call counts, also a dropped card, so the header does not leave
-  // and come back when a running write ends with nothing to show.
+  // and come back when a running write ends with nothing to show. A thinking
+  // row counts only once the turn ends: a live segment can reopen (ReActV2's
+  // message_reset) and take its row away again (SKY-773).
   const hasHistory =
-    Boolean(plan) || steps.length > 0 || earlier.length > 0 || thinkingRows.length > 0;
+    Boolean(plan) ||
+    steps.length > 0 ||
+    earlier.length > 0 ||
+    (!isLive && thinkingRows.length > 0);
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
   // Codex folds the history once the final answer starts; a click overrides.
@@ -159,7 +164,7 @@ export function TurnActivity({
 
   const renderPiece = (piece: (typeof pieces)[number], i: number) =>
     piece.kind === "thinking" ? (
-      <ThinkingSection key={`thinking-${i}`} thinking={piece.segment} compact />
+      <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
     ) : piece.kind === "card" ? (
       // A card whose component renders nothing when it mounts leaves no padded gap.
       <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
@@ -191,7 +196,7 @@ export function TurnActivity({
   const reduceMotion = Boolean(useReducedMotion());
   const renderFolded = (piece: (typeof pieces)[number], i: number) =>
     piece.kind === "thinking" ? (
-      fold(`thinking-${i}`, renderPiece(piece, i))
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece, i))
     ) : piece.kind === "card" ? (
       renderPiece(piece, i)
     ) : piece.kind === "steps" ? (
@@ -265,9 +270,15 @@ export function TurnActivity({
   );
 }
 
-/** The segments that show as rows: those with reasoning, except the one still being thought. */
-function finishedThinking(thinking: readonly TurnThinking[]): TurnThinking[] {
-  return thinking.filter((t) => t.reasoning && !(t.streaming && t.endedAt === null));
+/**
+ * The segments that show as rows: those with reasoning, except the one still
+ * being thought. ``order`` is the segment's place in the turn, a key that
+ * holds when a dropped card merges the bursts around a row.
+ */
+function finishedThinking(thinking: readonly TurnThinking[]): Array<TurnThinking & { order: number }> {
+  return thinking.flatMap((t, order) =>
+    t.reasoning && !(t.streaming && t.endedAt === null) ? [{ ...t, order }] : [],
+  );
 }
 
 /** Codex's exploration: reading and searching, which fold together into one "Exploring" unit. */
@@ -374,22 +385,5 @@ function Header({
   );
 }
 
-/** A duration as Codex writes it: "42s", "1m 5s", "1h 2m 3s", in the active locale. Never under 1s. */
-export function formatSpan(ms: number): string {
-  const total = Math.max(1, Math.floor(ms / 1000));
-  const unit = (value: number, u: "hour" | "minute" | "second") =>
-    new Intl.NumberFormat(getActiveIntlLocale(), {
-      style: "unit",
-      unit: u,
-      unitDisplay: "narrow",
-    }).format(value);
-  const hours = Math.floor(total / 3600);
-  const mins = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  const parts = [
-    hours ? unit(hours, "hour") : "",
-    mins ? unit(mins, "minute") : "",
-    secs ? unit(secs, "second") : "",
-  ].filter(Boolean);
-  return parts.join(" ");
-}
+// CompactionRow still imports it from here.
+export { formatSpan };
