@@ -589,6 +589,39 @@ void test("a draft set from outside grows the textarea to fit it", async () => {
   assert.equal(height, "90px");
 });
 
+void test("a draft cleared from outside shrinks the textarea back (SKY-780)", async () => {
+  // A reply-time send that the panel takes over clears the draft with no input event.
+  let setDraft: ((text: string) => void) | null = null;
+  onRun = (set) => {
+    setDraft = set;
+  };
+  const composer = await mount("/name Release notes", false);
+  await composer.press("Enter");
+  onRun = null;
+  await React.act(async () => {
+    setDraft?.("line one\nline two\nline three");
+  });
+  composer.textarea.style.height = "90px";
+  await React.act(async () => {
+    setDraft?.("");
+  });
+  const height = composer.textarea.style.height;
+  await composer.unmount();
+  assert.equal(height, "", "the CSS height applies again");
+});
+
+void test("a Send the host refuses keeps the textarea height (SKY-780)", async () => {
+  // The panel refuses a Send while a dataset stages, and keeps the draft.
+  const composer = await mount("line one\nline two\nline three", false);
+  composer.textarea.style.height = "90px";
+  await composer.press("Enter");
+  const height = composer.textarea.style.height;
+  const sent = [...composer.sent];
+  await composer.unmount();
+  assert.deepEqual(sent, ["submit"]);
+  assert.equal(height, "90px", "the multi-line draft stays visible");
+});
+
 // Opens the /model picker and types a filter into it.
 async function openPicker(
   filter: string,

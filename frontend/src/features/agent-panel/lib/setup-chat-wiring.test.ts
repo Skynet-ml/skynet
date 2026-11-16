@@ -827,3 +827,99 @@ test("Send drops file originals before it reads the ready media (SKY-735)", () =
   submit();
   assert.deepEqual(calls, ["keep report.pdf", "ready", "toast"]);
 });
+
+// Run the panel's handleSubmit with a pending dataset card (SKY-780).
+function datasetSubmit(options: {
+  staging?: boolean;
+  compacting?: boolean;
+  media?: { kind: string }[];
+  noCard?: boolean;
+  sendFails?: boolean;
+}) {
+  const calls: unknown[][] = [];
+  const submit = expression(panel, "handleSubmit", {
+    draft: "use it <card>",
+    lineComments: [],
+    splitPastes: () => ({ files: [] }),
+    keepOriginals: () => {},
+    chatMedia: { ready: () => options.media ?? [], blocked: null, clear: () => calls.push(["clear media"]) },
+    toast: { info: (text: string) => calls.push(["toast", text]) },
+    msg: (key: string) => key,
+    joinLineComments: (text: string) => text,
+    compacting: options.compacting ?? false,
+    datasetDraft: {
+      staging: () => options.staging ?? false,
+      take: () => (calls.push(["take"]), options.noCard ? null : { override: { staged_dataset_id: "s1" } }),
+    },
+    sendAfterRender: (...args: unknown[]) => calls.push(["sendAfterRender", ...args]),
+    agent: { send: (...args: unknown[]) => (calls.push(["send", ...args]), !options.sendFails) },
+    setDraft: (text: string) => calls.push(["setDraft", text]),
+    clearLineComments: () => {},
+  });
+  submit();
+  return calls;
+}
+
+test("Send with a dataset card sends the text, the override and the media after a render (SKY-780)", () => {
+  const media = [{ kind: "image" }];
+  assert.deepEqual(datasetSubmit({ media }), [
+    ["take"],
+    ["sendAfterRender", "use it <card>", { staged_dataset_id: "s1" }, { media }],
+    ["setDraft", ""],
+    ["clear media"],
+  ]);
+});
+
+test("Send with no dataset card sends at once (SKY-780)", () => {
+  const media = [{ kind: "image" }];
+  assert.deepEqual(datasetSubmit({ noCard: true, media }), [
+    ["take"],
+    ["send", "use it <card>", undefined, { media }],
+    ["setDraft", ""],
+    ["clear media"],
+  ]);
+});
+
+test("a refused Send with media and no dataset card keeps the draft (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ noCard: true, sendFails: true, media: [{ kind: "image" }] }), [
+    ["take"],
+    ["send", "use it <card>", undefined, { media: [{ kind: "image" }] }],
+    ["toast", "agent.media.wait_compact"],
+  ]);
+});
+
+test("Send waits while the dataset rows stage and keeps the draft (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ staging: true }), [["toast", "agent.media.uploading"]]);
+});
+
+test("a /compact with an image keeps the dataset card for a later Send (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ compacting: true, media: [{ kind: "image" }] }), [
+    ["toast", "agent.media.wait_compact"],
+  ]);
+});
+
+test("a mid-turn Send with the dataset card goes through handleSubmit, not the queue (SKY-780)", () => {
+  const submitted: string[] = [];
+  const accepts = expression(panel, "acceptsMidTurn", {
+    datasetDraft: { holds: (text: string) => text.includes("<card>") },
+    handleSubmit: () => submitted.push("submit"),
+  });
+  assert.equal(accepts("plain text"), true);
+  assert.equal(accepts("use it <card>"), false);
+  assert.deepEqual(submitted, ["submit"]);
+  assert.match(source(panel), /acceptsMidTurn=\{acceptsMidTurn\}/);
+});
+
+test("a dataset card that left the draft unsent reopens its tool card (SKY-780)", () => {
+  const confirmedDatasetCallsRef = { current: new Set(["call-1", "call-2"]) };
+  let cards: Record<string, number> = { "call-1": 1 };
+  const reopen = expression(panel, "reopenDatasetCard", {
+    confirmedDatasetCallsRef,
+    setReopenedCards: (update: (c: Record<string, number>) => Record<string, number>) => (cards = update(cards)),
+  });
+  reopen("call-1");
+  assert.deepEqual([...confirmedDatasetCallsRef.current], ["call-2"]);
+  assert.deepEqual(cards, { "call-1": 2 });
+  // The new key remounts the card, so it shows its picker again.
+  assert.equal(source(panel).match(/key=\{`\$\{call\.id\}:\$\{reopenedCards\[call\.id\] \?\? 0\}`\}/g)?.length, 2);
+});

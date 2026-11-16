@@ -2552,3 +2552,13 @@ async def test_list_repo_folder_without_a_path_lists_the_root() -> None:
 def test_metric_focus_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
     """The setup agent shows the optimize.toml it wrote in full, so the user sees the file (SKY-184)."""
     assert "When you write optimize.toml, show the user the file in full." in SCREEN_FOCUS["metric"]
+
+
+def test_dataset_prompt_says_the_card_is_a_preview_and_the_run_uses_every_row() -> None:
+    """The dataset comes as a file card in the user's message, and only the run reads every row (SKY-780)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+
+    assert "arrives as an attached file card in the user's message" in prompt
+    assert "only a preview" in prompt
+    assert "The run uses every row" in prompt
+    assert "never ask the user to paste rows" in prompt

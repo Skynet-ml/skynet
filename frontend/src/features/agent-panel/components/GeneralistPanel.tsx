@@ -177,9 +177,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
-  applyDatasetUpload,
-  datasetAttachedNote,
-  libraryPickOverride,
+  useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
 } from "./DatasetUploadCard";
@@ -988,82 +986,55 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // appears while a chosen dataset file is read, or when it cannot be read.
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
+  // A new key remounts a tool card whose dataset left the draft unsent, so
+  // the user can pick again.
+  const [reopenedCards, setReopenedCards] = React.useState<Record<string, number>>({});
+  const reopenDatasetCard = React.useCallback((callId: string) => {
+    confirmedDatasetCallsRef.current.delete(callId);
+    setReopenedCards((cards) => ({ ...cards, [callId]: (cards[callId] ?? 0) + 1 }));
+  }, []);
 
   const sendAfterRender = useSendAfterRender(agent.send);
-  const handleDatasetConfirm = React.useCallback(
-    async (callId: string, confirmed: ConfirmedDataset) => {
-      // A web chat must not stage rows or change the Mac's wizard.
-      if (webChat) return;
-      confirmedDatasetCallsRef.current.add(callId);
-      // Stage the rows on the backend before notifying the agent so the
-      // very next turn's wizard_state carries ``staged_dataset_id``. The
-      // submit wizard's own staging path only runs when its form is
-      // mounted; without this call an agent-panel-only flow ends up
-      // calling ``submit_unified_run_optimize_post`` with no dataset and 422s.
-      let stagedDatasetId: string | undefined;
-      try {
-        const staged = await stageDatasetForAgent({
+  // Stage the rows on the backend at once, so the turn that carries the
+  // card has ``staged_dataset_id``. The submit wizard's own staging path only
+  // runs when its form is mounted; without this call an agent-panel-only flow
+  // ends up calling ``submit_unified_run_optimize_post`` with no dataset and 422s.
+  const stageDataset = React.useCallback(
+    async (confirmed: ConfirmedDataset) =>
+      (
+        await stageDatasetForAgent({
           dataset: confirmed.rows,
           dataset_filename: confirmed.fileName,
-        });
-        stagedDatasetId = staged.staged_dataset_id;
-      } catch {
-        // Best-effort: if staging fails the agent will surface a clear
-        // 422 on submit and the user can re-attach. Falling back to no
-        // staged id matches the prior behaviour for the dispatched event.
-      }
-      const { detail: stagedDetail, override: wizardOverride } = applyDatasetUpload(
-        wizardCtx,
-        confirmed,
-        stagedDatasetId,
-      );
-      // Persist before dispatch so the wizard can replay it after navigation;
-      // the listener in use-unified-wizard reads+clears this key on mount.
-      try {
-        window.sessionStorage.setItem("wizard:staged-dataset", JSON.stringify(stagedDetail));
-      } catch {
-        // sessionStorage can throw under quota or private-mode policy; the
-        // live event below still covers the same-page case.
-      }
-      window.dispatchEvent(new CustomEvent("wizard:dataset-staged", { detail: stagedDetail }));
-      const note = datasetAttachedNote(confirmed);
-      // Sent after the cleared roles render, so the turn's wizard state does
-      // not carry the earlier file's roles.
-      sendAfterRender(note, wizardOverride);
+        })
+      ).staged_dataset_id,
+    [],
+  );
+  const datasetDraft = useDatasetDraft({
+    draft,
+    setDraft,
+    stage: stageDataset,
+    wizard: wizardCtx,
+    onRelease: reopenDatasetCard,
+  });
+  const handleDatasetConfirm = React.useCallback(
+    (callId: string | undefined, confirmed: ConfirmedDataset) => {
+      // A web chat must not stage rows or change the Mac's wizard.
+      if (webChat) return;
+      // A composer attach has no tool card to mark or reopen.
+      if (callId) confirmedDatasetCallsRef.current.add(callId);
+      // The file waits in the composer as a card, as a PDF does (SKY-780).
+      datasetDraft.attach(confirmed, callId);
     },
-    [wizardCtx, webChat, sendAfterRender],
+    [webChat, datasetDraft],
   );
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
-      // By-reference twin of handleDatasetConfirm: no staging call — the run
-      // materializes rows from ``source_dataset_id`` on submit. Set the same
-      // gate fields so the next turn's wizard_state unlocks submit, and carry
-      // the library id so the backend injects it into the submit request.
-      if (wizardCtx) {
-        wizardCtx.setField("source_dataset_id", picked.sourceDatasetId, "user");
-        wizardCtx.setField("dataset_columns", picked.columns, "user");
-        wizardCtx.setField("dataset_ready", true, "user");
-        wizardCtx.setField("columns_configured", true, "user");
-      }
-      const mappingLine = picked.columns
-        .map((c) => {
-          const role = picked.columnRoles[c];
-          if (role === "ignore") return null;
-          return `- ${c} → ${role}`;
-        })
-        .filter(Boolean)
-        .join("\n");
-      const note = formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
-        p1: picked.name,
-        p2: picked.rowCount,
-        p3: mappingLine,
-      });
-      agent.send(note, libraryPickOverride(picked));
+      datasetDraft.attachLibrary(picked, callId);
     },
-    [agent, wizardCtx, webChat],
+    [webChat, datasetDraft],
   );
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
@@ -1087,20 +1058,55 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       toast.info(chatMedia.blocked ?? msg("agent.media.uploading"));
       return;
     }
+    if (datasetDraft.staging(draft)) {
+      toast.info(msg("agent.media.uploading"));
+      return;
+    }
     if (!trimmed && lineComments.length === 0 && media.length === 0) return;
-    const sent = agent.send(
-      joinLineComments(trimmed, lineComments),
-      undefined,
-      media.length ? { media } : undefined,
-    );
-    if (!sent && media.length) {
+    const message = joinLineComments(trimmed, lineComments);
+    const options = media.length ? { media } : undefined;
+    // A manual /compact holds text only, so a turn with files waits in the
+    // composer; check it here, as the dataset's send goes after a render.
+    if (compacting && media.some((m) => m.kind !== "document")) {
       toast.info(msg("agent.media.wait_compact"));
       return;
+    }
+    const dataset = datasetDraft.take(draft);
+    if (dataset) {
+      // Sent after the cleared roles render, so the turn's wizard state does
+      // not carry the earlier file's roles.
+      sendAfterRender(message, dataset.override, options);
+    } else {
+      const sent = agent.send(message, undefined, options);
+      if (!sent && media.length) {
+        toast.info(msg("agent.media.wait_compact"));
+        return;
+      }
     }
     setDraft("");
     chatMedia.clear();
     clearLineComments?.();
-  }, [agent, draft, lineComments, clearLineComments, chatMedia, keepOriginals]);
+  }, [
+    agent,
+    draft,
+    lineComments,
+    clearLineComments,
+    chatMedia,
+    keepOriginals,
+    datasetDraft,
+    compacting,
+    sendAfterRender,
+  ]);
+  // A draft with the pending dataset card skips the mid-turn queue: only
+  // handleSubmit applies the dataset, and its send stops the running reply.
+  const acceptsMidTurn = React.useCallback(
+    (text: string) => {
+      if (!datasetDraft.holds(text)) return true;
+      handleSubmit();
+      return false;
+    },
+    [datasetDraft, handleSubmit],
+  );
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],
@@ -1164,10 +1170,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // request without finishing — that would freeze the card in
         // disabled state while the user waits for a stream that already
         // hung up. Keeping the card live lets the upload proceed; the
-        // confirmation handler cancels any in-flight stream before
-        // starting the next turn.
+        // dataset's send cancels any in-flight stream before starting the
+        // next turn.
         return (
           <DatasetUploadCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
@@ -1182,6 +1189,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_LIBRARY_TOOL) {
         return (
           <LibraryDatasetCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(picked) => handleLibraryPick(call.id, picked)}
@@ -1202,7 +1210,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming, webChat, writeBefore],
+    [handleDatasetConfirm, handleLibraryPick, reopenedCards, streaming, webChat, writeBefore],
   );
 
   // Every call is a step in the turn's activity group except the ones the
@@ -1911,6 +1919,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         mentions={wizardCtx?.repoPaths ?? undefined}
         streaming={activeBusy}
         midTurn={midTurn}
+        acceptsMidTurn={acceptsMidTurn}
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
@@ -1961,7 +1970,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   onConfirm={(confirmed) => {
                     setAttachOpen(false);
                     setAttachFile(null);
-                    void handleDatasetConfirm(`user-attach-${confirmed.fileName}`, confirmed);
+                    handleDatasetConfirm(undefined, confirmed);
                   }}
                 />
               </PopoverContent>
