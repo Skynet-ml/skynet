@@ -760,6 +760,19 @@ async def test_continue_never_leaves_the_overview() -> None:
 
 
 @pytest.mark.asyncio
+async def test_continue_after_a_write_this_turn_does_not_name_a_stale_screen() -> None:
+    """A write this turn can change the order (Standard's data mode turns optimizer into plan), so the text names no screen."""
+    turn = _TurnAuthoringFlag()
+    turn.wizard_patch["data_mode"] = "pairs"
+    state = {**_READY, "wizard_screen": "source", "next_screen": "optimizer"}
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "source", "to": "optimizer"}
+    assert "moves on to the next screen" in result["message"]
+    assert "'optimizer'" not in result["message"]
+    assert turn.moved_to == ""
+
+
+@pytest.mark.asyncio
 async def test_continue_to_the_last_screen_names_it() -> None:
     """From Harden, Continue names the Overview, the last screen (SKY-744)."""
     state = {**_READY, "wizard_screen": "harden", "next_screen": "overview"}
@@ -775,7 +788,7 @@ async def test_continue_without_a_known_next_screen_names_this_screen(sent: str 
     turn = _TurnAuthoringFlag()
     result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
     assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "brief"}
-    assert "now shows the next screen" in result["message"]
+    assert "moves on to the next screen" in result["message"]
     assert turn.moved_to == ""
     err = validate_wizard_screen("update_wizard_state", {"task_objective": "x"}, cast(WizardState, state), moved_to="")
     assert err is not None

@@ -1979,7 +1979,7 @@ def _moved_message(screen: str, *, jump: bool = False) -> str:
     moved = (
         f"The wizard heads back to {where}, or stops earlier if a screen on the way still needs something."
         if jump
-        else f"The wizard now shows {where}."
+        else f"The wizard moves on to {where}, unless its Continue check still holds it on this screen."
     )
     return (
         f"{moved} That screen's assistant takes the next turn. "
@@ -2032,12 +2032,16 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         turn.screen_moved = True
         target = _return_target(screen, merged)
         # The client sends the screen its Continue shows next (SKY-744). Without
-        # a known one, ``to`` keeps this screen and the text says "the next
-        # screen": the client still moves on by one.
+        # a known one, ``to`` keeps this screen: the client still moves on by one.
         sent = str(state.get("next_screen") or "")
-        known = target or (sent if sent in _NAV_SCREENS else "")
+        sent = sent if sent in _NAV_SCREENS else ""
+        to = target or sent or screen
+        # ``next_screen`` is the turn-start order, and a write this turn (the
+        # data mode, the level, a model) can change it, so the agent's text
+        # then says "the next screen" instead of a name that may be stale.
+        known = target or ("" if turn.wizard_patch else sent)
         turn.moved_to = known
-        nav: dict[str, Any] = {"action": "continue", "from": screen, "to": known or screen}
+        nav: dict[str, Any] = {"action": "continue", "from": screen, "to": to}
         if target:
             # Only a return target jumps; a plain move runs the Continue
             # button, which follows this turn's writes, not the snapshot's.
