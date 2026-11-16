@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
+import anyio
 import dspy
 import httpx
 import litellm
@@ -1136,6 +1137,76 @@ async def test_bad_cli_reply_raises_a_clear_error_after_the_retries() -> None:
         [chunk async for chunk in handlers.complete({"messages": [], "tools": []})]
 
     assert [request.get("rollout_id") for request in lm.requests] == [None, *range(1, attempts)]
+
+
+class _ReasoningTextLM(_TextLM):
+    """A text-protocol LM that streams its reasoning and its reply text, as the local CLI gateway does."""
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        """Stream a reasoning delta and the reply text, then return the reply.
+
+        Args:
+            prompt: Unused legacy prompt.
+            messages: The rendered chat messages.
+            **kwargs: Provider kwargs.
+
+        Returns:
+            An OpenAI-shaped text response.
+        """
+        response = super().forward(prompt=prompt, messages=messages, **kwargs)
+        stream = dspy.settings.send_stream
+        for delta in (
+            Delta(reasoning_content="I should look up a."),
+            Delta(content=response.choices[0].message.content),
+        ):
+            chunk = ModelResponseStream(id="r1", model="scripted", choices=[StreamingChoices(index=0, delta=delta)])
+            anyio.from_thread.run(stream.send, chunk)
+        return response
+
+
+async def test_cli_reply_relays_streamed_reasoning_and_no_protocol_text() -> None:
+    """A streamed CLI reply relays only its reasoning to Pi, then the parsed tool call (SKY-774)."""
+    handlers, _ = _handlers(_ReasoningTextLM([_text_calls(("_lookup", {"name": "a"}))]))
+
+    chunks = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    deltas = [choice["delta"] for chunk in chunks for choice in chunk["choices"]]
+    assert [delta.get("reasoning_content") for delta in deltas] == ["I should look up a.", None]
+    assert not any(delta.get("content") for delta in deltas)
+    message = _merge(chunks)
+    assert message["content"] is None
+    (call,) = message["tool_calls"]
+    assert call["function"]["name"] == "_lookup"
+    assert json.loads(call["function"]["arguments"]) == {"name": "a"}
+
+
+async def test_cli_reply_with_nothing_streamed_keeps_its_reasoning() -> None:
+    """A CLI reply that streams nothing, like a cache hit, carries its reasoning in the tool-call chunk."""
+
+    class _CachedLM(_TextLM):
+        """A text-protocol LM whose reply has reasoning but streams nothing."""
+
+        def forward(self, prompt=None, messages=None, **kwargs):
+            """Return the reply with reasoning and stream nothing.
+
+            Args:
+                prompt: Unused legacy prompt.
+                messages: The rendered chat messages.
+                **kwargs: Provider kwargs.
+
+            Returns:
+                An OpenAI-shaped text response.
+            """
+            response = super().forward(prompt=prompt, messages=messages, **kwargs)
+            response.choices[0].message.reasoning_content = "Cached thought."
+            return response
+
+    handlers, _ = _handlers(_CachedLM([_text_calls(("_lookup", {"name": "a"}))]))
+
+    (chunk,) = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    assert chunk["choices"][0]["delta"]["reasoning_content"] == "Cached thought."
+    assert _merge([chunk])["tool_calls"][0]["function"]["name"] == "_lookup"
 
 
 async def test_native_model_does_not_take_the_text_path() -> None:
