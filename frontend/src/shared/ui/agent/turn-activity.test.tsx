@@ -541,6 +541,38 @@ void it("keeps an opened thinking row open when a dropped card merges the bursts
   }
 });
 
+void it("keeps an opened later row open when a dropped card joins it to the row before", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const steps: Props["steps"] = [{ call: call("write"), isRetry: false, index: 0, card: true }];
+  const render = (cardShows: boolean) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[segment("First.", 0), segment("Second.", 1)]}
+          streaming={false}
+          durationMs={5_000}
+          steps={steps}
+          renderStep={(c) => (cardShows ? <span data-step={c.id}>{c.id}</span> : null)}
+        />,
+      );
+    });
+  try {
+    await render(true);
+    await openTurn(host);
+    const second = thoughtRows(host)[1];
+    assert.ok(second, host.innerHTML);
+    await act(async () => (second as HTMLButtonElement).click());
+    await render(false);
+    const rows = thoughtRows(host);
+    assert.equal(rows.length, 1, "the two rows join");
+    assert.equal(rows[0]!.getAttribute("aria-expanded"), "true", "the joined row stays open");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 void it("shows an earlier turn's finished segment as a row", async () => {
   const { host, unmount } = await mount([{ call: call("read-b"), isRetry: false, index: 0 }], {
     earlier: [

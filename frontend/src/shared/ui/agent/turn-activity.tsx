@@ -130,7 +130,25 @@ export function TurnActivity({
   const shown = (list: Step[]) =>
     list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
   const thinkingRows = finishedThinking(thinking);
-  const pieces = mergeAdjacentThinking(interleaveThinking(thinkingRows, shown(steps)));
+  const laidOut = interleaveThinking(thinkingRows, shown(steps));
+  const pieces = mergeAdjacentThinking(laidOut);
+  // A card can drop out after it rendered (a write that ended with nothing to
+  // show) and join the rows around it into the first one's row. The open
+  // state lives here, by segment, so the row the reader opened stays open.
+  const joinedRows = new Map<number, number[]>();
+  let group: number[] | null = null;
+  for (const piece of laidOut) {
+    if (piece.kind !== "thinking") {
+      group = null;
+      continue;
+    }
+    if (!group) {
+      group = [];
+      joinedRows.set(piece.segment.order, group);
+    }
+    group.push(piece.segment.order);
+  }
+  const [openRows, setOpenRows] = React.useState<ReadonlySet<number>>(() => new Set());
   const earlierPieces = earlier.map((t) =>
     mergeAdjacentThinking(interleaveThinking(finishedThinking(t.thinking), shown(t.steps))),
   );
@@ -168,9 +186,35 @@ export function TurnActivity({
     );
   };
 
-  const renderPiece = (piece: (typeof pieces)[number]) =>
+  const renderRow = (segment: (typeof thinkingRows)[number]) => {
+    const rows = joinedRows.get(segment.order) ?? [segment.order];
+    return (
+      <ThinkingSection
+        key={`thinking-${segment.order}`}
+        thinking={segment}
+        compact
+        open={rows.some((o) => openRows.has(o))}
+        onOpenChange={(next) =>
+          setOpenRows((prev) => {
+            const out = new Set(prev);
+            for (const o of rows) out.delete(o);
+            if (next) out.add(segment.order);
+            return out;
+          })
+        }
+      />
+    );
+  };
+
+  // ``current`` is false for an earlier turn: its rows never join later, and
+  // their orders would collide with this turn's in ``openRows``.
+  const renderPiece = (piece: (typeof pieces)[number], current: boolean) =>
     piece.kind === "thinking" ? (
-      <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
+      current ? (
+        renderRow(piece.segment)
+      ) : (
+        <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
+      )
     ) : piece.kind === "card" ? (
       // A card whose component renders nothing when it mounts leaves no padded gap.
       <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
@@ -200,14 +244,14 @@ export function TurnActivity({
     </Reveal>
   );
   const reduceMotion = Boolean(useReducedMotion());
-  const renderFolded = (piece: (typeof pieces)[number]) =>
+  const renderFolded = (current: boolean) => (piece: (typeof pieces)[number]) =>
     piece.kind === "thinking" ? (
-      fold(`thinking-${piece.segment.order}`, renderPiece(piece))
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece, current))
     ) : piece.kind === "card" ? (
-      renderPiece(piece)
+      renderPiece(piece, current)
     ) : piece.kind === "steps" ? (
       <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
-        {fold("steps", renderPiece(piece))}
+        {fold("steps", renderPiece(piece, current))}
         {!historyOpen &&
           piece.steps
             .filter(({ call }) => call.status === "error")
@@ -228,7 +272,7 @@ export function TurnActivity({
   const earlierNodes = earlier.map((turn, i) => (
     <React.Fragment key={`earlier-${i}`}>
       {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
-      {(earlierPieces[i] ?? []).map(renderFolded)}
+      {(earlierPieces[i] ?? []).map(renderFolded(false))}
       {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
     </React.Fragment>
   ));
@@ -269,7 +313,7 @@ export function TurnActivity({
       <div className="flex flex-col pt-1.5 empty:hidden">
         {earlierNodes}
         {plan && fold("plan", planLine)}
-        {pieces.map(renderFolded)}
+        {pieces.map(renderFolded(true))}
       </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>

@@ -27,15 +27,19 @@ interface ThinkingSectionProps {
   thinking: AgentThinking;
   /** A plain step row inside a turn's activity, which owns the padding. */
   compact?: boolean;
+  /** Set by a parent that keeps the open state, so a row it joins with another keeps it. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 // Raw reasoning never shows on its own, as in Codex: the row reads
 // "Thinking" while the model reasons and only "Thought for Ns" after. The
 // summary stays off the row; the text itself only opens on request.
-export function ThinkingSection({ thinking, compact = false }: ThinkingSectionProps) {
+export function ThinkingSection({ thinking, compact = false, open: openProp, onOpenChange }: ThinkingSectionProps) {
   const { reasoning, startedAt, endedAt, streaming } = thinking;
   const isThinking = streaming && !endedAt && Boolean(startedAt);
-  const [open, setOpen] = React.useState(false);
+  const [ownOpen, setOwnOpen] = React.useState(false);
+  const open = openProp ?? ownOpen;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const stickToBottomRef = React.useRef(true);
   const reduce = useReducedMotion();
@@ -72,7 +76,10 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
     <div className={cn(!compact && "px-4 py-2")}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOwnOpen(!open);
+          onOpenChange?.(!open);
+        }}
         disabled={!reasoning}
         aria-expanded={open}
         className="group relative flex w-full items-start gap-2 py-1 text-start text-[0.8125rem] leading-5 text-muted-foreground transition-colors enabled:cursor-pointer enabled:hover:text-foreground"
