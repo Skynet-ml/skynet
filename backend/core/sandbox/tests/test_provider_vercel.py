@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from vercel.sandbox import SandboxApiError, SandboxPathNotFoundError
 from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
@@ -2137,6 +2138,92 @@ async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.Mo
     built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder")
     await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
     assert builder.destroys == 1
+
+
+async def test_delete_snapshot_reads_the_builder_session_by_id_before_the_destroy(
+    monkeypatch: pytest.MonkeyPatch, log: list[str]
+) -> None:
+    """Check that an owned client has no capture hook, and the builder hold settles by id and unpins first."""
+    client = SnapshotQueryClient(log)
+    builder = client.boxes["builder"] = FakeBox("builder", FakeSession())
+    service = object()
+    usage = SimpleNamespace(
+        operation=SimpleNamespace(id="op-builder"),
+        runtime=SimpleNamespace(service=service, username="alice", unpin=lambda op: log.append(f"unpin:{op}")),
+    )
+    captures: list[Any] = []
+    readers: list[tuple[str, str]] = []
+
+    def make_client(capture: Any) -> SnapshotQueryClient:
+        """Return the fake client and keep its response capture.
+
+        Args:
+            capture: The response capture hook.
+
+        Returns:
+            The fake client.
+        """
+        captures.append(capture)
+        return client
+
+    def make_reader(token: str, team_id: str) -> str:
+        """Keep the settings the reader is built from.
+
+        Args:
+            token: The Vercel token.
+            team_id: The Vercel team id.
+
+        Returns:
+            A stand-in reader.
+        """
+        readers.append((token, team_id))
+        return "reader"
+
+    class FakeReconciler:
+        """Record the exact-id reconcile of the builder hold."""
+
+        def __init__(self, ledger: Any, reader: Any) -> None:
+            """Check the ledger and the reader.
+
+            Args:
+                ledger: The hold's budget service.
+                reader: The session reader.
+            """
+            assert (ledger, reader) == (service, "reader")
+
+        def reconcile(self, operation_id: str, username: str) -> Any:
+            """Log the reconcile and report a settled hold.
+
+            Args:
+                operation_id: The hold's operation id.
+                username: The hold's owner.
+
+            Returns:
+                A settled operation.
+            """
+            log.append(f"reconcile:{operation_id}:{username}")
+            return SimpleNamespace(state="settled")
+
+    async def destroy(*, delete_orphan_snapshots: bool = False) -> None:
+        """Log the destroy.
+
+        Args:
+            delete_orphan_snapshots: Unused.
+        """
+        log.append("builder-destroy")
+
+    builder.destroy = destroy
+    monkeypatch.setattr(vercel.settings, "vercel_token", SecretStr("test-token"))
+    monkeypatch.setattr(vercel.settings, "vercel_team_id", "team-test")
+    monkeypatch.setattr(vercel, "VercelSessionUsageClient", make_reader)
+    monkeypatch.setattr(vercel, "VercelUsageReconciler", FakeReconciler)
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(make_client))
+    built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", builder_usage=usage)
+    await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
+    assert captures == [None]
+    assert readers == [("test-token", "team-test")]
+    assert log == ["reconcile:op-builder:alice", "unpin:op-builder", "builder-destroy"]
 
 
 class GrowingProcess:
