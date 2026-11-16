@@ -719,6 +719,8 @@ class CliDispatcher:
         ran: str | None = None
         capped_runs: list[str] = []
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
+        # A non-stream chat answer carries the CLI's thinking whole (SKY-774).
+        reasoning: list[str] | None = [] if stream is None and path != _MESSAGES_PATH else None
         for provider in self._providers():
             if stream is not None and stream.started:
                 # The client already has one CLI's text; another CLI's would mix into it.
@@ -736,7 +738,7 @@ class CliDispatcher:
             started = time.monotonic()
             ran = provider
             try:
-                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
+                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast, reasoning)
             except SubscriptionRateLimitedError as error:
                 capped = error
                 capped_runs.append(provider)
@@ -764,7 +766,7 @@ class CliDispatcher:
             )
             if path == _MESSAGES_PATH:
                 return self._message(request, completion.text, usage), evidence
-            return self._success(request, completion.text, usage, stream), evidence
+            return self._success(request, completion.text, usage, stream, "".join(reasoning or [])), evidence
         assert capped is not None or not self._providers() or (stream is not None and stream.started)
         provider = capped.provider if capped else self.cli
         reset_at = capped.reset_at.isoformat() if capped and capped.reset_at else None
@@ -790,6 +792,7 @@ class CliDispatcher:
         prefix: str = "",
         effort: Any = None,
         fast: bool = False,
+        reasoning: list[str] | None = None,
     ) -> CliCompletion:
         """Run one CLI call, retrying transient failures with jittered back-off.
 
@@ -812,6 +815,9 @@ class CliDispatcher:
             fast: Whether the request asks for fast mode. A side call ignores
                 it, and a model without fast mode on ``provider``
                 (:func:`cli_fast`) drops it.
+            reasoning: For a call with no ``stream``, the list that gets the
+                pieces of the CLI's thinking, or ``None``. Each attempt
+                clears it first, so it holds only the last attempt's thinking.
 
         Returns:
             The completion.
@@ -835,13 +841,22 @@ class CliDispatcher:
             runner_kwargs["effort"] = effort
         if fast and cli_fast(provider, self.model):
             runner_kwargs["fast"] = True
+
+        def keep(kind: str, text: str) -> None:
+            """Keep one piece of thinking; drop answer text, which the completion holds whole."""
+            if kind == "reasoning" and reasoning is not None:
+                reasoning.append(text)
+
+        on_delta = stream if stream is not None or reasoning is None else keep
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
             if stream is not None and not stream.started:
                 # Held text of a failed attempt must not prefix the next one's.
                 stream.content = stream.sent = ""
+            if reasoning is not None:
+                reasoning.clear()
             try:
                 with slots:
-                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), stream, **runner_kwargs)
+                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), on_delta, **runner_kwargs)
             except CliRunError as error:
                 streamed = stream is not None and stream.started
                 if not error.transient or streamed or retry == len(_RETRY_DELAYS_SECONDS):
@@ -968,7 +983,12 @@ class CliDispatcher:
         }
 
     def _success(
-        self, request: Mapping[str, Any], text: str, usage: dict[str, Any], stream: _ChatStream | None = None
+        self,
+        request: Mapping[str, Any],
+        text: str,
+        usage: dict[str, Any],
+        stream: _ChatStream | None = None,
+        reasoning: str = "",
     ) -> ModelHTTPResult:
         """Build the chat completion answer, as JSON or as SSE.
 
@@ -978,6 +998,7 @@ class CliDispatcher:
             usage: The usage block.
             stream: The live chat stream; when it already sent text, the SSE
                 carries only the rest of the answer, in the same stream identity.
+            reasoning: The CLI's thinking, for a JSON answer, or ``""``.
 
         Returns:
             The answer. Tool calls the CLI wrote as JSON text come back as
@@ -996,6 +1017,8 @@ class CliDispatcher:
             message: dict[str, Any] = {"role": "assistant", "content": content}
             if tool_calls:
                 message = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
+            if reasoning:
+                message["reasoning_content"] = reasoning
             body = {
                 "id": identity,
                 "object": "chat.completion",

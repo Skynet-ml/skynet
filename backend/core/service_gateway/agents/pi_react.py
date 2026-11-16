@@ -23,8 +23,7 @@ Pi owns the loop; this module keeps the program's contract:
 * **Models without native tool calls.** A local CLI subscription route
   (SKY-245) answers in DSPy's ``[[ ## tool_calls ## ]]`` text protocol. The
   relay renders that protocol with the same adapter, parses the reply with
-  it and hands Pi the calls as one native tool-call chunk. Only the model's
-  reasoning is relayed as it streams (SKY-774); the protocol text never is.
+  it and hands Pi the calls as one native tool-call chunk.
 
 The setup agent and the workspace coding agent run here.
 """
@@ -186,25 +185,6 @@ def output_chunk(output: Any) -> str:
             "object": "chat.completion.chunk",
             "model": "skynet-relay",
             "choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls" if calls else "stop"}],
-        }
-    )
-
-
-def _reasoning_chunk(text: str) -> str:
-    """Wrap one streamed piece of model reasoning as a stream chunk for Pi.
-
-    Args:
-        text: The reasoning text.
-
-    Returns:
-        One OpenAI stream chunk with only ``reasoning_content``.
-    """
-    return json.dumps(
-        {
-            "id": "skynet-relay",
-            "object": "chat.completion.chunk",
-            "model": "skynet-relay",
-            "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": text}, "finish_reason": None}],
         }
     )
 
@@ -435,8 +415,7 @@ class ReactOnPi:
         await self._take_steers(len(tail))
         messages = self._messages(tail)
         if not self._native:
-            async for chunk in self._text_protocol_reply(messages):
-                yield chunk
+            yield await self._text_protocol_reply(messages)
             return
         kwargs = self._call_kwargs()
         send, receive = anyio.create_memory_object_stream[Any](max_buffer_size=1024)
@@ -516,69 +495,28 @@ class ReactOnPi:
         self._last_tools = [SUBMIT_TOOL]
         await self._submit(args)
 
-    def _streamed_lm_call(self, send: Any, messages: list[dict[str, Any]], kwargs: dict[str, Any]) -> Any:
-        """Run one LM call with its stream chunks sent to ``send``.
-
-        Args:
-            send: The memory stream that receives the chunks.
-            messages: The rendered prompt.
-            kwargs: The LM kwargs.
-
-        Returns:
-            The LM's outputs.
-        """
-        with dspy.context(send_stream=send):
-            return self._lm(messages=messages, **kwargs)
-
-    async def _text_protocol_reply(self, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
+    async def _text_protocol_reply(self, messages: list[dict[str, Any]]) -> str:
         """Call a model without native tool calls and hand Pi its calls natively.
 
         The model writes DSPy's ``[[ ## tool_calls ## ]]`` text protocol, as it
         did in the DSPy loop. A reply that does not parse is resampled with a
-        fresh ``rollout_id`` so the LM cache does not return it again. The
-        call streams, so the model's reasoning reaches Pi as it arrives. The
-        local CLI gateway sends reasoning only in stream deltas (SKY-774).
+        fresh ``rollout_id`` so the LM cache does not return it again.
 
         Args:
             messages: The rendered prompt.
 
-        Yields:
-            Reasoning chunks, then one OpenAI stream chunk with the parsed
-            tool calls.
+        Returns:
+            One OpenAI stream chunk with the parsed tool calls.
 
         Raises:
             AgentReplyFormatError: When no attempt yields a tool call.
         """
-
-        async def run(send: Any, kwargs: dict[str, Any]) -> Any:
-            """Run the call off the event loop and close the stream after it.
-
-            Args:
-                send: The memory stream that receives the chunks.
-                kwargs: The LM kwargs.
-
-            Returns:
-                The LM's outputs.
-            """
-            async with send:
-                return await anyio.to_thread.run_sync(self._streamed_lm_call, send, messages, kwargs)
-
         field = self._adapter._get_tool_call_output_field_name(self._signature)
         attempts = PARSE_RETRY_ATTEMPTS + 1
         problem = ""
         for attempt in range(attempts):
             kwargs = {"rollout_id": attempt} if attempt else {}
-            send, receive = anyio.create_memory_object_stream[Any](max_buffer_size=1024)
-            task = asyncio.ensure_future(run(send, kwargs))
-            streamed = False
-            async with receive:
-                async for chunk in receive:
-                    for choice in getattr(chunk, "choices", None) or []:
-                        reasoning = getattr(choice.delta, "reasoning_content", None)
-                        if reasoning:
-                            streamed = True
-                            yield _reasoning_chunk(reasoning)
-            outputs = await task
+            outputs = await asyncio.to_thread(self._lm, messages=messages, **kwargs)
             output = outputs[0] if outputs else ""
             text = (output.get("text") if isinstance(output, dict) else output) or ""
             try:
@@ -600,9 +538,8 @@ class ReactOnPi:
                     }
                     for index, call in enumerate(calls)
                 ]
-                reasoning = None if streamed or not isinstance(output, dict) else output.get("reasoning_content")
-                yield output_chunk({"text": "", "reasoning_content": reasoning, "tool_calls": wire})
-                return
+                reasoning = output.get("reasoning_content") if isinstance(output, dict) else None
+                return output_chunk({"text": "", "reasoning_content": reasoning, "tool_calls": wire})
             problem = "the reply has no tool call"
         raise AgentReplyFormatError(
             f"The model did not answer in the tool-call text protocol after {attempts} attempts: {problem}"
