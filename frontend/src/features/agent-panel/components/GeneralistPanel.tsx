@@ -1097,11 +1097,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const clearLineComments = wizardCtx?.clearLineComments;
   // A file taken out of the draft takes its stored original with it.
   const keepOriginals = chatMedia.keepOriginals;
-  React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
+  const draftFiles = React.useMemo(() => splitPastes(draft).files, [draft]);
+  React.useEffect(() => keepOriginals(draftFiles), [draftFiles, keepOriginals]);
   const shownOriginals = chatMedia.shownOriginals;
   const draftOriginals = React.useMemo(
-    () => shownOriginals(splitPastes(draft).files),
-    [draft, shownOriginals],
+    () => shownOriginals(draftFiles),
+    [draftFiles, shownOriginals],
   );
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();

@@ -89,6 +89,9 @@ export function SentAttachments({
     });
     return { slides, entries };
   }, [tiled, resolved, files, originals]);
+  const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
+  // A slide that leaves gives up its id, so a later file at the same place does not open by itself.
+  if (open !== null && openIndex < 0) setOpen(null);
   if (!entries.length) return null;
   const hidden = entries.length > SENT_LIMIT ? entries.length - SENT_LIMIT : 0;
   const shown = hidden ? entries.slice(0, SENT_LIMIT) : entries;
@@ -100,7 +103,6 @@ export function SentAttachments({
     opener.current = e.currentTarget;
     setOpen(slides[slide]?.id ?? null);
   };
-  const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
   return (
     <>
       <ul

@@ -250,6 +250,8 @@ function SharedDraftViewer({
     setOpen(id);
   };
   const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
+  // A slide that leaves gives up its id, so a later file at the same place does not open by itself.
+  if (open !== null && openIndex < 0) setOpen(null);
   return (
     <>
       {media.map((m) => (
