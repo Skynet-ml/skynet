@@ -28,7 +28,7 @@ after(() => dom.window.close());
 // jsdom has no matchMedia. A live thinking row's dots read it on mount; a
 // reduced-motion answer keeps their timer off.
 Object.assign(dom.window, {
-  matchMedia: (query: string) => ({ matches: true, media: query, addEventListener() {}, removeEventListener() {} }),
+  matchMedia: (query: string) => ({ matches: query.includes("prefers-reduced-motion"), media: query, addEventListener() {}, removeEventListener() {} }),
 });
 
 const { act } = await import("react");
@@ -383,6 +383,11 @@ function thoughtRows(host: HTMLElement): Element[] {
   return [...host.querySelectorAll("button")].filter((b) => /thought_(for|briefly)/.test(b.textContent ?? ""));
 }
 
+/** True when `a` comes before `b` in the document. */
+function before(a: Node, b: Node): boolean {
+  return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
 // SKY-773: a finished stretch of reasoning is one folded row in time order.
 void it("shows a finished thinking segment as a folded row between the tools it ran between", async () => {
   const { host, unmount } = await mount(
@@ -398,7 +403,6 @@ void it("shows a finished thinking segment as a folded row between the tools it 
   const row = rows[0]!;
   assert.equal(row.getAttribute("aria-expanded"), "false", "the row starts folded");
   assert.ok(!host.textContent?.includes("Check the config first."), "the reasoning stays hidden");
-  const before = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
   const editA = host.querySelector('[data-step="edit-a"]');
   const editB = host.querySelector('[data-step="edit-b"]');
   assert.ok(editA && editB && turn, "both edits show once the turn opens");
@@ -422,6 +426,28 @@ void it("shows no row for the segment still being thought, only the thinking lin
     assert.equal(liveRows.length, 0, host.innerHTML);
     assert.equal(thoughtRows(host).length, 0, host.innerHTML);
     assert.ok(host.querySelector('[role="status"]'), "the thinking line shows");
+  } finally {
+    await unmount();
+  }
+});
+
+// In a live turn every segment has streaming set; one with an end time is finished.
+void it("shows a finished segment of a live turn as a row between its tools", async () => {
+  const { host, unmount } = await mount(
+    [
+      { call: call("edit-a"), isRetry: false, index: 0 },
+      { call: call("edit-b"), isRetry: false, index: 1 },
+    ],
+    { streaming: true, thinking: [segment("Done.", 1, { streaming: true })], stepKind: () => "edit" },
+  );
+  try {
+    const rows = thoughtRows(host);
+    assert.equal(rows.length, 1, host.innerHTML);
+    const editA = host.querySelector('[data-step="edit-a"]');
+    const editB = host.querySelector('[data-step="edit-b"]');
+    assert.ok(editA && editB, host.innerHTML);
+    assert.ok(before(editA, rows[0]!), "the row comes after edit-a");
+    assert.ok(before(rows[0]!, editB), "the row comes before edit-b");
   } finally {
     await unmount();
   }
@@ -533,7 +559,6 @@ void it("shows an earlier turn's finished segment as a row", async () => {
   const readA = host.querySelector('[data-step="read-a"]');
   const readB = host.querySelector('[data-step="read-b"]');
   assert.ok(readA && readB, host.innerHTML);
-  const before = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
   assert.ok(before(rows[0]!, readA), "the row comes before the earlier read");
   assert.ok(before(readA, readB), "the earlier turn comes first");
   await unmount();
