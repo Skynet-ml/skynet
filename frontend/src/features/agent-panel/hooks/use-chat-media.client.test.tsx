@@ -457,7 +457,7 @@ void test("a failed original upload and an unmount free the draft's local URLs",
 
 void test("an older commit's effect does not free a URL its draft still shows", async () => {
   let latest: ReturnType<typeof useChatMedia> | null = null;
-  // Runs once, inside the next commit.
+  // Runs once, in the layout phase of the next commit.
   let onCommit: (() => void) | null = null;
   function Harness() {
     latest = useChatMedia();
@@ -470,35 +470,25 @@ void test("an older commit's effect does not free a URL its draft still shows", 
   }
   const root = createRoot(document.createElement("div"));
   await React.act(async () => root.render(<Harness />));
-  let failA: () => void = () => {};
-  let passB: () => void = () => {};
-  const held = [
-    new Promise<Response>((r) => (failA = () => r(new Response(null, { status: 500 })))),
-    new Promise<Response>(
-      (r) => (passB = () => r(Response.json({ id: "s-b", name: "b.pdf", kind: "document" }))),
-    ),
-  ];
   const fetchAll = globalThis.fetch;
+  // The uploads never end, so only keepOriginals takes a file out.
   globalThis.fetch = ((url: string, init?: RequestInit) =>
-    init?.method === "POST" ? held.shift()! : fetchAll(url, init)) as typeof fetch;
-  await React.act(async () => latest!.addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
-  globalThis.fetch = fetchAll;
+    init?.method === "POST"
+      ? new Promise<Response>(() => {})
+      : fetchAll(url, init)) as typeof fetch;
   // At each free, the originals the rendered draft shows.
   const shownAtFree: string[][] = [];
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = () =>
     void shownAtFree.push(latest!.shownOriginals(both).map((o) => o.name));
-  // act runs a commit's effects at once. The real scheduler runs them in a later
-  // task, so a's failure can land after b's commit and before its effects.
-  const act = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
-  act.IS_REACT_ACT_ENVIRONMENT = false;
   try {
-    onCommit = failA;
-    passB();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // a's URL is queued in the commit that first shows a and b. That commit's
+    // passive effect runs before the render without a, so it must keep a's URL.
+    onCommit = () => latest!.keepOriginals([{ name: "b.pdf" }]);
+    await React.act(async () => latest!.addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
     assert.deepEqual(shownAtFree, [["b.pdf"]], "a is freed only once the draft without it renders");
   } finally {
-    act.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.fetch = fetchAll;
     URL.revokeObjectURL = revoke;
   }
   await React.act(async () => root.unmount());

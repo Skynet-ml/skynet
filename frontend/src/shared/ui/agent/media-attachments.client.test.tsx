@@ -505,6 +505,31 @@ void test("a viewer closed by Escape keeps its slide while it fades out", async 
   });
 });
 
+void test("a sent viewer whose slide leaves shows no other slide while it fades out", async () => {
+  await withFade(async () => {
+    const files = [
+      { name: "x.pdf", text: "" },
+      { name: "y.docx", text: "" },
+    ];
+    const doc = (name: string): Media => ({ id: name, name, kind: "document", url: "" });
+    const view = (media: Media[]) => (
+      <MediaUrlContext.Provider value={async (m) => `blob:https://example.test/${m.id}`}>
+        <SentAttachments media={media} files={files} />
+      </MediaUrlContext.Provider>
+    );
+    const { container, rerender, unmount } = await mount(view([doc("x.pdf"), doc("y.docx")]));
+    await click(container.querySelector('button[aria-label="Open x.pdf"]'));
+    await settle();
+    assert.match(dialog()?.textContent ?? "", /x\.pdf/);
+    // x.pdf loses its stored copy and has no text, so y.docx takes its place in the slides.
+    await rerender(view([doc("y.docx")]));
+    await settle();
+    assert.equal(dialog()?.dataset.state, "closed", "the viewer fades out");
+    assert.doesNotMatch(dialog()?.textContent ?? "", /y\.docx/);
+    await unmount();
+  });
+});
+
 void test("a sent viewer whose slide leaves stays closed when a file takes its place", async () => {
   const files = [{ name: "scan.pdf", text: "" }];
   const doc = (id: string): Media => ({ id, name: "scan.pdf", kind: "document", url: "" });
