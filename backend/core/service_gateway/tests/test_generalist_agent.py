@@ -705,7 +705,8 @@ async def test_continue_returns_to_the_screen_a_go_back_left() -> None:
     """After a go-back edit, Continue jumps back once every screen between is done."""
     state = {**_READY, "wizard_screen": "optimizer", "return_screen": "budget"}
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget", "jump": True}
+    assert "heads back to the 'budget' screen, or stops earlier" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -771,8 +772,14 @@ async def test_continue_to_the_last_screen_names_it() -> None:
 async def test_continue_without_a_known_next_screen_names_this_screen(sent: str | None) -> None:
     """A missing or unknown ``next_screen`` still gives ``to``; the client then moves on one screen."""
     state = {**_READY, "wizard_screen": "brief", **({"next_screen": sent} if sent else {})}
-    result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"]["to"] == "brief"
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "brief"}
+    assert "now shows the next screen" in result["message"]
+    assert turn.moved_to == ""
+    err = validate_wizard_screen("update_wizard_state", {"task_objective": "x"}, cast(WizardState, state), moved_to="")
+    assert err is not None
+    assert "moved to the next screen" in err
 
 
 @pytest.mark.asyncio
@@ -912,9 +919,9 @@ def test_snapshot_drops_the_next_screen() -> None:
 
 def test_prompts_forbid_a_saved_claim_after_a_move() -> None:
     """Both prompts say ``screen_nav`` names the new screen and no field is saved after a move (SKY-744)."""
-    prompt = GENERALIST_SYSTEM_PROMPT or ""
-    assert "After a move, write no field this turn, and never say a\n  field is saved" in prompt
-    instructions = screen_signature("brief").instructions
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "After a move, write no field this turn, and never say a field is saved" in prompt
+    instructions = " ".join(screen_signature("brief").instructions.split())
     assert "Never claim a field is saved after a move" in instructions
     assert "``screen_nav.to`` (Continue) or ``screen_nav.screen`` (Back)" in instructions
 

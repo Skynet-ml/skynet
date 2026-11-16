@@ -1420,7 +1420,8 @@ def validate_wizard_screen(
         kwargs: The call's keyword arguments.
         state: The turn-start wizard snapshot.
         moved_to: The screen a Continue or Back move named earlier this
-            turn; ``None`` when the wizard did not move.
+            turn, ``""`` when the client did not name it; ``None`` when the
+            wizard did not move.
 
     Returns:
         ``None`` when the write stays on the visible screen, or when the
@@ -1434,7 +1435,7 @@ def validate_wizard_screen(
         # The wizard left the turn-start screen, and the new screen's own
         # assistant takes the next turn, so no write this turn lands on view.
         return (
-            f"Not on screen: the wizard moved to the {moved_to!r} screen this turn, so nothing was saved. "
+            f"Not on screen: the wizard moved to {_screen_phrase(moved_to)} this turn, so nothing was saved. "
             f"Its assistant sets that screen's fields on the next turn. Tell the user you did not set "
             f"{', '.join(sorted(kwargs))}."
         )
@@ -1949,17 +1950,39 @@ def ask_user_tool(turn: _TurnAuthoringFlag) -> dspy.Tool:
 _NAV_SCREENS = frozenset(_SCREEN_ORDER) | {"harden"}
 
 
-def _moved_message(to: str) -> str:
+def _screen_phrase(screen: str) -> str:
+    """Name a screen in the agent's text.
+
+    Args:
+        screen: A screen id, or ``""`` when the client did not name the
+            screen Continue shows next.
+
+    Returns:
+        ``"the '<screen>' screen"``, or ``"the next screen"`` for ``""``.
+    """
+    return f"the {screen!r} screen" if screen else "the next screen"
+
+
+def _moved_message(screen: str, *, jump: bool = False) -> str:
     """Tell the agent where the wizard went and who owns the next turn.
 
     Args:
-        to: The screen the wizard shows after the move.
+        screen: The screen the wizard shows after the move, or ``""`` when
+            the client did not name it.
+        jump: The move jumps back to a later screen after a go-back edit,
+            which the wizard can stop short of.
 
     Returns:
         The English text the agent reads with the move's result.
     """
+    where = _screen_phrase(screen)
+    moved = (
+        f"The wizard heads back to {where}, or stops earlier if a screen on the way still needs something."
+        if jump
+        else f"The wizard now shows {where}."
+    )
     return (
-        f"The wizard now shows the {to!r} screen. That screen's assistant takes the next turn. "
+        f"{moved} That screen's assistant takes the next turn. "
         "Set none of its fields now, and do not say any of them is saved."
     )
 
@@ -2007,15 +2030,22 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         if note and note.strip():
             _append_note(notes, screen, note)
         turn.screen_moved = True
-        # The client sends the screen its Continue shows next; a value it
-        # does not name as a screen falls back to this one (SKY-744).
-        next_screen = str(state.get("next_screen") or "")
-        to = _return_target(screen, merged) or (next_screen if next_screen in _NAV_SCREENS else screen)
-        turn.moved_to = to
+        target = _return_target(screen, merged)
+        # The client sends the screen its Continue shows next (SKY-744). Without
+        # a known one, ``to`` keeps this screen and the text says "the next
+        # screen": the client still moves on by one.
+        sent = str(state.get("next_screen") or "")
+        known = target or (sent if sent in _NAV_SCREENS else "")
+        turn.moved_to = known
+        nav: dict[str, Any] = {"action": "continue", "from": screen, "to": known or screen}
+        if target:
+            # Only a return target jumps; a plain move runs the Continue
+            # button, which follows this turn's writes, not the snapshot's.
+            nav["jump"] = True
         return {
-            "screen_nav": {"action": "continue", "from": screen, "to": to},
+            "screen_nav": nav,
             "wizard_state": {"screen_notes": list(notes)},
-            "message": _moved_message(to),
+            "message": _moved_message(known, jump=bool(target)),
         }
 
     async def go_back_to_screen(screen_id: str, request: str) -> Any:

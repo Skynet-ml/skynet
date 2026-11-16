@@ -112,18 +112,16 @@ export function unansweredTurn(messages: AgentMessage[]): {
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
   /**
-   * ``to`` is the screen the wizard shows after the move: the next screen,
-   * or, after a go-back edit, the later screen the user returns to.
+   * ``to`` is the screen the wizard shows after the move. ``jump`` marks a
+   * later screen the user returns to after a go-back edit.
    */
-  | { action: "continue"; from: string; to?: string }
+  | { action: "continue"; from: string; to?: string; jump?: boolean }
   | { action: "back"; from: string; screen: string; request: string };
 
 /** What the wizard frame exposes so the agent can move it. */
 export interface ScreenNavigator {
   /** The screen on view. */
   screen: string;
-  /** The screen the Continue button shows next; null on the last screen. */
-  next: string | null;
   /** The Continue button's handler, without its optimize.toml check: the server holds the agent's moves on that check. */
   forward: () => void;
   /** Jump back to an earlier screen. */
@@ -142,9 +140,10 @@ export function parseScreenNav(result: unknown): ScreenNav | null {
   const nav = result.screen_nav;
   const from = typeof nav.from === "string" ? nav.from : "";
   if (nav.action === "continue") {
-    return typeof nav.to === "string" && nav.to
-      ? { action: "continue", from, to: nav.to }
-      : { action: "continue", from };
+    if (typeof nav.to !== "string" || !nav.to) return { action: "continue", from };
+    return nav.jump === true
+      ? { action: "continue", from, to: nav.to, jump: true }
+      : { action: "continue", from, to: nav.to };
   }
   if (nav.action === "back" && typeof nav.screen === "string" && nav.screen) {
     const request = typeof nav.request === "string" ? nav.request : "";
@@ -160,10 +159,10 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
     // The wizard may already have moved past the agent's screen by itself;
     // continuing again would skip the next one unseen.
     if (nav.from && nav.from !== navigator.screen) return;
-    // ``to`` comes from the turn-start snapshot, and this turn's writes can
-    // change what Continue shows next; a plain next move or a stale ``to``
-    // takes the Continue button's own path (``goForwardTo`` falls back to it).
-    if (nav.to && nav.to !== navigator.next) navigator.goForwardTo(nav.to);
+    // A plain move's ``to`` comes from the turn-start snapshot, and this
+    // turn's writes can change what Continue shows next, so only a return
+    // jump goes by ``to``; every other move runs the Continue button.
+    if (nav.jump && nav.to) navigator.goForwardTo(nav.to);
     else navigator.forward();
   } else navigator.goToScreen(nav.screen);
 }
