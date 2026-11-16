@@ -114,6 +114,9 @@ export function useChatMedia(): ChatMediaDraft {
   const [restoring, setRestoring] = React.useState(0);
   // A newer restore or a closed panel makes an older restore drop its files.
   const restoreRef = React.useRef(0);
+  // The composer reads a file before it adds the original, and a toast outlives the
+  // panel, so a call can come after the unmount cleanup that frees the draft.
+  const closedRef = React.useRef(false);
 
   const update = React.useCallback(
     (next: (prev: readonly DraftMedia[]) => readonly DraftMedia[]) => {
@@ -148,6 +151,7 @@ export function useChatMedia(): ChatMediaDraft {
             }
           },
           (err: unknown) => {
+            if (closedRef.current) return;
             // The tile stays with a failed mark, so the user sees which file did not go.
             const removed = removedRef.current.get(item.localId);
             if (removed) removed.failed = true;
@@ -193,6 +197,7 @@ export function useChatMedia(): ChatMediaDraft {
 
   const addOriginals = React.useCallback(
     (files: File[]) => {
+      if (closedRef.current) return;
       const added = files.map((file): DraftOriginal => {
         const localId = crypto.randomUUID();
         // The viewer shows a PDF in an unsandboxed frame before the server checks
@@ -287,7 +292,7 @@ export function useChatMedia(): ChatMediaDraft {
             // the Undo fails and the file goes, so a message never passes the limit.
             if (undone && itemsRef.current.length >= MAX_MEDIA_PER_MESSAGE) {
               toast.error(msg("agent.media.too_many", { max: MAX_MEDIA_PER_MESSAGE }));
-            } else if (undone) {
+            } else if (undone && !closedRef.current) {
               update((prev) => {
                 const next = prev.slice();
                 next.splice(Math.min(index, next.length), 0, held);
@@ -388,17 +393,19 @@ export function useChatMedia(): ChatMediaDraft {
 
   // A closed panel frees the local URLs of files still in the draft. An upload
   // that ends later then finds no tile or original and deletes its stored file.
-  React.useEffect(
-    () => () => {
+  React.useEffect(() => {
+    // StrictMode unmounts and mounts again, so the mount opens the draft again.
+    closedRef.current = false;
+    return () => {
+      closedRef.current = true;
       restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
       for (const o of originalsRef.current) freeMediaUrl(o.shown.url);
       for (const url of unshownRef.current.splice(0)) freeMediaUrl(url);
       itemsRef.current = [];
       originalsRef.current = [];
-    },
-    [],
-  );
+    };
+  }, []);
 
   const tiles = React.useMemo(
     () =>

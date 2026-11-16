@@ -730,3 +730,89 @@ void test("a media file the server stores as a document fails and its copy goes"
   assert.equal(errors.length, errorsBefore + 1);
   await unmount();
 });
+
+void test("an original added after the panel closes makes no local URL and starts no upload", async () => {
+  const { draft, unmount } = await mountDraft();
+  const add = draft().addOriginals;
+  await unmount();
+  const uploadsBefore = uploads;
+  let made = 0;
+  const create = URL.createObjectURL;
+  URL.createObjectURL = (blob: Blob) => {
+    made += 1;
+    return create(blob);
+  };
+  try {
+    // The composer reads the file first, so its call can come after the close.
+    add([pdf("late.pdf")]);
+    await flush();
+  } finally {
+    URL.createObjectURL = create;
+  }
+  assert.equal(made, 0);
+  assert.equal(uploads, uploadsBefore);
+});
+
+void test("a StrictMode remount keeps the draft open for new originals", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  function Harness() {
+    latest = useChatMedia();
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () =>
+    root.render(
+      <React.StrictMode>
+        <Harness />
+      </React.StrictMode>,
+    ),
+  );
+  await React.act(async () => latest!.addOriginals([pdf("s.pdf")]));
+  await flush();
+  assert.deepEqual(
+    latest!.shownOriginals([{ name: "s.pdf" }]).map((o) => o.name),
+    ["s.pdf"],
+  );
+  await React.act(async () => root.unmount());
+});
+
+void test("Undo after the panel closes frees the file's URL and deletes its stored copy", async () => {
+  const { draft, unmount } = await mountDraft();
+  const toasts = document.createElement("div");
+  document.body.append(toasts);
+  const toastRoot = createRoot(toasts);
+  await React.act(async () =>
+    toastRoot.render(<ToastContainer transition={Instant} autoClose={false} />),
+  );
+  await React.act(async () => draft().addFiles([image(7)]));
+  await flush();
+  const [stored] = draft().ready()!;
+  await React.act(async () => draft().remove(draft().tiles[0]!.id));
+  await flush();
+  await unmount();
+  const before = deleted.length;
+  await recordingRevokes(async (revoked) => {
+    const undo = [...toasts.querySelectorAll("button")].find((b) => b.textContent === "Undo");
+    assert.ok(undo, "the removed-file toast outlives the panel");
+    await React.act(async () => undo.click());
+    await flush();
+    assert.deepEqual(revoked, [stored!.url]);
+  });
+  assert.deepEqual(deleted.slice(before), [stored!.id]);
+  await React.act(async () => toastRoot.unmount());
+  toasts.remove();
+});
+
+void test("an upload that fails after the panel closes shows no error", async () => {
+  const { draft, unmount } = await mountDraft();
+  const errorsBefore = errors.length;
+  let fail: () => void = () => {};
+  nextUpload = new Promise<Response>(
+    (resolve) => (fail = () => resolve(new Response(null, { status: 500 }))),
+  );
+  await React.act(async () => draft().addFiles([image(8)]));
+  await unmount();
+  fail();
+  await flush();
+  assert.equal(errors.length, errorsBefore);
+});
