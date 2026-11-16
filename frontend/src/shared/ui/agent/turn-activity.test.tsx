@@ -332,3 +332,27 @@ void it("drops a card that renders nothing, so it does not cut a group in two", 
   assert.ok(host.querySelector('[data-step="edit-a"]') && host.querySelector('[data-step="edit-b"]'));
   await act(async () => root.unmount());
 });
+
+void it("keeps the live header when the only call is a card that renders nothing", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = (status: Call["status"]) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[]}
+          streaming
+          durationMs={5_000}
+          steps={[{ call: call("write", status), isRetry: false, index: 0, card: status !== "running" }]}
+          // A running setup write is a step row; one that ends with no change renders nothing.
+          renderStep={(c) => (c.status === "running" ? <span data-step={c.id}>{c.id}</span> : null)}
+        />,
+      );
+    });
+  await render("running");
+  assert.ok(turnRow(host, "working"), "the live header shows while the write runs");
+  await render("done");
+  assert.ok(turnRow(host, "working"), "the live header stays when the write ends with no change");
+  await act(async () => root.unmount());
+});
