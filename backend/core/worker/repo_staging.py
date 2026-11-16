@@ -1414,6 +1414,11 @@ def add_run_record(
     }
 
 
+# GitHub refuses a pull request body over 65,536 characters, and the split
+# holds one position for each case, so a longer record stays out of the text.
+_RECORD_JSON_LIMIT = 20_000
+
+
 def _record_block(result: dict[str, Any]) -> str:
     """Write the pull request's run record block, or nothing for a run with no record.
 
@@ -1423,7 +1428,8 @@ def _record_block(result: dict[str, Any]) -> str:
     Returns:
         Markdown that starts with one plain line on the contract, then the
         record fields, then the whole record as one JSON block in a collapsed
-        "Record as JSON" section; an empty string when the result has no record.
+        "Record as JSON" section, or one line that points to ``get_run`` when
+        the JSON is too long; an empty string when the result has no record.
     """
     record = (result.get("details") or {}).get("record")
     if not isinstance(record, dict):
@@ -1473,7 +1479,10 @@ def _record_block(result: dict[str, Any]) -> str:
     ]
     # A guest reason can hold a code fence; the JSON escape keeps it inside the block and parses back the same.
     as_json = json.dumps(record, indent=2, ensure_ascii=False).replace("`", "\\u0060")
-    collapsed = f"<details>\n<summary>Record as JSON</summary>\n\n```json\n{as_json}\n```\n\n</details>\n\n"
+    if len(as_json) > _RECORD_JSON_LIMIT:
+        collapsed = "The record is too long to print as JSON here. `get_run` returns it in `details.record`.\n\n"
+    else:
+        collapsed = f"<details>\n<summary>Record as JSON</summary>\n\n```json\n{as_json}\n```\n\n</details>\n\n"
     return f"{verdict}\n\nRun record:\n" + "\n".join(fields) + "\n\n" + collapsed
 
 

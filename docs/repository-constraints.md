@@ -126,8 +126,11 @@ a short block. The first line of the block says if the run met the
 contract, which rule failed with its numbers, or that the file sets no
 target and no minimum. Then comes one line for each fact. Last comes a
 collapsed section, "Record as JSON". It holds the full record as one JSON
-block, which parses to the same object as `details.record`. The run writes
-no record file into the repository. The record holds no secret, no case
+block, which parses to the same object as `details.record`. GitHub limits
+the length of a pull request text. When the JSON is longer than 20,000
+characters, for example in a run with thousands of cases, the pull request
+shows no JSON block. One line then says that `get_run` returns the record.
+The run writes no record file into the repository. The record holds no secret, no case
 content and no metric code. It has these keys:
 
 - `record_version`: the integer `1`.

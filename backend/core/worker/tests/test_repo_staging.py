@@ -3543,6 +3543,40 @@ def test_a_backtick_in_a_guest_reason_keeps_the_json_block_whole() -> None:
     assert _json_block(body) == result["details"]["record"]
 
 
+def test_a_long_record_stays_out_of_the_pull_request_text() -> None:
+    """A split of 6,000 cases would pass GitHub's 65,536-character limit, so the text points to the stored record."""
+    result = _recorded(target_reached=True, contract_met=True)
+    positions = list(range(6_000))
+    result["details"]["record"]["split"] = {
+        "rule": "pairs",
+        "seed": 7,
+        "search": positions[:3_600],
+        "validation": positions[3_600:4_800],
+        "held_out": positions[4_800:],
+    }
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert len(body) < 65_536
+    assert "```json" not in body
+    assert "Record as JSON" not in body
+    assert "The record is too long to print as JSON here. `get_run` returns it in `details.record`.\n\n" in body
+    assert "- Split: `pairs`, seed 7: 3600 search, 1200 validation, 1200 held_out cases" in body
+    assert body.index("Run record:") < body.index("The record is too long") < body.index("Review the run:")
+
+
+def test_a_record_at_the_json_limit_still_prints_its_json_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The limit counts the JSON text as printed, and a record of exactly that length keeps its block."""
+    result = _recorded(target_reached=True, contract_met=True)
+    printed = json.dumps(result["details"]["record"], indent=2, ensure_ascii=False).replace("`", "\\u0060")
+
+    monkeypatch.setattr(repo_staging, "_RECORD_JSON_LIMIT", len(printed))
+    assert _json_block(repo_staging._description(result, _EDIT, "https://x/run")) == result["details"]["record"]
+
+    monkeypatch.setattr(repo_staging, "_RECORD_JSON_LIMIT", len(printed) - 1)
+    assert "```json" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
 def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
     """A record with no change hash and no scores says so in plain words."""
     result = _recorded(contract_met=True)
