@@ -95,6 +95,25 @@ void describe("draft file previews", () => {
     assert.deepEqual(parsed, ["rows.csv:a\n1", "rows.csv:a\n2", "rows.csv:a\n2"]);
   });
 
+  void it("parse two same-name files once each while new but equal arrays come in", () => {
+    const parsed: string[] = [];
+    const previewsOf = previewCache((name, text) => {
+      parsed.push(text);
+      return fileTilePreview(name, text);
+    });
+    const draft = () => [
+      { name: "data.csv", text: "a\n1" },
+      { name: "data.csv", text: "a\n2" },
+    ];
+    const first = previewsOf(draft());
+    for (let press = 0; press < 5; press += 1) previewsOf(draft());
+    const last = previewsOf(draft());
+    assert.deepEqual(parsed, ["a\n1", "a\n2"]);
+    assert.equal(last[0], first[0]);
+    assert.equal(last[1], first[1]);
+    assert.notEqual(first[0], first[1]);
+  });
+
   void it("give the same slides as a fresh parse", () => {
     const files = [
       { name: "rows.csv", text: "a,b\n1,2" },

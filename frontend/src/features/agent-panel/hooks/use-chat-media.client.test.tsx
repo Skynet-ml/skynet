@@ -484,6 +484,38 @@ void test("an original leaves the draft before its local URL is freed", async ()
   await unmount();
 });
 
+void test("a failed original's URL is freed only after the draft without it renders", async () => {
+  const { draft, unmount } = await mountDraft();
+  // What the rendered draft shows at each free.
+  const shownAtFree: string[][] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = () =>
+    void shownAtFree.push(
+      draft()
+        .shownOriginals([{ name: "a.pdf" }])
+        .map((o) => o.name),
+    );
+  try {
+    let fail: () => void = () => {};
+    nextUpload = new Promise<Response>(
+      (resolve) => (fail = () => resolve(new Response(null, { status: 500 }))),
+    );
+    await React.act(async () => draft().addOriginals([pdf("a.pdf")]));
+    assert.deepEqual(
+      draft()
+        .shownOriginals([{ name: "a.pdf" }])
+        .map((o) => o.name),
+      ["a.pdf"],
+    );
+    fail();
+    await flush();
+    assert.deepEqual(shownAtFree, [[]]);
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+  await unmount();
+});
+
 void test("a draft shows no original for two same-name files when one upload fails", async () => {
   const { draft, unmount } = await mountDraft();
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));

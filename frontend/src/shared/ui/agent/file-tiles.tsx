@@ -177,13 +177,17 @@ export function fileSlides(
  * only when its name or text changes. It keeps only the last call's previews.
  */
 export function previewCache(preview = fileTilePreview) {
-  let kept = new Map<string, { text: string; value: FilePreview | null }>();
+  type Entry = { text: string; value: FilePreview | null };
+  // A list per name: two files can share a name and differ in text.
+  let kept = new Map<string, Entry[]>();
   return (files: readonly AttachedFile[]): Array<FilePreview | null> => {
-    const next = new Map<string, { text: string; value: FilePreview | null }>();
+    const next = new Map<string, Entry[]>();
     const out = files.map(({ name, text }) => {
-      const hit = next.get(name) ?? kept.get(name);
-      const value = hit && hit.text === text ? hit.value : preview(name, text);
-      next.set(name, { text, value });
+      const same = (e: Entry) => e.text === text;
+      const fresh = next.get(name) ?? [];
+      const hit = fresh.find(same) ?? kept.get(name)?.find(same);
+      const value = hit ? hit.value : preview(name, text);
+      if (!fresh.some(same)) next.set(name, [...fresh, { text, value }]);
       return value;
     });
     kept = next;

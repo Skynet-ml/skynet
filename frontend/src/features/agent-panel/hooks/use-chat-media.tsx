@@ -90,6 +90,11 @@ export function useChatMedia(): ChatMediaDraft {
     originalsRef.current = next;
     setDraftOriginals(next);
   }, []);
+  // Local URLs of failed originals; each is freed once the draft without it renders.
+  const unshownRef = React.useRef<string[]>([]);
+  React.useEffect(() => {
+    for (const url of unshownRef.current.splice(0)) freeMediaUrl(url);
+  }, [draftOriginals]);
   // Restores whose files still load; Send waits for them.
   const [restoring, setRestoring] = React.useState(0);
   // A newer restore or a closed panel makes an older restore drop its files.
@@ -193,9 +198,10 @@ export function useChatMedia(): ChatMediaDraft {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
-          // Out of the draft first, so nothing shows the URL once it is freed.
+          // A failed upload ends between renders, so the viewer can still show the
+          // original; its URL is freed after the draft without it commits.
+          unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
-          freeMediaUrl(item.shown.url);
         };
         uploadChatMedia(files[i]!).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
@@ -374,6 +380,7 @@ export function useChatMedia(): ChatMediaDraft {
       restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
       for (const o of originalsRef.current) freeMediaUrl(o.shown.url);
+      for (const url of unshownRef.current.splice(0)) freeMediaUrl(url);
       itemsRef.current = [];
       originalsRef.current = [];
     },

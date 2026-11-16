@@ -500,6 +500,35 @@ void test("a draft original that keeps its object does not load again when the d
   }
 });
 
+void test("typing in a draft does not parse its attached files again (SKY-736)", async () => {
+  // filePreview trims a file's text once per parse, so the trims of this text count the parses.
+  const text = "col\nparse-probe-1";
+  let parses = 0;
+  const trim = String.prototype.trim;
+  String.prototype.trim = function (this: string) {
+    if (String(this) === text) parses += 1;
+    return trim.call(this);
+  };
+  try {
+    const view = () => (
+      <DraftAttachments files={[{ name: "rows.csv", text }]} originals={[]} onRemove={() => {}} />
+    );
+    const { container, rerender, unmount } = await mount(view());
+    const mounted = parses;
+    assert.ok(mounted > 0, "the mount parses the file");
+    // Each key press gives new but equal file and original arrays.
+    for (let key = 0; key < 3; key += 1) await rerender(view());
+    assert.equal(parses, mounted, "no parse after the mount");
+    await click(container.querySelector('button[aria-label="Open rows.csv"]'));
+    assert.match(dialog()?.textContent ?? "", /parse-probe-1/);
+    await press(dialog()!, "Escape");
+    await settle();
+    await unmount();
+  } finally {
+    String.prototype.trim = trim;
+  }
+});
+
 void test("the draft's remove buttons give each tile's own id or index", async () => {
   const removedMedia: string[] = [];
   const removedFiles: number[] = [];
