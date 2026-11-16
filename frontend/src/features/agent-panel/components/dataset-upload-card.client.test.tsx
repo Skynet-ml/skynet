@@ -103,15 +103,22 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
   document.body.append(closedContainer);
   const closedRoot = createRoot(closedContainer);
   const closedAttached: ConfirmedDataset[] = [];
-  await React.act(async () => {
+  // The read waits for the test, so the unmount comes before it ends.
+  let finishRead: () => void = () => {};
+  const slowFile = new File([csv], "qa.csv", { type: "text/csv" });
+  const readText = slowFile.text.bind(slowFile);
+  slowFile.text = () =>
+    new Promise<void>((resolve) => {
+      finishRead = resolve;
+    }).then(readText);
+  await React.act(async () =>
     closedRoot.render(
-      <DatasetUploadCard
-        initialFile={new File([csv], "qa.csv", { type: "text/csv" })}
-        onConfirm={(d) => closedAttached.push(d)}
-      />,
-    );
-    closedRoot.unmount();
-  });
+      <DatasetUploadCard initialFile={slowFile} onConfirm={(d) => closedAttached.push(d)} />,
+    ),
+  );
+  assert.match(closedContainer.textContent ?? "", /Reading the file/, "the read is under way");
+  await React.act(async () => closedRoot.unmount());
+  finishRead();
   await settle();
   assert.equal(closedAttached.length, 0, "a card closed during the read attaches nothing");
   closedContainer.remove();

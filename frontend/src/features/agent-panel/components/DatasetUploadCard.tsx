@@ -188,7 +188,7 @@ export function DatasetUploadCard({
             </motion.div>
           )}
 
-          {!parsed && !parsing && !initialFile && (
+          {!parsed && !parsing && !initialFile && !confirmed && (
             <motion.div key="empty" {...fade} className="px-4 py-3.5">
               <button
                 type="button"

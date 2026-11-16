@@ -978,6 +978,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
 
+  // An upload note waits here for one render; see handleDatasetConfirm.
+  const [datasetNote, setDatasetNote] = React.useState<{
+    note: string;
+    override: WizardState | undefined;
+  } | null>(null);
   const handleDatasetConfirm = React.useCallback(
     async (callId: string, confirmed: ConfirmedDataset) => {
       // A web chat must not stage rows or change the Mac's wizard.
@@ -1056,18 +1061,26 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           p4: sampleLines,
         },
       );
+      // The override stays on every later turn, so it carries no column
+      // roles: the agent's column-role tool sets those.
       const wizardOverride: WizardState | undefined = stagedDatasetId
         ? {
             staged_dataset_id: stagedDatasetId,
             dataset_ready: true,
-            columns_configured: false,
             dataset_columns: confirmed.columns,
           }
         : undefined;
-      agent.send(note, wizardOverride);
+      // Sent after the cleared roles render, so the turn's wizard state does
+      // not carry the earlier file's roles.
+      setDatasetNote({ note, override: wizardOverride });
     },
-    [agent, wizardCtx, webChat],
+    [wizardCtx, webChat],
   );
+  React.useEffect(() => {
+    if (!datasetNote) return;
+    setDatasetNote(null);
+    agent.send(datasetNote.note, datasetNote.override);
+  }, [datasetNote, agent]);
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
