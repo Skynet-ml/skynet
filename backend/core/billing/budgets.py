@@ -1564,6 +1564,55 @@ class BudgetService:
             budget.updated_at = now
         return len(owned)
 
+    def close_for_deleted_account(self, username: str, *, session: Session) -> int:
+        """Close every budget of an account being deleted and release all of its open holds.
+
+        The same delete closes the wallet, so no usage of the account can settle
+        after it. Dispatched and pending work is released too: left open, the
+        reconciliation sweep selects it on every pass and fails on the missing
+        wallet. The budgets, operations and evidence rows stay as the record.
+
+        Args:
+            username: Account being deleted in ``session``.
+            session: The caller's delete transaction, so holds and wallet close together.
+
+        Returns:
+            Number of operations released.
+        """
+        # Wallet before budget, the same lock order as every other mutation.
+        session.execute(
+            select(BillingCustomerModel.username).where(BillingCustomerModel.username == username).with_for_update()
+        )
+        budgets = session.scalars(
+            select(ExecutionBudgetModel)
+            .where(ExecutionBudgetModel.username == username)
+            .order_by(ExecutionBudgetModel.id)
+            .with_for_update()
+        ).all()
+        now = datetime.now(UTC)
+        released = 0
+        for budget in budgets:
+            operations = session.scalars(
+                select(ExecutionOperationModel)
+                .where(
+                    ExecutionOperationModel.budget_id == budget.id,
+                    ExecutionOperationModel.state.in_(_ACTIVE_STATES),
+                )
+                .with_for_update()
+            ).all()
+            for operation in operations:
+                # A partial settle already moved the actual units out of the hold.
+                budget.reserved_units -= operation.max_units - operation.actual_units
+                budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+                operation.state = "released"
+                operation.updated_at = now
+            released += len(operations)
+            if budget.state != "blocked":
+                budget.state = "closed"
+                budget.blocked_reason = "account_deleted"
+            budget.updated_at = now
+        return released
+
     def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
         """Close a failed job's envelope and return the holds of work that never started.
 

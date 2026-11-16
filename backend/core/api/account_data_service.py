@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import case, delete, select, update
 from sqlalchemy.orm import Session
 
+from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
 from ..storage.models import (
@@ -665,6 +666,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     forfeited = session.scalar(
         select(BillingCustomerModel.balance_cents).where(BillingCustomerModel.username == username).with_for_update()
     )
+    # The closed wallet can never settle a hold, so a hold left open stays in
+    # the reconciliation sweep for ever.
+    BudgetService(engine=session.get_bind()).close_for_deleted_account(username, session=session)
     if forfeited:
         session.add(
             WalletLedgerModel(
