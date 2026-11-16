@@ -159,7 +159,9 @@ export function useSendAfterRender(
   );
   React.useEffect(() => {
     if (pending.length === 0) return;
-    setPending([]);
+    // Drop only what this effect sends: a send queued after this render
+    // but before this effect is still in the queue.
+    setPending((queue) => queue.slice(pending.length));
     for (const item of pending) send(item.note, item.override);
   }, [pending, send]);
   return React.useCallback(

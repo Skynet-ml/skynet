@@ -235,6 +235,39 @@ void test("two sends queued in one tick both go out, in order", async () => {
   container.remove();
 });
 
+void test("a send queued after the render but before the send effect still goes out", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const sent: string[] = [];
+  let start: () => void = () => {};
+
+  function Panel() {
+    const [late, setLate] = React.useState(false);
+    const send = React.useCallback((note: string) => {
+      sent.push(note);
+    }, []);
+    const sendAfterRender = useSendAfterRender(send);
+    // A layout effect runs after the commit and before the passive send effect.
+    React.useLayoutEffect(() => {
+      if (!late) return;
+      setLate(false);
+      sendAfterRender("late");
+    }, [late, sendAfterRender]);
+    start = () => {
+      setLate(true);
+      sendAfterRender("early");
+    };
+    return null;
+  }
+
+  await React.act(async () => root.render(<Panel />));
+  await React.act(async () => start());
+  assert.deepEqual(sent, ["early", "late"]);
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
 void test("a disabled card attaches nothing", async () => {
   const container = document.createElement("div");
   document.body.append(container);
