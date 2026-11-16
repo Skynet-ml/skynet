@@ -601,7 +601,46 @@ void it("does not open the new turn's row after a steer moves the opened row int
     await render(true);
     const rows = thoughtRows(host);
     assert.equal(rows.length, 2, host.innerHTML);
+    assert.equal(rows[0]!.getAttribute("aria-expanded"), "true", "the opened row stays open in the earlier turn");
     assert.equal(rows[1]!.getAttribute("aria-expanded"), "false", "the new turn's row starts folded");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+void it("keeps an earlier turn's opened row open when a dropped card joins it to the row before", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = (cardShows: boolean) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[]}
+          streaming={false}
+          durationMs={5_000}
+          steps={[{ call: call("read-b"), isRetry: false, index: 0 }]}
+          earlier={[
+            {
+              thinking: [segment("First.", 0), segment("Second.", 1)],
+              steps: [{ call: call("write"), isRetry: false, index: 0, card: true }],
+              answer: null,
+            },
+          ]}
+          renderStep={(c) => (c.id !== "write" || cardShows ? <span data-step={c.id}>{c.id}</span> : null)}
+        />,
+      );
+    });
+  try {
+    await render(true);
+    await openTurn(host);
+    const second = thoughtRows(host)[1];
+    assert.ok(second, host.innerHTML);
+    await act(async () => (second as HTMLButtonElement).click());
+    await render(false);
+    const rows = thoughtRows(host);
+    assert.equal(rows.length, 1, "the two rows join");
+    assert.equal(rows[0]!.getAttribute("aria-expanded"), "true", "the joined row stays open");
   } finally {
     await act(async () => root.unmount());
   }
