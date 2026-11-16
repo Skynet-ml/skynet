@@ -35,6 +35,7 @@ from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...billing.budgets import BudgetService
 from ...billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ...config import app_env, settings
 from ...storage.models import (
@@ -45,6 +46,8 @@ from ...storage.models import (
     BillingCustomerModel,
     ChatMediaModel,
     DatasetModel,
+    ExecutionBudgetModel,
+    ExecutionOperationModel,
     JobModel,
     NotificationModel,
     NotificationPreferenceModel,
@@ -682,3 +685,120 @@ def test_deletion_keeps_a_real_stripe_customer_id(full_schema_engine: Engine) ->
         wallet = session.scalars(select(BillingCustomerModel)).one()
         assert wallet.stripe_customer_id == "cus_real"
         assert wallet.username.startswith(_anonymized_username(_EMAIL))
+
+
+def _seed_budget_with_holds(engine: Engine, username: str) -> None:
+    """Give an account a funded wallet and a budget with one operation in each ledger state.
+
+    The reserved hold is unstarted work, the dispatched hold is a Vercel
+    sandbox, the pending hold is a partly settled model call, and the settled
+    operation is finished work.
+
+    Args:
+        engine: Engine holding the full schema.
+        username: Owner of the wallet and the budget.
+    """
+    now = datetime.now(UTC)
+    budget_id = f"budget-{username}"
+    holds = {
+        "reserved": ("model", "openrouter", 0),
+        "dispatched": ("sandbox", "vercel", 0),
+        "pending": ("model", "openrouter", 30),
+        "settled": ("model", "openrouter", 100),
+    }
+    with Session(engine) as session:
+        session.add(BillingCustomerModel(username=username, stripe_customer_id=f"cus-{username}", balance_cents=500))
+        session.add(
+            ExecutionBudgetModel(
+                id=budget_id,
+                username=username,
+                creation_key=budget_id,
+                creation_fingerprint="f",
+                total_cents=100,
+                state="attached",
+                settled_units=130,
+                wallet_settled_units=130,
+                reserved_units=270,
+                wallet_reserved_units=270,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        for state, (cost_kind, provider, actual) in holds.items():
+            session.add(
+                ExecutionOperationModel(
+                    id=f"{state}-{username}",
+                    budget_id=budget_id,
+                    operation_key=state,
+                    attempt=0,
+                    generation=0,
+                    phase="run",
+                    cost_kind=cost_kind,
+                    request_fingerprint="r",
+                    admission_fingerprint="a",
+                    price_snapshot={"provider": provider},
+                    state=state,
+                    max_units=100,
+                    max_wallet_units=100,
+                    actual_units=actual,
+                    actual_wallet_units=actual,
+                    created_at=now,
+                    dispatched_at=None if state == "reserved" else now,
+                    updated_at=now,
+                )
+            )
+        session.commit()
+
+
+def _swept(engine: Engine) -> set[str]:
+    """Return the operations that the model and Vercel reconciliation sweeps select.
+
+    Args:
+        engine: Engine holding the full schema.
+
+    Returns:
+        Operation ids the two sweeps would read on their next pass.
+    """
+    service = BudgetService(engine=engine)
+    return {
+        operation_id
+        for provider, cost_kind in (("openrouter", "model"), ("vercel", "sandbox"))
+        for operation_id, _ in service.unsettled_operations(provider=provider, cost_kind=cost_kind)
+    }
+
+
+def test_deletion_releases_the_open_holds_so_the_sweep_skips_them(full_schema_engine: Engine) -> None:
+    """A deleted account leaves no hold for the reconciliation sweep, and a live account keeps its holds."""
+    _seed_budget_with_holds(full_schema_engine, _EMAIL)
+    _seed_budget_with_holds(full_schema_engine, _OTHER)
+    assert _swept(full_schema_engine) == {
+        f"{state}-{username}" for state in ("dispatched", "pending") for username in (_EMAIL, _OTHER)
+    }
+
+    _delete(full_schema_engine)
+
+    assert _swept(full_schema_engine) == {f"dispatched-{_OTHER}", f"pending-{_OTHER}"}
+    with Session(full_schema_engine) as session:
+        states = {
+            operation.id: operation.state
+            for operation in session.scalars(select(ExecutionOperationModel).order_by(ExecutionOperationModel.id))
+        }
+        assert {key: value for key, value in states.items() if key.endswith(_EMAIL)} == {
+            f"reserved-{_EMAIL}": "released",
+            f"dispatched-{_EMAIL}": "released",
+            f"pending-{_EMAIL}": "released",
+            f"settled-{_EMAIL}": "settled",
+        }
+        assert {key: value for key, value in states.items() if key.endswith(_OTHER)} == {
+            f"reserved-{_OTHER}": "reserved",
+            f"dispatched-{_OTHER}": "dispatched",
+            f"pending-{_OTHER}": "pending",
+            f"settled-{_OTHER}": "settled",
+        }
+        closed = session.get(ExecutionBudgetModel, f"budget-{_EMAIL}")
+        assert (closed.state, closed.blocked_reason) == ("closed", "account_deleted")
+        assert (closed.reserved_units, closed.wallet_reserved_units) == (0, 0)
+        assert (closed.settled_units, closed.wallet_settled_units) == (130, 130)
+        live = session.get(ExecutionBudgetModel, f"budget-{_OTHER}")
+        assert (live.state, live.blocked_reason, live.reserved_units) == ("attached", None, 270)
