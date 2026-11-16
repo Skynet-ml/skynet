@@ -406,6 +406,23 @@ void test("a file of any type keeps its original, which goes out on Send (SKY-78
   await unmount();
 });
 
+void test("an original over the file limit is not uploaded; the file keeps only its text", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = originalUploads.length;
+  const big = new File(["x"], "big.csv", { type: "text/csv" });
+  Object.defineProperty(big, "size", { value: 20 * 1024 * 1024 + 1 });
+  let ids: string[] = [];
+  await React.act(async () => void (ids = draft().addOriginals([big, pdf("a.pdf")])));
+  await flush();
+  assert.equal(ids.length, 1);
+  assert.deepEqual(originalUploads.slice(before), ["a.pdf"]);
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["a.pdf"],
+  );
+  await unmount();
+});
+
 void test("dropOriginal takes out only that original, and deletes its stored copy", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;

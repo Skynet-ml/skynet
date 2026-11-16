@@ -1042,9 +1042,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
+      // A library dataset has no local file, so it has no original; the
+      // earlier upload card's original must not pair with its card.
+      if (datasetOriginalRef.current) dropOriginal(datasetOriginalRef.current);
+      datasetOriginalRef.current = null;
       datasetDraft.attachLibrary(picked, callId);
     },
-    [webChat, datasetDraft],
+    [webChat, datasetDraft, dropOriginal],
   );
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;

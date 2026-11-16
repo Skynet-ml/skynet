@@ -334,12 +334,14 @@ def test_an_original_of_any_type_is_stored_as_opaque_bytes(harness: SimpleNamesp
     assert resp.headers["content-type"] == "application/octet-stream"
     assert resp.headers["x-content-type-options"] == "nosniff"
     assert "sandbox" in resp.headers["content-security-policy"]
+    assert resp.headers["content-disposition"].startswith("attachment;")
 
 
 @pytest.mark.parametrize(
     ("data", "name", "mime"),
     [
         (_PDF, "brief.pdf", "application/pdf"),
+        (_zip("[Content_Types].xml", "word/document.xml"), "brief.docx", _DOCX_MIME),
         (_zip("[Content_Types].xml", "xl/workbook.xml"), "budget.xlsx", _XLSX_MIME),
     ],
 )
@@ -349,6 +351,14 @@ def test_an_original_the_viewer_draws_keeps_its_real_type(
     """A PDF, DOCX or XLSX original keeps its real type, so the viewer draws it."""
     body = _upload_original(harness.client, data, name).json()
     assert (body["kind"], body["mime_type"]) == ("document", mime)
+    resp = harness.client.get(f"/agent/media/{body['id']}")
+    assert resp.headers["content-disposition"].startswith("inline;")
+
+
+def test_a_name_that_is_only_an_extension_claims_no_drawn_type(harness: SimpleNamespace) -> None:
+    """The viewer does not draw a file named only ".pdf", so its original is opaque bytes, as the viewer expects."""
+    body = _upload_original(harness.client, b"notes", ".pdf").json()
+    assert (body["kind"], body["mime_type"]) == ("document", "application/octet-stream")
 
 
 @pytest.mark.parametrize(

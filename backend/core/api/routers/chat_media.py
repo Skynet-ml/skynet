@@ -220,8 +220,12 @@ def _named_document_type(filename: str) -> str | None:
     Returns:
         The PDF, DOCX or XLSX content type, or ``None`` for any other name.
     """
-    lower = filename.lower()
-    return next((mime for mime, ext in _DOCUMENT_EXTENSIONS.items() if lower.endswith(ext)), None)
+    # The same rule as the viewer's ``originalFormat``: a name that is only an
+    # extension (".pdf") claims no type, so the viewer does not draw it.
+    stem, dot, ext = filename.lower().rpartition(".")
+    if not stem or not dot:
+        return None
+    return next((mime for mime, known in _DOCUMENT_EXTENSIONS.items() if known == f".{ext}"), None)
 
 
 def _original_type(head: bytes, data: bytes, filename: str) -> str:
@@ -581,11 +585,13 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         data = load_media_data(engine, [row.id]).get(row.id)
         if data is None:
             raise HTTPException(status_code=404, detail="Attachment not found.")
+        # The viewer never draws an opaque original, so the browser saves it.
+        disposition = "attachment" if row.mime_type == _OPAQUE_DOCUMENT else "inline"
         return Response(
             content=data,
             media_type=row.mime_type,
             headers={
-                "Content-Disposition": f"inline; filename*=UTF-8''{quote(row.filename)}",
+                "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(row.filename)}",
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
                 "Cache-Control": "private, max-age=3600",

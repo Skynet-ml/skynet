@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
+import { MAX_ATTACHMENT_MB } from "@/shared/ui/agent/file-attachments";
 import { fitOriginals, keptOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
@@ -200,7 +201,10 @@ export function useChatMedia(): ChatMediaDraft {
   const addOriginals = React.useCallback(
     (files: File[]): string[] => {
       if (closedRef.current) return [];
-      const added = files.map((file): DraftOriginal => {
+      // The server takes no original over the file limit, so a larger file
+      // keeps only its text and is not uploaded for nothing.
+      const fits = files.filter((file) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
+      const added = fits.map((file): DraftOriginal => {
         const localId = crypto.randomUUID();
         // The viewer shows a PDF in an unsandboxed frame before the server checks
         // the bytes, so the blob's type is PDF whatever type the file claims.
@@ -223,7 +227,7 @@ export function useChatMedia(): ChatMediaDraft {
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
-        uploadChatMedia(files[i]!, { original: true }).then((stored) => {
+        uploadChatMedia(fits[i]!, { original: true }).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
             void deleteChatMedia(stored.id);
             return;
