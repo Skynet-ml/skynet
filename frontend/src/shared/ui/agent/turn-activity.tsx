@@ -15,6 +15,7 @@ import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segment
 import { ActivityGroup } from "./activity-steps";
 import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
+import { formatSpan, ThinkingSection } from "./thinking-section";
 import { deniedCount } from "./denied-count";
 import { DeniedCount } from "./denied-count-note";
 import {
@@ -75,9 +76,11 @@ interface TurnActivityProps {
 // Mirrors Codex's local turn: a "Working" line ("Working for 14s" after the
 // first second) over what the agent said and the tools it ran, then a single
 // shimmering line at the bottom naming what it is thinking about, which gives
-// way to a running tool or to the answer. Reasoning itself never shows as
-// rows. Once the answer starts, the history folds behind one "Worked for 39s"
-// row with a chevron and a full-width rule; cards and failed steps stay out.
+// way to a running tool or to the answer. Each finished stretch of reasoning
+// becomes one folded "Thought for Ns" row at its place among the tools; the
+// stretch still open shows only as that line (SKY-773). Once the answer
+// starts, the history folds behind one "Worked for 39s" row with a chevron
+// and a full-width rule; cards and failed steps stay out.
 // Matches the fold's close time in reveal.tsx.
 const FOLD_CLOSE_S = 0.14;
 
@@ -122,11 +125,18 @@ export function TurnActivity({
   // groups with nothing between them (SKY-743).
   const shown = (list: Step[]) =>
     list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
-  const pieces = interleaveThinking([], shown(steps));
-  const earlierPieces = earlier.map((t) => interleaveThinking([], shown(t.steps)));
+  const thinkingRows = finishedThinking(thinking);
+  const pieces = interleaveThinking(thinkingRows, shown(steps));
+  const earlierPieces = earlier.map((t) => interleaveThinking(finishedThinking(t.thinking), shown(t.steps)));
   // Every call counts, also a dropped card, so the header does not leave
-  // and come back when a running write ends with nothing to show.
-  const hasHistory = Boolean(plan) || steps.length > 0 || earlier.length > 0;
+  // and come back when a running write ends with nothing to show. A thinking
+  // row counts only once the turn ends: a live segment can reopen (ReActV2's
+  // message_reset) and take its row away again (SKY-773).
+  const hasHistory =
+    Boolean(plan) ||
+    steps.length > 0 ||
+    earlier.length > 0 ||
+    (!isLive && thinkingRows.length > 0);
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
   // Codex folds the history once the final answer starts; a click overrides.
@@ -153,7 +163,9 @@ export function TurnActivity({
   };
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card" ? (
+    piece.kind === "thinking" ? (
+      <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
+    ) : piece.kind === "card" ? (
       // A card whose component renders nothing when it mounts leaves no padded gap.
       <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
@@ -183,7 +195,9 @@ export function TurnActivity({
   );
   const reduceMotion = Boolean(useReducedMotion());
   const renderFolded = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card" ? (
+    piece.kind === "thinking" ? (
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece))
+    ) : piece.kind === "card" ? (
       renderPiece(piece)
     ) : piece.kind === "steps" ? (
       <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
@@ -253,6 +267,17 @@ export function TurnActivity({
       </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
+  );
+}
+
+/**
+ * The segments that show as rows: those with reasoning, except the one still
+ * being thought. ``order`` is the segment's place in the turn, a key that
+ * holds when a dropped card merges the bursts around a row.
+ */
+function finishedThinking(thinking: readonly TurnThinking[]): Array<TurnThinking & { order: number }> {
+  return thinking.flatMap((t, order) =>
+    t.reasoning && !(t.streaming && t.endedAt === null) ? [{ ...t, order }] : [],
   );
 }
 
@@ -360,22 +385,5 @@ function Header({
   );
 }
 
-/** A duration as Codex writes it: "42s", "1m 5s", "1h 2m 3s", in the active locale. Never under 1s. */
-export function formatSpan(ms: number): string {
-  const total = Math.max(1, Math.floor(ms / 1000));
-  const unit = (value: number, u: "hour" | "minute" | "second") =>
-    new Intl.NumberFormat(getActiveIntlLocale(), {
-      style: "unit",
-      unit: u,
-      unitDisplay: "narrow",
-    }).format(value);
-  const hours = Math.floor(total / 3600);
-  const mins = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  const parts = [
-    hours ? unit(hours, "hour") : "",
-    mins ? unit(mins, "minute") : "",
-    secs ? unit(secs, "second") : "",
-  ].filter(Boolean);
-  return parts.join(" ");
-}
+// CompactionRow still imports it from here.
+export { formatSpan };
