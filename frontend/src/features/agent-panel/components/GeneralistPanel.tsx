@@ -1097,7 +1097,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const clearLineComments = wizardCtx?.clearLineComments;
   // A file taken out of the draft takes its stored original with it.
   const keepOriginals = chatMedia.keepOriginals;
-  React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
+  const draftFiles = React.useMemo(() => splitPastes(draft).files, [draft]);
+  React.useEffect(() => keepOriginals(draftFiles), [draftFiles, keepOriginals]);
+  const shownOriginals = chatMedia.shownOriginals;
+  const draftOriginals = React.useMemo(
+    () => shownOriginals(draftFiles),
+    [draftFiles, shownOriginals],
+  );
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
     // An upload that failed since the last edit can leave a name with fewer
@@ -1929,16 +1935,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
-          // The setup chat puts the context meter on the end side, and the model menu on the start side.
-          inSetup ? (
+          // The setup chat puts the model menu on the start side; every other chat keeps it here.
+          <>
             <ChatContextUsage
               messages={agent.messages}
               contextWindow={contextWindow}
               streaming={streaming}
             />
-          ) : (
-            modelMenuNode
-          )
+            {!inSetup && modelMenuNode}
+          </>
         }
         // Dataset files keep their column-mapping card; any other file is
         // read as text by the composer.
@@ -1946,6 +1951,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
+        originals={webChat ? undefined : draftOriginals}
         mediaWaiting={chatMedia.tiles.length > 0}
         sendBlocked={chatMedia.blocked}
         onAttachFile={(file) => {

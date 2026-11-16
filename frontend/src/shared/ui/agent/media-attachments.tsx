@@ -1368,10 +1368,13 @@ export function MediaViewer({
 }) {
   const icons = React.useContext(MediaIconsContext);
   const strip = React.useRef<HTMLDivElement | null>(null);
-  // The last open item stays on the stage while the viewer fades out.
-  const [kept, setKept] = React.useState(openIndex);
-  if (openIndex !== null && openIndex !== kept) setKept(openIndex);
-  const index = openIndex ?? (kept !== null && kept < media.length ? kept : null);
+  // The last open item stays on the stage while the viewer fades out. Its id, not
+  // its index: when it leaves the list, another item must not show in its place.
+  const openId = openIndex === null ? null : (media[openIndex]?.id ?? null);
+  const [kept, setKept] = React.useState(openId);
+  if (openId !== null && openId !== kept) setKept(openId);
+  const keptIndex = kept === null ? -1 : media.findIndex((m) => m.id === kept);
+  const index = openIndex ?? (keptIndex < 0 ? null : keptIndex);
   const [zoom, setZoom] = React.useState({ index, value: 1 });
   const item = index === null ? null : media[index];
   // Each item opens at its fitted size.

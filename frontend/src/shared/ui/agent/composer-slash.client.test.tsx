@@ -1,5 +1,6 @@
 /*
- * Mounts the composer in jsdom to check the keys that send a slash command.
+ * Mounts the composer in jsdom to check the keys that send a slash command,
+ * and the draft's attachment row.
  * composer.render.test.ts spawns it through jiti inside `npm run test:unit`.
  */
 import assert from "node:assert/strict";
@@ -10,6 +11,7 @@ import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { saveSuggestion, suggestSignature } from "./next-prompt";
 import { midTurnOf, SteerQueue } from "./steer-queue";
 import { labelsOnlyValue, type SlashCommand, type SlashOption } from "./slash-commands";
+import { attachedFile, joinPastes } from "./pasted-text";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://example.test/",
@@ -27,6 +29,9 @@ Object.assign(globalThis, {
   Event: dom.window.Event,
   KeyboardEvent: dom.window.KeyboardEvent,
   MouseEvent: dom.window.MouseEvent,
+  // The media tiles and the viewer need these.
+  MutationObserver: dom.window.MutationObserver,
+  CustomEvent: dom.window.CustomEvent,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
   cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
@@ -845,4 +850,35 @@ void test("Enter on a labels-only command with no matching label runs nothing", 
   } finally {
     liveCommands = commands;
   }
+});
+
+void test("the composer's image tile opens one viewer that pages to the draft PDF's original (SKY-736)", async () => {
+  const draft = joinPastes({
+    text: "",
+    pastes: [],
+    files: [attachedFile("scan.pdf", "Page 1\nHello")],
+  });
+  const composer = await mount(draft, false, undefined, undefined, {
+    media: {
+      items: [{ id: "m-1", name: "photo.png", kind: "image", url: "https://example.test/1.png" }],
+      onRemove: () => {},
+    },
+    originals: [{ id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan" }],
+  });
+  const open = document.querySelector<HTMLElement>('button[aria-label="Open photo.png"]');
+  assert.ok(open, "the image tile");
+  await React.act(async () => open.click());
+  const box = document.querySelector('[role="dialog"]')!;
+  assert.equal(box.querySelector('[role="status"]')?.textContent, "1 of 2");
+  const next = box.querySelector<HTMLElement>('button[aria-label="Next"]');
+  assert.ok(next, "the viewer pages");
+  await React.act(async () => next.click());
+  await React.act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
+  assert.equal(box.querySelector('[role="status"]')?.textContent, "2 of 2");
+  assert.equal(
+    box.querySelector("iframe[data-original-file='pdf']")?.getAttribute("src"),
+    "blob:local-scan",
+  );
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "one viewer");
+  await composer.unmount();
 });

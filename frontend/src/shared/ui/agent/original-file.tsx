@@ -131,8 +131,9 @@ export function OriginalFile({
         {msg("shared.agent.media_loading_preview", { name })}
       </p>
     );
-  // Chrome's PDF viewer does not load in a sandboxed frame. The blob holds only
-  // the stored bytes, which the server checked are a PDF.
+  // Chrome's PDF viewer does not load in a sandboxed frame. A sent PDF's blob
+  // holds the stored bytes, which the server checked are a PDF. A draft PDF's
+  // blob is the local file typed as a PDF, so the browser only shows it as one.
   if (shown.state === "pdf")
     return <iframe data-original-file="pdf" src={shown.url} title={name} className={FRAME} />;
   return (

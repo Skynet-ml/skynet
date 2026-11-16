@@ -19,16 +19,10 @@ import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { originalsToKeep } from "./file-originals";
-import {
-  isUnsupportedImage,
-  type MediaAttachment,
-  mediaKind,
-  MediaTiles,
-  TileRow,
-} from "./media-attachments";
+import { isUnsupportedImage, type MediaAttachment, mediaKind, TileRow } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
-import { FileTile } from "./file-tiles";
+import { DraftAttachments } from "./file-tiles";
 import {
   attachedFile,
   joinPastes,
@@ -95,6 +89,9 @@ interface ComposerProps {
   /** Receives the attached PDF, DOCX and XLSX files whose text was read, so
    *  their originals can show in the viewer. */
   onOriginalFiles?: (files: File[]) => void;
+  /** The originals `onOriginalFiles` keeps, as they stand; a draft file then
+   *  opens its original in the viewer, as a sent one does. */
+  originals?: readonly MediaAttachment[];
   /** Files wait to go with the next message. A queued or steered message
    *  carries only text, so the composer refuses it, with a reason, until the
    *  reply ends. */
@@ -276,6 +273,7 @@ export function Composer({
   onAttachFile,
   onMediaFiles,
   onOriginalFiles,
+  originals,
   mediaWaiting = false,
   sendBlocked = null,
   suggest,
@@ -993,15 +991,13 @@ export function Composer({
           {(draft.files.length > 0 || Boolean(media?.items.length)) && !inline && (
             <div className="flex px-3 pt-3">
               <TileRow>
-                {media && <MediaTiles media={media.items} onRemove={media.onRemove} bare />}
-                {draft.files.map((file, i) => (
-                  <FileTile
-                    key={`file-${i}`}
-                    name={file.name}
-                    text={file.text}
-                    onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
-                  />
-                ))}
+                <DraftAttachments
+                  media={media?.items}
+                  onRemoveMedia={media?.onRemove}
+                  files={draft.files}
+                  originals={originals}
+                  onRemove={(i) => setFiles(draft.files.filter((_, j) => j !== i))}
+                />
               </TileRow>
             </div>
           )}
