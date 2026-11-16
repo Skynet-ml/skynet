@@ -19,16 +19,10 @@ import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { originalsToKeep } from "./file-originals";
-import {
-  isUnsupportedImage,
-  type MediaAttachment,
-  mediaKind,
-  MediaTiles,
-  TileRow,
-} from "./media-attachments";
+import { isUnsupportedImage, type MediaAttachment, mediaKind, TileRow } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
-import { DraftFileTiles } from "./file-tiles";
+import { DraftAttachments } from "./file-tiles";
 import {
   attachedFile,
   joinPastes,
@@ -997,8 +991,9 @@ export function Composer({
           {(draft.files.length > 0 || Boolean(media?.items.length)) && !inline && (
             <div className="flex px-3 pt-3">
               <TileRow>
-                {media && <MediaTiles media={media.items} onRemove={media.onRemove} bare />}
-                <DraftFileTiles
+                <DraftAttachments
+                  media={media?.items}
+                  onRemoveMedia={media?.onRemove}
                   files={draft.files}
                   originals={originals}
                   onRemove={(i) => setFiles(draft.files.filter((_, j) => j !== i))}

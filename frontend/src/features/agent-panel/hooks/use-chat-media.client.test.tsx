@@ -456,6 +456,34 @@ void test("a failed original upload and an unmount free the draft's local URLs",
   });
 });
 
+void test("an original leaves the draft before its local URL is freed", async () => {
+  const { draft, unmount } = await mountDraft();
+  // What Send would take at each free; ``ready`` reads the draft's live originals.
+  const atFree: Array<string[] | null> = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = () =>
+    void atFree.push(
+      draft()
+        .ready()
+        ?.map((m) => m.name) ?? null,
+    );
+  try {
+    nextUpload = Promise.resolve(new Response(null, { status: 500 }));
+    await React.act(async () => draft().addOriginals([pdf("a.pdf")]));
+    await flush();
+    assert.deepEqual(atFree, [[]], "a failed upload");
+    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    await flush();
+    await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
+    assert.deepEqual(atFree.slice(1), [["b.pdf"]], "a file that leaves");
+    await React.act(async () => draft().clear());
+    assert.deepEqual(atFree.slice(2), [[]], "a sent draft");
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+  await unmount();
+});
+
 void test("a draft shows no original for two same-name files when one upload fails", async () => {
   const { draft, unmount } = await mountDraft();
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));

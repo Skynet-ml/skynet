@@ -5,8 +5,7 @@ import * as React from "react";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
-import { pairOriginals } from "./file-originals";
-import { FileTile, fileTilePreview } from "./file-tiles";
+import { FileTile, fileSlides } from "./file-tiles";
 import {
   DraftTile,
   FailedTile,
@@ -80,17 +79,11 @@ export function SentAttachments({
         media: m,
       });
     }
-    const paired = pairOriginals(files, originals);
-    files.forEach((file, i) => {
-      const preview = fileTilePreview(file.name, file.text);
-      const original = paired[i] ?? undefined;
-      const id = `file-${i}-${file.name}`;
+    fileSlides(files, originals).forEach((slide, i) => {
+      const file = files[i]!;
       entries.push({
-        key: id,
-        slide:
-          preview || original
-            ? slides.push({ kind: "file", id, name: file.name, preview, original }) - 1
-            : null,
+        key: `file-${i}-${file.name}`,
+        slide: slide ? slides.push(slide) - 1 : null,
         file,
       });
     });

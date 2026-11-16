@@ -11,13 +11,17 @@ import { FilePreviewBody } from "./file-preview-body";
 import {
   BADGE,
   CARD,
+  DraftTile,
   type MediaAttachment,
+  MediaTiles,
   MediaUrlContext,
   MediaViewer,
   type OpenHandler,
   TILE,
   TileFrame,
+  useResolvedMedia,
   type ViewerFile,
+  type ViewerItem,
 } from "./media-attachments";
 import type { AttachedFile } from "./pasted-text";
 import { TextPreviewDialog } from "./pasted-text-card";
@@ -149,42 +153,113 @@ export function FileTile({
   );
 }
 
+/**
+ * The viewer slide of each attached file, in order, paired with its original;
+ * null for a file with nothing to show. A sent message and the draft page the same way.
+ */
+export function fileSlides(
+  files: readonly AttachedFile[],
+  originals: readonly MediaAttachment[],
+): Array<ViewerFile | null> {
+  const paired = pairOriginals(files, originals);
+  return files.map((file, i) => {
+    const preview = fileTilePreview(file.name, file.text);
+    const original = paired[i] ?? undefined;
+    return preview || original
+      ? { kind: "file", id: `file-${i}-${file.name}`, name: file.name, preview, original }
+      : null;
+  });
+}
+
 // A draft original plays from its own object URL, as the draft's media do.
 const draftUrl = (media: MediaAttachment) => Promise.resolve(media.url);
 
+const NO_MEDIA: readonly MediaAttachment[] = [];
+
 /**
- * The composer's attached files. With `originals`, the local copies of the
- * draft's PDF, DOCX and XLSX originals that go out on Send, the files open one
- * shared viewer as a sent message's files do, and a file there shows its
- * original. Without it, each tile opens its own text preview.
+ * The composer's attached media and files, media first. With `originals`, the
+ * local copies of the draft's PDF, DOCX and XLSX originals that go out on Send,
+ * every tile opens one shared viewer that pages through the media and the files,
+ * as a sent message's tiles do, and a file there shows its original. Without it,
+ * the media share their own viewer and each file opens its own text preview.
  */
-export function DraftFileTiles({
+export function DraftAttachments({
+  media = NO_MEDIA,
+  onRemoveMedia,
   files,
   originals,
   onRemove,
 }: {
+  media?: readonly MediaAttachment[];
+  onRemoveMedia?: (id: string) => void;
   files: readonly AttachedFile[];
   originals?: readonly MediaAttachment[];
   onRemove: (index: number) => void;
 }) {
-  // The open file's id: an index would move to another file as files come and go.
+  if (originals)
+    return (
+      <SharedDraftViewer
+        media={media}
+        onRemoveMedia={onRemoveMedia}
+        files={files}
+        originals={originals}
+        onRemove={onRemove}
+      />
+    );
+  return (
+    <>
+      {media.length > 0 && <MediaTiles media={media} onRemove={onRemoveMedia} bare />}
+      {files.map((file, i) => (
+        <FileTile
+          key={`file-${i}`}
+          name={file.name}
+          text={file.text}
+          onRemove={() => onRemove(i)}
+        />
+      ))}
+    </>
+  );
+}
+
+/** The draft's tiles with one viewer for its media and files; see `DraftAttachments`. */
+function SharedDraftViewer({
+  media: given,
+  onRemoveMedia,
+  files,
+  originals,
+  onRemove,
+}: {
+  media: readonly MediaAttachment[];
+  onRemoveMedia?: (id: string) => void;
+  files: readonly AttachedFile[];
+  originals: readonly MediaAttachment[];
+  onRemove: (index: number) => void;
+}) {
+  const media = useResolvedMedia(given);
+  // The open slide's id: an index would move to another slide as tiles come and go.
   const [open, setOpen] = React.useState<string | null>(null);
   const opener = React.useRef<HTMLElement | null>(null);
   const { byFile, slides } = React.useMemo(() => {
-    if (!originals) return { byFile: [], slides: [] };
-    const paired = pairOriginals(files, originals);
-    const byFile = files.map((file, i): ViewerFile | null => {
-      const preview = fileTilePreview(file.name, file.text);
-      const original = paired[i] ?? undefined;
-      return preview || original
-        ? { kind: "file", id: `file-${i}-${file.name}`, name: file.name, preview, original }
-        : null;
-    });
-    return { byFile, slides: byFile.filter((s): s is ViewerFile => s !== null) };
-  }, [files, originals]);
+    const byFile = fileSlides(files, originals);
+    // As in MediaTiles, audio plays in its tile, and a failed upload still plays from its local URL.
+    const visual: ViewerItem[] = media.filter((m) => m.kind !== "audio");
+    return { byFile, slides: [...visual, ...byFile.filter((s): s is ViewerFile => s !== null)] };
+  }, [media, files, originals]);
+  const openAt = (id: string, e: React.MouseEvent<HTMLElement>) => {
+    opener.current = e.currentTarget;
+    setOpen(id);
+  };
   const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
   return (
     <>
+      {media.map((m) => (
+        <DraftTile
+          key={m.id}
+          media={m}
+          onOpen={(e) => openAt(m.id, e)}
+          onRemove={onRemoveMedia && (() => onRemoveMedia(m.id))}
+        />
+      ))}
       {files.map((file, i) => {
         const slide = byFile[i];
         return (
@@ -193,28 +268,19 @@ export function DraftFileTiles({
             name={file.name}
             text={file.text}
             onRemove={() => onRemove(i)}
-            onOpen={
-              slide
-                ? (e) => {
-                    opener.current = e.currentTarget;
-                    setOpen(slide.id);
-                  }
-                : undefined
-            }
+            onOpen={slide ? (e) => openAt(slide.id, e) : undefined}
           />
         );
       })}
-      {originals && (
-        <MediaUrlContext.Provider value={draftUrl}>
-          <MediaViewer
-            media={slides}
-            index={openIndex < 0 ? null : openIndex}
-            onIndex={(i) => setOpen(slides[i]?.id ?? null)}
-            onClose={() => setOpen(null)}
-            returnFocus={opener}
-          />
-        </MediaUrlContext.Provider>
-      )}
+      <MediaUrlContext.Provider value={draftUrl}>
+        <MediaViewer
+          media={slides}
+          index={openIndex < 0 ? null : openIndex}
+          onIndex={(i) => setOpen(slides[i]?.id ?? null)}
+          onClose={() => setOpen(null)}
+          returnFocus={opener}
+        />
+      </MediaUrlContext.Provider>
     </>
   );
 }

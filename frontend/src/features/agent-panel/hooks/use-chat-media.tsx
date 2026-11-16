@@ -193,8 +193,9 @@ export function useChatMedia(): ChatMediaDraft {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
-          freeMediaUrl(item.shown.url);
+          // Out of the draft first, so nothing shows the URL once it is freed.
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
+          freeMediaUrl(item.shown.url);
         };
         uploadChatMedia(files[i]!).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
@@ -221,12 +222,12 @@ export function useChatMedia(): ChatMediaDraft {
     (files: ReadonlyArray<{ name: string }>) => {
       const kept = new Set(keptOriginals(files, originalsRef.current));
       if (kept.size === originalsRef.current.length) return;
-      for (const o of originalsRef.current) {
-        if (kept.has(o)) continue;
+      const gone = originalsRef.current.filter((o) => !kept.has(o));
+      syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
+      for (const o of gone) {
         freeMediaUrl(o.shown.url);
         if (o.serverId) void deleteChatMedia(o.serverId);
       }
-      syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
     },
     [syncOriginals],
   );
@@ -303,12 +304,13 @@ export function useChatMedia(): ChatMediaDraft {
     );
     markMediaSent(itemsRef.current.map((m) => m.url));
     update(() => []);
+    const gone = originalsRef.current;
+    syncOriginals([]);
     // A sent original shows from its stored copy, so no local URL outlives the draft.
-    for (const o of originalsRef.current) {
+    for (const o of gone) {
       freeMediaUrl(o.shown.url);
       if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
     }
-    syncOriginals([]);
   }, [update, syncOriginals]);
 
   const restore = React.useCallback(
