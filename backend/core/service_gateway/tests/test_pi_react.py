@@ -1045,11 +1045,12 @@ async def test_setup_turn_without_an_answer_fails(monkeypatch: pytest.MonkeyPatc
 class _TextLM(dspy.BaseLM):
     """An LM without native tool calls, like a subscription CLI route, that answers with fixed texts."""
 
-    def __init__(self, replies: list[str]) -> None:
+    def __init__(self, replies: list[str | tuple[str, str]]) -> None:
         """Store the replies.
 
         Args:
-            replies: One raw assistant text per expected LM call.
+            replies: One raw assistant text, or a ``(text, reasoning)`` pair,
+                per expected LM call.
         """
         super().__init__(model="scripted")
         self._replies = list(replies)
@@ -1072,7 +1073,9 @@ class _TextLM(dspy.BaseLM):
             An OpenAI-shaped text response.
         """
         self.requests.append({"messages": messages, **kwargs})
-        message = {"role": "assistant", "content": self._replies.pop(0)}
+        reply = self._replies.pop(0)
+        text, reasoning = reply if isinstance(reply, tuple) else (reply, None)
+        message = {"role": "assistant", "content": text, "reasoning_content": reasoning}
         return litellm.ModelResponse(
             model="scripted",
             choices=[{"index": 0, "finish_reason": "stop", "message": message}],
@@ -1108,6 +1111,37 @@ async def test_cli_reply_becomes_one_native_tool_call_chunk() -> None:
     request = cast(_TextLM, handlers._lm).requests[0]
     assert "tools" not in request
     assert "tool_calls" in request["messages"][-1]["content"]
+
+
+async def test_cli_reply_hands_pi_the_model_reasoning() -> None:
+    """A text-protocol reply's reasoning reaches Pi with its parsed tool call, so the chat shows it (SKY-774)."""
+    handlers, _ = _handlers(_TextLM([(_text_calls(("_lookup", {"name": "a"})), "I need a.")]))
+
+    (chunk,) = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    delta = chunk["choices"][0]["delta"]
+    assert delta["reasoning_content"] == "I need a."
+    (call,) = delta["tool_calls"]
+    assert call["function"]["name"] == "_lookup"
+    assert json.loads(call["function"]["arguments"]) == {"name": "a"}
+
+
+async def test_cli_reply_after_a_parse_retry_hands_pi_only_the_used_reasoning() -> None:
+    """The reasoning of a reply that did not parse never reaches Pi; the resampled reply's does."""
+    lm = _TextLM(
+        [
+            ("Sure, here is my answer.\n\n[[ ## completed ## ]]", "Wrong path."),
+            (_text_calls(("_lookup", {"name": "a"})), "Right path."),
+        ]
+    )
+    handlers, _ = _handlers(lm)
+
+    chunks = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    assert len(lm.requests) == 2
+    reasoning = [chunk["choices"][0]["delta"].get("reasoning_content") for chunk in chunks]
+    assert reasoning == ["Right path."]
+    assert _merge(chunks)["tool_calls"][0]["function"]["name"] == "_lookup"
 
 
 async def test_cli_turn_runs_tools_and_answers_through_header_less_replies() -> None:

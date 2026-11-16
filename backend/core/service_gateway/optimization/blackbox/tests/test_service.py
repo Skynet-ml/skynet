@@ -1135,6 +1135,26 @@ def test_reflection_caller_hands_chat_messages_to_the_model() -> None:
     assert all(d >= 0 for d in durations_ms)
 
 
+def test_reflection_caller_returns_only_the_text_of_a_reply_with_reasoning() -> None:
+    """Return the proposal text, not the dict DSPy builds when the reply also has reasoning."""
+
+    class LM:
+        def __call__(self, prompt: Any = None, *, messages: Any = None) -> list[dict[str, str]]:
+            """Answer like DSPy does for a reply that carries ``reasoning_content``.
+
+            Args:
+                prompt: Positional reflection text.
+                messages: Structured reflection messages.
+
+            Returns:
+                One completion with its text and reasoning.
+            """
+            return [{"text": "new prompt", "reasoning_content": "thinking"}]
+
+    reflection_lm, _ = service_mod._reflection_caller(LM())  # type: ignore[arg-type]
+    assert reflection_lm("plain text") == "new prompt"
+
+
 def test_run_persists_every_version_it_scored(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
     """Record search evaluations in order and keep the baseline in its dedicated result fields.
 
