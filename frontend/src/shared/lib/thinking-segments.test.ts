@@ -7,6 +7,7 @@ import {
   interleaveThinking,
   lastEventAt,
   latestHeading,
+  mergeAdjacentThinking,
   reopenThinking,
   parseThinkingRows,
   splitSummary,
@@ -195,4 +196,23 @@ test("the live heading is the newest one, from bold reasoning lines before label
     ]),
     "Picking a metric",
   );
+});
+
+test("thinking rows left side by side by a dropped step join into one row", () => {
+  const segs = [
+    { reasoning: "First.", startedAt: 1000, endedAt: 6000, toolsBefore: 0 },
+    { reasoning: "Second.", startedAt: 9000, endedAt: 13000, toolsBefore: 1 },
+    { reasoning: "Third.", startedAt: 20000, endedAt: 22000, toolsBefore: 2 },
+  ];
+  // Step 0 rendered nothing and dropped out, so rows 1 and 2 touch.
+  const pieces = mergeAdjacentThinking(interleaveThinking(segs, [{ index: 1 }]));
+  assert.deepEqual(pieces, [
+    {
+      kind: "thinking",
+      // 5s plus 4s of thinking; the 3s gap between them does not count.
+      segment: { reasoning: "First.\n\nSecond.", startedAt: 4000, endedAt: 13000, toolsBefore: 0 },
+    },
+    { kind: "steps", steps: [{ index: 1 }] },
+    { kind: "thinking", segment: segs[2] },
+  ]);
 });

@@ -85,7 +85,7 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
     <form
       onSubmit={save}
       autoComplete="off"
-      className={cn("rounded-2xl border border-border/50 bg-white dark:bg-card overflow-hidden", className)}
+      className={cn("rounded-md border border-border/50 bg-white dark:bg-card overflow-hidden", className)}
     >
       <div className="flex items-start gap-2.5 px-4 py-3 border-b border-border/40">
         <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground/10 text-foreground/70">

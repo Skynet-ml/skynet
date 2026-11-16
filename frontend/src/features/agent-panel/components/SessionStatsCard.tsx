@@ -71,7 +71,7 @@ export function SessionStatsCard({ stats, onClose }: { stats: SessionStats; onCl
       initial={{ opacity: 0, y: reduce ? 0 : 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, ease: EASE }}
-      className="rounded-2xl border border-border bg-card px-4 py-3 text-sm focus:outline-none"
+      className="rounded-md border border-border bg-card px-4 py-3 text-sm focus:outline-none"
     >
       <div className="mb-2 flex items-center gap-2">
         <ChartBar aria-hidden className="size-4 text-muted-foreground" />

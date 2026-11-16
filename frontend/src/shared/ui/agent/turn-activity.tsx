@@ -9,7 +9,11 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
-import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
+import {
+  interleaveThinking,
+  latestHeading,
+  mergeAdjacentThinking,
+} from "@/shared/lib/thinking-segments";
 
 
 import { ActivityGroup } from "./activity-steps";
@@ -126,8 +130,10 @@ export function TurnActivity({
   const shown = (list: Step[]) =>
     list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
   const thinkingRows = finishedThinking(thinking);
-  const pieces = interleaveThinking(thinkingRows, shown(steps));
-  const earlierPieces = earlier.map((t) => interleaveThinking(finishedThinking(t.thinking), shown(t.steps)));
+  const pieces = mergeAdjacentThinking(interleaveThinking(thinkingRows, shown(steps)));
+  const earlierPieces = earlier.map((t) =>
+    mergeAdjacentThinking(interleaveThinking(finishedThinking(t.thinking), shown(t.steps))),
+  );
   // Every call counts, also a dropped card, so the header does not leave
   // and come back when a running write ends with nothing to show. A thinking
   // row counts only once the turn ends: a live segment can reopen (ReActV2's
