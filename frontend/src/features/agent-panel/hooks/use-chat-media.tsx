@@ -90,7 +90,8 @@ export function useChatMedia(): ChatMediaDraft {
     originalsRef.current = next;
     setDraftOriginals(next);
   }, []);
-  // Local URLs of failed originals; each is freed once the draft without it renders.
+  // Local URLs of originals that left the draft. The viewer can still show one
+  // until the draft without it commits, so this effect frees them after that.
   const unshownRef = React.useRef<string[]>([]);
   React.useEffect(() => {
     for (const url of unshownRef.current.splice(0)) freeMediaUrl(url);
@@ -198,8 +199,6 @@ export function useChatMedia(): ChatMediaDraft {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
-          // A failed upload ends between renders, so the viewer can still show the
-          // original; its URL is freed after the draft without it commits.
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
@@ -231,7 +230,7 @@ export function useChatMedia(): ChatMediaDraft {
       const gone = originalsRef.current.filter((o) => !kept.has(o));
       syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
       for (const o of gone) {
-        freeMediaUrl(o.shown.url);
+        unshownRef.current.push(o.shown.url);
         if (o.serverId) void deleteChatMedia(o.serverId);
       }
     },
@@ -314,7 +313,7 @@ export function useChatMedia(): ChatMediaDraft {
     syncOriginals([]);
     // A sent original shows from its stored copy, so no local URL outlives the draft.
     for (const o of gone) {
-      freeMediaUrl(o.shown.url);
+      unshownRef.current.push(o.shown.url);
       if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
     }
   }, [update, syncOriginals]);

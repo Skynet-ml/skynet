@@ -516,6 +516,64 @@ void test("a failed original's URL is freed only after the draft without it rend
   await unmount();
 });
 
+void test("a kept-out or sent original's URL is freed only after the draft without it renders", async () => {
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+  await flush();
+  const urls = new Map(
+    draft()
+      .shownOriginals(both)
+      .map((o) => [o.url, o.name]),
+  );
+  // At each free of one of these URLs, the names the rendered draft shows.
+  const shownAtFree: Array<[string, string[]]> = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => {
+    const name = urls.get(url);
+    if (name)
+      shownAtFree.push([
+        name,
+        draft()
+          .shownOriginals(both)
+          .map((o) => o.name),
+      ]);
+  };
+  try {
+    await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
+    assert.deepEqual(shownAtFree, [["a.pdf", ["b.pdf"]]], "a file that leaves");
+    await React.act(async () => draft().clear());
+    assert.deepEqual(shownAtFree.slice(1), [["b.pdf", []]], "a sent draft");
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+  await unmount();
+});
+
+void test("an unmount before the draft commits frees each left original's URL once", async () => {
+  for (const leave of ["keep", "clear"] as const) {
+    let latest: ReturnType<typeof useChatMedia> | null = null;
+    function Harness() {
+      latest = useChatMedia();
+      return null;
+    }
+    const root = createRoot(document.createElement("div"));
+    await React.act(async () => root.render(<Harness />));
+    await React.act(async () => latest!.addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    await flush();
+    const urls = latest!.shownOriginals(both).map((o) => o.url);
+    await recordingRevokes(async (revoked) => {
+      // The unmount comes in the same act, so the draft without the files never commits.
+      await React.act(async () => {
+        if (leave === "keep") latest!.keepOriginals([{ name: "b.pdf" }]);
+        else latest!.clear();
+        root.unmount();
+      });
+      const mine = revoked.filter((url) => urls.includes(url));
+      assert.deepEqual(mine.sort(), [...urls].sort(), `${leave}: each URL is freed once`);
+    });
+  }
+});
+
 void test("a draft shows no original for two same-name files when one upload fails", async () => {
   const { draft, unmount } = await mountDraft();
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));
