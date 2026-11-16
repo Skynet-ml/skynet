@@ -2031,17 +2031,18 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             _append_note(notes, screen, note)
         turn.screen_moved = True
         target = _return_target(screen, merged)
-        # The client sends the screen its Continue shows next (SKY-744). Without
-        # a known one, ``to`` keeps this screen: the client still moves on by one.
+        # The client sends the screen its Continue shows next (SKY-744).
         sent = str(state.get("next_screen") or "")
         sent = sent if sent in _NAV_SCREENS else ""
-        to = target or sent or screen
         # ``next_screen`` is the turn-start order, and a write this turn (the
-        # data mode, the level, a model) can change it, so the agent's text
-        # then says "the next screen" instead of a name that may be stale.
+        # data mode, the level, a model) can change it. Then, or without a
+        # known next screen, ``to`` is left out and the text says "the next
+        # screen", so the agent names no stale screen; the client moves on by one.
         known = target or ("" if turn.wizard_patch else sent)
         turn.moved_to = known
-        nav: dict[str, Any] = {"action": "continue", "from": screen, "to": to}
+        nav: dict[str, Any] = {"action": "continue", "from": screen}
+        if known:
+            nav["to"] = known
         if target:
             # Only a return target jumps; a plain move runs the Continue
             # button, which follows this turn's writes, not the snapshot's.
@@ -2316,9 +2317,9 @@ The wizard screen on view:
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved
-  them to another screen otherwise. ``screen_nav.to`` names the screen
-  the wizard shows after the move, and that screen's assistant takes the
-  next turn. After a move, write no field this turn, and never say a
+  them to another screen otherwise. ``screen_nav.to``, when present,
+  names the screen the wizard shows after the move; without it, say
+  only "the next screen". That screen's assistant takes the next turn. After a move, write no field this turn, and never say a
   field is saved: the move ends this screen's turn.
 
 Rules:
@@ -2632,7 +2633,7 @@ This screen:
   screen, say they head back there, and that the wizard stops
   earlier if a screen on the way still needs something (prices still
   loading, for example). Otherwise a screen on the way needs a fix
-  first, so say they go to the ``screen_nav.to`` screen. When it belongs to a later screen, change nothing for
+  first, so say they go to the next screen. When it belongs to a later screen, change nothing for
   it: save it with ``remember_for_later`` and say it will be handled there.
 * ``job_name``, ``job_description`` and ``is_private`` show on no screen.
   Set them only when the user asks for them this turn, with one exception:
@@ -2669,8 +2670,9 @@ This screen:
   and the screen moves only when ``continue_to_next_screen`` or
   ``go_back_to_screen`` returns ``screen_nav``. Never say a field is set
   or the user is on another screen otherwise.
-* ``screen_nav.to`` (Continue) or ``screen_nav.screen`` (Back) names the
-  screen the wizard shows next, and that screen's assistant takes the
+* ``screen_nav.to`` (Continue, when present) or ``screen_nav.screen``
+  (Back) names the screen the wizard shows next; a Continue without
+  ``to`` goes to "the next screen". That screen's assistant takes the
   next turn. After a move, write no field this turn: the write is
   refused. Never claim a field is saved after a move; name the new
   screen and say its assistant handles it.

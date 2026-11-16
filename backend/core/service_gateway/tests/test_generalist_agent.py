@@ -697,7 +697,7 @@ async def test_continue_judges_this_turns_writes() -> None:
     result = await _nav_tools({"wizard_screen": "brief", "screen_issue": "stale", "next_screen": "artifact"}, turn)[
         "continue_to_next_screen"
     ].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "artifact"}
+    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
 
 
 @pytest.mark.asyncio
@@ -766,7 +766,7 @@ async def test_continue_after_a_write_this_turn_does_not_name_a_stale_screen() -
     turn.wizard_patch["data_mode"] = "pairs"
     state = {**_READY, "wizard_screen": "source", "next_screen": "optimizer"}
     result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "source", "to": "optimizer"}
+    assert result["screen_nav"] == {"action": "continue", "from": "source"}
     assert "moves on to the next screen" in result["message"]
     assert "'optimizer'" not in result["message"]
     assert turn.moved_to == ""
@@ -782,12 +782,12 @@ async def test_continue_to_the_last_screen_names_it() -> None:
 
 @pytest.mark.parametrize("sent", [None, "nowhere"])
 @pytest.mark.asyncio
-async def test_continue_without_a_known_next_screen_names_this_screen(sent: str | None) -> None:
+async def test_continue_without_a_known_next_screen_names_no_screen(sent: str | None) -> None:
     """A missing or unknown ``next_screen`` still gives ``to``; the client then moves on one screen."""
     state = {**_READY, "wizard_screen": "brief", **({"next_screen": sent} if sent else {})}
     turn = _TurnAuthoringFlag()
     result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "brief"}
+    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
     assert "moves on to the next screen" in result["message"]
     assert turn.moved_to == ""
     err = validate_wizard_screen("update_wizard_state", {"task_objective": "x"}, cast(WizardState, state), moved_to="")
@@ -936,7 +936,7 @@ def test_prompts_forbid_a_saved_claim_after_a_move() -> None:
     assert "After a move, write no field this turn, and never say a field is saved" in prompt
     instructions = " ".join(screen_signature("brief").instructions.split())
     assert "Never claim a field is saved after a move" in instructions
-    assert "``screen_nav.to`` (Continue) or ``screen_nav.screen`` (Back)" in instructions
+    assert "``screen_nav.to`` (Continue, when present) or ``screen_nav.screen`` (Back)" in instructions
 
 
 def test_scope_wizard_tool_unchanged_without_a_screen() -> None:
@@ -1328,7 +1328,7 @@ async def test_continue_after_a_repository_write_ignores_a_stale_artifact_kind()
     )
     assert await update.func._async_body(repository="acme/app") == "ok"
     result = await _nav_tools({**state, "next_screen": "source"}, flag)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "artifact", "to": "source"}
+    assert result["screen_nav"] == {"action": "continue", "from": "artifact"}
 
 
 def test_system_prompt_sends_code_requests_to_the_metric_screen() -> None:
