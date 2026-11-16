@@ -153,10 +153,10 @@ export function FileTile({
 const draftUrl = (media: MediaAttachment) => Promise.resolve(media.url);
 
 /**
- * The composer's attached files. With `originals`, the stored originals of the
- * draft's PDF, DOCX and XLSX files, the files open one shared viewer as a sent
- * message's files do, and a file there shows its original. Without it, each
- * tile opens its own text preview.
+ * The composer's attached files. With `originals`, the local copies of the
+ * draft's PDF, DOCX and XLSX originals that go out on Send, the files open one
+ * shared viewer as a sent message's files do, and a file there shows its
+ * original. Without it, each tile opens its own text preview.
  */
 export function DraftFileTiles({
   files,

@@ -387,33 +387,128 @@ void test("removing one of two same-name files deletes both originals", async ()
   await unmount();
 });
 
-void test("the draft shows its originals from local URLs, and frees each one that leaves (SKY-736)", async () => {
+/** Run ``body`` with URL.revokeObjectURL recording the URLs it frees. */
+async function recordingRevokes(body: (revoked: string[]) => Promise<void>) {
   const revoked: string[] = [];
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  try {
+    await body(revoked);
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+}
+
+const both = [{ name: "a.pdf" }, { name: "b.pdf" }];
+
+void test("the draft shows its originals from local URLs, and frees each one that leaves (SKY-736)", async () => {
+  await recordingRevokes(async (revoked) => {
+    const { draft, unmount } = await mountDraft();
+    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    await flush();
+    const [a, b] = draft().shownOriginals(both);
+    assert.deepEqual(
+      draft()
+        .shownOriginals(both)
+        .map((o) => [o.name, o.kind]),
+      [
+        ["a.pdf", "document"],
+        ["b.pdf", "document"],
+      ],
+    );
+    assert.ok(a!.url.startsWith("blob:") && b!.url.startsWith("blob:"), "local object URLs");
+    await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
+    assert.deepEqual(revoked, [a!.url]);
+    assert.deepEqual(
+      draft()
+        .shownOriginals([{ name: "b.pdf" }])
+        .map((o) => o.name),
+      ["b.pdf"],
+    );
+    await React.act(async () => draft().clear());
+    assert.deepEqual(revoked, [a!.url, b!.url]);
+    assert.deepEqual(draft().shownOriginals([{ name: "b.pdf" }]), []);
+    await unmount();
+  });
+});
+
+void test("a failed original upload and an unmount free the draft's local URLs", async () => {
+  await recordingRevokes(async (revoked) => {
+    const { draft, unmount } = await mountDraft();
+    let fail: () => void = () => {};
+    nextUpload = new Promise<Response>(
+      (resolve) => (fail = () => resolve(new Response(null, { status: 500 }))),
+    );
+    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+    const urls = draft()
+      .shownOriginals(both)
+      .map((o) => o.url);
+    assert.equal(urls.length, 2);
+    // Earlier tests' toasts can free their own URLs meanwhile.
+    const mine = () => revoked.filter((url) => urls.includes(url));
+    fail();
+    await flush();
+    // Either upload can take the failed response; its URL goes at once.
+    assert.equal(mine().length, 1, "the failed upload frees its URL");
+    assert.equal(draft().shownOriginals(both).length, 1);
+    await unmount();
+    assert.deepEqual(mine().sort(), [...urls].sort(), "the unmount frees the rest");
+  });
+});
+
+void test("a draft shows no original for two same-name files when one upload fails", async () => {
   const { draft, unmount } = await mountDraft();
-  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+  nextUpload = Promise.resolve(new Response(null, { status: 500 }));
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("a.pdf")]));
   await flush();
-  const [a, b] = draft().originals;
-  assert.deepEqual(
-    draft().originals.map((o) => [o.name, o.kind]),
-    [
-      ["a.pdf", "document"],
-      ["b.pdf", "document"],
-    ],
-  );
-  assert.ok(a!.url.startsWith("blob:") && b!.url.startsWith("blob:"), "local object URLs");
-  await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
-  assert.deepEqual(revoked, [a!.url]);
-  assert.deepEqual(
-    draft().originals.map((o) => o.name),
-    ["b.pdf"],
-  );
-  await React.act(async () => draft().clear());
-  assert.deepEqual(revoked, [a!.url, b!.url]);
-  assert.deepEqual(draft().originals, []);
+  // The one left could be either file's, and Send drops it, so no tile shows it.
+  assert.deepEqual(draft().shownOriginals([{ name: "a.pdf" }, { name: "a.pdf" }]), []);
   await unmount();
-  URL.revokeObjectURL = revoke;
+});
+
+void test("a draft shows no original that the file limit keeps out of the message", async () => {
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () =>
+    draft().addFiles(Array.from({ length: MAX_MEDIA_PER_MESSAGE }, (_, n) => image(n))),
+  );
+  await React.act(async () => draft().addOriginals([pdf("a.pdf")]));
+  await flush();
+  assert.deepEqual(draft().shownOriginals([{ name: "a.pdf" }]), []);
+  await unmount();
+});
+
+void test("a draft original keeps one object when its upload ends, so the viewer does not reload", async () => {
+  const { draft, unmount } = await mountDraft();
+  let settle: (res: Response) => void = () => {};
+  nextUpload = new Promise<Response>((resolve) => (settle = resolve));
+  await React.act(async () => draft().addOriginals([pdf("a.pdf")]));
+  const [before] = draft().shownOriginals([{ name: "a.pdf" }]);
+  assert.ok(draft().blocked, "the upload still runs");
+  settle(Response.json({ id: "a-1", name: "a.pdf", kind: "document" }));
+  await flush();
+  assert.equal(draft().blocked, null, "the upload ended");
+  assert.equal(draft().shownOriginals([{ name: "a.pdf" }])[0], before);
+  await unmount();
+});
+
+void test("a draft PDF's local URL holds a PDF blob, whatever type the file claims", async () => {
+  const types: string[] = [];
+  const create = URL.createObjectURL;
+  URL.createObjectURL = (blob: Blob) => {
+    types.push(blob.type);
+    return create(blob);
+  };
+  try {
+    const { draft, unmount } = await mountDraft();
+    const page = new File(["<script>1</script>"], "a.pdf", { type: "text/html" });
+    const doc = new File([new Uint8Array(3)], "b.docx", { type: "application/x-test" });
+    await React.act(async () => draft().addOriginals([page, doc]));
+    await flush();
+    assert.deepEqual(types, ["application/pdf", "application/x-test"]);
+    await unmount();
+  } finally {
+    URL.createObjectURL = create;
+  }
 });
 
 void test("Send waits for an original upload, and an unmount deletes one that ends later", async () => {

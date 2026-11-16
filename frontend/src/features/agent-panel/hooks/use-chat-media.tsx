@@ -4,7 +4,7 @@ import * as React from "react";
 import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
-import { fitOriginals, keptOriginals } from "@/shared/ui/agent/file-originals";
+import { fitOriginals, keptOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
   type MediaAttachment,
@@ -38,8 +38,9 @@ interface DraftMedia {
 interface DraftOriginal {
   localId: string;
   name: string;
-  /** The local file's object URL, which the draft's viewer shows. */
-  url: string;
+  /** What the draft's viewer shows: the local file, by its object URL. One
+   *  object for the original's life, so an upload that ends does not reload it. */
+  shown: MediaAttachment;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
 }
@@ -47,8 +48,8 @@ interface DraftOriginal {
 export interface ChatMediaDraft {
   /** The tiles to show in the composer, keyed by local id. */
   tiles: readonly MediaAttachment[];
-  /** The draft's file originals, keyed by local id, which the draft's viewer shows. */
-  originals: readonly MediaAttachment[];
+  /** The originals that go with ``files`` on Send, keyed by local id, which the draft's viewer shows. */
+  shownOriginals: (files: ReadonlyArray<{ name: string }>) => readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
   /** Keep the originals of attached PDF, DOCX and XLSX files, which the viewer shows. */
@@ -172,18 +173,27 @@ export function useChatMedia(): ChatMediaDraft {
 
   const addOriginals = React.useCallback(
     (files: File[]) => {
-      const added = files.map((file) => ({
-        localId: crypto.randomUUID(),
-        name: file.name,
-        url: localMediaUrl(file),
-        serverId: null,
-      }));
+      const added = files.map((file): DraftOriginal => {
+        const localId = crypto.randomUUID();
+        // The viewer shows a PDF in an unsandboxed frame before the server checks
+        // the bytes, so the blob's type is PDF whatever type the file claims.
+        const blob =
+          originalFormat(file.name) === "pdf"
+            ? new Blob([file], { type: "application/pdf" })
+            : file;
+        return {
+          localId,
+          name: file.name,
+          shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob) },
+          serverId: null,
+        };
+      });
       syncOriginals([...originalsRef.current, ...added]);
       added.forEach((item, i) => {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
-          freeMediaUrl(item.url);
+          freeMediaUrl(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
         uploadChatMedia(files[i]!).then((stored) => {
@@ -213,7 +223,7 @@ export function useChatMedia(): ChatMediaDraft {
       if (kept.size === originalsRef.current.length) return;
       for (const o of originalsRef.current) {
         if (kept.has(o)) continue;
-        freeMediaUrl(o.url);
+        freeMediaUrl(o.shown.url);
         if (o.serverId) void deleteChatMedia(o.serverId);
       }
       syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
@@ -295,7 +305,7 @@ export function useChatMedia(): ChatMediaDraft {
     update(() => []);
     // A sent original shows from its stored copy, so no local URL outlives the draft.
     for (const o of originalsRef.current) {
-      freeMediaUrl(o.url);
+      freeMediaUrl(o.shown.url);
       if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
     }
     syncOriginals([]);
@@ -361,7 +371,7 @@ export function useChatMedia(): ChatMediaDraft {
     () => () => {
       restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
-      for (const o of originalsRef.current) freeMediaUrl(o.url);
+      for (const o of originalsRef.current) freeMediaUrl(o.shown.url);
       itemsRef.current = [];
       originalsRef.current = [];
     },
@@ -379,15 +389,14 @@ export function useChatMedia(): ChatMediaDraft {
       })),
     [items],
   );
-  const originals = React.useMemo(
-    () =>
-      draftOriginals.map((o) => ({
-        id: o.localId,
-        name: o.name,
-        kind: "document" as const,
-        url: o.url,
-      })),
-    [draftOriginals],
+  // The same originals that ``ready`` sends after Send's ``keepOriginals``, so a
+  // tile never shows an original that stays out of the message.
+  const shownOriginals = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>) =>
+      fitOriginals(keptOriginals(files, draftOriginals), MAX_MEDIA_PER_MESSAGE - items.length).map(
+        (o) => o.shown,
+      ),
+    [draftOriginals, items.length],
   );
   const originalsUploading = draftOriginals.some((o) => !o.serverId);
   const blocked = items.some((m) => m.failed)
@@ -398,7 +407,7 @@ export function useChatMedia(): ChatMediaDraft {
 
   return {
     tiles,
-    originals,
+    shownOriginals,
     addFiles,
     addOriginals,
     keepOriginals,

@@ -1098,6 +1098,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // A file taken out of the draft takes its stored original with it.
   const keepOriginals = chatMedia.keepOriginals;
   React.useEffect(() => keepOriginals(splitPastes(draft).files), [draft, keepOriginals]);
+  const shownOriginals = chatMedia.shownOriginals;
+  const draftOriginals = React.useMemo(
+    () => shownOriginals(splitPastes(draft).files),
+    [draft, shownOriginals],
+  );
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
     // An upload that failed since the last edit can leave a name with fewer
@@ -1945,7 +1950,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
-        originals={webChat ? undefined : chatMedia.originals}
+        originals={webChat ? undefined : draftOriginals}
         mediaWaiting={chatMedia.tiles.length > 0}
         sendBlocked={chatMedia.blocked}
         onAttachFile={(file) => {
