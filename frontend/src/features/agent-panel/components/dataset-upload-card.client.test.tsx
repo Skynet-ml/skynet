@@ -34,9 +34,12 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
   buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
-const { DatasetUploadCard, datasetAttachedNote, libraryPickOverride } = await import(
-  "./DatasetUploadCard"
-);
+const {
+  DatasetUploadCard,
+  datasetAttachedNote,
+  libraryPickOverride,
+  useSendAfterRender,
+} = await import("./DatasetUploadCard");
 
 after(() => dom.window.close());
 
@@ -137,7 +140,7 @@ void test("the attached-file note has no RTL isolate marks in a Hebrew UI", () =
       columns: ["address", "lat"],
     });
     assert.doesNotMatch(note, /[\u2066-\u2069]/, "the agent copies clean column names");
-    assert.match(note, /address, lat/);
+    assert.match(note, /\["address","lat"\]/, "the columns are a JSON list");
     assert.match(note, /cfca\.xlsx/);
     assert.match(note, /"address":"1 Main St"/);
   } finally {
@@ -160,4 +163,47 @@ void test("a library pick override does not mark the columns as set", () => {
     dataset_columns: ["question", "answer"],
   });
   assert.equal("columns_configured" in override, false, "a later upload can clear it");
+});
+
+void test("the note cuts a long row by code point, so no surrogate pair splits", () => {
+  // `{"tt":"` is 7 code units, so a cut at 300 code units splits an emoji.
+  const note = datasetAttachedNote({
+    fileName: "emoji.csv",
+    rows: [{ tt: "\u{1F600}".repeat(400) }],
+    rowCount: 1,
+    columns: ["tt", "a,b"],
+  });
+  assert.doesNotMatch(note, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, "no lone high surrogate");
+  assert.match(note, /\u{1F600}…/u, "the cut ends on a whole emoji");
+  assert.match(note, /\["tt","a,b"\]/, "a column name with a comma stays one name");
+});
+
+void test("a send queued after a state change reads the state of the next render", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const seen: Array<string | null> = [];
+  let attach: () => void = () => {};
+
+  function Panel() {
+    const [roles, setRoles] = React.useState<string | null>("roles of the first file");
+    // The chat reads the wizard state of the latest render, as agent.send does.
+    const rolesRef = React.useRef(roles);
+    rolesRef.current = roles;
+    const send = React.useCallback(() => {
+      seen.push(rolesRef.current);
+    }, []);
+    const sendAfterRender = useSendAfterRender(send);
+    attach = () => {
+      setRoles(null);
+      sendAfterRender("note");
+    };
+    return null;
+  }
+
+  await React.act(async () => root.render(<Panel />));
+  await React.act(async () => attach());
+  assert.deepEqual(seen, [null], "the turn carries no roles from the first file");
+  await React.act(async () => root.unmount());
+  container.remove();
 });

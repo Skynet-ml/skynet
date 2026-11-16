@@ -82,6 +82,7 @@ import {
   inputsFromRoles,
   inputsWithRoles,
   rolesFromFields,
+  stagedDatasetRoles,
   rowsToCases,
   singleInputCase,
   type Row,
@@ -905,9 +906,6 @@ export function WizardV2Provider({
   // A table the agent panel staged reaches the wizard by event while it is
   // open, or through the session key when it mounts later.
   useEffect(() => {
-    // fromSession: the wizard mounts after the upload, so the shared context
-    // can already hold the roles the agent set for this file (SKY-742). The
-    // live event comes before the panel clears the earlier file's roles.
     const adopt = (detail: unknown, fromSession = false) => {
       if (!detail || typeof detail !== "object") return;
       const d = detail as Record<string, unknown>;
@@ -920,17 +918,11 @@ export function WizardV2Provider({
           : Object.keys(rows[0] ?? {});
       const label = typeof d.dataset_filename === "string" ? d.dataset_filename : "dataset.json";
       const stagedId = typeof d.staged_dataset_id === "string" ? d.staged_dataset_id : null;
-      const shared = wizardCtxRef.current?.state;
-      const roles =
-        ws.column_roles && typeof ws.column_roles === "object"
-          ? (ws.column_roles as Record<string, ColumnRole>)
-          : fromSession && shared
-            ? rolesFromFields(
-                columns,
-                shared.input_fields,
-                typeof shared.expected_field === "string" ? shared.expected_field : null,
-              )
-            : null;
+      const roles = stagedDatasetRoles(
+        ws,
+        columns,
+        fromSession ? wizardCtxRef.current?.state : undefined,
+      );
       patchInputs(inputsFromRows(rows, columns, label, stagedId, roles));
     };
     try {

@@ -44,8 +44,10 @@ export function datasetAttachedNote(dataset: ConfirmedDataset): string {
   const sampleLines = dataset.rows
     .slice(0, DATASET_NOTE_SAMPLE_ROWS)
     .map((row) => {
-      const line = JSON.stringify(row);
-      return line.length > DATASET_NOTE_ROW_CHARS ? `${line.slice(0, DATASET_NOTE_ROW_CHARS)}…` : line;
+      // Cut by code point, so the cut never splits a surrogate pair.
+      const chars = Array.from(JSON.stringify(row));
+      const line = chars.slice(0, DATASET_NOTE_ROW_CHARS).join("");
+      return chars.length > DATASET_NOTE_ROW_CHARS ? `${line}…` : line;
     })
     .join("\n");
   // The agent copies column names from this note, so it must carry no
@@ -53,7 +55,8 @@ export function datasetAttachedNote(dataset: ConfirmedDataset): string {
   return formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_attached_note", {
     p1: dataset.fileName,
     p2: dataset.rowCount,
-    p3: dataset.columns.join(", "),
+    // A JSON list keeps column names that hold a comma unambiguous.
+    p3: JSON.stringify(dataset.columns),
     p4: sampleLines,
   }).replace(/[\u2066-\u2069]/g, "");
 }
@@ -70,6 +73,32 @@ export function libraryPickOverride(picked: ConfirmedLibraryDataset): WizardStat
     dataset_ready: true,
     dataset_columns: picked.columns,
   };
+}
+
+/**
+ * Queue a chat send that runs after the next render.
+ *
+ * The send reads the wizard state of that render, so a field the caller
+ * clears just before it does not reach the turn (SKY-742).
+ *
+ * Args:
+ *   send: The chat send function.
+ *
+ * Returns:
+ *   A function that queues one note and its turn override.
+ */
+export function useSendAfterRender(
+  send: (note: string, override?: WizardState) => void,
+): (note: string, override?: WizardState) => void {
+  const [pending, setPending] = React.useState<{ note: string; override?: WizardState } | null>(
+    null,
+  );
+  React.useEffect(() => {
+    if (!pending) return;
+    setPending(null);
+    send(pending.note, pending.override);
+  }, [pending, send]);
+  return React.useCallback((note, override) => setPending({ note, override }), []);
 }
 
 export function DatasetUploadCard({

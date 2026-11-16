@@ -173,6 +173,7 @@ import {
   DatasetUploadCard,
   datasetAttachedNote,
   libraryPickOverride,
+  useSendAfterRender,
   type ConfirmedDataset,
 } from "./DatasetUploadCard";
 import { EditedFilesCard } from "./EditedFilesCard";
@@ -979,11 +980,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
 
-  // An upload note waits here for one render; see handleDatasetConfirm.
-  const [datasetNote, setDatasetNote] = React.useState<{
-    note: string;
-    override: WizardState | undefined;
-  } | null>(null);
+  const sendAfterRender = useSendAfterRender(agent.send);
   const handleDatasetConfirm = React.useCallback(
     async (callId: string, confirmed: ConfirmedDataset) => {
       // A web chat must not stage rows or change the Mac's wizard.
@@ -1054,15 +1051,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         : undefined;
       // Sent after the cleared roles render, so the turn's wizard state does
       // not carry the earlier file's roles.
-      setDatasetNote({ note, override: wizardOverride });
+      sendAfterRender(note, wizardOverride);
     },
-    [wizardCtx, webChat],
+    [wizardCtx, webChat, sendAfterRender],
   );
-  React.useEffect(() => {
-    if (!datasetNote) return;
-    setDatasetNote(null);
-    agent.send(datasetNote.note, datasetNote.override);
-  }, [datasetNote, agent]);
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
