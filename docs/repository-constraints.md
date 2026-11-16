@@ -109,8 +109,10 @@ the list of the failed minimums. The verdict does not change what the run
 publishes.
 
 `[outcome]` has no `accept` key, and an `accept` key fails as an unknown
-setting. Every run opens a pull request, as before. Skynet does not merge it
-by itself.
+setting. A run that improves the score opens a pull request, as before.
+Skynet does not merge it by itself. A repository that Skynet created gets
+no pull request: its top versions go to branches, and `skynet/best` holds
+the best one.
 
 The search stops when its score reaches `target`. A file without `target`
 has no stop score.
