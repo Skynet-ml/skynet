@@ -343,6 +343,7 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
   document.body.append(container);
   const root = createRoot(container);
   const calls: Array<[string, string, unknown?]> = [];
+  const released: string[] = [];
   const wizard = {
     setField: (key: string, value: unknown) => calls.push(["set", key, value]),
     clearField: (key: string) => calls.push(["clear", key]),
@@ -356,7 +357,13 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
     const [draft, setDraft] = React.useState("my text");
     live.draft = draft;
     live.setDraft = setDraft;
-    live.api = useDatasetDraft({ setDraft, stage, wizard });
+    live.api = useDatasetDraft({
+      draft,
+      setDraft,
+      stage,
+      wizard,
+      onRelease: (owner) => released.push(owner),
+    });
     return null;
   }
   await React.act(async () => root.render(<Panel />));
@@ -364,7 +371,7 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
     await React.act(async () => root.unmount());
     container.remove();
   };
-  return { live, calls, unmount };
+  return { live, calls, released, unmount };
 }
 
 const QA_DATASET: ConfirmedDataset = {
@@ -443,5 +450,26 @@ void test("a library pick waits in the draft and applies its override on Send", 
     dataset_columns: ["q", "a"],
   });
   assert.ok(calls.some(([op, key]) => op === "set" && key === "source_dataset_id"));
+  await unmount();
+});
+
+void test("a removed card drops its dataset and reopens its tool card", async () => {
+  const { live, released, unmount } = await mountDatasetDraft(async () => "staged-4");
+  await React.act(async () => live.api.attach(QA_DATASET, "call-1"));
+  assert.equal(released.length, 0);
+  await React.act(async () => live.setDraft("my text"));
+  assert.deepEqual(released, ["call-1"]);
+  assert.ok(!live.api.holds(live.draft));
+  await unmount();
+});
+
+void test("a second dataset reopens the first tool card, and Send reopens nothing", async () => {
+  const { live, released, unmount } = await mountDatasetDraft(async () => "staged-5");
+  await React.act(async () => live.api.attach(QA_DATASET, "call-1"));
+  await React.act(async () => live.api.attach({ ...QA_DATASET, fileName: "b.csv" }, "call-2"));
+  assert.deepEqual(released, ["call-1"]);
+  assert.ok(live.api.take(live.draft));
+  await React.act(async () => live.setDraft(""));
+  assert.deepEqual(released, ["call-1"], "a sent dataset keeps its tool card confirmed");
   await unmount();
 });

@@ -177,16 +177,11 @@ export function useSendAfterRender(
   );
 }
 
-/** A confirmed dataset whose card waits in the draft. */
-type DraftDataset =
-  | {
-      kind: "upload";
-      chip: AttachedFile;
-      dataset: ConfirmedDataset;
-      staging: boolean;
-      stagedId?: string;
-    }
-  | { kind: "library"; chip: AttachedFile; picked: ConfirmedLibraryDataset };
+/** A confirmed dataset whose card waits in the draft; ``owner`` is the agent's tool call, if any. */
+type DraftDataset = { chip: AttachedFile; owner?: string } & (
+  | { kind: "upload"; dataset: ConfirmedDataset; staging: boolean; stagedId?: string }
+  | { kind: "library"; picked: ConfirmedLibraryDataset }
+);
 
 /** Build the agent's context for a library pick: its name, row count and column roles. */
 function libraryPickNote(picked: ConfirmedLibraryDataset): string {
@@ -213,27 +208,35 @@ function libraryPickNote(picked: ConfirmedLibraryDataset): string {
  * user removes before Send changes nothing.
  *
  * Args:
+ *   draft: The composer draft.
  *   setDraft: Sets the composer draft; it takes an update function.
  *   stage: Stages the rows on the backend; resolves to the staged id, or
  *     undefined when staging failed.
  *   wizard: The shared wizard context, or null when no wizard is mounted.
+ *   onRelease: Gets the owner of a dataset whose card left the draft unsent
+ *     (removed, or replaced by another dataset), so its tool card can reopen.
  *
  * Returns:
- *   ``attach`` and ``attachLibrary`` put a card in the draft. ``staging``
+ *   ``attach`` and ``attachLibrary`` put a card in the draft. ``holds``
+ *   tells if a draft has the pending card. ``staging``
  *   tells if Send must wait for the rows. ``take`` applies the dataset of a
  *   draft on Send and returns its turn override, or null for no dataset.
  */
 export function useDatasetDraft({
+  draft,
   setDraft,
   stage,
   wizard,
+  onRelease,
 }: {
+  draft: string;
   setDraft: (update: (draft: string) => string) => void;
   stage: (dataset: ConfirmedDataset) => Promise<string | undefined>;
   wizard: DatasetUploadWizard | null;
+  onRelease?: (owner: string) => void;
 }): {
-  attach: (dataset: ConfirmedDataset) => void;
-  attachLibrary: (picked: ConfirmedLibraryDataset) => void;
+  attach: (dataset: ConfirmedDataset, owner?: string) => void;
+  attachLibrary: (picked: ConfirmedLibraryDataset, owner?: string) => void;
   holds: (draft: string) => boolean;
   staging: (draft: string) => boolean;
   take: (draft: string) => { override: WizardState | undefined } | null;
@@ -246,20 +249,35 @@ export function useDatasetDraft({
     setPending(next);
   }, []);
 
+  const onReleaseRef = React.useRef(onRelease);
+  React.useEffect(() => {
+    onReleaseRef.current = onRelease;
+  }, [onRelease]);
+
   const putCard = React.useCallback(
     (next: DraftDataset) => {
-      const earlier = pendingRef.current?.chip ?? null;
+      const earlier = pendingRef.current;
       update(next);
-      setDraft((draft) => putDatasetChip(draft, next.chip, earlier));
+      setDraft((draft) => putDatasetChip(draft, next.chip, earlier?.chip ?? null));
+      if (earlier?.owner) onReleaseRef.current?.(earlier.owner);
     },
     [setDraft, update],
   );
 
+  // A card the user removed from the draft drops its dataset.
+  React.useEffect(() => {
+    const current = pendingRef.current;
+    if (!current || draftHasChip(draft, current.chip)) return;
+    update(null);
+    if (current.owner) onReleaseRef.current?.(current.owner);
+  }, [draft, pending, update]);
+
   const attach = React.useCallback(
-    (dataset: ConfirmedDataset) => {
+    (dataset: ConfirmedDataset, owner?: string) => {
       const next: DraftDataset = {
         kind: "upload",
         chip: datasetChip(dataset.fileName, datasetAttachedNote(dataset)),
+        owner,
         dataset,
         staging: true,
       };
@@ -276,8 +294,13 @@ export function useDatasetDraft({
   );
 
   const attachLibrary = React.useCallback(
-    (picked: ConfirmedLibraryDataset) =>
-      putCard({ kind: "library", chip: datasetChip(picked.name, libraryPickNote(picked)), picked }),
+    (picked: ConfirmedLibraryDataset, owner?: string) =>
+      putCard({
+        kind: "library",
+        chip: datasetChip(picked.name, libraryPickNote(picked)),
+        owner,
+        picked,
+      }),
     [putCard],
   );
 

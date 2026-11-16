@@ -986,6 +986,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // appears while a chosen dataset file is read, or when it cannot be read.
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
+  // A new key remounts a tool card whose dataset left the draft unsent, so
+  // the user can pick again.
+  const [reopenedCards, setReopenedCards] = React.useState<Record<string, number>>({});
+  const reopenDatasetCard = React.useCallback((callId: string) => {
+    confirmedDatasetCallsRef.current.delete(callId);
+    setReopenedCards((cards) => ({ ...cards, [callId]: (cards[callId] ?? 0) + 1 }));
+  }, []);
 
   const sendAfterRender = useSendAfterRender(agent.send);
   // Stage the rows on the backend at once, so the turn that carries the
@@ -1002,14 +1009,20 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       ).staged_dataset_id,
     [],
   );
-  const datasetDraft = useDatasetDraft({ setDraft, stage: stageDataset, wizard: wizardCtx });
+  const datasetDraft = useDatasetDraft({
+    draft,
+    setDraft,
+    stage: stageDataset,
+    wizard: wizardCtx,
+    onRelease: reopenDatasetCard,
+  });
   const handleDatasetConfirm = React.useCallback(
     (callId: string, confirmed: ConfirmedDataset) => {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
-      datasetDraft.attach(confirmed);
+      datasetDraft.attach(confirmed, callId);
     },
     [webChat, datasetDraft],
   );
@@ -1018,7 +1031,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
-      datasetDraft.attachLibrary(picked);
+      datasetDraft.attachLibrary(picked, callId);
     },
     [webChat, datasetDraft],
   );
@@ -1160,6 +1173,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // next turn.
         return (
           <DatasetUploadCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
@@ -1174,6 +1188,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_LIBRARY_TOOL) {
         return (
           <LibraryDatasetCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(picked) => handleLibraryPick(call.id, picked)}
@@ -1194,7 +1209,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming, webChat, writeBefore],
+    [handleDatasetConfirm, handleLibraryPick, reopenedCards, streaming, webChat, writeBefore],
   );
 
   // Every call is a step in the turn's activity group except the ones the

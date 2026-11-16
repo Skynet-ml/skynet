@@ -884,3 +884,17 @@ test("a mid-turn Send with the dataset card goes through handleSubmit, not the q
   assert.equal(accepts("use it <card>"), false);
   assert.deepEqual(submitted, ["submit"]);
 });
+
+test("a dataset card that left the draft unsent reopens its tool card (SKY-780)", () => {
+  const confirmedDatasetCallsRef = { current: new Set(["call-1", "call-2"]) };
+  let cards: Record<string, number> = { "call-1": 1 };
+  const reopen = expression(panel, "reopenDatasetCard", {
+    confirmedDatasetCallsRef,
+    setReopenedCards: (update: (c: Record<string, number>) => Record<string, number>) => (cards = update(cards)),
+  });
+  reopen("call-1");
+  assert.deepEqual([...confirmedDatasetCallsRef.current], ["call-2"]);
+  assert.deepEqual(cards, { "call-1": 2 });
+  // The new key remounts the card, so it shows its picker again.
+  assert.equal(source(panel).match(/key=\{`\$\{call\.id\}:\$\{reopenedCards\[call\.id\] \?\? 0\}`\}/g)?.length, 2);
+});

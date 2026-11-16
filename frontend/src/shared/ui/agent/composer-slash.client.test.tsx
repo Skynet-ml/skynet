@@ -589,6 +589,27 @@ void test("a draft set from outside grows the textarea to fit it", async () => {
   assert.equal(height, "90px");
 });
 
+void test("a draft cleared from outside shrinks the textarea back (SKY-780)", async () => {
+  // A reply-time send that the panel takes over clears the draft with no input event.
+  let setDraft: ((text: string) => void) | null = null;
+  onRun = (set) => {
+    setDraft = set;
+  };
+  const composer = await mount("/name Release notes", false);
+  await composer.press("Enter");
+  onRun = null;
+  await React.act(async () => {
+    setDraft?.("line one\nline two\nline three");
+  });
+  composer.textarea.style.height = "90px";
+  await React.act(async () => {
+    setDraft?.("");
+  });
+  const height = composer.textarea.style.height;
+  await composer.unmount();
+  assert.equal(height, "42px");
+});
+
 // Opens the /model picker and types a filter into it.
 async function openPicker(
   filter: string,
