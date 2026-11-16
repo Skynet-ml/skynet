@@ -234,3 +234,125 @@ void it("folds a run of reads and searches apart from the edits after it", async
   assert.match(groups[0]?.textContent ?? "", /xplored/, "the first group names what it explored");
   await unmount();
 });
+
+// SKY-743: plain rows, group summaries, setup-write rows and rows in an open
+// group all sit the same distance apart: each row has py-1, and nothing
+// between them adds a gap, padding or margin.
+void it("spaces every step-like row the same, in a group or out of it", async () => {
+  const { StepRow } = await import("./activity-steps");
+  const { Wrench } = await import("@/shared/ui/icons");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const Nothing = () => null;
+  const steps: Props["steps"] = [
+    { call: call("edit-a"), isRetry: false, index: 0 },
+    { call: call("write-b"), isRetry: false, index: 1 },
+    { call: call("ask"), isRetry: false, index: 2, card: true },
+    { call: call("read-c"), isRetry: false, index: 3 },
+  ];
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={steps}
+        stepKind={(c) => (c.id.startsWith("read") ? "read" : "edit")}
+        renderStep={(c) =>
+          // A card whose component renders nothing once it mounts.
+          c.id === "ask" ? <Nothing /> : (
+            <StepRow icon={Wrench} label={c.id} status="done">
+              {c.id === "write-b" ? <span data-details="" /> : undefined}
+            </StepRow>
+          )
+        }
+      />,
+    );
+  });
+  const turn = await openTurn(host);
+  const summary = [...host.querySelectorAll("button[aria-expanded]")].find((b) => b !== turn);
+  assert.ok(summary, "the edits fold under one summary line");
+  await act(async () => (summary as HTMLButtonElement).click());
+
+  const label = (id: string) =>
+    [...host.querySelectorAll("span")].find((s) => s.textContent === id)!.parentElement!;
+  const rows = [summary, label("edit-a"), label("write-b"), label("read-c")];
+  for (const row of rows) assert.ok(row.classList.contains("py-1"), `${row.textContent} has py-1`);
+
+  const SPACING = /^(gap|gap-y|space-y|p|py|pt|pb|m|my|mt|mb)-/;
+  // The history is the block right after the turn row.
+  const history = turn.parentElement!.nextElementSibling!;
+  for (const row of rows) {
+    for (let node = row.parentElement; node && node !== history; node = node.parentElement) {
+      const extra = [...node.classList].filter((c) => SPACING.test(c));
+      assert.deepEqual(extra, [], `nothing between rows adds spacing: ${node.className}`);
+    }
+  }
+  // jsdom applies no CSS, so this checks that an empty padded box carries the class that hides it.
+  const empty = [...history.querySelectorAll("div")].filter(
+    (d) => d.childNodes.length === 0 && d.className.includes("py-"),
+  );
+  assert.equal(empty.length, 1, "the empty card keeps its padded box");
+  assert.ok(empty[0]!.classList.contains("empty:hidden"), "an empty card's padded box hides itself");
+
+  // A row with details is a toggle with a chevron; a row without them is neither.
+  assert.equal(label("write-b").tagName, "BUTTON");
+  assert.ok(label("write-b").querySelector("svg:last-child"), "the row with details has a chevron");
+  assert.equal(label("edit-a").tagName, "DIV");
+  assert.equal(label("edit-a").querySelectorAll("svg").length, 1, "the row without details shows only its icon");
+  await act(async () => root.unmount());
+});
+
+void it("drops a card that renders nothing, so it does not cut a group in two", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={[
+          { call: call("edit-a"), isRetry: false, index: 0 },
+          { call: call("quiet"), isRetry: false, index: 1, card: true },
+          { call: call("edit-b"), isRetry: false, index: 2 },
+        ]}
+        stepKind={() => "edit"}
+        // A setup write that changed nothing renders nothing, as in the setup chat.
+        renderStep={(c) => (c.id === "quiet" ? null : <span data-step={c.id}>{c.id}</span>)}
+      />,
+    );
+  });
+  const row = await openTurn(host);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
+  assert.equal(groups.length, 1, "both edits fold under one summary line");
+  await act(async () => (groups[0] as HTMLButtonElement).click());
+  assert.ok(host.querySelector('[data-step="edit-a"]') && host.querySelector('[data-step="edit-b"]'));
+  await act(async () => root.unmount());
+});
+
+void it("keeps the live header when the only call is a card that renders nothing", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = (status: Call["status"]) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[]}
+          streaming
+          durationMs={5_000}
+          steps={[{ call: call("write", status), isRetry: false, index: 0, card: status !== "running" }]}
+          // A running setup write is a step row; one that ends with no change renders nothing.
+          renderStep={(c) => (c.status === "running" ? <span data-step={c.id}>{c.id}</span> : null)}
+        />,
+      );
+    });
+  await render("running");
+  assert.ok(turnRow(host, "working"), "the live header shows while the write runs");
+  await render("done");
+  assert.ok(turnRow(host, "working"), "the live header stays when the write ends with no change");
+  await act(async () => root.unmount());
+});

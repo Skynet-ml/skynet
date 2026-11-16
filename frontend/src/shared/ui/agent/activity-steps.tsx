@@ -261,7 +261,8 @@ const EDGE_FADE = "1.5rem";
 
 /**
  * An open burst's rows, as in Codex: at most 224px tall, scrolling inside,
- * with the edge that has more rows past it faded out.
+ * with the edge that has more rows past it faded out. No gap: each row's own
+ * ``py-1`` spaces it, so rows sit as far apart inside a group as outside (SKY-743).
  */
 function FadeScroll({ children }: { children: React.ReactNode }) {
   const ref = React.useRef<HTMLDivElement>(null);
@@ -283,7 +284,7 @@ function FadeScroll({ children }: { children: React.ReactNode }) {
       ref={ref}
       onScroll={measure}
       style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
-      className="flex max-h-56 flex-col gap-1 overflow-y-auto ps-2"
+      className="flex max-h-56 flex-col overflow-y-auto ps-2"
     >
       {children}
     </div>

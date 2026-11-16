@@ -117,9 +117,16 @@ export function TurnActivity({
     return () => clearInterval(id);
   }, [isLive]);
 
-  const pieces = interleaveThinking([], steps);
-  const earlierPieces = earlier.map((t) => interleaveThinking([], t.steps));
-  const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
+  // A card that renders nothing (the ask-user call, a setup write that
+  // changed nothing) is no piece: it would cut the steps around it into two
+  // groups with nothing between them (SKY-743).
+  const shown = (list: Step[]) =>
+    list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
+  const pieces = interleaveThinking([], shown(steps));
+  const earlierPieces = earlier.map((t) => interleaveThinking([], shown(t.steps)));
+  // Every call counts, also a dropped card, so the header does not leave
+  // and come back when a running write ends with nothing to show.
+  const hasHistory = Boolean(plan) || steps.length > 0 || earlier.length > 0;
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
   // Codex folds the history once the final answer starts; a click overrides.
@@ -147,7 +154,8 @@ export function TurnActivity({
 
   const renderPiece = (piece: (typeof pieces)[number]) =>
     piece.kind === "card" ? (
-      <div key={`card-${piece.step.call.id}`} className="py-1.5">
+      // A card whose component renders nothing when it mounts leaves no padded gap.
+      <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
       </div>
     ) : piece.kind === "steps" ? (
