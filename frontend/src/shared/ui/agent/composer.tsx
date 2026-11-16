@@ -506,10 +506,11 @@ export function Composer({
   // A draft set from outside (a fork puts a message back) gets no input event,
   // so grow the textarea when that text no longer fits. Typing resizes itself.
   // A draft cleared from outside (a reply-time send the panel takes over)
-  // shrinks it back.
+  // shrinks it back: clearing the inline height keeps the CSS height, which
+  // is taller on touch screens.
   React.useLayoutEffect(() => {
     const el = textareaRef.current;
-    if (el && !value) resetHeight();
+    if (el && !value) el.style.height = "";
     else if (el && el.scrollHeight > el.clientHeight && el.clientHeight < 120)
       autoResizeTextarea(el);
   }, [value]);

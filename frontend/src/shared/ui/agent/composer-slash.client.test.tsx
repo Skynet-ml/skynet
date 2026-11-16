@@ -607,7 +607,7 @@ void test("a draft cleared from outside shrinks the textarea back (SKY-780)", as
   });
   const height = composer.textarea.style.height;
   await composer.unmount();
-  assert.equal(height, "42px");
+  assert.equal(height, "", "the CSS height applies again");
 });
 
 // Opens the /model picker and types a filter into it.
