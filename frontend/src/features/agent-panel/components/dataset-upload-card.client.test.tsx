@@ -77,6 +77,27 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   container.remove();
 });
 
+void test("the card hands back the picked file, so the chat can keep its original", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const picked: File[] = [];
+  const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
+
+  await React.act(async () =>
+    root.render(<DatasetUploadCard initialFile={file} onConfirm={(_, f) => picked.push(f)} />),
+  );
+  for (let i = 0; i < 20 && picked.length === 0; i += 1) {
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  }
+
+  assert.equal(picked.length, 1);
+  assert.equal(picked[0], file, "the same File object, so its bytes can be stored");
+
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
 void test("a Strict Mode remount attaches once, and a closed card attaches nothing", async () => {
   const csv = "question,answer\nWhat is 2+2?,4\n";
   const settle = async () => {

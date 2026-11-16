@@ -32,7 +32,8 @@ interface DatasetUploadCardProps {
   /** File already chosen via the OS picker; when set, the card skips the
    *  dropzone entirely and parses it straight away. */
   initialFile?: File | null;
-  onConfirm: (confirmed: ConfirmedDataset) => void;
+  /** The picked file goes too, so the chat can keep its original for the viewer. */
+  onConfirm: (confirmed: ConfirmedDataset, file: File) => void;
 }
 
 const DATASET_FILE_ACCEPT = DATASET_UPLOAD_ACCEPT;
@@ -404,7 +405,7 @@ export function DatasetUploadCard({
       };
       setParsed(read);
       setConfirmed(true);
-      onConfirmRef.current(read);
+      onConfirmRef.current(read, file);
     } catch {
       if (readId !== readRef.current) return;
       setParsed(null);

@@ -43,6 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { originalFormat } from "@/shared/ui/agent/file-originals";
 import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
@@ -1017,15 +1018,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onRelease: reopenDatasetCard,
   });
   const handleDatasetConfirm = React.useCallback(
-    (callId: string | undefined, confirmed: ConfirmedDataset) => {
+    (callId: string | undefined, confirmed: ConfirmedDataset, file: File) => {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
       if (callId) confirmedDatasetCallsRef.current.add(callId);
+      // The new card takes the place of a card with the same name. Its stored
+      // original goes first; else the name has two originals for one card,
+      // and keepOriginals drops both.
+      chatMedia.keepOriginals(splitPastes(draft).files.filter((f) => f.name !== file.name));
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       datasetDraft.attach(confirmed, callId);
+      // An XLSX also keeps its original, so the viewer shows the real
+      // workbook, as it does for a PDF (SKY-735).
+      if (originalFormat(file.name)) chatMedia.addOriginals([file]);
     },
-    [webChat, datasetDraft],
+    [webChat, datasetDraft, draft, chatMedia],
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1178,7 +1186,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             call={call}
             disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
-            onConfirm={(confirmed) => handleDatasetConfirm(call.id, confirmed)}
+            onConfirm={(confirmed, file) => handleDatasetConfirm(call.id, confirmed, file)}
           />
         );
       }
@@ -1967,10 +1975,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               >
                 <DatasetUploadCard
                   initialFile={attachFile}
-                  onConfirm={(confirmed) => {
+                  onConfirm={(confirmed, file) => {
                     setAttachOpen(false);
                     setAttachFile(null);
-                    handleDatasetConfirm(undefined, confirmed);
+                    handleDatasetConfirm(undefined, confirmed, file);
                   }}
                 />
               </PopoverContent>
