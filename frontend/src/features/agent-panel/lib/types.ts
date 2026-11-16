@@ -82,6 +82,8 @@ export interface WizardState {
   screen_issue?: string;
   /** The later screen a go-back left from; Continue returns there. */
   return_screen?: string;
+  /** The screen the wizard's Continue shows next; the agent's Continue names it as ``screen_nav.to``. */
+  next_screen?: string;
   /** The setup is a copy of an earlier run, so the agent waits for the user. */
   cloned_run?: boolean;
 }

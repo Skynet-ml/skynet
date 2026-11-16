@@ -45,6 +45,7 @@ test("a continue result runs the Continue button's own handler", () => {
   const calls: string[] = [];
   const navigator = {
     screen: "brief",
+    next: "artifact",
     forward: () => calls.push("forward"),
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
@@ -59,6 +60,7 @@ test("a continue with a return screen jumps straight back there", () => {
   const calls: string[] = [];
   const navigator = {
     screen: "optimizer",
+    next: "models",
     forward: () => calls.push("forward"),
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
@@ -67,6 +69,37 @@ test("a continue with a return screen jumps straight back there", () => {
   assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget" });
   runScreenNav(nav!, navigator);
   assert.deepEqual(calls, ["to:budget"]);
+});
+
+test("every continue names the next screen, and a plain next move runs Continue (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "brief",
+    next: "artifact",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "brief", to: "artifact" } });
+  assert.deepEqual(nav, { action: "continue", from: "brief", to: "artifact" });
+  runScreenNav(nav!, navigator);
+  assert.deepEqual(calls, ["forward"]);
+});
+
+test("a continue whose screen differs from the wizard's next goes there through the jump (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "harden",
+    next: "overview",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  // A stale ``to`` (this turn changed the next screen) still uses goForwardTo, which falls back to Continue.
+  runScreenNav({ action: "continue", from: "harden", to: "plan" }, navigator);
+  // On the move to the last screen, the wizard's next screen is the one named.
+  runScreenNav({ action: "continue", from: "harden", to: "overview" }, navigator);
+  assert.deepEqual(calls, ["to:plan", "forward"]);
 });
 
 test("the return screen is the latest screen a go-back left, until the wizard reaches it", () => {
@@ -97,6 +130,7 @@ test("a back result jumps to the named screen with its request", () => {
   const calls: string[] = [];
   const navigator = {
     screen: "budget",
+    next: "metric",
     forward: () => calls.push("forward"),
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
@@ -120,6 +154,7 @@ test("a continue from a screen the wizard already left is dropped", () => {
   const calls: string[] = [];
   const navigator = {
     screen: "artifact",
+    next: "source",
     forward: () => calls.push("forward"),
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),

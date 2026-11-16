@@ -111,7 +111,10 @@ export function unansweredTurn(messages: AgentMessage[]): {
 
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
-  /** ``to`` is a later screen to jump to, after a go-back edit: the user returns where they were. */
+  /**
+   * ``to`` is the screen the wizard shows after the move: the next screen,
+   * or, after a go-back edit, the later screen the user returns to.
+   */
   | { action: "continue"; from: string; to?: string }
   | { action: "back"; from: string; screen: string; request: string };
 
@@ -119,6 +122,8 @@ export type ScreenNav =
 export interface ScreenNavigator {
   /** The screen on view. */
   screen: string;
+  /** The screen the Continue button shows next; null on the last screen. */
+  next: string | null;
   /** The Continue button's handler, without its optimize.toml check: the server holds the agent's moves on that check. */
   forward: () => void;
   /** Jump back to an earlier screen. */
@@ -155,7 +160,10 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
     // The wizard may already have moved past the agent's screen by itself;
     // continuing again would skip the next one unseen.
     if (nav.from && nav.from !== navigator.screen) return;
-    if (nav.to) navigator.goForwardTo(nav.to);
+    // ``to`` comes from the turn-start snapshot, and this turn's writes can
+    // change what Continue shows next; a plain next move or a stale ``to``
+    // takes the Continue button's own path (``goForwardTo`` falls back to it).
+    if (nav.to && nav.to !== navigator.next) navigator.goForwardTo(nav.to);
     else navigator.forward();
   } else navigator.goToScreen(nav.screen);
 }
