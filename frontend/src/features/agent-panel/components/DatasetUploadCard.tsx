@@ -234,6 +234,7 @@ export function useDatasetDraft({
 }): {
   attach: (dataset: ConfirmedDataset) => void;
   attachLibrary: (picked: ConfirmedLibraryDataset) => void;
+  holds: (draft: string) => boolean;
   staging: (draft: string) => boolean;
   take: (draft: string) => { override: WizardState | undefined } | null;
 } {
@@ -280,6 +281,11 @@ export function useDatasetDraft({
     [putCard],
   );
 
+  const holds = React.useCallback((draft: string) => {
+    const current = pendingRef.current;
+    return Boolean(current && draftHasChip(draft, current.chip));
+  }, []);
+
   const staging = React.useCallback(
     (draft: string) =>
       pending?.kind === "upload" && pending.staging && draftHasChip(draft, pending.chip),
@@ -319,8 +325,8 @@ export function useDatasetDraft({
   );
 
   return React.useMemo(
-    () => ({ attach, attachLibrary, staging, take }),
-    [attach, attachLibrary, staging, take],
+    () => ({ attach, attachLibrary, holds, staging, take }),
+    [attach, attachLibrary, holds, staging, take],
   );
 }
 

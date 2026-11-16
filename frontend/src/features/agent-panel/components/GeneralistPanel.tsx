@@ -1083,6 +1083,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     compacting,
     sendAfterRender,
   ]);
+  // A draft with the pending dataset card skips the mid-turn queue: only
+  // handleSubmit applies the dataset, and its send stops the running reply.
+  const acceptsMidTurn = React.useCallback(
+    (text: string) => {
+      if (!datasetDraft.holds(text)) return true;
+      handleSubmit();
+      return false;
+    },
+    [datasetDraft, handleSubmit],
+  );
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],
@@ -1146,8 +1156,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // request without finishing — that would freeze the card in
         // disabled state while the user waits for a stream that already
         // hung up. Keeping the card live lets the upload proceed; the
-        // confirmation handler cancels any in-flight stream before
-        // starting the next turn.
+        // dataset's send cancels any in-flight stream before starting the
+        // next turn.
         return (
           <DatasetUploadCard
             call={call}
@@ -1893,6 +1903,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         mentions={wizardCtx?.repoPaths ?? undefined}
         streaming={activeBusy}
         midTurn={midTurn}
+        acceptsMidTurn={acceptsMidTurn}
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={

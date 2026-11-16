@@ -827,3 +827,60 @@ test("Send drops file originals before it reads the ready media (SKY-735)", () =
   submit();
   assert.deepEqual(calls, ["keep report.pdf", "ready", "toast"]);
 });
+
+// Run the panel's handleSubmit with a pending dataset card (SKY-780).
+function datasetSubmit(options: { staging?: boolean; compacting?: boolean; media?: { kind: string }[] }) {
+  const calls: unknown[][] = [];
+  const submit = expression(panel, "handleSubmit", {
+    draft: "use it <card>",
+    lineComments: [],
+    splitPastes: () => ({ files: [] }),
+    keepOriginals: () => {},
+    chatMedia: { ready: () => options.media ?? [], blocked: null, clear: () => calls.push(["clear media"]) },
+    toast: { info: (text: string) => calls.push(["toast", text]) },
+    msg: (key: string) => key,
+    joinLineComments: (text: string) => text,
+    compacting: options.compacting ?? false,
+    datasetDraft: {
+      staging: () => options.staging ?? false,
+      take: () => (calls.push(["take"]), { override: { staged_dataset_id: "s1" } }),
+    },
+    sendAfterRender: (...args: unknown[]) => calls.push(["sendAfterRender", ...args]),
+    agent: { send: (...args: unknown[]) => (calls.push(["send", ...args]), true) },
+    setDraft: (text: string) => calls.push(["setDraft", text]),
+    clearLineComments: () => {},
+  });
+  submit();
+  return calls;
+}
+
+test("Send with a dataset card sends the text, the override and the media after a render (SKY-780)", () => {
+  const media = [{ kind: "image" }];
+  assert.deepEqual(datasetSubmit({ media }), [
+    ["take"],
+    ["sendAfterRender", "use it <card>", { staged_dataset_id: "s1" }, { media }],
+    ["setDraft", ""],
+    ["clear media"],
+  ]);
+});
+
+test("Send waits while the dataset rows stage and keeps the draft (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ staging: true }), [["toast", "agent.media.uploading"]]);
+});
+
+test("a /compact with an image keeps the dataset card for a later Send (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ compacting: true, media: [{ kind: "image" }] }), [
+    ["toast", "agent.media.wait_compact"],
+  ]);
+});
+
+test("a mid-turn Send with the dataset card goes through handleSubmit, not the queue (SKY-780)", () => {
+  const submitted: string[] = [];
+  const accepts = expression(panel, "acceptsMidTurn", {
+    datasetDraft: { holds: (text: string) => text.includes("<card>") },
+    handleSubmit: () => submitted.push("submit"),
+  });
+  assert.equal(accepts("plain text"), true);
+  assert.equal(accepts("use it <card>"), false);
+  assert.deepEqual(submitted, ["submit"]);
+});

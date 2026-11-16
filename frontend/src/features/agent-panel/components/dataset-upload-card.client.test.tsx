@@ -386,6 +386,7 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   );
   assert.equal(calls.length, 0, "the wizard changes only on Send");
   assert.ok(!live.api.staging(live.draft), "staging ended");
+  assert.ok(live.api.holds(live.draft), "the draft holds the card");
   const taken = live.api.take(live.draft);
   assert.deepEqual(taken, {
     override: { staged_dataset_id: "staged-1", dataset_ready: true, dataset_columns: ["q", "a"] },
@@ -395,6 +396,7 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   assert.equal(staged.length, 1, "Send hands the dataset to the wizard");
   window.removeEventListener("wizard:dataset-staged", onStaged);
   assert.equal(live.api.take(live.draft), null, "a dataset applies once");
+  assert.ok(!live.api.holds(live.draft), "a sent card is no longer pending");
   await unmount();
 });
 
@@ -414,6 +416,7 @@ void test("a removed card changes nothing on Send", async () => {
   const { live, calls, unmount } = await mountDatasetDraft(async () => "staged-3");
   await React.act(async () => live.api.attach(QA_DATASET));
   await React.act(async () => live.setDraft("my text"));
+  assert.ok(!live.api.holds(live.draft));
   assert.ok(!live.api.staging(live.draft));
   assert.equal(live.api.take(live.draft), null);
   assert.equal(calls.length, 0);
