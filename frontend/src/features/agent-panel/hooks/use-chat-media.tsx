@@ -38,6 +38,8 @@ interface DraftMedia {
 interface DraftOriginal {
   localId: string;
   name: string;
+  /** The local file's object URL, which the draft's viewer shows. */
+  url: string;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
 }
@@ -45,6 +47,8 @@ interface DraftOriginal {
 export interface ChatMediaDraft {
   /** The tiles to show in the composer, keyed by local id. */
   tiles: readonly MediaAttachment[];
+  /** The draft's file originals, keyed by local id, which the draft's viewer shows. */
+  originals: readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
   /** Keep the originals of attached PDF, DOCX and XLSX files, which the viewer shows. */
@@ -80,10 +84,10 @@ export function useChatMedia(): ChatMediaDraft {
   // Tiles taken out whose Undo toast is still open.
   const removedRef = React.useRef(new Map<string, DraftMedia>());
   const originalsRef = React.useRef<DraftOriginal[]>([]);
-  const [originalsUploading, setOriginalsUploading] = React.useState(false);
+  const [draftOriginals, setDraftOriginals] = React.useState<readonly DraftOriginal[]>([]);
   const syncOriginals = React.useCallback((next: DraftOriginal[]) => {
     originalsRef.current = next;
-    setOriginalsUploading(next.some((o) => !o.serverId));
+    setDraftOriginals(next);
   }, []);
   // Restores whose files still load; Send waits for them.
   const [restoring, setRestoring] = React.useState(0);
@@ -171,13 +175,17 @@ export function useChatMedia(): ChatMediaDraft {
       const added = files.map((file) => ({
         localId: crypto.randomUUID(),
         name: file.name,
+        url: localMediaUrl(file),
         serverId: null,
       }));
       syncOriginals([...originalsRef.current, ...added]);
       added.forEach((item, i) => {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
-        const drop = () =>
+        const drop = () => {
+          if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
+          freeMediaUrl(item.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
+        };
         uploadChatMedia(files[i]!).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
             void deleteChatMedia(stored.id);
@@ -203,8 +211,11 @@ export function useChatMedia(): ChatMediaDraft {
     (files: ReadonlyArray<{ name: string }>) => {
       const kept = new Set(keptOriginals(files, originalsRef.current));
       if (kept.size === originalsRef.current.length) return;
-      for (const o of originalsRef.current)
-        if (!kept.has(o) && o.serverId) void deleteChatMedia(o.serverId);
+      for (const o of originalsRef.current) {
+        if (kept.has(o)) continue;
+        freeMediaUrl(o.url);
+        if (o.serverId) void deleteChatMedia(o.serverId);
+      }
       syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
     },
     [syncOriginals],
@@ -282,8 +293,11 @@ export function useChatMedia(): ChatMediaDraft {
     );
     markMediaSent(itemsRef.current.map((m) => m.url));
     update(() => []);
-    for (const o of originalsRef.current)
+    // A sent original shows from its stored copy, so no local URL outlives the draft.
+    for (const o of originalsRef.current) {
+      freeMediaUrl(o.url);
       if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
+    }
     syncOriginals([]);
   }, [update, syncOriginals]);
 
@@ -347,6 +361,7 @@ export function useChatMedia(): ChatMediaDraft {
     () => () => {
       restoreRef.current += 1;
       for (const m of itemsRef.current) freeMediaUrl(m.url);
+      for (const o of originalsRef.current) freeMediaUrl(o.url);
       itemsRef.current = [];
       originalsRef.current = [];
     },
@@ -364,11 +379,33 @@ export function useChatMedia(): ChatMediaDraft {
       })),
     [items],
   );
+  const originals = React.useMemo(
+    () =>
+      draftOriginals.map((o) => ({
+        id: o.localId,
+        name: o.name,
+        kind: "document" as const,
+        url: o.url,
+      })),
+    [draftOriginals],
+  );
+  const originalsUploading = draftOriginals.some((o) => !o.serverId);
   const blocked = items.some((m) => m.failed)
     ? msg("agent.media.remove_failed")
     : restoring || items.some((m) => !m.serverId) || originalsUploading
       ? msg("agent.media.uploading")
       : null;
 
-  return { tiles, addFiles, addOriginals, keepOriginals, remove, ready, blocked, clear, restore };
+  return {
+    tiles,
+    originals,
+    addFiles,
+    addOriginals,
+    keepOriginals,
+    remove,
+    ready,
+    blocked,
+    clear,
+    restore,
+  };
 }

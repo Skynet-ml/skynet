@@ -5,9 +5,21 @@ import * as React from "react";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
+import { pairOriginals } from "./file-originals";
 import { filePreview, type FilePreview } from "./file-preview";
 import { FilePreviewBody } from "./file-preview-body";
-import { BADGE, CARD, type OpenHandler, TILE, TileFrame } from "./media-attachments";
+import {
+  BADGE,
+  CARD,
+  type MediaAttachment,
+  MediaUrlContext,
+  MediaViewer,
+  type OpenHandler,
+  TILE,
+  TileFrame,
+  type ViewerFile,
+} from "./media-attachments";
+import type { AttachedFile } from "./pasted-text";
 import { TextPreviewDialog } from "./pasted-text-card";
 
 /** The file types that get their own icon; everything else is a plain file. */
@@ -134,5 +146,75 @@ export function FileTile({
         </TextPreviewDialog>
       )}
     </TileFrame>
+  );
+}
+
+// A draft original plays from its own object URL, as the draft's media do.
+const draftUrl = (media: MediaAttachment) => Promise.resolve(media.url);
+
+/**
+ * The composer's attached files. With `originals`, the stored originals of the
+ * draft's PDF, DOCX and XLSX files, the files open one shared viewer as a sent
+ * message's files do, and a file there shows its original. Without it, each
+ * tile opens its own text preview.
+ */
+export function DraftFileTiles({
+  files,
+  originals,
+  onRemove,
+}: {
+  files: readonly AttachedFile[];
+  originals?: readonly MediaAttachment[];
+  onRemove: (index: number) => void;
+}) {
+  // The open file's id: an index would move to another file as files come and go.
+  const [open, setOpen] = React.useState<string | null>(null);
+  const opener = React.useRef<HTMLElement | null>(null);
+  const { byFile, slides } = React.useMemo(() => {
+    if (!originals) return { byFile: [], slides: [] };
+    const paired = pairOriginals(files, originals);
+    const byFile = files.map((file, i): ViewerFile | null => {
+      const preview = fileTilePreview(file.name, file.text);
+      const original = paired[i] ?? undefined;
+      return preview || original
+        ? { kind: "file", id: `file-${i}-${file.name}`, name: file.name, preview, original }
+        : null;
+    });
+    return { byFile, slides: byFile.filter((s): s is ViewerFile => s !== null) };
+  }, [files, originals]);
+  const openIndex = open === null ? -1 : slides.findIndex((s) => s.id === open);
+  return (
+    <>
+      {files.map((file, i) => {
+        const slide = byFile[i];
+        return (
+          <FileTile
+            key={`file-${i}`}
+            name={file.name}
+            text={file.text}
+            onRemove={() => onRemove(i)}
+            onOpen={
+              slide
+                ? (e) => {
+                    opener.current = e.currentTarget;
+                    setOpen(slide.id);
+                  }
+                : undefined
+            }
+          />
+        );
+      })}
+      {originals && (
+        <MediaUrlContext.Provider value={draftUrl}>
+          <MediaViewer
+            media={slides}
+            index={openIndex < 0 ? null : openIndex}
+            onIndex={(i) => setOpen(slides[i]?.id ?? null)}
+            onClose={() => setOpen(null)}
+            returnFocus={opener}
+          />
+        </MediaUrlContext.Provider>
+      )}
+    </>
   );
 }

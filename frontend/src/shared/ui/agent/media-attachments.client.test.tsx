@@ -58,6 +58,7 @@ dom.window.HTMLMediaElement.prototype.load = () => {};
 const { createRoot } = await import("react-dom/client");
 const { MediaTiles, MediaUrlContext } = await import("./media-attachments");
 const { SentAttachments } = await import("./sent-attachments");
+const { DraftFileTiles } = await import("./file-tiles");
 const { FilePage } = await import("./file-preview-body");
 
 after(() => dom.window.close());
@@ -332,6 +333,41 @@ void test("a sent file with no text preview still opens when it has an original"
     dialog()?.querySelector("iframe[data-original-file='pdf']")?.getAttribute("src"),
     "blob:https://example.test/scan",
   );
+  await unmount();
+});
+
+void test("a draft PDF tile opens its original in the viewer, from its local URL (SKY-736)", async () => {
+  const scan: Media = { id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan" };
+  const { container, unmount } = await mount(
+    <DraftFileTiles
+      files={[{ name: "scan.pdf", text: "Page 1\nHello" }]}
+      originals={[scan]}
+      onRemove={() => {}}
+    />,
+  );
+  await click(container.querySelector('button[aria-label="Open scan.pdf"]'));
+  await settle();
+  assert.equal(
+    dialog()?.querySelector("iframe[data-original-file='pdf']")?.getAttribute("src"),
+    "blob:local-scan",
+  );
+  await unmount();
+});
+
+void test("a draft PDF tile with no original opens its text page in the viewer", async () => {
+  const { container, unmount } = await mount(
+    <DraftFileTiles
+      files={[{ name: "scan.pdf", text: "Page 1\nHello" }]}
+      originals={[]}
+      onRemove={() => {}}
+    />,
+  );
+  await click(container.querySelector('button[aria-label="Open scan.pdf"]'));
+  await settle();
+  const box = dialog()!;
+  assert.ok(box, "the shared viewer opens");
+  assert.ok(!box.querySelector("iframe[data-original-file]"), "no original to show");
+  assert.match(box.querySelector("[data-file-page]")?.textContent ?? "", /Hello/);
   await unmount();
 });
 

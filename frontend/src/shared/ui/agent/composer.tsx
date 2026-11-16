@@ -28,7 +28,7 @@ import {
 } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
-import { FileTile } from "./file-tiles";
+import { DraftFileTiles } from "./file-tiles";
 import {
   attachedFile,
   joinPastes,
@@ -95,6 +95,9 @@ interface ComposerProps {
   /** Receives the attached PDF, DOCX and XLSX files whose text was read, so
    *  their originals can show in the viewer. */
   onOriginalFiles?: (files: File[]) => void;
+  /** The originals `onOriginalFiles` keeps, as they stand; a draft file then
+   *  opens its original in the viewer, as a sent one does. */
+  originals?: readonly MediaAttachment[];
   /** Files wait to go with the next message. A queued or steered message
    *  carries only text, so the composer refuses it, with a reason, until the
    *  reply ends. */
@@ -276,6 +279,7 @@ export function Composer({
   onAttachFile,
   onMediaFiles,
   onOriginalFiles,
+  originals,
   mediaWaiting = false,
   sendBlocked = null,
   suggest,
@@ -994,14 +998,11 @@ export function Composer({
             <div className="flex px-3 pt-3">
               <TileRow>
                 {media && <MediaTiles media={media.items} onRemove={media.onRemove} bare />}
-                {draft.files.map((file, i) => (
-                  <FileTile
-                    key={`file-${i}`}
-                    name={file.name}
-                    text={file.text}
-                    onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
-                  />
-                ))}
+                <DraftFileTiles
+                  files={draft.files}
+                  originals={originals}
+                  onRemove={(i) => setFiles(draft.files.filter((_, j) => j !== i))}
+                />
               </TileRow>
             </div>
           )}

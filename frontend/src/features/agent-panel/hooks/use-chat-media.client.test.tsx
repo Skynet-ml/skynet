@@ -387,6 +387,35 @@ void test("removing one of two same-name files deletes both originals", async ()
   await unmount();
 });
 
+void test("the draft shows its originals from local URLs, and frees each one that leaves (SKY-736)", async () => {
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url: string) => void revoked.push(url);
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+  await flush();
+  const [a, b] = draft().originals;
+  assert.deepEqual(
+    draft().originals.map((o) => [o.name, o.kind]),
+    [
+      ["a.pdf", "document"],
+      ["b.pdf", "document"],
+    ],
+  );
+  assert.ok(a!.url.startsWith("blob:") && b!.url.startsWith("blob:"), "local object URLs");
+  await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
+  assert.deepEqual(revoked, [a!.url]);
+  assert.deepEqual(
+    draft().originals.map((o) => o.name),
+    ["b.pdf"],
+  );
+  await React.act(async () => draft().clear());
+  assert.deepEqual(revoked, [a!.url, b!.url]);
+  assert.deepEqual(draft().originals, []);
+  await unmount();
+  URL.revokeObjectURL = revoke;
+});
+
 void test("Send waits for an original upload, and an unmount deletes one that ends later", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
