@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "اكتُشف أثناء الكتابة",
   "submit.v2.metric.issue.metric_code": "أضف كود المقياس.",
   "submit.v2.metric.issue.metric_code.guided": "لا يوجد بعد كود يقيّم النتائج. اطلب من المساعد كتابته.",
+  "submit.v2.metric.repo_entry": "يستخدم مقياس المستودع:",
   "submit.v2.metric.title": "الكود والمقياس",
   "submit.v2.metric.title.guided": "كيف تعمل وكيف تُقيَّم",
   "submit.v2.optimizer.budget.desc": "تحدّ مرات تشغيل المُقيِّم من عدد المرشّحين الذين يُقيَّمون، ويحدّ سقف التكلفة من الإنفاق.",

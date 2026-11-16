@@ -74,3 +74,14 @@ test("missing code reads as being written while the agent writes it", () => {
     "submit.v2.metric.agent.writing_metric",
   );
 });
+
+test("a contract that names a metric entry passes the Metric step with no wizard code (SKY-749)", () => {
+  const ready = readyState("standard");
+  const noMetric = { ...ready, workspace: { ...ready.workspace, metricCode: "" } };
+  assert.equal(computeStepIssue(noMetric, "metric", null, { metricEntry: "metric.py:score" }), null);
+  assert.equal(runBlockedReason(noMetric, null, { metricEntry: "metric.py:score" }), null);
+  assert.equal(
+    computeStepIssue(noMetric, "metric", null, { metricEntry: null }),
+    "submit.v2.metric.issue.metric_code",
+  );
+});

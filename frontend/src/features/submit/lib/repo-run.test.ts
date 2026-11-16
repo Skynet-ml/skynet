@@ -19,7 +19,9 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { contractMissing, finishedHardeningJobId, repoBaseText, repoRunRequest } = await import("./repo-run.ts");
+const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseText, repoRunRequest } = await import(
+  "./repo-run.ts"
+);
 const { prepareModelConfig } = await import("./model-config.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
@@ -308,6 +310,17 @@ test("a hosted run sends no hardening job id", async () => {
   assert.equal(reads, 0);
 });
 
+test("a run whose contract names its own metric sends no hardening job id (SKY-749)", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return { id: "job-1", status: "done" } as never;
+  };
+  // The job hardened metric.py, which the run does not use.
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read, "metric.py:score"), null);
+  assert.equal(reads, 0);
+});
+
 test("a repository run sends each secret with its allowed hosts as a list", () => {
   const state = repoState();
   state.task.repo = {
@@ -522,4 +535,35 @@ test("only a repository read that found no optimize.toml holds the Metric screen
   assert.equal(holds({ text: "version = 1\n" }), false);
   // Other files keep an empty base, so the Changes pane does not change.
   assert.equal(repoBaseText("src/a.py", null), "");
+});
+
+test("the metric entry comes from the draft optimize.toml, else from the repository's file (SKY-749)", () => {
+  const named = 'version = 1\n\n[metric]\nentry = "metric.py:score"  # the scorer\n';
+  assert.equal(contractMetricEntry(named, undefined), "metric.py:score");
+  assert.equal(contractMetricEntry("", named), "metric.py:score");
+  assert.equal(contractMetricEntry(undefined, "[metric]\nentry = 'node score.js'\n"), "node score.js");
+  // A draft replaces the repository's whole file, so its own entry is the only one.
+  assert.equal(contractMetricEntry("version = 1\n", named), null);
+  // Only the [metric] table names the metric.
+  assert.equal(contractMetricEntry('[run]\nentry = "run.py:main"\n', undefined), null);
+  assert.equal(contractMetricEntry('[metric.extra]\nentry = "x.py:f"\n', undefined), null);
+  assert.equal(contractMetricEntry('[metric]\n# entry = "metric.py:score"\n', undefined), null);
+  assert.equal(contractMetricEntry('[metric]\nentry = "  "\n', undefined), null);
+  // An array-of-tables header ends the [metric] table too.
+  assert.equal(contractMetricEntry('[metric]\nfiles = ["a"]\n[[tool.x]]\nentry = "y"\n', undefined), null);
+  assert.equal(contractMetricEntry(undefined, undefined), null);
+});
+
+test("a run whose contract names a metric entry sends no metric code (SKY-749)", () => {
+  const state = repoState();
+  state.workspace.metricCode = "";
+  assert.equal(repoRunRequest(state, options), null);
+  const request = repoRunRequest(state, { ...options, metricEntry: "metric.py:score" });
+  assert.deepEqual(request?.scorer, {
+    kind: "python",
+    timeout_seconds: state.workspace.metricTimeoutSeconds,
+  });
+  // The contract's metric wins over wizard code, so the run scores with one metric.
+  const withCode = repoRunRequest(repoState(), { ...options, metricEntry: "metric.py:score" });
+  assert.equal(withCode?.scorer.metric_code, undefined);
 });
