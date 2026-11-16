@@ -83,3 +83,41 @@ test("the composer gets the draft originals that Send sends, and none in a web c
   assert.equal(pick(false), "draft");
   assert.equal(pick(true), undefined);
 });
+
+// The initializer of the panel's one `const <name> = ...`.
+function declaration(name: string): string {
+  const found: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name && node.initializer)
+      found.push(node.initializer.getText(tree));
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.equal(found.length, 1, `one ${name}`);
+  return found[0];
+}
+
+test("the draft originals are the shown originals of the draft's own files", () => {
+  const names = ["draftFiles", "shownOriginals", "draftOriginals"];
+  const code = ts.transpileModule(
+    `${names.map((n) => `const ${n} = ${declaration(n)};`).join("\n")}\nreturn draftOriginals;`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const files = [{ name: "a.pdf", text: "" }];
+  const asked: unknown[] = [];
+  const context: Record<string, unknown> = {
+    React: { useMemo: (make: () => unknown) => make() },
+    draft: "the draft",
+    splitPastes: (text: string) => ({ files: text === "the draft" ? files : [] }),
+    chatMedia: {
+      shownOriginals: (given: unknown) => {
+        asked.push(given);
+        return "shown";
+      },
+    },
+  };
+  const result = new Function(...Object.keys(context), code)(...Object.values(context));
+  assert.equal(result, "shown");
+  assert.deepEqual(asked, [files]);
+  assert.equal(asked[0], files, "the same array as the one draft-files memo");
+});

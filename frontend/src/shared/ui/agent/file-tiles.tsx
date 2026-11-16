@@ -160,15 +160,35 @@ export function FileTile({
 export function fileSlides(
   files: readonly AttachedFile[],
   originals: readonly MediaAttachment[],
+  previews: ReadonlyArray<FilePreview | null> = files.map((f) => fileTilePreview(f.name, f.text)),
 ): Array<ViewerFile | null> {
   const paired = pairOriginals(files, originals);
   return files.map((file, i) => {
-    const preview = fileTilePreview(file.name, file.text);
+    const preview = previews[i] ?? null;
     const original = paired[i] ?? undefined;
     return preview || original
       ? { kind: "file", id: `file-${i}-${file.name}`, name: file.name, preview, original }
       : null;
   });
+}
+
+/**
+ * A function from files to their previews, in order, that parses a file again
+ * only when its name or text changes. It keeps only the last call's previews.
+ */
+export function previewCache(preview = fileTilePreview) {
+  let kept = new Map<string, { text: string; value: FilePreview | null }>();
+  return (files: readonly AttachedFile[]): Array<FilePreview | null> => {
+    const next = new Map<string, { text: string; value: FilePreview | null }>();
+    const out = files.map(({ name, text }) => {
+      const hit = next.get(name) ?? kept.get(name);
+      const value = hit && hit.text === text ? hit.value : preview(name, text);
+      next.set(name, { text, value });
+      return value;
+    });
+    kept = next;
+    return out;
+  };
 }
 
 // A draft original plays from its own object URL, as the draft's media do.
@@ -239,12 +259,14 @@ function SharedDraftViewer({
   // The open slide's id: an index would move to another slide as tiles come and go.
   const [open, setOpen] = React.useState<string | null>(null);
   const opener = React.useRef<HTMLElement | null>(null);
+  // The draft gives new file arrays on each key press; the cache keeps the parsed previews.
+  const [previewsOf] = React.useState(previewCache);
   const { byFile, slides } = React.useMemo(() => {
-    const byFile = fileSlides(files, originals);
+    const byFile = fileSlides(files, originals, previewsOf(files));
     // As in MediaTiles, audio plays in its tile, and a failed upload still plays from its local URL.
     const visual: ViewerItem[] = media.filter((m) => m.kind !== "audio");
     return { byFile, slides: [...visual, ...byFile.filter((s): s is ViewerFile => s !== null)] };
-  }, [media, files, originals]);
+  }, [media, files, originals, previewsOf]);
   const openAt = (id: string, e: React.MouseEvent<HTMLElement>) => {
     opener.current = e.currentTarget;
     setOpen(id);

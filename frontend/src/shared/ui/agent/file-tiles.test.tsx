@@ -6,7 +6,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { fileExtension, fileIconKind, NAME_MAX, NAME_TAIL, shortFileName } from "./file-tiles";
+import {
+  fileExtension,
+  fileIconKind,
+  fileSlides,
+  fileTilePreview,
+  NAME_MAX,
+  NAME_TAIL,
+  previewCache,
+  shortFileName,
+} from "./file-tiles";
 
 void describe("file type icon", () => {
   void it("picks the icon from the extension, in any case", () => {
@@ -52,5 +61,45 @@ void describe("file name truncation", () => {
     assert.equal(Array.from(short).length, 20);
     assert.ok(!short.includes("�"));
     assert.ok(short.endsWith("📊📊📊📊📊📊📊📊.csv"));
+  });
+});
+
+void describe("draft file previews", () => {
+  void it("parse each file once while new but equal file arrays come in (SKY-736)", () => {
+    const parsed: string[] = [];
+    const previewsOf = previewCache((name, text) => {
+      parsed.push(name);
+      return fileTilePreview(name, text);
+    });
+    const draft = () => [
+      { name: "rows.csv", text: "a,b\n1,2" },
+      { name: "notes.txt", text: "hello" },
+    ];
+    const first = fileSlides(draft(), [], previewsOf(draft()));
+    const again = fileSlides(draft(), [], previewsOf(draft()));
+    assert.deepEqual(parsed, ["rows.csv", "notes.txt"]);
+    assert.equal(again[0]?.preview, first[0]?.preview);
+    assert.ok(first[0]?.preview, "the CSV has a preview");
+  });
+
+  void it("parse a file again when its text changes, and forget a file that leaves", () => {
+    const parsed: string[] = [];
+    const previewsOf = previewCache((name, text) => {
+      parsed.push(`${name}:${text}`);
+      return fileTilePreview(name, text);
+    });
+    previewsOf([{ name: "rows.csv", text: "a\n1" }]);
+    previewsOf([{ name: "rows.csv", text: "a\n2" }]);
+    previewsOf([]);
+    previewsOf([{ name: "rows.csv", text: "a\n2" }]);
+    assert.deepEqual(parsed, ["rows.csv:a\n1", "rows.csv:a\n2", "rows.csv:a\n2"]);
+  });
+
+  void it("give the same slides as a fresh parse", () => {
+    const files = [
+      { name: "rows.csv", text: "a,b\n1,2" },
+      { name: "blob.bin", text: "" },
+    ];
+    assert.deepEqual(fileSlides(files, [], previewCache()(files)), fileSlides(files, []));
   });
 });
