@@ -1349,9 +1349,9 @@ def add_run_record(
     """Write the run record into ``result["details"]["record"]`` at the run end (SKY-694).
 
     The record lets another person check the score: ``record_version``, the
-    pinned start commit, the SHA-256 of the reported patch (null for the start
-    version), the start and final scores at full precision (null when the run
-    has none), the hashes and the metric source from staging
+    pinned commit, the SHA-256 of the reported patch (null when that patch is
+    empty), the baseline and final scores at full precision (null when the
+    run has none), the hashes and the metric source from staging
     (:func:`_record_facts`), the seed, the split the guest made, the pinned
     sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
