@@ -573,6 +573,40 @@ void it("keeps an opened later row open when a dropped card joins it to the row 
   }
 });
 
+void it("does not open the new turn's row after a steer moves the opened row into an earlier turn", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const first = { thinking: [segment("First.", 0)], steps: [{ call: call("read-a"), isRetry: false, index: 0 }] };
+  const render = (steered: boolean) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={steered ? [segment("Second.", 0)] : first.thinking}
+          streaming={false}
+          durationMs={5_000}
+          steps={steered ? [{ call: call("read-b"), isRetry: false, index: 0 }] : first.steps}
+          earlier={steered ? [{ ...first, answer: null }] : []}
+          renderStep={(c) => <span data-step={c.id}>{c.id}</span>}
+        />,
+      );
+    });
+  try {
+    await render(false);
+    await openTurn(host);
+    const row = thoughtRows(host)[0];
+    assert.ok(row, host.innerHTML);
+    await act(async () => (row as HTMLButtonElement).click());
+    assert.equal(row.getAttribute("aria-expanded"), "true");
+    await render(true);
+    const rows = thoughtRows(host);
+    assert.equal(rows.length, 2, host.innerHTML);
+    assert.equal(rows[1]!.getAttribute("aria-expanded"), "false", "the new turn's row starts folded");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 void it("shows an earlier turn's finished segment as a row", async () => {
   const { host, unmount } = await mount([{ call: call("read-b"), isRetry: false, index: 0 }], {
     earlier: [

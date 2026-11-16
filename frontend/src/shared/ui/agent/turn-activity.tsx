@@ -148,7 +148,14 @@ export function TurnActivity({
     }
     group.push(piece.segment.order);
   }
-  const [openRows, setOpenRows] = React.useState<ReadonlySet<number>>(() => new Set());
+  // Orders are indexes in this turn. A steer moves this turn into
+  // ``earlier`` and keeps this component mounted, so the open rows reset
+  // when the turn count changes: the new turn's row 0 is another row.
+  const [openState, setOpenState] = React.useState<{ turn: number; rows: ReadonlySet<number> }>(
+    () => ({ turn: earlier.length, rows: new Set() }),
+  );
+  if (openState.turn !== earlier.length) setOpenState({ turn: earlier.length, rows: new Set() });
+  const openRows = openState.turn === earlier.length ? openState.rows : new Set<number>();
   const earlierPieces = earlier.map((t) =>
     mergeAdjacentThinking(interleaveThinking(finishedThinking(t.thinking), shown(t.steps))),
   );
@@ -195,11 +202,11 @@ export function TurnActivity({
         compact
         open={rows.some((o) => openRows.has(o))}
         onOpenChange={(next) =>
-          setOpenRows((prev) => {
-            const out = new Set(prev);
+          setOpenState((prev) => {
+            const out = new Set(prev.rows);
             for (const o of rows) out.delete(o);
             if (next) out.add(segment.order);
-            return out;
+            return { turn: prev.turn, rows: out };
           })
         }
       />
