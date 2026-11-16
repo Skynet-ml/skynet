@@ -1052,6 +1052,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             : line;
         })
         .join("\n");
+      // The agent copies column names from this note, so it must carry no
+      // RTL isolate marks (U+2066-U+2069) that formatMsg adds around Latin text.
       const note = formatMsg(
         "auto.features.agent.panel.components.generalistpanel.dataset_attached_note",
         {
@@ -1060,7 +1062,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           p3: confirmed.columns.join(", "),
           p4: sampleLines,
         },
-      );
+      ).replace(/[\u2066-\u2069]/g, "");
       // The override stays on every later turn, so it carries no column
       // roles: the agent's column-role tool sets those.
       const wizardOverride: WizardState | undefined = stagedDatasetId
@@ -1112,7 +1114,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const wizardOverride: WizardState = {
         source_dataset_id: picked.sourceDatasetId,
         dataset_ready: true,
-        columns_configured: true,
         dataset_columns: picked.columns,
       };
       agent.send(note, wizardOverride);
