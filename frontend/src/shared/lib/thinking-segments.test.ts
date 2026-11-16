@@ -216,3 +216,19 @@ test("thinking rows left side by side by a dropped step join into one row", () =
     { kind: "thinking", segment: segs[2] },
   ]);
 });
+
+test("a joined row keeps a known span when the other row has no timestamps", () => {
+  const known = { reasoning: "Known.", startedAt: 9000, endedAt: 13000, toolsBefore: 0 };
+  const old = { reasoning: "Old.", startedAt: null, endedAt: 0, toolsBefore: 0 };
+  const join = (a: typeof known | typeof old, b: typeof known | typeof old) =>
+    mergeAdjacentThinking<typeof known | typeof old, never>([
+      { kind: "thinking", segment: a },
+      { kind: "thinking", segment: b },
+    ]);
+  assert.deepEqual(join(old, known), [
+    { kind: "thinking", segment: { reasoning: "Old.\n\nKnown.", startedAt: 9000, endedAt: 13000, toolsBefore: 0 } },
+  ]);
+  assert.deepEqual(join(known, old), [
+    { kind: "thinking", segment: { reasoning: "Known.\n\nOld.", startedAt: 9000, endedAt: 13000, toolsBefore: 0 } },
+  ]);
+});

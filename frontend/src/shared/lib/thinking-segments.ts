@@ -365,10 +365,10 @@ function joinThinking<S extends TimedThinking>(a: S, b: S): S {
     s.startedAt !== null && s.endedAt !== null ? s.endedAt - s.startedAt : null;
   const spanA = span(a);
   const spanB = span(b);
-  // The gap between the two rows is not thinking, so the row shows the sum.
-  const startedAt =
-    spanA !== null && spanB !== null && b.endedAt !== null
-      ? b.endedAt - spanA - spanB
-      : a.startedAt;
-  return { ...a, reasoning: `${a.reasoning}\n\n${b.reasoning}`, startedAt, endedAt: b.endedAt };
+  const reasoning = `${a.reasoning}\n\n${b.reasoning}`;
+  // The gap between the two rows is not thinking, so the row shows the sum of
+  // the known spans. Old saved rows can lack a timestamp; a known span still counts.
+  if (spanA === null && spanB === null) return { ...a, reasoning, endedAt: b.endedAt ?? a.endedAt };
+  const endedAt = (spanB !== null ? b.endedAt : a.endedAt) as number;
+  return { ...a, reasoning, startedAt: endedAt - (spanA ?? 0) - (spanB ?? 0), endedAt };
 }
