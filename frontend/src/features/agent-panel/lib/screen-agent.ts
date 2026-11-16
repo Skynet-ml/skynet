@@ -8,7 +8,7 @@ import { parseSourceKey, type ApiSource } from "@/shared/lib/api-route";
 import { closeThinking } from "@/shared/lib/thinking-segments";
 import type { AgentMessage } from "@/shared/ui/agent/types";
 
-import { stopToolCalls } from "./pending-tool-calls";
+import { shiftPastDropped, stopToolCalls } from "./pending-tool-calls";
 
 // Never shown, so not translated: the agent replies in the user's language
 // either way, and one fixed text lets a reopened chat recognize it.
@@ -509,7 +509,12 @@ export function setupChatSnapshot(
     ...last,
     ...(last.toolCalls ? { toolCalls: stopToolCalls(last.toolCalls, now) } : {}),
     ...(last.thinkingSegments
-      ? { thinkingSegments: closeThinking(last.thinkingSegments, now) }
+      ? {
+          thinkingSegments: closeThinking(
+            shiftPastDropped(last.toolCalls ?? [], last.thinkingSegments),
+            now,
+          ),
+        }
       : {}),
   };
   if (!ended.content && !ended.toolCalls?.length) kept.pop();

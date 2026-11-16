@@ -193,6 +193,19 @@ test("a mid-turn copy ends running and pending tool rows and open thinking", () 
   assert.deepEqual(setupChatSnapshot([user, onlyPending], null, 9), [user]);
 });
 
+test("a mid-turn copy keeps a thinking segment after the tool it followed when a pending row drops", () => {
+  const user = { role: "user" as const, content: "set it" };
+  const pending = { id: "pending:0", tool: "x", reason: "", status: "running" as const, startedAt: 1, endedAt: null };
+  const done = { id: "t0", tool: "y", reason: "", status: "done" as const, startedAt: 1, endedAt: 2 };
+  const reply = {
+    role: "assistant" as const, content: "",
+    toolCalls: [pending, done],
+    thinkingSegments: [{ reasoning: "hm", toolsBefore: 2, startedAt: 3, endedAt: 4 }],
+  };
+  const [, kept] = setupChatSnapshot([user, reply], null, 9);
+  assert.equal(kept?.thinkingSegments?.[0]?.toolsBefore, 1);
+});
+
 test("a mid-turn copy drops a running kickoff but keeps what the user wrote during it", () => {
   const earlier = { role: "assistant" as const, content: "done" };
   const kickoff = { role: "user" as const, content: "kick", hidden: true };

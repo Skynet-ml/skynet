@@ -49,6 +49,24 @@ export function dropPendingToolCalls(calls: readonly AgentToolCall[]): AgentTool
 }
 
 /**
+ * Lower each thinking segment's `toolsBefore` by the placeholders before it
+ * that `calls` will drop. The count includes placeholders, so without this a
+ * segment's row lands one tool too late once they go. Call it with the rows
+ * before the drop.
+ */
+export function shiftPastDropped<S extends { toolsBefore: number }>(
+  calls: readonly AgentToolCall[],
+  segments: readonly S[],
+): readonly S[] {
+  const dropped = calls.flatMap((row, i) => (isPendingToolCall(row) ? [i] : []));
+  if (dropped.length === 0) return segments;
+  return segments.map((s) => {
+    const before = dropped.filter((i) => i < s.toolsBefore).length;
+    return before === 0 ? s : { ...s, toolsBefore: s.toolsBefore - before };
+  });
+}
+
+/**
  * End the rows of a stopped turn: placeholders go, started calls fail now.
  * A stopped stream sends no `tool_end`, and a row left running kept the
  * turn's "Working for" header counting while the agent waited on the user.

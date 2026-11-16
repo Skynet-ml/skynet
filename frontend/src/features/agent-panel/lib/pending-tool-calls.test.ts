@@ -9,6 +9,7 @@ import {
   isPendingToolCall,
   pendingToolCall,
   placeToolCall,
+  shiftPastDropped,
   stopToolCalls,
 } from "./pending-tool-calls.ts";
 
@@ -57,4 +58,21 @@ test("placeholders that never started are dropped, started rows kept", () => {
     dropPendingToolCalls(calls).map((row) => row.id),
     ["c1"],
   );
+});
+
+test("a thinking segment keeps its place when placeholders before it drop", () => {
+  const calls = [
+    started("c1", "read", 1),
+    pendingToolCall("edit", 0, 2),
+    started("c2", "search", 3),
+    pendingToolCall("fetch", 1, 4),
+  ];
+  const segments = [{ toolsBefore: 0 }, { toolsBefore: 1 }, { toolsBefore: 2 }, { toolsBefore: 4 }];
+  // The kept rows are c1, c2: a segment after both placeholders now sits after c2.
+  assert.deepEqual(
+    shiftPastDropped(calls, segments).map((s) => s.toolsBefore),
+    [0, 1, 1, 2],
+  );
+  const none = [started("c1", "read", 1)];
+  assert.equal(shiftPastDropped(none, segments), segments, "no placeholder keeps the same array");
 });
