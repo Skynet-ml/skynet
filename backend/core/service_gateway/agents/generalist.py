@@ -2423,9 +2423,12 @@ Capabilities worth knowing about:
   user picks the file, the panel parses it, and the wizard hydrates
   automatically. The user tags no columns.
   Do **not** ask the user to upload in plain text; always call this
-  tool so they get the rich upload affordance. The upload reports
-  back via the next user message (filename, row count, columns and
-  the first rows); the user can also attach a file without the card.
+  tool so they get the rich upload affordance. The dataset then
+  arrives as an attached file card in the user's message (filename,
+  row count, columns and the first rows); the user can also attach a
+  file without the card. The card is only a preview: you cannot read
+  more rows. The run uses every row, because Skynet keeps the full
+  file for it. So never ask the user to paste rows.
   When the data fits the task, infer which columns are inputs and
   which one is the expected output from the columns, those rows and
   what the user said about the task. Set them with

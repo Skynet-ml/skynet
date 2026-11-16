@@ -9,7 +9,9 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 
-import type { AgentToolCall } from "@/shared/ui/agent/types";
+import type { AttachedFile } from "@/shared/ui/agent/pasted-text";
+import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
+import { datasetChip, draftHasChip, putDatasetChip } from "../lib/dataset-chip";
 import type { WizardState } from "../lib/types";
 import type { ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 
@@ -140,6 +142,9 @@ export function applyDatasetUpload(
   };
 }
 
+/** The options a chat send takes with its note: the message's files. */
+type SendOptions = { media?: AgentMessage["media"] };
+
 /**
  * Queue chat sends that run after the next render.
  *
@@ -150,25 +155,172 @@ export function applyDatasetUpload(
  *   send: The chat send function.
  *
  * Returns:
- *   A function that queues one note and its turn override.
+ *   A function that queues one note, its turn override and its send options.
  */
 export function useSendAfterRender(
-  send: (note: string, override?: WizardState) => void,
-): (note: string, override?: WizardState) => void {
+  send: (note: string, override?: WizardState, options?: SendOptions) => void,
+): (note: string, override?: WizardState, options?: SendOptions) => void {
   // A queue, so two sends in one tick both go out, in order.
-  const [pending, setPending] = React.useState<Array<{ note: string; override?: WizardState }>>(
-    [],
-  );
+  const [pending, setPending] = React.useState<
+    Array<{ note: string; override?: WizardState; options?: SendOptions }>
+  >([]);
   React.useEffect(() => {
     if (pending.length === 0) return;
     // Drop only what this effect sends: a send queued after this render
     // but before this effect is still in the queue.
     setPending((queue) => queue.slice(pending.length));
-    for (const item of pending) send(item.note, item.override);
+    for (const item of pending) send(item.note, item.override, item.options);
   }, [pending, send]);
   return React.useCallback(
-    (note, override) => setPending((queue) => [...queue, { note, override }]),
+    (note, override, options) => setPending((queue) => [...queue, { note, override, options }]),
     [],
+  );
+}
+
+/** A confirmed dataset whose card waits in the draft. */
+type DraftDataset =
+  | {
+      kind: "upload";
+      chip: AttachedFile;
+      dataset: ConfirmedDataset;
+      staging: boolean;
+      stagedId?: string;
+    }
+  | { kind: "library"; chip: AttachedFile; picked: ConfirmedLibraryDataset };
+
+/** Build the agent's context for a library pick: its name, row count and column roles. */
+function libraryPickNote(picked: ConfirmedLibraryDataset): string {
+  const mappingLine = picked.columns
+    .map((c) => {
+      const role = picked.columnRoles[c];
+      if (role === "ignore") return null;
+      return `- ${c} → ${role}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+  return formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
+    p1: picked.name,
+    p2: picked.rowCount,
+    p3: mappingLine,
+  });
+}
+
+/**
+ * Hold a confirmed dataset in the composer draft until Send, as a PDF waits (SKY-780).
+ *
+ * A confirm puts one file card in the draft and stages the rows. Send
+ * applies the dataset to the wizard and gives the turn override. A card the
+ * user removes before Send changes nothing.
+ *
+ * Args:
+ *   setDraft: Sets the composer draft; it takes an update function.
+ *   stage: Stages the rows on the backend; resolves to the staged id, or
+ *     undefined when staging failed.
+ *   wizard: The shared wizard context, or null when no wizard is mounted.
+ *
+ * Returns:
+ *   ``attach`` and ``attachLibrary`` put a card in the draft. ``staging``
+ *   tells if Send must wait for the rows. ``take`` applies the dataset of a
+ *   draft on Send and returns its turn override, or null for no dataset.
+ */
+export function useDatasetDraft({
+  setDraft,
+  stage,
+  wizard,
+}: {
+  setDraft: (update: (draft: string) => string) => void;
+  stage: (dataset: ConfirmedDataset) => Promise<string | undefined>;
+  wizard: DatasetUploadWizard | null;
+}): {
+  attach: (dataset: ConfirmedDataset) => void;
+  attachLibrary: (picked: ConfirmedLibraryDataset) => void;
+  staging: (draft: string) => boolean;
+  take: (draft: string) => { override: WizardState | undefined } | null;
+} {
+  const [pending, setPending] = React.useState<DraftDataset | null>(null);
+  // Send reads the latest dataset in the same tick as a confirm or a staging end.
+  const pendingRef = React.useRef<DraftDataset | null>(null);
+  const update = React.useCallback((next: DraftDataset | null) => {
+    pendingRef.current = next;
+    setPending(next);
+  }, []);
+
+  const putCard = React.useCallback(
+    (next: DraftDataset) => {
+      const earlier = pendingRef.current?.chip ?? null;
+      update(next);
+      setDraft((draft) => putDatasetChip(draft, next.chip, earlier));
+    },
+    [setDraft, update],
+  );
+
+  const attach = React.useCallback(
+    (dataset: ConfirmedDataset) => {
+      const next: DraftDataset = {
+        kind: "upload",
+        chip: datasetChip(dataset.fileName, datasetAttachedNote(dataset)),
+        dataset,
+        staging: true,
+      };
+      putCard(next);
+      // Staging is best-effort: with no staged id the agent gets a clear
+      // 422 on submit, and the user can attach the file again.
+      void stage(dataset)
+        .catch(() => undefined)
+        .then((stagedId) => {
+          if (pendingRef.current === next) update({ ...next, staging: false, stagedId });
+        });
+    },
+    [putCard, stage, update],
+  );
+
+  const attachLibrary = React.useCallback(
+    (picked: ConfirmedLibraryDataset) =>
+      putCard({ kind: "library", chip: datasetChip(picked.name, libraryPickNote(picked)), picked }),
+    [putCard],
+  );
+
+  const staging = React.useCallback(
+    (draft: string) =>
+      pending?.kind === "upload" && pending.staging && draftHasChip(draft, pending.chip),
+    [pending],
+  );
+
+  const take = React.useCallback(
+    (draft: string): { override: WizardState | undefined } | null => {
+      const current = pendingRef.current;
+      if (!current || !draftHasChip(draft, current.chip)) return null;
+      update(null);
+      if (current.kind === "library") {
+        const { picked } = current;
+        // By reference: the run reads the rows from ``source_dataset_id`` on
+        // submit, so nothing stages.
+        if (wizard) {
+          wizard.setField("source_dataset_id", picked.sourceDatasetId, "user");
+          wizard.setField("dataset_columns", picked.columns, "user");
+          wizard.setField("dataset_ready", true, "user");
+          wizard.setField("columns_configured", true, "user");
+        }
+        return { override: libraryPickOverride(picked) };
+      }
+      const { detail, override } = applyDatasetUpload(wizard, current.dataset, current.stagedId);
+      // Persist before dispatch so the wizard can replay it after navigation;
+      // the listener in use-unified-wizard reads and clears this key on mount.
+      try {
+        window.sessionStorage.setItem("wizard:staged-dataset", JSON.stringify(detail));
+      } catch {
+        // sessionStorage can throw under quota or private-mode policy; the
+        // live event below still covers the same-page case.
+      }
+      window.dispatchEvent(new CustomEvent("wizard:dataset-staged", { detail }));
+      return { override };
+    },
+    [update, wizard],
+  );
+
+  return React.useMemo(
+    () => ({ attach, attachLibrary, staging, take }),
+    [attach, attachLibrary, staging, take],
   );
 }
 
