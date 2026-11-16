@@ -51,8 +51,8 @@ export function dropPendingToolCalls(calls: readonly AgentToolCall[]): AgentTool
 /**
  * Lower each thinking segment's `toolsBefore` by the placeholders before it
  * that `calls` will drop. The count includes placeholders, so without this a
- * segment's row lands one tool too late once they go. Call it with the rows
- * before the drop.
+ * segment's row lands one tool too late for each placeholder before it once
+ * they go. Call it with the rows before the drop.
  */
 export function shiftPastDropped<S extends { toolsBefore: number }>(
   calls: readonly AgentToolCall[],
