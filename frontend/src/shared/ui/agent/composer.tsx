@@ -622,8 +622,9 @@ export function Composer({
       toast.info(sendBlocked);
       return;
     }
+    // The layout effect on value shrinks the textarea when the host clears the
+    // draft; a Send the host refuses keeps the draft and its height.
     onSubmit();
-    resetHeight();
   };
 
   const editPending = async (id: string) => {

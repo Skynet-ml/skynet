@@ -610,6 +610,18 @@ void test("a draft cleared from outside shrinks the textarea back (SKY-780)", as
   assert.equal(height, "", "the CSS height applies again");
 });
 
+void test("a Send the host refuses keeps the textarea height (SKY-780)", async () => {
+  // The panel refuses a Send while a dataset stages, and keeps the draft.
+  const composer = await mount("line one\nline two\nline three", false);
+  composer.textarea.style.height = "90px";
+  await composer.press("Enter");
+  const height = composer.textarea.style.height;
+  const sent = [...composer.sent];
+  await composer.unmount();
+  assert.deepEqual(sent, ["submit"]);
+  assert.equal(height, "90px", "the multi-line draft stays visible");
+});
+
 // Opens the /model picker and types a filter into it.
 async function openPicker(
   filter: string,
