@@ -310,6 +310,17 @@ test("a hosted run sends no hardening job id", async () => {
   assert.equal(reads, 0);
 });
 
+test("a run whose contract names its own metric sends no hardening job id (SKY-749)", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return { id: "job-1", status: "done" } as never;
+  };
+  // The job hardened metric.py, which the run does not use.
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read, "metric.py:score"), null);
+  assert.equal(reads, 0);
+});
+
 test("a repository run sends each secret with its allowed hosts as a list", () => {
   const state = repoState();
   state.task.repo = {
@@ -538,6 +549,8 @@ test("the metric entry comes from the draft optimize.toml, else from the reposit
   assert.equal(contractMetricEntry('[metric.extra]\nentry = "x.py:f"\n', undefined), null);
   assert.equal(contractMetricEntry('[metric]\n# entry = "metric.py:score"\n', undefined), null);
   assert.equal(contractMetricEntry('[metric]\nentry = "  "\n', undefined), null);
+  // An array-of-tables header ends the [metric] table too.
+  assert.equal(contractMetricEntry('[metric]\nfiles = ["a"]\n[[tool.x]]\nentry = "y"\n', undefined), null);
   assert.equal(contractMetricEntry(undefined, undefined), null);
 });
 

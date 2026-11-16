@@ -60,9 +60,9 @@ export function contractMetricEntry(draft: string | undefined, repoFile: string 
   const toml = draft?.trim() ? draft : (repoFile ?? "");
   let inMetric = false;
   for (const line of toml.split("\n")) {
-    const header = /^\s*\[([^[\]]+)\]\s*(?:#.*)?$/.exec(line);
+    const header = /^\s*(\[\[?)([^[\]]+)\]\]?\s*(?:#.*)?$/.exec(line);
     if (header) {
-      inMetric = header[1]?.trim() === "metric";
+      inMetric = header[1] === "[" && header[2]?.trim() === "metric";
       continue;
     }
     if (!inMetric) continue;
@@ -184,7 +184,7 @@ const hasModel = (config: ModelConfig | null): config is ModelConfig =>
  * runner scores with the run's metric (SKY-378).
  *
  * A contract that names its own metric sends no code: the run scores with
- * that entry (SKY-749).
+ * that entry, and the run attaches no hardening job (SKY-749).
  *
  * Args:
  *   workspace: The wizard's workspace, with `metric.py` and its model.
@@ -400,21 +400,27 @@ const FINISHED_HARDENING: ReadonlySet<HardeningStatus> = new Set(["clean_stop", 
  * Hardening runs only on the local backend, so a hosted run's worker cannot
  * find the job; a hosted run sends no id and ships no suite.
  *
+ * The hardening job hardens the wizard's metric.py. A contract that names its
+ * own metric scores with that entry instead, so the job's suite would make
+ * claims about a metric the run never used (SKY-749).
+ *
  * Args:
  *   runOn: The backend the run goes to.
  *   draftId: The setup's hardening draft id, or null when it never had one.
  *   read: Reads the draft's newest hardening job from the local backend.
+ *   metricEntry: The `[metric] entry` the contract names, if any.
  *
  * Returns:
- *   The job id, or null for a hosted run, a setup with no finished job, or a
- *   failed read; the run then submits without one.
+ *   The job id, or null for a hosted run, a contract metric entry, a setup
+ *   with no finished job, or a failed read; the run then submits without one.
  */
 export async function finishedHardeningJobId(
   runOn: ApiSource,
   draftId: string | null,
   read: (draftId: string) => Promise<HardeningJob | null>,
+  metricEntry: string | null = null,
 ): Promise<string | null> {
-  if (runOn !== "local" || !draftId) return null;
+  if (runOn !== "local" || !draftId || metricEntry) return null;
   try {
     const job = await read(draftId);
     return job && FINISHED_HARDENING.has(job.status) ? job.id : null;

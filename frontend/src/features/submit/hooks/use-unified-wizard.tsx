@@ -732,6 +732,7 @@ export function WizardV2Provider({
         runOn,
         readSessionValue(WIZARD_HARDENING_KEY),
         getLatestHardeningJob,
+        metricEntry,
       );
       const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
       const result = await submitRepoRun(
