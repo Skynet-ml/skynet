@@ -97,7 +97,7 @@ class WizardUpdateRequest(BaseModel):
         alias="model_config",
         description=(
             "Optimizer step: task model config dict (name required, other fields optional). "
-            "Put the reasoning level in extra.reasoning_effort, a level the model lists in GET /models."
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
         ),
     )
     reflection_model: dict[str, Any] | None = Field(
@@ -105,7 +105,7 @@ class WizardUpdateRequest(BaseModel):
         alias="reflection_model_config",
         description=(
             "Optimizer step: reflection model config dict, the model that proposes new versions. "
-            "Put the reasoning level in extra.reasoning_effort, a level the model lists in GET /models."
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
         ),
     )
     spending_limit_usd: float | None = Field(
