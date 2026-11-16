@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "输入时发现",
   "submit.v2.metric.issue.metric_code": "请添加指标代码。",
   "submit.v2.metric.issue.metric_code.guided": "还没有为结果评分的代码。请让助手编写。",
+  "submit.v2.metric.repo_entry": "使用仓库的指标：",
   "submit.v2.metric.title": "代码和指标",
   "submit.v2.metric.title.guided": "如何运行以及如何评分",
   "submit.v2.optimizer.budget.desc": "评分器运行次数限制评分的候选数量，费用上限限制花费。",

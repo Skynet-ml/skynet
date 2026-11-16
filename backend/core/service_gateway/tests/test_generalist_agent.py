@@ -189,6 +189,29 @@ def test_screen_rejects_fields_off_the_visible_screen() -> None:
     assert "task_objective" in err.split("may set only", 1)[1]
 
 
+def test_screen_refusal_names_each_fields_screen() -> None:
+    """The refusal says where each refused field lives, so the agent can tell the user (SKY-744)."""
+    patch = {"spending_limit_usd": 5, "repository": "acme/bot", "nonsense": 1}
+    err = validate_wizard_screen("update_wizard_state", patch, WizardState(wizard_screen="brief"))
+    assert err is not None
+    assert "spending_limit_usd is on the plan or budget screen" in err
+    assert "repository is on the artifact screen" in err
+    assert "nonsense is on no wizard screen" in err
+    assert "nothing was saved" in err
+
+
+def test_screen_refuses_every_write_after_a_move() -> None:
+    """After Continue or Back this turn, even a field of the old screen is refused and the new screen named."""
+    err = validate_wizard_screen(
+        "update_wizard_state", {"task_objective": "x"}, WizardState(wizard_screen="brief"), moved_to="artifact"
+    )
+    assert err is not None
+    assert err.startswith("Not on screen")
+    assert "'artifact'" in err
+    assert "nothing was saved" in err
+    assert "task_objective" in err
+
+
 def test_screen_plan_takes_engine_models_and_budget() -> None:
     """Standard's one plan screen holds the engine, the models and the budget."""
     patch = {
@@ -282,6 +305,47 @@ async def test_wrap_refuses_off_screen_patch_without_calling_tool() -> None:
     assert result.startswith("Not on screen")
     end = next(e for e in events if e["event"] == "tool_end")
     assert end["data"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_scoped_tool_refuses_an_off_screen_field_by_name() -> None:
+    """A field the scoped tool does not list reaches the screen check, not dspy's generic error (SKY-744)."""
+    state = cast(WizardState, {**_READY, "wizard_screen": "brief"})
+    fake = _make_fake_tool("update_wizard_state", return_value="should not run")
+    fake.args = {"task_objective": {"type": "string"}, "spending_limit_usd": {"type": "number"}}
+    tool = _wrap_tool_with_approval(
+        scope_wizard_tool(fake, state),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=state,
+    )
+    assert "spending_limit_usd" not in tool.args
+    # pi_react calls tools from a worker thread; the wrapper waits on the loop.
+    result = await asyncio.to_thread(tool, spending_limit_usd=5)
+    assert isinstance(result, str)
+    assert "spending_limit_usd is on the plan or budget screen" in result
+
+
+@pytest.mark.asyncio
+async def test_wrap_refuses_a_write_after_the_screen_moved() -> None:
+    """Once Continue ran this turn, a write for the old screen is refused and never runs (SKY-744)."""
+    flag = _TurnAuthoringFlag()
+    state = cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact"})
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("update_wizard_state", return_value="should not run"),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=state,
+        authoring_flag=flag,
+    )
+    await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    result = await tool.func._async_body(task_objective="Sort refunds")
+    assert result.startswith("Not on screen")
+    assert "'artifact'" in result
 
 
 def test_system_prompt_names_the_screen_rule() -> None:
@@ -630,7 +694,7 @@ async def test_continue_judges_this_turns_writes() -> None:
     """A field written earlier this turn counts toward the screen being done."""
     turn = _TurnAuthoringFlag()
     turn.wizard_patch["task_objective"] = "Sort tickets"
-    result = await _nav_tools({"wizard_screen": "brief", "screen_issue": "stale"}, turn)[
+    result = await _nav_tools({"wizard_screen": "brief", "screen_issue": "stale", "next_screen": "artifact"}, turn)[
         "continue_to_next_screen"
     ].acall()
     assert result["screen_nav"] == {"action": "continue", "from": "brief"}
@@ -641,24 +705,31 @@ async def test_continue_returns_to_the_screen_a_go_back_left() -> None:
     """After a go-back edit, Continue jumps back once every screen between is done."""
     state = {**_READY, "wizard_screen": "optimizer", "return_screen": "budget"}
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget", "jump": True}
+    assert "heads back to the 'budget' screen, or stops earlier" in result["message"]
 
 
 @pytest.mark.asyncio
 async def test_continue_moves_one_screen_when_a_screen_between_is_not_done() -> None:
     """A screen between that still needs work keeps the plain one-screen move."""
-    state = {**_READY, "reflection_model_config": {}, "wizard_screen": "optimizer", "return_screen": "budget"}
+    state = {
+        **_READY,
+        "reflection_model_config": {},
+        "wizard_screen": "optimizer",
+        "return_screen": "budget",
+        "next_screen": "models",
+    }
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "models"}
 
 
 @pytest.mark.parametrize("back", ["models", "brief", "nowhere"])
 @pytest.mark.asyncio
 async def test_continue_ignores_a_return_screen_that_is_not_a_jump_ahead(back: str) -> None:
-    """The next screen, an earlier one or an unknown one gives no ``to``."""
-    state = {**_READY, "wizard_screen": "optimizer", "return_screen": back}
+    """The next screen, an earlier one or an unknown one moves to the client's next screen."""
+    state = {**_READY, "wizard_screen": "optimizer", "return_screen": back, "next_screen": "models"}
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "models"}
 
 
 def test_snapshot_tells_the_agent_where_continue_returns() -> None:
@@ -671,9 +742,13 @@ def test_snapshot_tells_the_agent_where_continue_returns() -> None:
 @pytest.mark.asyncio
 async def test_continue_moves_on_and_saves_its_note() -> None:
     """A done screen moves on, and the optional note is kept like ``remember_for_later``."""
-    state = {**_READY, "wizard_screen": "brief"}
-    result = await _nav_tools(state)["continue_to_next_screen"].acall(note="keep it cheap")
-    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
+    state = {**_READY, "wizard_screen": "brief", "next_screen": "artifact"}
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall(note="keep it cheap")
+    assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "artifact"}
+    assert turn.moved_to == "artifact"
+    assert "'artifact' screen" in result["message"]
+    assert "Set none of its fields now" in result["message"]
     assert result["wizard_state"]["screen_notes"] == [{"screen": "brief", "note": "keep it cheap"}]
 
 
@@ -685,9 +760,46 @@ async def test_continue_never_leaves_the_overview() -> None:
 
 
 @pytest.mark.asyncio
+async def test_continue_after_a_write_this_turn_does_not_name_a_stale_screen() -> None:
+    """A write this turn can change the order (Standard's data mode turns optimizer into plan), so the text names no screen."""
+    turn = _TurnAuthoringFlag()
+    turn.wizard_patch["data_mode"] = "pairs"
+    state = {**_READY, "wizard_screen": "source", "next_screen": "optimizer"}
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "source"}
+    assert "moves on to the next screen" in result["message"]
+    assert "'optimizer'" not in result["message"]
+    assert turn.moved_to == ""
+
+
+@pytest.mark.asyncio
+async def test_continue_to_the_last_screen_names_it() -> None:
+    """From Harden, Continue names the Overview, the last screen (SKY-744)."""
+    state = {**_READY, "wizard_screen": "harden", "next_screen": "overview"}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "harden", "to": "overview"}
+
+
+@pytest.mark.parametrize("sent", [None, "nowhere"])
+@pytest.mark.asyncio
+async def test_continue_without_a_known_next_screen_names_no_screen(sent: str | None) -> None:
+    """A missing or unknown ``next_screen`` still gives ``to``; the client then moves on one screen."""
+    state = {**_READY, "wizard_screen": "brief", **({"next_screen": sent} if sent else {})}
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
+    assert "moves on to the next screen" in result["message"]
+    assert turn.moved_to == ""
+    err = validate_wizard_screen("update_wizard_state", {"task_objective": "x"}, cast(WizardState, state), moved_to="")
+    assert err is not None
+    assert "moved to the next screen" in err
+
+
+@pytest.mark.asyncio
 async def test_go_back_only_to_an_earlier_screen() -> None:
     """Going back names an earlier screen and carries the request."""
-    tools = _nav_tools({"wizard_screen": "budget"})
+    turn = _TurnAuthoringFlag()
+    tools = _nav_tools({"wizard_screen": "budget"}, turn)
     result = await tools["go_back_to_screen"].acall(screen_id="brief", request="Make it about refunds")
     assert result["screen_nav"] == {
         "action": "back",
@@ -695,6 +807,9 @@ async def test_go_back_only_to_an_earlier_screen() -> None:
         "screen": "brief",
         "request": "Make it about refunds",
     }
+    assert turn.moved_to == "brief"
+    assert "'brief' screen" in result["message"]
+    assert "takes the next turn" in result["message"]
     assert isinstance(await tools["go_back_to_screen"].acall(screen_id="metric", request="x"), str)
     assert isinstance(await tools["go_back_to_screen"].acall(screen_id="brief", request=" "), str)
 
@@ -803,6 +918,25 @@ def test_scope_wizard_tool_names_only_current_screen_fields() -> None:
     assert set(tool.args) == {"spending_limit_usd", "job_name", "job_description", "is_private"}
     assert "set only spending_limit_usd" in tool.desc
     assert "optimizer_choice" not in tool.desc
+
+
+def test_snapshot_drops_the_next_screen() -> None:
+    """``next_screen`` feeds Continue only; the agent never reads it (SKY-744)."""
+    on_screen = screen_snapshot(cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact"}))
+    cloned = screen_snapshot(
+        cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact", "cloned_run": True})
+    )
+    assert "next_screen" not in on_screen
+    assert "next_screen" not in cloned
+
+
+def test_prompts_forbid_a_saved_claim_after_a_move() -> None:
+    """Both prompts say ``screen_nav`` names the new screen and no field is saved after a move (SKY-744)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "After a move, write no field this turn, and never say a field is saved" in prompt
+    instructions = " ".join(screen_signature("brief").instructions.split())
+    assert "Never claim a field is saved after a move" in instructions
+    assert "``screen_nav.to`` (Continue, when present) or ``screen_nav.screen`` (Back)" in instructions
 
 
 def test_scope_wizard_tool_unchanged_without_a_screen() -> None:
@@ -1193,7 +1327,7 @@ async def test_continue_after_a_repository_write_ignores_a_stale_artifact_kind()
         authoring_flag=flag,
     )
     assert await update.func._async_body(repository="acme/app") == "ok"
-    result = await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    result = await _nav_tools({**state, "next_screen": "source"}, flag)["continue_to_next_screen"].acall()
     assert result["screen_nav"] == {"action": "continue", "from": "artifact"}
 
 

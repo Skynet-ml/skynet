@@ -25,6 +25,11 @@ Object.assign(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 after(() => dom.window.close());
+// jsdom has no matchMedia. A live thinking row's dots read it on mount; a
+// reduced-motion answer keeps their timer off.
+Object.assign(dom.window, {
+  matchMedia: (query: string) => ({ matches: query.includes("prefers-reduced-motion"), media: query, addEventListener() {}, removeEventListener() {} }),
+});
 
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
@@ -46,7 +51,14 @@ async function mount(
     earlier,
     plan,
     stepKind,
-  }: { streaming?: boolean; earlier?: Props["earlier"]; plan?: string; stepKind?: Props["stepKind"] } = {},
+    thinking = [],
+  }: {
+    streaming?: boolean;
+    earlier?: Props["earlier"];
+    plan?: string;
+    stepKind?: Props["stepKind"];
+    thinking?: Props["thinking"];
+  } = {},
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -55,7 +67,7 @@ async function mount(
     act(async () => {
       root.render(
         <TurnActivity
-          thinking={[]}
+          thinking={thinking}
           streaming={live}
           durationMs={5_000}
           steps={steps}
@@ -232,5 +244,322 @@ void it("folds a run of reads and searches apart from the edits after it", async
   const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
   assert.equal(groups.length, 2, "one group for the exploration, one for the edits");
   assert.match(groups[0]?.textContent ?? "", /xplored/, "the first group names what it explored");
+  await unmount();
+});
+
+// SKY-743: plain rows, group summaries, setup-write rows and rows in an open
+// group all sit the same distance apart: each row has py-1, and nothing
+// between them adds a gap, padding or margin.
+void it("spaces every step-like row the same, in a group or out of it", async () => {
+  const { StepRow } = await import("./activity-steps");
+  const { Wrench } = await import("@/shared/ui/icons");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const Nothing = () => null;
+  const steps: Props["steps"] = [
+    { call: call("edit-a"), isRetry: false, index: 0 },
+    { call: call("write-b"), isRetry: false, index: 1 },
+    { call: call("ask"), isRetry: false, index: 2, card: true },
+    { call: call("read-c"), isRetry: false, index: 3 },
+  ];
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={steps}
+        stepKind={(c) => (c.id.startsWith("read") ? "read" : "edit")}
+        renderStep={(c) =>
+          // A card whose component renders nothing once it mounts.
+          c.id === "ask" ? <Nothing /> : (
+            <StepRow icon={Wrench} label={c.id} status="done">
+              {c.id === "write-b" ? <span data-details="" /> : undefined}
+            </StepRow>
+          )
+        }
+      />,
+    );
+  });
+  const turn = await openTurn(host);
+  const summary = [...host.querySelectorAll("button[aria-expanded]")].find((b) => b !== turn);
+  assert.ok(summary, "the edits fold under one summary line");
+  await act(async () => (summary as HTMLButtonElement).click());
+
+  const label = (id: string) =>
+    [...host.querySelectorAll("span")].find((s) => s.textContent === id)!.parentElement!;
+  const rows = [summary, label("edit-a"), label("write-b"), label("read-c")];
+  for (const row of rows) assert.ok(row.classList.contains("py-1"), `${row.textContent} has py-1`);
+
+  const SPACING = /^(gap|gap-y|space-y|p|py|pt|pb|m|my|mt|mb)-/;
+  // The history is the block right after the turn row.
+  const history = turn.parentElement!.nextElementSibling!;
+  for (const row of rows) {
+    for (let node = row.parentElement; node && node !== history; node = node.parentElement) {
+      const extra = [...node.classList].filter((c) => SPACING.test(c));
+      assert.deepEqual(extra, [], `nothing between rows adds spacing: ${node.className}`);
+    }
+  }
+  // jsdom applies no CSS, so this checks that an empty padded box carries the class that hides it.
+  const empty = [...history.querySelectorAll("div")].filter(
+    (d) => d.childNodes.length === 0 && d.className.includes("py-"),
+  );
+  assert.equal(empty.length, 1, "the empty card keeps its padded box");
+  assert.ok(empty[0]!.classList.contains("empty:hidden"), "an empty card's padded box hides itself");
+
+  // A row with details is a toggle with a chevron; a row without them is neither.
+  assert.equal(label("write-b").tagName, "BUTTON");
+  assert.ok(label("write-b").querySelector("svg:last-child"), "the row with details has a chevron");
+  assert.equal(label("edit-a").tagName, "DIV");
+  assert.equal(label("edit-a").querySelectorAll("svg").length, 1, "the row without details shows only its icon");
+  await act(async () => root.unmount());
+});
+
+void it("drops a card that renders nothing, so it does not cut a group in two", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={[
+          { call: call("edit-a"), isRetry: false, index: 0 },
+          { call: call("quiet"), isRetry: false, index: 1, card: true },
+          { call: call("edit-b"), isRetry: false, index: 2 },
+        ]}
+        stepKind={() => "edit"}
+        // A setup write that changed nothing renders nothing, as in the setup chat.
+        renderStep={(c) => (c.id === "quiet" ? null : <span data-step={c.id}>{c.id}</span>)}
+      />,
+    );
+  });
+  const row = await openTurn(host);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
+  assert.equal(groups.length, 1, "both edits fold under one summary line");
+  await act(async () => (groups[0] as HTMLButtonElement).click());
+  assert.ok(host.querySelector('[data-step="edit-a"]') && host.querySelector('[data-step="edit-b"]'));
+  await act(async () => root.unmount());
+});
+
+void it("keeps the live header when the only call is a card that renders nothing", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = (status: Call["status"]) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[]}
+          streaming
+          durationMs={5_000}
+          steps={[{ call: call("write", status), isRetry: false, index: 0, card: status !== "running" }]}
+          // A running setup write is a step row; one that ends with no change renders nothing.
+          renderStep={(c) => (c.status === "running" ? <span data-step={c.id}>{c.id}</span> : null)}
+        />,
+      );
+    });
+  await render("running");
+  assert.ok(turnRow(host, "working"), "the live header shows while the write runs");
+  await render("done");
+  assert.ok(turnRow(host, "working"), "the live header stays when the write ends with no change");
+  await act(async () => root.unmount());
+});
+
+/** One thinking segment; finished and saved unless told otherwise. */
+function segment(
+  reasoning: string,
+  toolsBefore: number,
+  { endedAt = 1_800, streaming = false }: { endedAt?: number | null; streaming?: boolean } = {},
+): Props["thinking"][number] {
+  return { reasoning, startedAt: 1_500, endedAt, streaming, toolsBefore };
+}
+
+/** The "Thought for" rows; the test loads no catalog, so each shows its key. */
+function thoughtRows(host: HTMLElement): Element[] {
+  return [...host.querySelectorAll("button")].filter((b) => /thought_(for|briefly)/.test(b.textContent ?? ""));
+}
+
+/** True when `a` comes before `b` in the document. */
+function before(a: Node, b: Node): boolean {
+  return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+// SKY-773: a finished stretch of reasoning is one folded row in time order.
+void it("shows a finished thinking segment as a folded row between the tools it ran between", async () => {
+  const { host, unmount } = await mount(
+    [
+      { call: call("edit-a"), isRetry: false, index: 0 },
+      { call: call("edit-b"), isRetry: false, index: 1 },
+    ],
+    { thinking: [segment("Check the config first.", 1)], stepKind: () => "edit" },
+  );
+  const turn = await openTurn(host);
+  const rows = thoughtRows(host);
+  assert.equal(rows.length, 1, host.innerHTML);
+  const row = rows[0]!;
+  assert.equal(row.getAttribute("aria-expanded"), "false", "the row starts folded");
+  assert.ok(!host.textContent?.includes("Check the config first."), "the reasoning stays hidden");
+  const editA = host.querySelector('[data-step="edit-a"]');
+  const editB = host.querySelector('[data-step="edit-b"]');
+  assert.ok(editA && editB && turn, "both edits show once the turn opens");
+  assert.ok(before(editA, row), "the row comes after edit-a");
+  assert.ok(before(row, editB), "the row comes before edit-b");
+  await act(async () => (row as HTMLButtonElement).click());
+  assert.ok(host.textContent?.includes("Check the config first."), "the row opens to the reasoning");
+  await unmount();
+});
+
+void it("shows no row for the segment still being thought, only the thinking line", async () => {
+  const { host, unmount } = await mount([{ call: call("read-a"), isRetry: false, index: 0 }], {
+    streaming: true,
+    thinking: [segment("Still working it out.", 1, { endedAt: null, streaming: true })],
+  });
+  // A live turn keeps a timer; unmount even when an assertion fails, or the run hangs.
+  try {
+    const liveRows = [...host.querySelectorAll("button")].filter((b) =>
+      /shared\.agent\.thinking\b/.test(b.textContent ?? ""),
+    );
+    assert.equal(liveRows.length, 0, host.innerHTML);
+    assert.equal(thoughtRows(host).length, 0, host.innerHTML);
+    assert.ok(host.querySelector('[role="status"]'), "the thinking line shows");
+  } finally {
+    await unmount();
+  }
+});
+
+// In a live turn every segment has streaming set; one with an end time is finished.
+void it("shows a finished segment of a live turn as a row between its tools", async () => {
+  const { host, unmount } = await mount(
+    [
+      { call: call("edit-a"), isRetry: false, index: 0 },
+      { call: call("edit-b"), isRetry: false, index: 1 },
+    ],
+    { streaming: true, thinking: [segment("Done.", 1, { streaming: true })], stepKind: () => "edit" },
+  );
+  try {
+    const rows = thoughtRows(host);
+    assert.equal(rows.length, 1, host.innerHTML);
+    const editA = host.querySelector('[data-step="edit-a"]');
+    const editB = host.querySelector('[data-step="edit-b"]');
+    assert.ok(editA && editB, host.innerHTML);
+    assert.ok(before(editA, rows[0]!), "the row comes after edit-a");
+    assert.ok(before(rows[0]!, editB), "the row comes before edit-b");
+  } finally {
+    await unmount();
+  }
+});
+
+void it("shows no row for a segment without reasoning, so it does not cut a group in two", async () => {
+  const { host, unmount } = await mount(
+    [
+      { call: call("edit-a"), isRetry: false, index: 0 },
+      { call: call("edit-b"), isRetry: false, index: 1 },
+    ],
+    { thinking: [segment("", 1)], stepKind: () => "edit" },
+  );
+  const row = await openTurn(host);
+  assert.equal(thoughtRows(host).length, 0, host.innerHTML);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
+  assert.equal(groups.length, 1, "both edits fold under one summary line");
+  await unmount();
+});
+
+void it("gives a finished turn with only thinking its Worked for row", async () => {
+  const { host, unmount } = await mount([], { thinking: [segment("Nothing to run.", 0)] });
+  await openTurn(host);
+  assert.equal(thoughtRows(host).length, 1, host.innerHTML);
+  await unmount();
+});
+
+void it("hides the thinking rows while the finished turn is folded", async () => {
+  const { host, unmount } = await mount([{ call: call("read-a"), isRetry: false, index: 0 }], {
+    thinking: [segment("Look first.", 0)],
+  });
+  assert.equal(turnRow(host).getAttribute("aria-expanded"), "false");
+  assert.ok(thoughtRows(host).every((b) => !shown(b)), host.innerHTML);
+  await openTurn(host);
+  assert.equal(thoughtRows(host).length, 1, host.innerHTML);
+  await unmount();
+});
+
+// A live segment can reopen (ReActV2's message_reset) and lose its row; the
+// header must not leave and come back with it.
+void it("keeps the live header away while the only history is a thinking row", async () => {
+  const { host, unmount } = await mount([], { streaming: true, thinking: [segment("Plan it.", 0)] });
+  try {
+    assert.ok(
+      ![...host.querySelectorAll("span")].some((s) => /shared\.agent\.working/.test(s.textContent ?? "")),
+      host.innerHTML,
+    );
+    assert.equal(thoughtRows(host).length, 0, host.innerHTML);
+    assert.ok(host.querySelector('[role="status"]'), "the thinking line shows");
+  } finally {
+    await unmount();
+  }
+});
+
+void it("keeps an opened thinking row open when a dropped card merges the bursts before it", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const steps: Props["steps"] = [
+    { call: call("edit-a"), isRetry: false, index: 0 },
+    { call: call("ask"), isRetry: false, index: 1, card: true },
+    { call: call("edit-b"), isRetry: false, index: 2 },
+  ];
+  const render = (cardShows: boolean) =>
+    act(async () => {
+      root.render(
+        <TurnActivity
+          thinking={[segment("Wrap up.", 3)]}
+          streaming={false}
+          durationMs={5_000}
+          steps={steps}
+          stepKind={() => "edit"}
+          renderStep={(c) => (c.id === "ask" && !cardShows ? null : <span data-step={c.id}>{c.id}</span>)}
+        />,
+      );
+    });
+  // Unmount also on a failure, so the next test starts clean. Compare nodes
+  // with ===: assert.equal on a failure prints a jsdom node, which hangs.
+  try {
+    await render(true);
+    await openTurn(host);
+    const row = thoughtRows(host)[0];
+    assert.ok(row, host.innerHTML);
+    await act(async () => (row as HTMLButtonElement).click());
+    assert.equal(row.getAttribute("aria-expanded"), "true");
+    await render(false);
+    assert.ok(thoughtRows(host)[0] === row, "the row keeps its node");
+    assert.equal(row.getAttribute("aria-expanded"), "true", "the row stays open");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+void it("shows an earlier turn's finished segment as a row", async () => {
+  const { host, unmount } = await mount([{ call: call("read-b"), isRetry: false, index: 0 }], {
+    earlier: [
+      {
+        thinking: [segment("Read the first file.", 0)],
+        steps: [{ call: call("read-a"), isRetry: false, index: 0 }],
+        answer: null,
+      },
+    ],
+  });
+  const turn = await openTurn(host);
+  const rows = thoughtRows(host);
+  assert.equal(rows.length, 1, host.innerHTML);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== turn && b !== rows[0]);
+  for (const group of groups) await act(async () => (group as HTMLButtonElement).click());
+  const readA = host.querySelector('[data-step="read-a"]');
+  const readB = host.querySelector('[data-step="read-b"]');
+  assert.ok(readA && readB, host.innerHTML);
+  assert.ok(before(rows[0]!, readA), "the row comes before the earlier read");
+  assert.ok(before(readA, readB), "the earlier turn comes first");
   await unmount();
 });

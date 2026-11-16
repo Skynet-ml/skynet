@@ -538,7 +538,8 @@ class ReactOnPi:
                     }
                     for index, call in enumerate(calls)
                 ]
-                return output_chunk({"text": "", "tool_calls": wire})
+                reasoning = output.get("reasoning_content") if isinstance(output, dict) else None
+                return output_chunk({"text": "", "reasoning_content": reasoning, "tool_calls": wire})
             problem = "the reply has no tool call"
         raise AgentReplyFormatError(
             f"The model did not answer in the tool-call text protocol after {attempts} attempts: {problem}"

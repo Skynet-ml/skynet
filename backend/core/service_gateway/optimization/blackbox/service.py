@@ -1006,7 +1006,9 @@ def _reflection_caller(lm: dspy.LM) -> tuple[Callable[[str | list[dict[str, Any]
                     completions = lm(messages=prompt) if isinstance(prompt, list) else lm(prompt)
             finally:
                 durations_ms.append((time.monotonic() - started) * 1000.0)
-            return str(completions[0])
+            first = completions[0]
+            # DSPy returns a dict, not text, when the model also sends its reasoning (SKY-774).
+            return str((first.get("text") or "") if isinstance(first, dict) else first)
 
     return ReflectionCaller(), durations_ms
 

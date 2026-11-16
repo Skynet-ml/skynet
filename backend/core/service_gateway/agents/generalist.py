@@ -565,6 +565,9 @@ class _TurnAuthoringFlag:
         # A Continue or Back move ends the turn well on its own (see
         # :func:`screen_turn_guard`), and the guard refuses one reply at most.
         self.screen_moved = False
+        # The screen a Continue or Back move named, so a later write this
+        # turn is refused with where the wizard went (SKY-744).
+        self.moved_to: str | None = None
         self.end_refused = False
         # An ``ask_user`` question ends the turn as well as a typed one does.
         self.asked = False
@@ -775,7 +778,9 @@ class _ApprovalGatedTool:
         )
         try:
             if self._tool_name == "update_wizard_state":
-                order_error = validate_wizard_screen(self._tool_name, kwargs, self._wizard_state)
+                order_error = validate_wizard_screen(
+                    self._tool_name, kwargs, self._wizard_state, moved_to=self._authoring_flag.moved_to
+                )
                 if order_error is None and self._tool_name == "update_wizard_state":
                     order_error = validate_wizard_patch_order(kwargs, self._wizard_state)
                 if order_error:
@@ -1088,6 +1093,10 @@ class WizardState(TypedDict, total=False):
     # The later screen a go-back left from; Continue returns the user there
     # when every screen between them is done. Absent with no go-back pending.
     return_screen: str
+    # The screen the wizard's Continue shows next. Only the client knows it:
+    # the level, Guided's skipped step and the Harden screen change the
+    # order. Absent on the last screen (SKY-744).
+    next_screen: str
     # The setup is a copy of an earlier run and arrived filled in: its agent
     # waits for the user and sees the whole setup, not one screen's slice.
     cloned_run: bool
@@ -1385,21 +1394,51 @@ _SCREEN_FIELDS: dict[str, frozenset[str]] = {
 _SCREENLESS_FIELDS = frozenset({"job_name", "job_description", "is_private"})
 
 
-def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: WizardState) -> str | None:
+def _field_home(field: str) -> str:
+    """Name the wizard screen or screens that hold a field.
+
+    Args:
+        field: An ``update_wizard_state`` field name.
+
+    Returns:
+        ``"<field> is on the <screen> screen"``, with ``or`` between screens
+        when Standard and Expert show it on different ones.
+    """
+    homes = [screen for screen, fields in _SCREEN_FIELDS.items() if field in fields]
+    if not homes:
+        return f"{field} is on no wizard screen"
+    return f"{field} is on the {' or '.join(homes)} screen"
+
+
+def validate_wizard_screen(
+    tool_name: str, kwargs: dict[str, Any], state: WizardState, *, moved_to: str | None = None
+) -> str | None:
     """Reject a wizard write that lands outside the screen the user is viewing.
 
     Args:
         tool_name: The tool being called (``update_wizard_state``).
         kwargs: The call's keyword arguments.
         state: The turn-start wizard snapshot.
+        moved_to: The screen a Continue or Back move named earlier this
+            turn, ``""`` when the client did not name it; ``None`` when the
+            wizard did not move.
 
     Returns:
         ``None`` when the write stays on the visible screen, or when the
-        wizard is not on screen at all; otherwise a one-line English error
-        the ReAct loop reads as the tool's observation.
+        wizard is not on screen at all; otherwise an English error that
+        names each refused field's screen, which the agent reads as the
+        tool's observation.
     """
     if "wizard_screen" not in state:
         return None
+    if moved_to is not None:
+        # The wizard left the turn-start screen, and the new screen's own
+        # assistant takes the next turn, so no write this turn lands on view.
+        return (
+            f"Not on screen: the wizard moved to {_screen_phrase(moved_to)} this turn, so nothing was saved. "
+            f"Its assistant sets that screen's fields on the next turn. Tell the user you did not set "
+            f"{', '.join(sorted(kwargs))}."
+        )
     screen = state.get("wizard_screen") or ""
     visible = _SCREEN_FIELDS.get(screen, frozenset())
     allowed = visible | _SCREENLESS_FIELDS
@@ -1407,8 +1446,8 @@ def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: Wizard
     if not outside:
         return None
     return (
-        f"Not on screen: {', '.join(outside)} are not on the screen the user is viewing "
-        f"({screen or 'none'!r}). This turn you may set only "
+        f"Not on screen: {'; '.join(_field_home(field) for field in outside)}. The user is viewing the "
+        f"{screen or 'none'!r} screen, and nothing was saved. This turn you may set only "
         f"{', '.join(sorted(visible) + sorted(_SCREENLESS_FIELDS))}. Leave the rest and tell the user "
         "what you will set once they move to that screen."
     )
@@ -1524,9 +1563,8 @@ def screen_snapshot(state: WizardState) -> dict[str, Any]:
     if state.get("cloned_run"):
         # A cloned run's agent sees the whole copied setup, with the client's
         # raw notes and issue read the same way as on any other screen.
-        snapshot = {
-            key: value for key, value in state.items() if key not in {"screen_issue", "screen_notes", "return_screen"}
-        }
+        skipped = {"screen_issue", "screen_notes", "return_screen", "next_screen"}
+        snapshot = {key: value for key, value in state.items() if key not in skipped}
     else:
         screen = state.get("wizard_screen") or ""
         keep = (
@@ -1907,6 +1945,48 @@ def ask_user_tool(turn: _TurnAuthoringFlag) -> dspy.Tool:
     )
 
 
+# The Harden screen sits between Metric and Overview but has no fields, so
+# it is not in ``_SCREEN_ORDER``; the client can still name it as next.
+_NAV_SCREENS = frozenset(_SCREEN_ORDER) | {"harden"}
+
+
+def _screen_phrase(screen: str) -> str:
+    """Name a screen in the agent's text.
+
+    Args:
+        screen: A screen id, or ``""`` when the client did not name the
+            screen Continue shows next.
+
+    Returns:
+        ``"the '<screen>' screen"``, or ``"the next screen"`` for ``""``.
+    """
+    return f"the {screen!r} screen" if screen else "the next screen"
+
+
+def _moved_message(screen: str, *, jump: bool = False) -> str:
+    """Tell the agent where the wizard went and who owns the next turn.
+
+    Args:
+        screen: The screen the wizard shows after the move, or ``""`` when
+            the client did not name it.
+        jump: The move jumps back to a later screen after a go-back edit,
+            which the wizard can stop short of.
+
+    Returns:
+        The English text the agent reads with the move's result.
+    """
+    where = _screen_phrase(screen)
+    moved = (
+        f"The wizard heads back to {where}, or stops earlier if a screen on the way still needs something."
+        if jump
+        else f"The wizard moves on to {where}, unless its Continue check still holds it on this screen."
+    )
+    return (
+        f"{moved} That screen's assistant takes the next turn. "
+        "Set none of its fields now, and do not say any of them is saved."
+    )
+
+
 def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.Tool]:
     """Build the screen agent's own tools: questions with choices, notes, Continue and Back.
 
@@ -1950,10 +2030,28 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         if note and note.strip():
             _append_note(notes, screen, note)
         turn.screen_moved = True
-        nav: dict[str, str] = {"action": "continue", "from": screen}
-        if target := _return_target(screen, merged):
-            nav["to"] = target
-        return {"screen_nav": nav, "wizard_state": {"screen_notes": list(notes)}}
+        target = _return_target(screen, merged)
+        # The client sends the screen its Continue shows next (SKY-744).
+        sent = str(state.get("next_screen") or "")
+        sent = sent if sent in _NAV_SCREENS else ""
+        # ``next_screen`` is the turn-start order, and a write this turn (the
+        # data mode, the level, a model) can change it. Then, or without a
+        # known next screen, ``to`` is left out and the text says "the next
+        # screen", so the agent names no stale screen; the client moves on by one.
+        known = target or ("" if turn.wizard_patch else sent)
+        turn.moved_to = known
+        nav: dict[str, Any] = {"action": "continue", "from": screen}
+        if known:
+            nav["to"] = known
+        if target:
+            # Only a return target jumps; a plain move runs the Continue
+            # button, which follows this turn's writes, not the snapshot's.
+            nav["jump"] = True
+        return {
+            "screen_nav": nav,
+            "wizard_state": {"screen_notes": list(notes)},
+            "message": _moved_message(known, jump=bool(target)),
+        }
 
     async def go_back_to_screen(screen_id: str, request: str) -> Any:
         """Send the user back to an earlier screen with what to change there."""
@@ -1963,13 +2061,15 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         if not request.strip():
             return "Empty request: say what the user wants changed on that screen."
         turn.screen_moved = True
+        turn.moved_to = screen_id
         return {
             "screen_nav": {
                 "action": "back",
                 "from": screen,
                 "screen": screen_id,
                 "request": request.strip()[:_MAX_BACK_REQUEST_CHARS],
-            }
+            },
+            "message": _moved_message(screen_id),
         }
 
     async def check_setup() -> Any:
@@ -2050,6 +2150,10 @@ def scope_wizard_tool(tool: dspy.Tool, state: WizardState) -> dspy.Tool:
     screen = state.get("wizard_screen") or ""
     visible = _SCREEN_FIELDS.get(screen, frozenset())
     keep = visible | _SCREENLESS_FIELDS
+    # dspy rejects a key outside ``args`` with a generic error before the
+    # approval wrapper runs; let it through so validate_wizard_screen refuses
+    # it and names the field's screen (SKY-744).
+    tool.has_kwargs = True
     tool.args = {key: value for key, value in tool.args.items() if key in keep}
     tool.arg_types = {key: value for key, value in (tool.arg_types or {}).items() if key in keep}
     tool.arg_desc = {key: value for key, value in (tool.arg_desc or {}).items() if key in keep}
@@ -2213,7 +2317,10 @@ The wizard screen on view:
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved
-  them to another screen otherwise.
+  them to another screen otherwise. ``screen_nav.to``, when present,
+  names the screen the wizard shows after the move; without it, say
+  only "the next screen". That screen's assistant takes the next turn. After a move, write no field this turn, and never say a
+  field is saved: the move ends this screen's turn.
 
 Rules:
 * Prefer calling tools over explaining. One tool call per turn is ideal.
@@ -2522,10 +2629,10 @@ This screen:
   they want there. When ``wizard_state.continue_returns_to`` is set, the
   user came back from that screen to change something here: once the
   change is done, ``continue_to_next_screen`` takes them back there when
-  every screen on the way is ready. Its ``screen_nav.to`` names that
-  screen: then say they head back there, and that the wizard stops
+  every screen on the way is ready. When its ``screen_nav.to`` is that
+  screen, say they head back there, and that the wizard stops
   earlier if a screen on the way still needs something (prices still
-  loading, for example). Without it, a screen on the way needs a fix
+  loading, for example). Otherwise a screen on the way needs a fix
   first, so say they go to the next screen. When it belongs to a later screen, change nothing for
   it: save it with ``remember_for_later`` and say it will be handled there.
 * ``job_name``, ``job_description`` and ``is_private`` show on no screen.
@@ -2563,6 +2670,12 @@ This screen:
   and the screen moves only when ``continue_to_next_screen`` or
   ``go_back_to_screen`` returns ``screen_nav``. Never say a field is set
   or the user is on another screen otherwise.
+* ``screen_nav.to`` (Continue, when present) or ``screen_nav.screen``
+  (Back) names the screen the wizard shows next; a Continue without
+  ``to`` goes to "the next screen". That screen's assistant takes the
+  next turn. After a move, write no field this turn: the write is
+  refused. Never claim a field is saved after a move; name the new
+  screen and say its assistant handles it.
 * A turn that opens a screen comes from the wizard, not the user: the
   wizard just moved here (the user typed nothing), or a later screen sent
   the user back with a request. Be proactive. When this screen's values, the

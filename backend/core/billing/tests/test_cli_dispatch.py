@@ -188,6 +188,57 @@ def test_transient_failure_is_retried(tmp_path: Path) -> None:
     assert len(calls(tmp_path, "claude")) == 2
 
 
+def test_chat_completion_carries_the_cli_thinking(tmp_path: Path) -> None:
+    """Return the thinking a non-stream call's CLI streams as ``reasoning_content`` (SKY-774)."""
+    thinking = [claude_delta("thinking", "Plan"), claude_delta("thinking", "ning"), claude_delta("text", "pong")]
+    fake_cli(tmp_path, "claude", "\n".join(printing(event) for event in [*thinking, CLAUDE_SUCCESS]))
+    result = CliDispatcher(None, "claude", MODEL, "agent", local_settings(tmp_path)).dispatch(
+        "/chat/completions", REQUEST
+    )
+    assert result.status == 200
+    assert _body(result)["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "pong",
+        "reasoning_content": "Planning",
+    }
+
+
+def test_retry_drops_the_failed_attempt_thinking(tmp_path: Path) -> None:
+    """Keep only the thinking of the attempt that answers, not of a transient failure before it."""
+    marker = tmp_path / "failed-once"
+    fake_cli(
+        tmp_path,
+        "claude",
+        f"marker = {str(marker)!r}\n"
+        "if not os.path.exists(marker):\n"
+        "    open(marker, 'w').close()\n"
+        f"    {printing(claude_delta('thinking', 'Lost'))}\n"
+        "    sys.stdout.flush()\n"
+        "    sys.stderr.write('API Error: 529 overloaded')\n"
+        "    sys.exit(1)\n"
+        f"{printing(claude_delta('thinking', 'Kept'))}\n"
+        f"{printing(CLAUDE_SUCCESS)}",
+    )
+    result = CliDispatcher(None, "claude", MODEL, "agent", local_settings(tmp_path)).dispatch(
+        "/chat/completions", REQUEST
+    )
+    assert result.status == 200
+    assert len(calls(tmp_path, "claude")) == 2
+    assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
+
+
+def test_fallback_drops_the_capped_cli_thinking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep only the fallback CLI's thinking when the first CLI thinks and then hits its cap."""
+    fake_cli(tmp_path, "claude", f"{printing(claude_delta('thinking', 'Lost'))}\nsys.stdout.flush()\n{CAPPED}")
+    think = {"method": "item/reasoning/textDelta", "params": {"itemId": "rs_1", "contentIndex": 0, "delta": "Kept"}}
+    fake_app_server(tmp_path, emitting(think, *CODEX_TURN))
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model, **kwargs: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    result, evidence = CliDispatcher(None, "claude", MODEL, "agent", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["capped_runs"]) == (200, "codex", ["claude"])
+    assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
+
+
 def test_timeout_is_not_retried(tmp_path: Path) -> None:
     """Answer a timed-out call with 502 after one attempt, so a hung CLI holds a slot once."""
     fake_cli(tmp_path, "claude", "time.sleep(30)")

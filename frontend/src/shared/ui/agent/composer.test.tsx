@@ -131,4 +131,10 @@ void describe("Composer", () => {
     const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
   });
+
+  void it("lets the wheel scroll a long draft, not the page", () => {
+    const textarea = /<textarea[^>]*>/.exec(render({}))?.[0] ?? "";
+    assert.match(textarea, /\boverflow-y-auto\b/, textarea);
+    assert.doesNotMatch(textarea, /\boverflow-hidden\b/, textarea);
+  });
 });

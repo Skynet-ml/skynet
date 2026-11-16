@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "Detetado durante a escrita",
   "submit.v2.metric.issue.metric_code": "Adicione o código da métrica.",
   "submit.v2.metric.issue.metric_code.guided": "Ainda não há código que pontue os resultados. Peça ao assistente para o escrever.",
+  "submit.v2.metric.repo_entry": "Usa a métrica do repositório:",
   "submit.v2.metric.title": "Código e métrica",
   "submit.v2.metric.title.guided": "Como é executado e como é pontuado",
   "submit.v2.optimizer.budget.desc": "As execuções do avaliador limitam quantos candidatos são pontuados; o teto de custo limita o dinheiro.",

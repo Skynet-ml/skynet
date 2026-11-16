@@ -80,6 +80,7 @@
   "submit.v2.metric.check.static_title": "入力中に検出",
   "submit.v2.metric.issue.metric_code": "メトリクスのコードを追加してください。",
   "submit.v2.metric.issue.metric_code.guided": "結果をスコア付けするコードがまだありません。アシスタントに書いてもらってください。",
+  "submit.v2.metric.repo_entry": "リポジトリのメトリクスを使います:",
   "submit.v2.metric.title": "コードとメトリクス",
   "submit.v2.metric.title.guided": "実行方法と採点方法",
   "submit.v2.optimizer.budget.desc": "スコアラーの実行回数で採点する候補の数を、コスト上限で費用を制限します。",

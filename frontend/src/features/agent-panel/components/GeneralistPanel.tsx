@@ -158,7 +158,13 @@ import {
   type SetupChat,
 } from "../lib/screen-agent";
 import { messageEdits } from "../lib/turn-edits";
-import { isWizardWrite, liveValues, mergedPatch, writingFields } from "../lib/wizard-write";
+import {
+  isWizardWrite,
+  isWizardWriteStep,
+  liveValues,
+  mergedPatch,
+  writingFields,
+} from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
@@ -299,11 +305,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
     const back = wizardCtx?.returnScreen;
+    const next = wizardCtx?.nextScreen;
     return {
       ...merged,
       wizard_screen: screen,
       ...(issue ? { screen_issue: issue } : {}),
       ...(back ? { return_screen: back } : {}),
+      ...(next ? { next_screen: next } : {}),
     };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
@@ -1185,6 +1193,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
+      // A finished setup write with nothing to show renders nothing, so the turn drops it.
+      if (isWizardWrite(call.tool) && !isWizardWriteStep(call, writeBefore?.[call.id])) return null;
       const renderer = getToolRenderer(call.tool);
       if (renderer?.card && call.status !== "running") {
         return renderer.card(call);
@@ -1192,17 +1202,21 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming, webChat],
+    [handleDatasetConfirm, handleLibraryPick, streaming, webChat, writeBefore],
   );
 
   // Every call is a step in the turn's activity group except the ones the
-  // user acts on or reads at a glance: the request cards, the submit summary,
-  // which links to the new run, and each wizard write with its old and new values.
-  const isStepCall = React.useCallback((call: AgentToolCall) => {
-    if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
-    const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
-    return !(card && call.status !== "running");
-  }, []);
+  // user acts on: the request cards and the submit summary, which links to the
+  // new run. A wizard write is a step row that opens to its old and new values,
+  // except a finished write that changed nothing, which renders nothing.
+  const isStepCall = React.useCallback(
+    (call: AgentToolCall) => {
+      if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
+      if (isWizardWrite(call.tool)) return isWizardWriteStep(call, writeBefore?.[call.id]);
+      return !(SUBMIT_TOOLS.has(call.tool) && call.status !== "running");
+    },
+    [writeBefore],
+  );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
   // Pi runs its built-in slash commands only in its own terminal, so the

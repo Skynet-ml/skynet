@@ -341,3 +341,23 @@ test("an edit that drops a file's block also drops that file's original, and a r
     await unmount();
   }
 });
+
+// SKY-777: a dropped placeholder must not push a later thinking row one tool late.
+for (const drop of ["pending clear", "stop"] as const) {
+  test(`a thinking segment keeps its place when a ${drop} drops a placeholder before it`, async () => {
+    const { agent, calls, act, unmount } = await mount();
+    try {
+      await act(() => agent().send("go"));
+      const h = calls[0]!.handlers;
+      await act(() => h.onToolStart!({ id: "t1", tool: "list_jobs", arguments: {} }));
+      await act(() => h.onToolPending!({ tool: "edit" }));
+      await act(() => h.onReasoningPatch!("Check the jobs."));
+      await act(() => (drop === "stop" ? agent().stop() : h.onToolPendingClear!()));
+      const last = agent().messages[agent().messages.length - 1];
+      assert.deepEqual(last?.toolCalls?.map((c) => c.id), ["t1"]);
+      assert.equal(last?.thinkingSegments?.[0]?.toolsBefore, 1);
+    } finally {
+      await unmount();
+    }
+  });
+}

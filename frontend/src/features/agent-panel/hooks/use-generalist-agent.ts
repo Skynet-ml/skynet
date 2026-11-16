@@ -55,6 +55,7 @@ import {
   dropPendingToolCalls,
   pendingToolCall,
   placeToolCall,
+  shiftPastDropped,
   stopToolCalls,
 } from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
@@ -611,7 +612,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
           const kept = dropPendingToolCalls(last.toolCalls);
           if (kept.length === last.toolCalls.length) return prev;
           const next = prev.slice();
-          next[next.length - 1] = { ...last, toolCalls: kept };
+          next[next.length - 1] = {
+            ...last,
+            toolCalls: kept,
+            ...(last.thinkingSegments
+              ? { thinkingSegments: shiftPastDropped(last.toolCalls, last.thinkingSegments) }
+              : {}),
+          };
           return next;
         });
       streamingKeysRef.current.add(key);
@@ -1335,7 +1342,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         return prev;
       }
       const next = prev.slice();
-      next[next.length - 1] = { ...last, toolCalls: stopToolCalls(last.toolCalls, Date.now()) };
+      next[next.length - 1] = {
+        ...last,
+        toolCalls: stopToolCalls(last.toolCalls, Date.now()),
+        ...(last.thinkingSegments
+          ? { thinkingSegments: shiftPastDropped(last.toolCalls, last.thinkingSegments) }
+          : {}),
+      };
       return next;
     });
     if (wasQueued) {
