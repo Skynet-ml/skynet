@@ -169,7 +169,12 @@ import { MAX_WIDTH, MIN_WIDTH, NARROW_VIEWPORT_QUERY } from "../constants";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
-import { DatasetUploadCard, type ConfirmedDataset } from "./DatasetUploadCard";
+import {
+  DatasetUploadCard,
+  datasetAttachedNote,
+  libraryPickOverride,
+  type ConfirmedDataset,
+} from "./DatasetUploadCard";
 import { EditedFilesCard } from "./EditedFilesCard";
 import { LibraryDatasetCard, type ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 import { InferenceFormCard } from "./InferenceFormCard";
@@ -201,10 +206,6 @@ const RICH_CARD_TOOLS = new Set<string>([
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
-
-// Rows and characters per row of an uploaded dataset that the agent's note shows.
-const DATASET_NOTE_SAMPLE_ROWS = 3;
-const DATASET_NOTE_ROW_CHARS = 300;
 
 /** Whether a file opens the dataset upload card instead of being read as text. */
 function isDatasetFile(file: File): boolean {
@@ -1041,28 +1042,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         wizardCtx.clearField("expected_field");
         wizardCtx.setField("columns_configured", false, "user");
       }
-      // The agent reads the columns and a few rows to infer the input and
-      // output columns.
-      const sampleLines = confirmed.rows
-        .slice(0, DATASET_NOTE_SAMPLE_ROWS)
-        .map((row) => {
-          const line = JSON.stringify(row);
-          return line.length > DATASET_NOTE_ROW_CHARS
-            ? `${line.slice(0, DATASET_NOTE_ROW_CHARS)}…`
-            : line;
-        })
-        .join("\n");
-      // The agent copies column names from this note, so it must carry no
-      // RTL isolate marks (U+2066-U+2069) that formatMsg adds around Latin text.
-      const note = formatMsg(
-        "auto.features.agent.panel.components.generalistpanel.dataset_attached_note",
-        {
-          p1: confirmed.fileName,
-          p2: confirmed.rowCount,
-          p3: confirmed.columns.join(", "),
-          p4: sampleLines,
-        },
-      ).replace(/[\u2066-\u2069]/g, "");
+      const note = datasetAttachedNote(confirmed);
       // The override stays on every later turn, so it carries no column
       // roles: the agent's column-role tool sets those.
       const wizardOverride: WizardState | undefined = stagedDatasetId
@@ -1111,12 +1091,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         p2: picked.rowCount,
         p3: mappingLine,
       });
-      const wizardOverride: WizardState = {
-        source_dataset_id: picked.sourceDatasetId,
-        dataset_ready: true,
-        dataset_columns: picked.columns,
-      };
-      agent.send(note, wizardOverride);
+      agent.send(note, libraryPickOverride(picked));
     },
     [agent, wizardCtx, webChat],
   );

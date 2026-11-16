@@ -5,11 +5,13 @@ import { Button } from "@/shared/ui/primitives/button";
 import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Check, CircleNotch, FileXls, UploadSimple } from "@/shared/ui/icons";
-import { msg } from "@/shared/lib/messages";
+import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 
 import type { AgentToolCall } from "@/shared/ui/agent/types";
+import type { WizardState } from "../lib/types";
+import type { ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 
 /** A read dataset file. It carries no column roles: the setup agent infers them (SKY-742). */
 export interface ConfirmedDataset {
@@ -32,6 +34,43 @@ interface DatasetUploadCardProps {
 }
 
 const DATASET_FILE_ACCEPT = DATASET_UPLOAD_ACCEPT;
+
+// Rows and characters per row of an uploaded dataset that the agent's note shows.
+const DATASET_NOTE_SAMPLE_ROWS = 3;
+const DATASET_NOTE_ROW_CHARS = 300;
+
+/** Build the chat note that tells the setup agent a file is attached, with its columns and first rows. */
+export function datasetAttachedNote(dataset: ConfirmedDataset): string {
+  const sampleLines = dataset.rows
+    .slice(0, DATASET_NOTE_SAMPLE_ROWS)
+    .map((row) => {
+      const line = JSON.stringify(row);
+      return line.length > DATASET_NOTE_ROW_CHARS ? `${line.slice(0, DATASET_NOTE_ROW_CHARS)}…` : line;
+    })
+    .join("\n");
+  // The agent copies column names from this note, so it must carry no
+  // RTL isolate marks (U+2066-U+2069) that formatMsg adds around Latin text.
+  return formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_attached_note", {
+    p1: dataset.fileName,
+    p2: dataset.rowCount,
+    p3: dataset.columns.join(", "),
+    p4: sampleLines,
+  }).replace(/[\u2066-\u2069]/g, "");
+}
+
+/**
+ * Build the turn override for a library dataset pick.
+ *
+ * The chat keeps an override on every later turn, so it carries no
+ * ``columns_configured``: a later upload must be able to clear it.
+ */
+export function libraryPickOverride(picked: ConfirmedLibraryDataset): WizardState {
+  return {
+    source_dataset_id: picked.sourceDatasetId,
+    dataset_ready: true,
+    dataset_columns: picked.columns,
+  };
+}
 
 export function DatasetUploadCard({
   call,

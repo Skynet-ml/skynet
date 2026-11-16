@@ -10,6 +10,7 @@ import { after, test } from "node:test";
 import * as React from "react";
 import { JSDOM } from "jsdom";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
+import { setClientLocale } from "@/shared/lib/runtime-locale";
 import type { ConfirmedDataset } from "./DatasetUploadCard";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -33,7 +34,9 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
   buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
-const { DatasetUploadCard } = await import("./DatasetUploadCard");
+const { DatasetUploadCard, datasetAttachedNote, libraryPickOverride } = await import(
+  "./DatasetUploadCard"
+);
 
 after(() => dom.window.close());
 
@@ -122,4 +125,39 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
   await settle();
   assert.equal(closedAttached.length, 0, "a card closed during the read attaches nothing");
   closedContainer.remove();
+});
+
+void test("the attached-file note has no RTL isolate marks in a Hebrew UI", () => {
+  setClientLocale("he");
+  try {
+    const note = datasetAttachedNote({
+      fileName: "cfca.xlsx",
+      rows: [{ address: "1 Main St", lat: 1.5 }],
+      rowCount: 1,
+      columns: ["address", "lat"],
+    });
+    assert.doesNotMatch(note, /[\u2066-\u2069]/, "the agent copies clean column names");
+    assert.match(note, /address, lat/);
+    assert.match(note, /cfca\.xlsx/);
+    assert.match(note, /"address":"1 Main St"/);
+  } finally {
+    setClientLocale("en");
+  }
+});
+
+void test("a library pick override does not mark the columns as set", () => {
+  const override = libraryPickOverride({
+    sourceDatasetId: "ds-1",
+    name: "qa",
+    columns: ["question", "answer"],
+    columnRoles: {},
+    columnKinds: {},
+    rowCount: 2,
+  });
+  assert.deepEqual(override, {
+    source_dataset_id: "ds-1",
+    dataset_ready: true,
+    dataset_columns: ["question", "answer"],
+  });
+  assert.equal("columns_configured" in override, false, "a later upload can clear it");
 });
