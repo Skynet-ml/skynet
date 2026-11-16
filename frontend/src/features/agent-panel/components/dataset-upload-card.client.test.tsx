@@ -26,6 +26,7 @@ Object.assign(globalThis, {
   Element: dom.window.Element,
   Node: dom.window.Node,
   Event: dom.window.Event,
+  CustomEvent: dom.window.CustomEvent,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   IS_REACT_ACT_ENVIRONMENT: true,
 });
@@ -39,6 +40,7 @@ const {
   applyDatasetUpload,
   datasetAttachedNote,
   libraryPickOverride,
+  useDatasetDraft,
   useSendAfterRender,
 } = await import("./DatasetUploadCard");
 
@@ -333,4 +335,141 @@ void test("an upload clears the earlier roles and hands off no roles", () => {
     ["clear", "expected_field"],
     ["clear", "columns_configured"],
   ]);
+});
+
+/** Mount useDatasetDraft with a draft in state and a recording wizard (SKY-780). */
+async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const calls: Array<[string, string, unknown?]> = [];
+  const released: string[] = [];
+  const wizard = {
+    setField: (key: string, value: unknown) => calls.push(["set", key, value]),
+    clearField: (key: string) => calls.push(["clear", key]),
+  };
+  const live: {
+    draft: string;
+    setDraft: (d: string) => void;
+    api: ReturnType<typeof useDatasetDraft>;
+  } = {} as never;
+  function Panel() {
+    const [draft, setDraft] = React.useState("my text");
+    live.draft = draft;
+    live.setDraft = setDraft;
+    live.api = useDatasetDraft({
+      draft,
+      setDraft,
+      stage,
+      wizard,
+      onRelease: (owner) => released.push(owner),
+    });
+    return null;
+  }
+  await React.act(async () => root.render(<Panel />));
+  const unmount = async () => {
+    await React.act(async () => root.unmount());
+    container.remove();
+  };
+  return { live, calls, released, unmount };
+}
+
+const QA_DATASET: ConfirmedDataset = {
+  fileName: "qa.csv",
+  rows: [{ q: "2+2", a: "4" }],
+  rowCount: 1,
+  columns: ["q", "a"],
+};
+
+void test("a confirmed dataset waits in the draft as a card and sends nothing", async () => {
+  const { live, calls, unmount } = await mountDatasetDraft(async () => "staged-1");
+  const staged: unknown[] = [];
+  const onStaged = (e: Event) => staged.push((e as CustomEvent).detail);
+  window.addEventListener("wizard:dataset-staged", onStaged);
+  await React.act(async () => live.api.attach(QA_DATASET));
+  assert.match(
+    live.draft,
+    /^my text\n\n<attached_file name="qa.csv">\nDataset `qa.csv` attached \(1 rows\)/,
+  );
+  assert.equal(calls.length, 0, "the wizard changes only on Send");
+  assert.ok(!live.api.staging(live.draft), "staging ended");
+  assert.ok(live.api.holds(live.draft), "the draft holds the card");
+  const taken = live.api.take(live.draft);
+  assert.deepEqual(taken, {
+    override: { staged_dataset_id: "staged-1", dataset_ready: true, dataset_columns: ["q", "a"] },
+  });
+  assert.ok(calls.some(([op, key]) => op === "set" && key === "staged_dataset_id"));
+  assert.ok(calls.some(([op, key]) => op === "clear" && key === "input_fields"));
+  assert.equal(staged.length, 1, "Send hands the dataset to the wizard");
+  window.removeEventListener("wizard:dataset-staged", onStaged);
+  assert.equal(live.api.take(live.draft), null, "a dataset applies once");
+  assert.ok(!live.api.holds(live.draft), "a sent card is no longer pending");
+  await unmount();
+});
+
+void test("Send waits while the rows stage", async () => {
+  let finish: (id: string) => void = () => {};
+  const { live, unmount } = await mountDatasetDraft(
+    () => new Promise<string>((resolve) => (finish = resolve)),
+  );
+  await React.act(async () => live.api.attach(QA_DATASET));
+  assert.ok(live.api.staging(live.draft));
+  await React.act(async () => finish("staged-2"));
+  assert.ok(!live.api.staging(live.draft));
+  await unmount();
+});
+
+void test("a removed card changes nothing on Send", async () => {
+  const { live, calls, unmount } = await mountDatasetDraft(async () => "staged-3");
+  await React.act(async () => live.api.attach(QA_DATASET));
+  await React.act(async () => live.setDraft("my text"));
+  assert.ok(!live.api.holds(live.draft));
+  assert.ok(!live.api.staging(live.draft));
+  assert.equal(live.api.take(live.draft), null);
+  assert.equal(calls.length, 0);
+  await unmount();
+});
+
+void test("a library pick waits in the draft and applies its override on Send", async () => {
+  const { live, calls, unmount } = await mountDatasetDraft(async () => undefined);
+  await React.act(async () =>
+    live.api.attachLibrary({
+      sourceDatasetId: "lib-1",
+      name: "Saved QA",
+      rowCount: 5,
+      columns: ["q", "a"],
+      columnRoles: { q: "input", a: "output" },
+    } as never),
+  );
+  assert.match(live.draft, /<attached_file name="Saved QA">/);
+  assert.equal(calls.length, 0);
+  const taken = live.api.take(live.draft);
+  assert.deepEqual(taken?.override, {
+    source_dataset_id: "lib-1",
+    dataset_ready: true,
+    dataset_columns: ["q", "a"],
+  });
+  assert.ok(calls.some(([op, key]) => op === "set" && key === "source_dataset_id"));
+  await unmount();
+});
+
+void test("a removed card drops its dataset and reopens its tool card", async () => {
+  const { live, released, unmount } = await mountDatasetDraft(async () => "staged-4");
+  await React.act(async () => live.api.attach(QA_DATASET, "call-1"));
+  assert.equal(released.length, 0);
+  await React.act(async () => live.setDraft("my text"));
+  assert.deepEqual(released, ["call-1"]);
+  assert.ok(!live.api.holds(live.draft));
+  await unmount();
+});
+
+void test("a second dataset reopens the first tool card, and Send reopens nothing", async () => {
+  const { live, released, unmount } = await mountDatasetDraft(async () => "staged-5");
+  await React.act(async () => live.api.attach(QA_DATASET, "call-1"));
+  await React.act(async () => live.api.attach({ ...QA_DATASET, fileName: "b.csv" }, "call-2"));
+  assert.deepEqual(released, ["call-1"]);
+  assert.ok(live.api.take(live.draft));
+  await React.act(async () => live.setDraft(""));
+  assert.deepEqual(released, ["call-1"], "a sent dataset keeps its tool card confirmed");
+  await unmount();
 });
