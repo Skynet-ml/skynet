@@ -1076,7 +1076,9 @@ export function Composer({
                 aria-expanded={menu || mention ? true : undefined}
                 aria-activedescendant={slashActiveId}
                 className={cn(
-                  "relative bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
+                  // The wheel must scroll a draft past the height cap, not the page (SKY-772).
+                  // No scrollbar, so the wrap matches the painted token layer.
+                  "relative bg-transparent text-sm leading-[20px] resize-none overflow-y-auto no-scrollbar",
                   painted && "text-transparent caret-foreground",
                   "max-h-[120px] outline-none ring-0 border-0 shadow-none",
                   "focus:outline-none focus-visible:outline-none focus-visible:ring-0",
