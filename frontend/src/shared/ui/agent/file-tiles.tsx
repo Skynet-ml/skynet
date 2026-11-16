@@ -103,17 +103,23 @@ export function fileTilePreview(name: string, text: string): FilePreview | null 
 export function FileTile({
   name,
   text,
+  preview: given,
   onRemove,
   onOpen,
 }: {
   name: string;
   text: string;
+  /** The preview a shared viewer already parsed, so the tile does not parse the text again. */
+  preview?: FilePreview | null;
   onRemove?: () => void;
   onOpen?: OpenHandler;
 }) {
   const [open, setOpen] = React.useState(false);
   const ext = fileExtension(name);
-  const preview = React.useMemo(() => fileTilePreview(name, text), [name, text]);
+  const preview = React.useMemo(
+    () => (given === undefined ? fileTilePreview(name, text) : given),
+    [given, name, text],
+  );
   const face = (
     <>
       <span
@@ -295,6 +301,7 @@ function SharedDraftViewer({
             key={`file-${i}`}
             name={file.name}
             text={file.text}
+            preview={slide?.preview ?? null}
             onRemove={() => onRemove(i)}
             onOpen={slide ? (e) => openAt(slide.id, e) : undefined}
           />

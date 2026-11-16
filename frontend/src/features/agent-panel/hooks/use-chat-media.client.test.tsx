@@ -444,44 +444,64 @@ void test("a failed original upload and an unmount free the draft's local URLs",
       .shownOriginals(both)
       .map((o) => o.url);
     assert.equal(urls.length, 2);
-    // Earlier tests' toasts can free their own URLs meanwhile.
-    const mine = () => revoked.filter((url) => urls.includes(url));
     fail();
     await flush();
     // Either upload can take the failed response; its URL goes at once.
-    assert.equal(mine().length, 1, "the failed upload frees its URL");
+    assert.equal(revoked.length, 1, "the failed upload frees its URL");
+    assert.ok(urls.includes(revoked[0]!));
     assert.equal(draft().shownOriginals(both).length, 1);
     await unmount();
-    assert.deepEqual(mine().sort(), [...urls].sort(), "the unmount frees the rest");
+    assert.deepEqual(revoked.sort(), [...urls].sort(), "the unmount frees the rest");
   });
 });
 
-void test("an original leaves the draft before its local URL is freed", async () => {
-  const { draft, unmount } = await mountDraft();
-  // What Send would take at each free; ``ready`` reads the draft's live originals.
-  const atFree: Array<string[] | null> = [];
+void test("an older commit's effect does not free a URL its draft still shows", async () => {
+  let latest: ReturnType<typeof useChatMedia> | null = null;
+  // Runs once, inside the next commit.
+  let onCommit: (() => void) | null = null;
+  function Harness() {
+    latest = useChatMedia();
+    React.useLayoutEffect(() => {
+      const run = onCommit;
+      onCommit = null;
+      run?.();
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Harness />));
+  let failA: () => void = () => {};
+  let passB: () => void = () => {};
+  const held = [
+    new Promise<Response>((r) => (failA = () => r(new Response(null, { status: 500 })))),
+    new Promise<Response>(
+      (r) => (passB = () => r(Response.json({ id: "s-b", name: "b.pdf", kind: "document" }))),
+    ),
+  ];
+  const fetchAll = globalThis.fetch;
+  globalThis.fetch = ((url: string, init?: RequestInit) =>
+    init?.method === "POST" ? held.shift()! : fetchAll(url, init)) as typeof fetch;
+  await React.act(async () => latest!.addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
+  globalThis.fetch = fetchAll;
+  // At each free, the originals the rendered draft shows.
+  const shownAtFree: string[][] = [];
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = () =>
-    void atFree.push(
-      draft()
-        .ready()
-        ?.map((m) => m.name) ?? null,
-    );
+    void shownAtFree.push(latest!.shownOriginals(both).map((o) => o.name));
+  // act runs a commit's effects at once. The real scheduler runs them in a later
+  // task, so a's failure can land after b's commit and before its effects.
+  const act = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  act.IS_REACT_ACT_ENVIRONMENT = false;
   try {
-    nextUpload = Promise.resolve(new Response(null, { status: 500 }));
-    await React.act(async () => draft().addOriginals([pdf("a.pdf")]));
-    await flush();
-    assert.deepEqual(atFree, [[]], "a failed upload");
-    await React.act(async () => draft().addOriginals([pdf("a.pdf"), pdf("b.pdf")]));
-    await flush();
-    await React.act(async () => draft().keepOriginals([{ name: "b.pdf" }]));
-    assert.deepEqual(atFree.slice(1), [["b.pdf"]], "a file that leaves");
-    await React.act(async () => draft().clear());
-    assert.deepEqual(atFree.slice(2), [[]], "a sent draft");
+    onCommit = failA;
+    passB();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(shownAtFree, [["b.pdf"]], "a is freed only once the draft without it renders");
   } finally {
+    act.IS_REACT_ACT_ENVIRONMENT = true;
     URL.revokeObjectURL = revoke;
   }
-  await unmount();
+  await React.act(async () => root.unmount());
 });
 
 void test("a failed original's URL is freed only after the draft without it renders", async () => {

@@ -77,6 +77,20 @@ function uploadError(name: string, err: unknown): string {
   return msg("agent.media.upload_failed", { name });
 }
 
+/**
+ * Free the queued local URLs that a committed draft no longer shows, and give
+ * back the rest. React can run an older commit's effects after a URL is queued,
+ * and that commit still shows the URL.
+ */
+function freeUnshown(
+  queued: readonly string[],
+  shown: ReadonlyArray<{ shown: { url: string } }>,
+): string[] {
+  const held = new Set(shown.map((o) => o.shown.url));
+  for (const url of queued) if (!held.has(url)) freeMediaUrl(url);
+  return queued.filter((url) => held.has(url));
+}
+
 /** The image, video and audio files in the composer draft (SKY-707). */
 export function useChatMedia(): ChatMediaDraft {
   const [items, setItems] = React.useState<readonly DraftMedia[]>([]);
@@ -94,7 +108,7 @@ export function useChatMedia(): ChatMediaDraft {
   // until the draft without it commits, so this effect frees them after that.
   const unshownRef = React.useRef<string[]>([]);
   React.useEffect(() => {
-    for (const url of unshownRef.current.splice(0)) freeMediaUrl(url);
+    unshownRef.current = freeUnshown(unshownRef.current, draftOriginals);
   }, [draftOriginals]);
   // Restores whose files still load; Send waits for them.
   const [restoring, setRestoring] = React.useState(0);

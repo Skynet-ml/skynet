@@ -443,6 +443,68 @@ void test("a draft viewer whose slide leaves stays closed when a file takes its 
   await unmount();
 });
 
+/** Run ``body`` with a fade-out on the viewer, so a closed viewer stays until the test ends. */
+async function withFade(body: () => Promise<void>) {
+  // jsdom runs no animation, but Radix keeps a closing dialog while its animation name changes.
+  const style = document.createElement("style");
+  style.textContent =
+    '[role="dialog"][data-state="open"]{animation-name:in}[role="dialog"][data-state="closed"]{animation-name:out}';
+  document.head.append(style);
+  try {
+    await body();
+  } finally {
+    style.remove();
+  }
+}
+
+void test("a viewer whose slide leaves shows no other slide while it fades out", async () => {
+  await withFade(async () => {
+    const files = [
+      { name: "x.pdf", text: "" },
+      { name: "y.docx", text: "" },
+    ];
+    const doc = (name: string): Media => ({
+      id: name,
+      name,
+      kind: "document",
+      url: `blob:${name}`,
+    });
+    const view = (originals: Media[]) => (
+      <DraftAttachments files={files} originals={originals} onRemove={() => {}} />
+    );
+    const { container, rerender, unmount } = await mount(view([doc("x.pdf"), doc("y.docx")]));
+    await click(container.querySelector('button[aria-label="Open x.pdf"]'));
+    assert.match(dialog()?.textContent ?? "", /x\.pdf/);
+    // x.pdf's upload fails and it has no text, so y.docx takes its place in the slides.
+    await rerender(view([doc("y.docx")]));
+    await settle();
+    assert.equal(dialog()?.dataset.state, "closed", "the viewer fades out");
+    assert.doesNotMatch(dialog()?.textContent ?? "", /y\.docx/);
+    await unmount();
+  });
+});
+
+void test("a viewer closed by Escape keeps its slide while it fades out", async () => {
+  await withFade(async () => {
+    const { container, unmount } = await mount(
+      <DraftAttachments
+        files={[
+          { name: "a.csv", text: "a\n1" },
+          { name: "b.csv", text: "b\n2" },
+        ]}
+        originals={[]}
+        onRemove={() => {}}
+      />,
+    );
+    await click(container.querySelector('button[aria-label="Open b.csv"]'));
+    await press(dialog()!, "Escape");
+    await settle();
+    assert.equal(dialog()?.dataset.state, "closed", "the viewer fades out");
+    assert.match(dialog()?.textContent ?? "", /b\.csv/);
+    await unmount();
+  });
+});
+
 void test("a sent viewer whose slide leaves stays closed when a file takes its place", async () => {
   const files = [{ name: "scan.pdf", text: "" }];
   const doc = (id: string): Media => ({ id, name: "scan.pdf", kind: "document", url: "" });
@@ -515,7 +577,7 @@ void test("typing in a draft does not parse its attached files again (SKY-736)",
     );
     const { container, rerender, unmount } = await mount(view());
     const mounted = parses;
-    assert.ok(mounted > 0, "the mount parses the file");
+    assert.equal(mounted, 1, "the attach parses the file once, for the tile and the viewer");
     // Each key press gives new but equal file and original arrays.
     for (let key = 0; key < 3; key += 1) await rerender(view());
     assert.equal(parses, mounted, "no parse after the mount");

@@ -35,6 +35,32 @@ function composerAttribute(name: string): ts.Expression {
   return found;
 }
 
+// Each `cond && name` in an attribute whose right side is a plain name, such as a menu node.
+function guardedNames(attribute: ts.Expression): Array<{ cond: string; name: string }> {
+  const found: Array<{ cond: string; name: string }> = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+      ts.isIdentifier(node.right)
+    )
+      found.push({ cond: node.left.getText(tree), name: node.right.text });
+    ts.forEachChild(node, visit);
+  };
+  visit(attribute);
+  return found;
+}
+
+// The slot's one guarded name is the model menu, hidden by `!<setup flag>`.
+const slotGuards = guardedNames(composerAttribute("modelMenu"));
+assert.equal(slotGuards.length, 1, "one guarded node in the slot");
+const [{ cond: slotCond, name: menuName }] = slotGuards;
+assert.match(slotCond, /^![A-Za-z_]\w*$/, "the slot hides the menu under a negated flag");
+const setupFlag = slotCond.slice(1);
+
+const messages = [{ role: "user", content: "hi" }];
+const meterProps: unknown[] = [];
+
 // The panel's `modelMenu` slot, run without mounting the panel around it.
 function modelMenuSlot(inSetup: boolean): string {
   const code = ts.transpileModule(`(${composerAttribute("modelMenu").getText(tree)})`, {
@@ -42,36 +68,36 @@ function modelMenuSlot(inSetup: boolean): string {
   }).outputText;
   const context: Record<string, unknown> = {
     React,
-    inSetup,
-    agent: { messages: [] },
+    [setupFlag]: inSetup,
+    agent: { messages },
     contextWindow: 100_000,
-    streaming: false,
-    ChatContextUsage: () => React.createElement("span", { "data-meter": "" }),
-    modelMenuNode: React.createElement("span", { "data-model-menu": "" }),
+    streaming: true,
+    ChatContextUsage: (props: unknown) => {
+      meterProps.push(props);
+      return React.createElement("span", { "data-meter": "" });
+    },
+    [menuName]: React.createElement("span", { "data-model-menu": "" }),
   };
   const slot = new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
   return renderToStaticMarkup(slot as React.ReactElement);
 }
 
 test("a chat outside the setup shows the context meter next to the model menu (SKY-736)", () => {
+  meterProps.length = 0;
   assert.equal(modelMenuSlot(false), '<span data-meter=""></span><span data-model-menu=""></span>');
+  assert.deepEqual(meterProps, [{ messages, contextWindow: 100_000, streaming: true }]);
+  assert.equal((meterProps[0] as { messages: unknown }).messages, messages, "the chat's own list");
 });
 
 test("the setup chat keeps only the meter in the slot; its model menu sits in leadingControls", () => {
+  meterProps.length = 0;
   assert.equal(modelMenuSlot(true), '<span data-meter=""></span>');
-  let setupMenu = false;
-  const visit = (node: ts.Node) => {
-    if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
-      node.left.getText(tree) === "inSetup" &&
-      node.right.getText(tree) === "modelMenuNode"
-    )
-      setupMenu = true;
-    ts.forEachChild(node, visit);
-  };
-  visit(composerAttribute("leadingControls"));
-  assert.ok(setupMenu, "leadingControls shows the model menu in the setup");
+  assert.deepEqual(meterProps, [{ messages, contextWindow: 100_000, streaming: true }]);
+  // The same menu shows on the start side under the opposite condition.
+  const start = guardedNames(composerAttribute("leadingControls")).filter(
+    (g) => g.name === menuName,
+  );
+  assert.deepEqual(start, [{ cond: setupFlag, name: menuName }]);
 });
 
 test("the composer gets the draft originals that Send sends, and none in a web chat", () => {
