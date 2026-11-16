@@ -188,7 +188,7 @@ class StagedRepository:
     # Whether staging refused an optimize.toml with no version. Every later read
     # of this tree uses the same rule, so one pass never reads the file two ways.
     require_version: bool = True
-    # The run record's hashes and metric home, taken from the staged tree the
+    # The run record's hashes and metric source, taken from the staged tree the
     # run reads, so the run end never reads the repository again (SKY-694).
     record_facts: Mapping[str, Any] = field(default_factory=dict)
 
@@ -1225,10 +1225,10 @@ def _record_facts(
     (path ``metric.py``, the UTF-8 bytes of ``metric_code``), then each
     regular file under the ``[metric] files`` paths in sorted path order; see
     :func:`_framed`. The entry code stays first, so a repository file named
-    ``metric.py`` cannot take its place. ``metric_home`` describes the
+    ``metric.py`` cannot take its place. ``metric_source`` describes the
     ``[metric] files`` only: it is ``repository`` when the file sets
     ``[metric] files`` and every one comes from the pinned commit, and
-    ``judge`` when there are none or a draft file replaces or adds one.
+    ``request`` when there are none or a draft file replaces or adds one.
     ``cases_sha256`` hashes the ``[data] cases`` file bytes (``cases_source``
     ``file``), or else the compact JSON of the request's cases with sorted
     keys (``cases_source`` ``request``).
@@ -1247,7 +1247,7 @@ def _record_facts(
         cases: The request's cases, used when there is no cases file.
 
     Returns:
-        ``contract_sha256``, ``metric_sha256``, ``metric_home``,
+        ``contract_sha256``, ``metric_sha256``, ``metric_source``,
         ``cases_sha256`` and ``cases_source``; the last two are ``None`` with no cases.
     """
     roots = tuple(metric_files) + ((cases_file,) if cases_file is not None else ())
@@ -1274,7 +1274,7 @@ def _record_facts(
     return {
         "contract_sha256": contract_sha256,
         "metric_sha256": metric.hexdigest(),
-        "metric_home": "repository" if from_commit else "judge",
+        "metric_source": "repository" if from_commit else "request",
         "cases_sha256": cases_sha256,
         "cases_source": cases_source,
     }
@@ -1348,9 +1348,12 @@ def add_run_record(
 ) -> None:
     """Write the run record into ``result["details"]["record"]`` at the run end (SKY-694).
 
-    The record lets another person reproduce the score: the hashes and the
-    metric home from staging (:func:`_record_facts`), the seed, the split the
-    guest made, the pinned sandbox image, and the ``[outcome]`` verdict keys
+    The record lets another person check the score: ``record_version``, the
+    pinned start commit, the SHA-256 of the reported patch (null for the start
+    version), the start and final scores at full precision (null when the run
+    has none), the hashes and the metric source from staging
+    (:func:`_record_facts`), the seed, the split the guest made, the pinned
+    sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
     is true when no rule failed, also when the file sets no target and no
     minimum. A run with no ``optimize.toml``, a result with no ``details``, a
@@ -1392,7 +1395,16 @@ def add_run_record(
     ):
         return
     verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
+    best = result.get("best_candidate")
+    # Hash the change the run serves and publishes, which never holds a hidden-path edit (SKY-764).
+    change = drop_paths(best, staged.hidden_paths) if isinstance(best, str) else ""
+    baseline, final = result.get("baseline_score"), result.get("best_score")
     details["record"] = {
+        "record_version": 1,
+        "base_commit": payload["target"]["repo"]["commit"],
+        "change_sha256": hashlib.sha256(change.encode("utf-8")).hexdigest() if change.strip() else None,
+        "baseline_score": baseline if _finite_number(baseline) else None,
+        "final_score": final if _finite_number(final) else None,
         **staged.record_facts,
         "seed": payload.get("seed"),
         "split": split,
@@ -1410,7 +1422,8 @@ def _record_block(result: dict[str, Any]) -> str:
 
     Returns:
         Markdown that starts with one plain line on the contract, then the
-        record fields; an empty string when the result has no record.
+        record fields, then the whole record as one JSON block in a collapsed
+        "Record as JSON" section; an empty string when the result has no record.
     """
     record = (result.get("details") or {}).get("record")
     if not isinstance(record, dict):
@@ -1441,15 +1454,27 @@ def _record_block(result: dict[str, Any]) -> str:
         else:
             listed = "; ".join(f"{name} {positions}" for name, positions in parts.items())
             split_line = f"`{split.get('rule')}`, seed {split.get('seed')}: {listed}"
+    change = record.get("change_sha256")
+    change_line = f"`{change}`" if change else "none, the reported version is the start version"
     fields = [
+        f"- Record version: {record.get('record_version')}",
+        f"- Base commit: `{record.get('base_commit')}`",
+        f"- Change SHA-256: {change_line}",
+        *(
+            f"- {label} score: {'none' if record.get(key) is None else repr(record.get(key))}"
+            for label, key in (("Baseline", "baseline_score"), ("Final", "final_score"))
+        ),
         f"- Contract SHA-256: `{record.get('contract_sha256')}`",
-        f"- Metric SHA-256: `{record.get('metric_sha256')}` (metric home: {record.get('metric_home')})",
+        f"- Metric SHA-256: `{record.get('metric_sha256')}` (metric source: {record.get('metric_source')})",
         f"- Cases SHA-256: `{record.get('cases_sha256')}` (source: {record.get('cases_source')})",
         f"- Seed: {record.get('seed')}",
         f"- Split: {split_line}",
         f"- Sandbox image: `{record.get('image')}`",
     ]
-    return f"{verdict}\n\nRun record:\n" + "\n".join(fields) + "\n\n"
+    # A guest reason can hold a code fence; the JSON escape keeps it inside the block and parses back the same.
+    as_json = json.dumps(record, indent=2, ensure_ascii=False).replace("`", "\\u0060")
+    collapsed = f"<details>\n<summary>Record as JSON</summary>\n\n```json\n{as_json}\n```\n\n</details>\n\n"
+    return f"{verdict}\n\nRun record:\n" + "\n".join(fields) + "\n\n" + collapsed
 
 
 def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
