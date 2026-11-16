@@ -88,7 +88,7 @@ export function ApprovalChoices({ allowLabel, chatRule, onResolve }: ApprovalCho
           onFocus={() => setFocus(i)}
           onClick={() => pick(option)}
           className={cn(
-            "flex h-8 cursor-pointer items-center gap-2.5 rounded-lg px-2 text-start text-[0.8125rem] outline-none transition-colors disabled:cursor-default disabled:opacity-60",
+            "flex h-8 cursor-pointer items-center gap-2.5 rounded px-2 text-start text-[0.8125rem] outline-none transition-colors disabled:cursor-default disabled:opacity-60",
             focus === i ? "bg-accent text-foreground" : "text-foreground/85 hover:bg-accent/60",
           )}
         >

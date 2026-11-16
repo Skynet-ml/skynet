@@ -96,7 +96,7 @@ function ToolApprovalCard({ payload, onResolve, className }: ApprovalCardProps) 
   return (
     <div
       className={cn(
-        "rounded-2xl border overflow-hidden",
+        "rounded-md border overflow-hidden",
         styles.border,
         styles.bg,
         className,

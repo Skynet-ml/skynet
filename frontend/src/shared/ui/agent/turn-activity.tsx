@@ -9,7 +9,11 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
-import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
+import {
+  interleaveThinking,
+  latestHeading,
+  mergeAdjacentThinking,
+} from "@/shared/lib/thinking-segments";
 
 
 import { ActivityGroup } from "./activity-steps";
@@ -29,6 +33,9 @@ import type { AgentThinking, AgentToolCall } from "./types";
 
 /** One stretch of a turn's thinking, placed by the tool calls before it. */
 export type TurnThinking = AgentThinking & { toolsBefore: number };
+
+/** A finished thinking segment and its place among the turn's segments. */
+type Row = TurnThinking & { order: number };
 
 type Step = {
   call: AgentToolCall;
@@ -125,9 +132,33 @@ export function TurnActivity({
   // groups with nothing between them (SKY-743).
   const shown = (list: Step[]) =>
     list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
+  // A card can drop out after it rendered (a write that ended with nothing to
+  // show) and join the rows around it into the first one's row. ``joined``
+  // maps that row to the segments it holds, so the open state, kept by turn
+  // and segment, follows the row the reader opened.
+  const layOut = (rows: Row[], list: Step[]) => {
+    const laidOut = interleaveThinking(rows, shown(list));
+    const joined = new Map<number, number[]>();
+    let group: number[] | null = null;
+    for (const piece of laidOut) {
+      if (piece.kind !== "thinking") {
+        group = null;
+        continue;
+      }
+      if (!group) {
+        group = [];
+        joined.set(piece.segment.order, group);
+      }
+      group.push(piece.segment.order);
+    }
+    return { pieces: mergeAdjacentThinking(laidOut), joined };
+  };
   const thinkingRows = finishedThinking(thinking);
-  const pieces = interleaveThinking(thinkingRows, shown(steps));
-  const earlierPieces = earlier.map((t) => interleaveThinking(finishedThinking(t.thinking), shown(t.steps)));
+  const current = layOut(thinkingRows, steps);
+  const earlierLaidOut = earlier.map((t) => layOut(finishedThinking(t.thinking), t.steps));
+  // A steer moves this turn into ``earlier`` under the same index, so an
+  // opened row stays open there and the new turn's rows start folded.
+  const [openRows, setOpenRows] = React.useState<ReadonlySet<string>>(() => new Set());
   // Every call counts, also a dropped card, so the header does not leave
   // and come back when a running write ends with nothing to show. A thinking
   // row counts only once the turn ends: a live segment can reopen (ReActV2's
@@ -162,9 +193,32 @@ export function TurnActivity({
     );
   };
 
-  const renderPiece = (piece: (typeof pieces)[number]) =>
+  type Laid = ReturnType<typeof layOut>;
+  type Piece = Laid["pieces"][number];
+
+  const renderRow = (segment: Row, turn: number, joined: Laid["joined"]) => {
+    const rows = (joined.get(segment.order) ?? [segment.order]).map((o) => `${turn}:${o}`);
+    return (
+      <ThinkingSection
+        key={`thinking-${segment.order}`}
+        thinking={segment}
+        compact
+        open={rows.some((r) => openRows.has(r))}
+        onOpenChange={(next) =>
+          setOpenRows((prev) => {
+            const out = new Set(prev);
+            for (const r of rows) out.delete(r);
+            if (next) out.add(`${turn}:${segment.order}`);
+            return out;
+          })
+        }
+      />
+    );
+  };
+
+  const renderPiece = (piece: Piece, turn: number, joined: Laid["joined"]) =>
     piece.kind === "thinking" ? (
-      <ThinkingSection key={`thinking-${piece.segment.order}`} thinking={piece.segment} compact />
+      renderRow(piece.segment, turn, joined)
     ) : piece.kind === "card" ? (
       // A card whose component renders nothing when it mounts leaves no padded gap.
       <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
@@ -194,14 +248,14 @@ export function TurnActivity({
     </Reveal>
   );
   const reduceMotion = Boolean(useReducedMotion());
-  const renderFolded = (piece: (typeof pieces)[number]) =>
+  const renderFolded = (turn: number, { joined }: Laid) => (piece: Piece) =>
     piece.kind === "thinking" ? (
-      fold(`thinking-${piece.segment.order}`, renderPiece(piece))
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece, turn, joined))
     ) : piece.kind === "card" ? (
-      renderPiece(piece)
+      renderPiece(piece, turn, joined)
     ) : piece.kind === "steps" ? (
       <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
-        {fold("steps", renderPiece(piece))}
+        {fold("steps", renderPiece(piece, turn, joined))}
         {!historyOpen &&
           piece.steps
             .filter(({ call }) => call.status === "error")
@@ -222,7 +276,7 @@ export function TurnActivity({
   const earlierNodes = earlier.map((turn, i) => (
     <React.Fragment key={`earlier-${i}`}>
       {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
-      {(earlierPieces[i] ?? []).map(renderFolded)}
+      {(earlierLaidOut[i]?.pieces ?? []).map(renderFolded(i, earlierLaidOut[i]!))}
       {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
     </React.Fragment>
   ));
@@ -263,7 +317,7 @@ export function TurnActivity({
       <div className="flex flex-col pt-1.5 empty:hidden">
         {earlierNodes}
         {plan && fold("plan", planLine)}
-        {pieces.map(renderFolded)}
+        {current.pieces.map(renderFolded(earlier.length, current))}
       </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
@@ -275,7 +329,7 @@ export function TurnActivity({
  * being thought. ``order`` is the segment's place in the turn, a key that
  * holds when a dropped card merges the bursts around a row.
  */
-function finishedThinking(thinking: readonly TurnThinking[]): Array<TurnThinking & { order: number }> {
+function finishedThinking(thinking: readonly TurnThinking[]): Row[] {
   return thinking.flatMap((t, order) =>
     t.reasoning && !(t.streaming && t.endedAt === null) ? [{ ...t, order }] : [],
   );

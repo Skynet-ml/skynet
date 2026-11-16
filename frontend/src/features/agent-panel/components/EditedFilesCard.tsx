@@ -98,7 +98,7 @@ export function EditedFilesCard({
     </>
   );
   return (
-    <div className="ide-rise-in mt-3 overflow-hidden rounded-xl border border-border bg-card">
+    <div className="ide-rise-in mt-3 overflow-hidden rounded-md border border-border bg-card">
       {single ? (
         <Clickable onClick={open(single.path)} className="flex items-center gap-2.5 p-2">
           {header}
