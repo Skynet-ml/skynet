@@ -235,7 +235,7 @@ export function MessageTime({ createdAt }: { createdAt?: number }) {
           sideOffset={6}
           arrow={false}
           dir={getActiveDir()}
-          className="max-w-none whitespace-nowrap px-2.5 py-1 text-sm leading-5 tabular-nums"
+          className="max-w-none whitespace-nowrap px-2 py-0.5 text-[11px] leading-4 tabular-nums"
         >
           {fullDate}
         </TooltipContent>
