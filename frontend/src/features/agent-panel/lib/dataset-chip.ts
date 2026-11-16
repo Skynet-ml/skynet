@@ -3,17 +3,7 @@
  * does, and goes with the user's message on Send (SKY-780).
  */
 
-import {
-  attachedFile,
-  joinPastes,
-  splitPastes,
-  type AttachedFile,
-} from "@/shared/ui/agent/pasted-text";
-
-/** Build a dataset's card: its file name and the context the agent reads. */
-export function datasetChip(name: string, note: string): AttachedFile {
-  return attachedFile(name, note);
-}
+import { joinPastes, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
 
 function sameFile(a: AttachedFile, b: AttachedFile): boolean {
   return a.name === b.name && a.text === b.text;

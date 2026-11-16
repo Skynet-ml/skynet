@@ -9,9 +9,9 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 
-import type { AttachedFile } from "@/shared/ui/agent/pasted-text";
+import { attachedFile, type AttachedFile } from "@/shared/ui/agent/pasted-text";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
-import { datasetChip, draftHasChip, putDatasetChip } from "../lib/dataset-chip";
+import { draftHasChip, putDatasetChip } from "../lib/dataset-chip";
 import type { WizardState } from "../lib/types";
 import type { ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 
@@ -276,7 +276,7 @@ export function useDatasetDraft({
     (dataset: ConfirmedDataset, owner?: string) => {
       const next: DraftDataset = {
         kind: "upload",
-        chip: datasetChip(dataset.fileName, datasetAttachedNote(dataset)),
+        chip: attachedFile(dataset.fileName, datasetAttachedNote(dataset)),
         owner,
         dataset,
         staging: true,
@@ -297,7 +297,7 @@ export function useDatasetDraft({
     (picked: ConfirmedLibraryDataset, owner?: string) =>
       putCard({
         kind: "library",
-        chip: datasetChip(picked.name, libraryPickNote(picked)),
+        chip: attachedFile(picked.name, libraryPickNote(picked)),
         owner,
         picked,
       }),

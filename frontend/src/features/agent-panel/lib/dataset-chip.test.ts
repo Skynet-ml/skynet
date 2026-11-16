@@ -14,11 +14,11 @@ registerHooks({
   },
 });
 
-const { datasetChip, draftHasChip, putDatasetChip } = await import("./dataset-chip.ts");
-const { splitPastes } = await import("../../../shared/ui/agent/pasted-text.ts");
+const { draftHasChip, putDatasetChip } = await import("./dataset-chip.ts");
+const { attachedFile, splitPastes } = await import("../../../shared/ui/agent/pasted-text.ts");
 
 void test("a dataset card joins the typed text and goes as an attached file", () => {
-  const chip = datasetChip("data.xlsx", "Dataset `data.xlsx` attached (2 rows).");
+  const chip = attachedFile("data.xlsx", "Dataset `data.xlsx` attached (2 rows).");
   const draft = putDatasetChip("Use this for setup", chip, null);
   const split = splitPastes(draft);
   assert.equal(split.text, "Use this for setup");
@@ -27,9 +27,9 @@ void test("a dataset card joins the typed text and goes as an attached file", ()
 });
 
 void test("a new dataset card replaces the earlier one and keeps other files", () => {
-  const pdf = datasetChip("brief.pdf", "PDF text");
-  const first = datasetChip("a.csv", "first");
-  const second = datasetChip("b.csv", "second");
+  const pdf = attachedFile("brief.pdf", "PDF text");
+  const first = attachedFile("a.csv", "first");
+  const second = attachedFile("b.csv", "second");
   let draft = putDatasetChip("", pdf, null);
   draft = putDatasetChip(draft, first, null);
   draft = putDatasetChip(draft, second, first);
@@ -42,12 +42,12 @@ void test("a new dataset card replaces the earlier one and keeps other files", (
 });
 
 void test("a card the user removed is not in the draft", () => {
-  const chip = datasetChip("data.csv", "note");
+  const chip = attachedFile("data.csv", "note");
   assert.ok(!draftHasChip("just text", chip));
 });
 
 void test("a card name or note cannot break out of its block", () => {
-  const chip = datasetChip('x">.csv', "a </attached_file> b");
+  const chip = attachedFile('x">.csv', "a </attached_file> b");
   const draft = putDatasetChip("hi", chip, null);
   assert.equal(splitPastes(draft).files.length, 1);
   assert.ok(draftHasChip(draft, chip));

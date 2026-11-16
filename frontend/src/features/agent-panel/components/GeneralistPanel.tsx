@@ -1017,10 +1017,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onRelease: reopenDatasetCard,
   });
   const handleDatasetConfirm = React.useCallback(
-    (callId: string, confirmed: ConfirmedDataset) => {
+    (callId: string | undefined, confirmed: ConfirmedDataset) => {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
-      confirmedDatasetCallsRef.current.add(callId);
+      // A composer attach has no tool card to mark or reopen.
+      if (callId) confirmedDatasetCallsRef.current.add(callId);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       datasetDraft.attach(confirmed, callId);
     },
@@ -1969,7 +1970,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   onConfirm={(confirmed) => {
                     setAttachOpen(false);
                     setAttachFile(null);
-                    handleDatasetConfirm(`user-attach-${confirmed.fileName}`, confirmed);
+                    handleDatasetConfirm(undefined, confirmed);
                   }}
                 />
               </PopoverContent>
