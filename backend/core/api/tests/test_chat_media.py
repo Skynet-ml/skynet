@@ -206,7 +206,9 @@ def _zip(*parts: str) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for part in parts:
-            archive.writestr(part, "<x/>")
+            # A fixed entry time keeps the bytes equal in each xdist worker:
+            # these bytes are parametrize ids, and workers must collect the same ids.
+            archive.writestr(zipfile.ZipInfo(part), "<x/>")
     return buffer.getvalue()
 
 
