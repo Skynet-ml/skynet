@@ -437,3 +437,14 @@ def test_non_string_ui_model_config_key_rejected(wizard_client: TestClient, key:
 
     assert resp.status_code == 422
     assert key in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(("key", "value"), [("token_source", "paid"), ("cli_provider", "gemini")])
+def test_ui_model_config_key_outside_its_values_rejected(wizard_client: TestClient, key: str, value: str) -> None:
+    """A token_source or cli_provider that ModelConfig does not allow fails with the allowed values."""
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, key: value}})
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert f"'{value}'" in detail
+    assert ("managed, byok, subscription" if key == "token_source" else "codex, claude") in detail

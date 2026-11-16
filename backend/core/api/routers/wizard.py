@@ -16,7 +16,7 @@ Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
@@ -239,6 +239,17 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
         if value is not None:
             if not isinstance(value, str):
                 raise DomainError("wizard.model_field_not_string", status=422, field=field_name, key=key)
+            # A Literal field allows only its listed values; a plain ``str | None`` field yields none here.
+            allowed = [a for arg in get_args(ModelConfig.model_fields[key].annotation) for a in get_args(arg)]
+            if allowed and value not in allowed:
+                raise DomainError(
+                    "wizard.model_field_not_allowed",
+                    status=422,
+                    field=field_name,
+                    key=key,
+                    value=value,
+                    allowed=", ".join(allowed),
+                )
             out[key] = value
     base_url = v.get("base_url")
     if base_url is not None:

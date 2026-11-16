@@ -288,6 +288,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
         "Put the reasoning level in {field}.extra.reasoning_effort, not at the top level."
     ),
     "wizard.model_field_not_string": "{field}.{key} must be a string.",
+    "wizard.model_field_not_allowed": "{field}.{key} '{value}' is not allowed. Allowed values: {allowed}.",
     "wizard.model_reasoning_effort_unsupported": (
         "{field}.extra.reasoning_effort '{effort}' is not a level that {name} supports. Supported levels: {levels}."
     ),

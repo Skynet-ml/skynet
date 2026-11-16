@@ -388,6 +388,7 @@ class I18nKey(StrEnum):
     WIZARD_INVALID_ROLE_VALUES = 'wizard.invalid_role_values'
     WIZARD_MODEL_BASE_URL_NOT_STRING = 'wizard.model_base_url_not_string'
     WIZARD_MODEL_EXTRA_NOT_OBJECT = 'wizard.model_extra_not_object'
+    WIZARD_MODEL_FIELD_NOT_ALLOWED = 'wizard.model_field_not_allowed'
     WIZARD_MODEL_FIELD_NOT_STRING = 'wizard.model_field_not_string'
     WIZARD_MODEL_MAX_TOKENS_INT = 'wizard.model_max_tokens_int'
     WIZARD_MODEL_NAME_MISSING_PREFIX = 'wizard.model_name_missing_prefix'
