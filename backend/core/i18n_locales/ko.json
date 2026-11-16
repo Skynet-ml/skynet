@@ -305,6 +305,8 @@
     "wizard.model_field_not_string": "{field}.{key}은(는) 문자열이어야 합니다.",
     "wizard.model_field_not_allowed": "{field}.{key}에는 '{value}' 값을 사용할 수 없습니다. 허용되는 값: {allowed}.",
     "wizard.model_reasoning_effort_unsupported": "{field}.extra.reasoning_effort의 '{effort}'은(는) {name}이(가) 지원하는 수준이 아닙니다. 지원되는 수준: {levels}.",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription'에는 {field}.cli_provider(codex 또는 claude)가 필요합니다.",
+    "wizard.model_subscription_local_only": "{field}.token_source 'subscription'은 Mac 앱에서만 실행됩니다. 'managed' 또는 'byok'을 사용하세요.",
     "wizard.model_max_tokens_int": "{field}.max_tokens는 정수여야 합니다.",
     "wizard.model_name_missing_prefix": "{field}.name '{name}'에 공급자 접두사가 없습니다. dspy.LM에는 'openai/gpt-4o-mini'와 같은 정규화된 id가 필요합니다. list_models_for_agent를 호출하고 항목의 ``name`` 필드를 그대로 복사하세요.",
     "wizard.model_name_non_empty_string": "{field}.name은 비어 있지 않은 문자열이어야 합니다.",

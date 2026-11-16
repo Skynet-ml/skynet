@@ -289,6 +289,10 @@ ENGLISH_MESSAGES: dict[str, str] = {
     ),
     "wizard.model_field_not_string": "{field}.{key} must be a string.",
     "wizard.model_field_not_allowed": "{field}.{key} '{value}' is not allowed. Allowed values: {allowed}.",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' needs {field}.cli_provider (codex or claude).",
+    "wizard.model_subscription_local_only": (
+        "{field}.token_source 'subscription' runs only in the Mac app. Use 'managed' or 'byok'."
+    ),
     "wizard.model_reasoning_effort_unsupported": (
         "{field}.extra.reasoning_effort '{effort}' is not a level that {name} supports. Supported levels: {levels}."
     ),

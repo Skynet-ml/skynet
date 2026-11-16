@@ -305,6 +305,8 @@
     "wizard.model_field_not_string": "{field}.{key} deve essere una stringa.",
     "wizard.model_field_not_allowed": "{field}.{key} non consente il valore '{value}'. Valori consentiti: {allowed}.",
     "wizard.model_reasoning_effort_unsupported": "{field}.extra.reasoning_effort '{effort}' non è un livello supportato da {name}. Livelli supportati: {levels}.",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' richiede {field}.cli_provider (codex o claude).",
+    "wizard.model_subscription_local_only": "{field}.token_source 'subscription' funziona solo nell'app per Mac. Usa 'managed' o 'byok'.",
     "wizard.model_max_tokens_int": "{field}.max_tokens deve essere un numero intero.",
     "wizard.model_name_missing_prefix": "{field}.name '{name}' è privo di un prefisso del provider. dspy.LM richiede id completamente qualificati come 'openai/gpt-4o-mini'. Chiama list_models_for_agent e copia il campo ``name`` della voce esattamente come è.",
     "wizard.model_name_non_empty_string": "{field}.name deve essere una stringa non vuota.",

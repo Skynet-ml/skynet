@@ -301,6 +301,8 @@
     "wizard.model_field_not_string": "{field}.{key} 必須係字串。",
     "wizard.model_field_not_allowed": "{field}.{key} 唔可以用 '{value}'。可以用嘅值：{allowed}。",
     "wizard.model_reasoning_effort_unsupported": "{field}.extra.reasoning_effort 嘅 '{effort}' 唔係 {name} 支援嘅程度。支援嘅程度：{levels}。",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' 需要 {field}.cli_provider（codex 或者 claude）。",
+    "wizard.model_subscription_local_only": "{field}.token_source 'subscription' 只可以喺 Mac 應用程式度運行。請用 'managed' 或者 'byok'。",
     "wizard.model_max_tokens_int": "{field}.max_tokens 必須係整數。",
     "wizard.model_name_missing_prefix": "{field}.name '{name}' 缺少 provider 前綴。dspy.LM 需要完整格式嘅 ID（例如 'openai/gpt-4o-mini'）。請呼叫 list_models_for_agent 並直接複製該項目嘅 ``name`` 欄位。",
     "wizard.model_name_non_empty_string": "{field}.name 必須係非空白字串。",

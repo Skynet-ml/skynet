@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ...config import settings
 from .. import model_catalog
 from ..routers.wizard import create_wizard_router
 
@@ -448,3 +449,37 @@ def test_ui_model_config_key_outside_its_values_rejected(wizard_client: TestClie
     detail = resp.json()["detail"]
     assert f"'{value}'" in detail
     assert ("managed, byok, subscription" if key == "token_source" else "codex, claude") in detail
+
+
+def test_subscription_without_cli_provider_rejected(wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subscription model with no cli_provider fails now, not later at submit."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": {"name": _OPUS, "token_source": "subscription"}})
+
+    assert resp.status_code == 422
+    assert "cli_provider" in resp.json()["detail"]
+
+
+def test_subscription_with_cli_provider_kept_in_local_mode(
+    wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local build keeps a subscription model that names its CLI."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    config = {"name": _OPUS, "token_source": "subscription", "cli_provider": "codex"}
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": config})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"]["model_config"]["cli_provider"] == "codex"
+
+
+def test_subscription_rejected_on_hosted_build(wizard_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hosted build refuses a subscription model, as submit does."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    config = {"name": _OPUS, "token_source": "subscription", "cli_provider": "codex"}
+
+    resp = wizard_client.post("/wizard/update", json={"model_config": config})
+
+    assert resp.status_code == 422
+    assert "subscription" in resp.json()["detail"]

@@ -183,6 +183,8 @@
     "wizard.model_field_not_string": "{field}.{key} חייב להיות מחרוזת.",
     "wizard.model_field_not_allowed": "הערך '{value}' אינו מותר ב-{field}.{key}. הערכים המותרים: {allowed}.",
     "wizard.model_reasoning_effort_unsupported": "{field}.extra.reasoning_effort '{effort}' אינה רמה ש-{name} תומך בה. הרמות הנתמכות: {levels}.",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' דורש את {field}.cli_provider (codex או claude).",
+    "wizard.model_subscription_local_only": "{field}.token_source 'subscription' פועל רק באפליקציית Mac. השתמש/י ב-'managed' או ב-'byok'.",
     "wizard.optimizer_kwargs_not_object": "optimizer_kwargs חייב להיות אובייקט.",
     "wizard.optimizer_unknown": "'{name}' אינו {term.optimizer} מוכר. ראה/ראי get_registry_snapshot לשמות הרשומים, או השתמש/י בכינוי 'gepa' או בנתיב נקודות מלא כמו 'dspy.teleprompt.GEPA'.",
     "wizard.module_unknown": "'{name}' אינו {term.module} מוכר. השתמש/י בכינויים 'predict' או 'cot', או בנתיב נקודות מלא כמו 'dspy.Predict'.",

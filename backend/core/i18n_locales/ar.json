@@ -305,6 +305,8 @@
     "wizard.model_field_not_string": "يجب أن يكون {field}.{key} نصًا.",
     "wizard.model_field_not_allowed": "القيمة '{value}' غير مسموح بها في {field}.{key}. القيم المسموح بها: {allowed}.",
     "wizard.model_reasoning_effort_unsupported": "القيمة '{effort}' في {field}.extra.reasoning_effort ليست مستوى يدعمه {name}. المستويات المدعومة: {levels}.",
+    "wizard.model_subscription_needs_cli": "يتطلب {field}.token_source 'subscription' تحديد {field}.cli_provider (codex أو claude).",
+    "wizard.model_subscription_local_only": "يعمل {field}.token_source 'subscription' فقط في تطبيق Mac. استخدم 'managed' أو 'byok'.",
     "wizard.model_max_tokens_int": "يجب أن يكون {field}.max_tokens عددًا صحيحًا.",
     "wizard.model_name_missing_prefix": "ينقص {field}.name '{name}' بادئة المزوّد. يتطلّب dspy.LM معرّفات مؤهّلة بالكامل مثل 'openai/gpt-4o-mini'. استدعِ list_models_for_agent وانسخ حقل ``name`` للإدخال حرفيًا.",
     "wizard.model_name_non_empty_string": "يجب أن يكون {field}.name نصًا غير فارغ.",

@@ -396,6 +396,8 @@ class I18nKey(StrEnum):
     WIZARD_MODEL_NOT_JSON_OBJECT = 'wizard.model_not_json_object'
     WIZARD_MODEL_NUMBER_REQUIRED = 'wizard.model_number_required'
     WIZARD_MODEL_REASONING_EFFORT_UNSUPPORTED = 'wizard.model_reasoning_effort_unsupported'
+    WIZARD_MODEL_SUBSCRIPTION_LOCAL_ONLY = 'wizard.model_subscription_local_only'
+    WIZARD_MODEL_SUBSCRIPTION_NEEDS_CLI = 'wizard.model_subscription_needs_cli'
     WIZARD_MODEL_UNKNOWN_KEY = 'wizard.model_unknown_key'
     WIZARD_MODULE_UNKNOWN = 'wizard.module_unknown'
     WIZARD_OPTIMIZER_KWARGS_NOT_OBJECT = 'wizard.optimizer_kwargs_not_object'

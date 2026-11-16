@@ -21,6 +21,7 @@ from typing import Any, get_args
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...config import settings
 from ...models import DataMode, ModelConfig, OptimizerChoice, optimizers_for
 from ...models.blackbox import BlackboxCandidate
 from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
@@ -203,6 +204,7 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
     Raises:
         DomainError: 422 with a wizard-prefixed key when the input is not
             a JSON object, has a key that ``ModelConfig`` does not define,
+            names a subscription model that this build or its CLI cannot run,
             or any field fails type validation.
     """
     if not isinstance(v, dict):
@@ -251,6 +253,12 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
                     allowed=", ".join(allowed),
                 )
             out[key] = value
+    # Submit refuses these pairs; refuse them here so the agent sees the error, not the user.
+    if out.get("token_source") == "subscription":
+        if not settings.local_mode:
+            raise DomainError("wizard.model_subscription_local_only", status=422, field=field_name)
+        if "cli_provider" not in out:
+            raise DomainError("wizard.model_subscription_needs_cli", status=422, field=field_name)
     base_url = v.get("base_url")
     if base_url is not None:
         if not isinstance(base_url, str):

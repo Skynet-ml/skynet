@@ -305,6 +305,8 @@
     "wizard.model_field_not_string": "{field}.{key} 必须是字符串。",
     "wizard.model_field_not_allowed": "{field}.{key} 不允许值 '{value}'。允许的值：{allowed}。",
     "wizard.model_reasoning_effort_unsupported": "{field}.extra.reasoning_effort 的值 '{effort}' 不是 {name} 支持的级别。支持的级别：{levels}。",
+    "wizard.model_subscription_needs_cli": "{field}.token_source 'subscription' 需要 {field}.cli_provider（codex 或 claude）。",
+    "wizard.model_subscription_local_only": "{field}.token_source 'subscription' 仅在 Mac 应用中运行。请使用 'managed' 或 'byok'。",
     "wizard.model_max_tokens_int": "{field}.max_tokens 必须是整数。",
     "wizard.model_name_missing_prefix": "{field}.name '{name}' 缺少提供方前缀。dspy.LM 要求使用完全限定的 id，例如 'openai/gpt-4o-mini'。请调用 list_models_for_agent 并原样复制该条目的 ``name`` 字段。",
     "wizard.model_name_non_empty_string": "{field}.name 必须是非空字符串。",
