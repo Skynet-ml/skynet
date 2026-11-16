@@ -1240,7 +1240,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   // Every call is a step in the turn's activity group except the ones the
   // user acts on: the request cards and the submit summary, which links to the
-  // new run. A wizard write is a step row that opens to its old and new values.
+  // new run. A wizard write is a step row that opens to its old and new values,
+  // except a finished write that changed nothing, which renders nothing.
   const isStepCall = React.useCallback(
     (call: AgentToolCall) => {
       if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;

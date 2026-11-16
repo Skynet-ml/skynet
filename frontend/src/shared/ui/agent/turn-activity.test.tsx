@@ -260,7 +260,7 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
         steps={steps}
         stepKind={(c) => (c.id.startsWith("read") ? "read" : "edit")}
         renderStep={(c) =>
-          // The ask-user card's component renders nothing once it mounts.
+          // A card whose component renders nothing once it mounts.
           c.id === "ask" ? <Nothing /> : (
             <StepRow icon={Wrench} label={c.id} status="done">
               {c.id === "write-b" ? <span data-details="" /> : undefined}
