@@ -280,18 +280,20 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
   for (const row of rows) assert.ok(row.classList.contains("py-1"), `${row.textContent} has py-1`);
 
   const SPACING = /^(gap|gap-y|space-y|p|py|pt|pb|m|my|mt|mb)-/;
-  const history = host.querySelector(".pt-1\\.5")!;
+  // The history is the block right after the turn row.
+  const history = turn.parentElement!.nextElementSibling!;
   for (const row of rows) {
     for (let node = row.parentElement; node && node !== history; node = node.parentElement) {
       const extra = [...node.classList].filter((c) => SPACING.test(c));
       assert.deepEqual(extra, [], `nothing between rows adds spacing: ${node.className}`);
     }
   }
+  // jsdom applies no CSS, so this checks that an empty padded box carries the class that hides it.
   assert.ok(
     [...history.querySelectorAll("div")].every(
       (d) => d.childNodes.length > 0 || !d.className.includes("py-") || d.classList.contains("empty:hidden"),
     ),
-    "an empty card leaves no padded box",
+    "an empty card's padded box hides itself",
   );
 
   // A row with details is a toggle with a chevron; a row without them is neither.

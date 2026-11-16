@@ -19,6 +19,7 @@ const {
   fieldValueText,
   isLongText,
   isWizardWrite,
+  isWizardWriteStep,
   listChange,
   liveValues,
   lockedCodeFiles,
@@ -29,7 +30,7 @@ const {
   writingFields,
 } = await import(wizardWriteUrl);
 
-const call = (status: "running" | "done", result?: unknown) => ({
+const call = (status: "running" | "done" | "error", result?: unknown) => ({
   id: "1",
   tool: "update_wizard_state",
   reason: "",
@@ -187,4 +188,22 @@ test("a file tool's patch merges its file over the files the state holds", () =>
   });
   const plain = { metric_code: "x = 1\n" };
   assert.equal(mergedPatch(state, plain), plain);
+});
+
+// SKY-743: a finished write keeps its place in its group as a step row; only
+// one with nothing to show turns into an (empty) card.
+test("a wizard write stays a step unless it finished with no change", () => {
+  const changed = call("done", { previous: { task_objective: "Old goal" } });
+  assert.equal(isWizardWriteStep(changed), true, "a finished write with changes stays a step");
+  assert.equal(isWizardWriteStep(call("running")), true, "a running write is a step");
+  assert.equal(isWizardWriteStep(call("error", "boom")), true, "a failed write is a step");
+  const same = call("done", {
+    previous: { task_objective: "Sort tickets", screen_notes: null, metric_code: "def m(): ..." },
+  });
+  assert.equal(isWizardWriteStep(same), false, "a finished write with no change is no step");
+  // The form's live values win, as on the card itself.
+  assert.equal(
+    isWizardWriteStep(changed, { task_objective: "Sort tickets", metric_code: "def m(): ..." }),
+    false,
+  );
 });
