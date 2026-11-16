@@ -23,14 +23,13 @@ interface RevealTextProps {
  */
 export function RevealText({ text, animate, className }: RevealTextProps) {
   const reduce = useReducedMotion();
-  const key = text;
-  const [writing] = React.useState(() => animate || revealing.has(key));
+  const [writing] = React.useState(() => animate || revealing.has(text));
   const active = !reduce && writing;
 
   React.useEffect(() => {
     if (!active) return;
-    revealing.add(key);
-  }, [active, key]);
+    revealing.add(text);
+  }, [active, text]);
 
   if (!active) {
     return (
@@ -62,7 +61,7 @@ export function RevealText({ text, animate, className }: RevealTextProps) {
                   delay: Math.min(word++ * WORD_STAGGER_S, MAX_REVEAL_DELAY_S),
                   ease: [0.2, 0.8, 0.2, 1],
                 }}
-                onAnimationComplete={i === lastWord ? () => revealing.delete(key) : undefined}
+                onAnimationComplete={i === lastWord ? () => revealing.delete(text) : undefined}
               >
                 {part}
               </motion.span>
