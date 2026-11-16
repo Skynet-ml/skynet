@@ -227,6 +227,18 @@ def test_retry_drops_the_failed_attempt_thinking(tmp_path: Path) -> None:
     assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
 
 
+def test_fallback_drops_the_capped_cli_thinking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep only the fallback CLI's thinking when the first CLI thinks and then hits its cap."""
+    fake_cli(tmp_path, "claude", f"{printing(claude_delta('thinking', 'Lost'))}\nsys.stdout.flush()\n{CAPPED}")
+    think = {"method": "item/reasoning/textDelta", "params": {"itemId": "rs_1", "contentIndex": 0, "delta": "Kept"}}
+    fake_app_server(tmp_path, emitting(think, *CODEX_TURN))
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model, **kwargs: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    result, evidence = CliDispatcher(None, "claude", MODEL, "agent", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["capped_runs"]) == (200, "codex", ["claude"])
+    assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
+
+
 def test_timeout_is_not_retried(tmp_path: Path) -> None:
     """Answer a timed-out call with 502 after one attempt, so a hung CLI holds a slot once."""
     fake_cli(tmp_path, "claude", "time.sleep(30)")
