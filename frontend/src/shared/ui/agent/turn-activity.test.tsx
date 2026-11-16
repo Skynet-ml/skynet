@@ -244,6 +244,7 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
+  const Nothing = () => null;
   const steps: Props["steps"] = [
     { call: call("edit-a"), isRetry: false, index: 0 },
     { call: call("write-b"), isRetry: false, index: 1 },
@@ -259,8 +260,8 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
         steps={steps}
         stepKind={(c) => (c.id.startsWith("read") ? "read" : "edit")}
         renderStep={(c) =>
-          // The ask-user card renders nothing, as in the setup chat.
-          c.id === "ask" ? null : (
+          // The ask-user card's component renders nothing once it mounts.
+          c.id === "ask" ? <Nothing /> : (
             <StepRow icon={Wrench} label={c.id} status="done">
               {c.id === "write-b" ? <span data-details="" /> : undefined}
             </StepRow>
@@ -289,12 +290,11 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
     }
   }
   // jsdom applies no CSS, so this checks that an empty padded box carries the class that hides it.
-  assert.ok(
-    [...history.querySelectorAll("div")].every(
-      (d) => d.childNodes.length > 0 || !d.className.includes("py-") || d.classList.contains("empty:hidden"),
-    ),
-    "an empty card's padded box hides itself",
+  const empty = [...history.querySelectorAll("div")].filter(
+    (d) => d.childNodes.length === 0 && d.className.includes("py-"),
   );
+  assert.equal(empty.length, 1, "the empty card keeps its padded box");
+  assert.ok(empty[0]!.classList.contains("empty:hidden"), "an empty card's padded box hides itself");
 
   // A row with details is a toggle with a chevron; a row without them is neither.
   assert.equal(label("write-b").tagName, "BUTTON");
