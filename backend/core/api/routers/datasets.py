@@ -75,7 +75,9 @@ class SampleDatasetStageResponse(BaseModel):
 class ColumnRolesRequest(BaseModel):
     """Request body for ``POST /datasets/column-roles``."""
 
-    dataset_columns: list[str] = Field(min_length=1, max_length=100)
+    # No item cap: the upload parser has none, so a cap would refuse the
+    # roles of every wider file (SKY-742).
+    dataset_columns: list[str] = Field(min_length=1)
     column_roles: dict[str, str] = Field(
         description="Map of dataset column name → role: 'input', 'output', or 'ignore'.",
     )

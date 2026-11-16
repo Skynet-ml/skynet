@@ -169,7 +169,14 @@ import { MAX_WIDTH, MIN_WIDTH, NARROW_VIEWPORT_QUERY } from "../constants";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
-import { DatasetUploadCard, type ConfirmedDataset } from "./DatasetUploadCard";
+import {
+  DatasetUploadCard,
+  applyDatasetUpload,
+  datasetAttachedNote,
+  libraryPickOverride,
+  useSendAfterRender,
+  type ConfirmedDataset,
+} from "./DatasetUploadCard";
 import { EditedFilesCard } from "./EditedFilesCard";
 import { LibraryDatasetCard, type ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 import { InferenceFormCard } from "./InferenceFormCard";
@@ -202,7 +209,7 @@ const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset column-mapping card instead of being read as text. */
+/** Whether a file opens the dataset upload card instead of being read as text. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -970,11 +977,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const [attachOpen, setAttachOpen] = React.useState(false);
   // The composer's attach button opens the OS file picker; the popover only
-  // appears once a dataset file was chosen, already parsed into the
-  // column-mapping card.
+  // appears while a chosen dataset file is read, or when it cannot be read.
   const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
 
+  const sendAfterRender = useSendAfterRender(agent.send);
   const handleDatasetConfirm = React.useCallback(
     async (callId: string, confirmed: ConfirmedDataset) => {
       // A web chat must not stage rows or change the Mac's wizard.
@@ -997,18 +1004,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // 422 on submit and the user can re-attach. Falling back to no
         // staged id matches the prior behaviour for the dispatched event.
       }
-      const stagedDetail = {
-        dataset: confirmed.rows,
-        dataset_filename: confirmed.fileName,
-        staged_dataset_id: stagedDatasetId,
-        wizard_state: {
-          dataset_ready: true,
-          columns_configured: true,
-          dataset_columns: confirmed.columns,
-          column_kinds: confirmed.columnKinds,
-          column_roles: confirmed.columnRoles,
-        },
-      };
+      const { detail: stagedDetail, override: wizardOverride } = applyDatasetUpload(
+        wizardCtx,
+        confirmed,
+        stagedDatasetId,
+      );
       // Persist before dispatch so the wizard can replay it after navigation;
       // the listener in use-unified-wizard reads+clears this key on mount.
       try {
@@ -1018,41 +1018,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // live event below still covers the same-page case.
       }
       window.dispatchEvent(new CustomEvent("wizard:dataset-staged", { detail: stagedDetail }));
-      // Write the whole dataset descriptor into the shared context (not just
-      // the id) so it is the single source of truth: a wizard mounted on
-      // /submit hydrates the same rows from ``staged_dataset_id`` and reads
-      // columns + roles straight from here, instead of depending on the
-      // (quota-fragile) sessionStorage replay.
-      if (stagedDatasetId && wizardCtx) {
-        wizardCtx.setField("staged_dataset_id", stagedDatasetId, "user");
-        wizardCtx.setField("dataset_columns", confirmed.columns, "user");
-        wizardCtx.setField("dataset_ready", true, "user");
-        wizardCtx.setField("columns_configured", true, "user");
-      }
-      const mappingLine = confirmed.columns
-        .map((c) => {
-          const role = confirmed.columnRoles[c];
-          if (role === "ignore") return null;
-          return `- ${c} → ${role}`;
-        })
-        .filter(Boolean)
-        .join("\n");
-      const note = formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
-        p1: confirmed.fileName,
-        p2: confirmed.rowCount,
-        p3: mappingLine,
-      });
-      const wizardOverride: WizardState | undefined = stagedDatasetId
-        ? {
-            staged_dataset_id: stagedDatasetId,
-            dataset_ready: true,
-            columns_configured: true,
-            dataset_columns: confirmed.columns,
-          }
-        : undefined;
-      agent.send(note, wizardOverride);
+      const note = datasetAttachedNote(confirmed);
+      // Sent after the cleared roles render, so the turn's wizard state does
+      // not carry the earlier file's roles.
+      sendAfterRender(note, wizardOverride);
     },
-    [agent, wizardCtx, webChat],
+    [wizardCtx, webChat, sendAfterRender],
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1082,13 +1053,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         p2: picked.rowCount,
         p3: mappingLine,
       });
-      const wizardOverride: WizardState = {
-        source_dataset_id: picked.sourceDatasetId,
-        dataset_ready: true,
-        columns_configured: true,
-        dataset_columns: picked.columns,
-      };
-      agent.send(note, wizardOverride);
+      agent.send(note, libraryPickOverride(picked));
     },
     [agent, wizardCtx, webChat],
   );
@@ -1945,7 +1910,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             {!inSetup && modelMenuNode}
           </>
         }
-        // Dataset files keep their column-mapping card; any other file is
+        // Dataset files go to the dataset upload card; any other file is
         // read as text by the composer.
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.

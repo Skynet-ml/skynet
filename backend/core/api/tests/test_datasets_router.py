@@ -293,3 +293,16 @@ def test_stage_sample_unknown_id_returns_404(
     resp = client.post("/datasets/samples/not-a-sample/stage")
 
     assert resp.status_code == 404
+
+
+def test_column_roles_accept_a_file_wider_than_100_columns(datasets_client: TestClient) -> None:
+    """A 120-column upload gets its roles set; the parser has no column cap either."""
+    columns = [f"c{i}" for i in range(120)]
+    payload = {"dataset_columns": columns, "column_roles": {"c0": "input", "c119": "output"}}
+
+    resp = datasets_client.post("/datasets/column-roles", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    wizard_state = resp.json()["wizard_state"]
+    assert wizard_state["dataset_columns"] == columns
+    assert wizard_state["columns_configured"] is True
