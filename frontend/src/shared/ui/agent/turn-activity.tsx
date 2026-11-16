@@ -117,8 +117,13 @@ export function TurnActivity({
     return () => clearInterval(id);
   }, [isLive]);
 
-  const pieces = interleaveThinking([], steps);
-  const earlierPieces = earlier.map((t) => interleaveThinking([], t.steps));
+  // A card that renders nothing (the ask-user call, a setup write that
+  // changed nothing) is no piece: it would cut the steps around it into two
+  // groups with nothing between them (SKY-743).
+  const shown = (list: Step[]) =>
+    list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
+  const pieces = interleaveThinking([], shown(steps));
+  const earlierPieces = earlier.map((t) => interleaveThinking([], shown(t.steps)));
   const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;

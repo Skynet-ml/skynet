@@ -1226,6 +1226,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
+      // A finished setup write with nothing to show renders nothing, so the turn drops it.
+      if (isWizardWrite(call.tool) && !isWizardWriteStep(call, writeBefore?.[call.id])) return null;
       const renderer = getToolRenderer(call.tool);
       if (renderer?.card && call.status !== "running") {
         return renderer.card(call);
@@ -1233,7 +1235,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming, webChat],
+    [handleDatasetConfirm, handleLibraryPick, streaming, webChat, writeBefore],
   );
 
   // Every call is a step in the turn's activity group except the ones the

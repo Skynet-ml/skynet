@@ -303,3 +303,32 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
   assert.equal(label("edit-a").querySelectorAll("svg").length, 1, "the row without details shows only its icon");
   await act(async () => root.unmount());
 });
+
+void it("drops a card that renders nothing, so it does not cut a group in two", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <TurnActivity
+        thinking={[]}
+        streaming={false}
+        durationMs={5_000}
+        steps={[
+          { call: call("edit-a"), isRetry: false, index: 0 },
+          { call: call("quiet"), isRetry: false, index: 1, card: true },
+          { call: call("edit-b"), isRetry: false, index: 2 },
+        ]}
+        stepKind={() => "edit"}
+        // A setup write that changed nothing renders nothing, as in the setup chat.
+        renderStep={(c) => (c.id === "quiet" ? null : <span data-step={c.id}>{c.id}</span>)}
+      />,
+    );
+  });
+  const row = await openTurn(host);
+  const groups = [...host.querySelectorAll("button[aria-expanded]")].filter((b) => b !== row);
+  assert.equal(groups.length, 1, "both edits fold under one summary line");
+  await act(async () => (groups[0] as HTMLButtonElement).click());
+  assert.ok(host.querySelector('[data-step="edit-a"]') && host.querySelector('[data-step="edit-b"]'));
+  await act(async () => root.unmount());
+});
