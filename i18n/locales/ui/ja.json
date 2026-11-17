@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "{name} を読み込み中",
   "shared.agent.media_download_name": "{name} をダウンロード",
   "agent.media.upload_failed": "{name} を添付できませんでした。",
+  "agent.media.unreadable": "{name} をアップロードできませんでした。エージェントはこのファイルを読めません。",
   "agent.media.too_large": "{name} は大きすぎます。画像は 3 MB、音声は 20 MB、動画は 50 MB までです。",
   "agent.media.unsupported": "{name} は対応している画像、動画、音声ファイルではありません。",
   "agent.media.quota": "ストレージがいっぱいです。さらに添付するにはファイルを削除してください。",

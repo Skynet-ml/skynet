@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "Carregando {name}",
   "shared.agent.media_download_name": "Baixar {name}",
   "agent.media.upload_failed": "Não foi possível anexar {name}.",
+  "agent.media.unreadable": "Não foi possível enviar {name}. O agente não consegue ler este arquivo.",
   "agent.media.too_large": "{name} é grande demais. Imagens podem ter até 3 MB, áudio até 20 MB e vídeo até 50 MB.",
   "agent.media.unsupported": "{name} não é um arquivo de imagem, vídeo ou áudio compatível.",
   "agent.media.quota": "Seu armazenamento está cheio. Exclua arquivos para anexar mais.",

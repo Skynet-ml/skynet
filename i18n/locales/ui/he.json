@@ -4559,6 +4559,7 @@
   "shared.agent.media_load_error": "לא ניתן לטעון את הקובץ",
   "shared.agent.media_try_again": "לנסות שוב",
   "agent.media.upload_failed": "לא ניתן לצרף את {name}.",
+  "agent.media.unreadable": "לא ניתן להעלות את {name}. הסוכן לא יכול לקרוא את הקובץ.",
   "agent.media.too_large": "{name} גדול מדי. אפשר לצרף תמונות עד 3 MB, קובצי שמע עד 20 MB וסרטונים עד 50 MB.",
   "agent.media.unsupported": "{name} אינו קובץ תמונה, סרטון או שמע נתמך.",
   "agent.media.quota": "האחסון שלך מלא. כדי לצרף עוד, צריך למחוק קבצים.",

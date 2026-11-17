@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "Завантаження {name}",
   "shared.agent.media_download_name": "Завантажити {name}",
   "agent.media.upload_failed": "Не вдалося прикріпити {name}.",
+  "agent.media.unreadable": "Не вдалося завантажити {name}. Агент не може прочитати цей файл.",
   "agent.media.too_large": "{name} завеликий. Зображення — до 3 МБ, аудіо — до 20 МБ, відео — до 50 МБ.",
   "agent.media.unsupported": "{name} не є підтримуваним файлом зображення, відео чи аудіо.",
   "agent.media.quota": "Сховище заповнене. Видаліть файли, щоб прикріпити нові.",

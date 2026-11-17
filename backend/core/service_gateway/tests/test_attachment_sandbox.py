@@ -441,7 +441,7 @@ def test_stop_chat_runner_deletes_a_mac_workspace_with_no_runner(
     folder = module.local_workspace("chat-1") / "attachments" / "m1"
     folder.mkdir(parents=True)
     (folder / "a.txt").write_bytes(b"a")
-    module.stop_chat_runner("chat-1")
+    module.stop_chat_runner("chat-1").join(timeout=10)
     assert not module.local_workspace("chat-1").exists()
 
 
@@ -472,7 +472,7 @@ def test_stop_chat_runner_closes_the_box(monkeypatch: pytest.MonkeyPatch) -> Non
     runner = make_runner([], boxes, Clock())
     runner.exec_command("true")
     monkeypatch.setitem(module._RUNNERS, "chat-1", runner)
-    module.stop_chat_runner("chat-1")
+    module.stop_chat_runner("chat-1").join(timeout=10)
     assert "chat-1" not in module._RUNNERS
     assert boxes[0].stopped
 
@@ -484,7 +484,7 @@ def test_a_chat_deleted_mid_turn_still_charges_the_turn(monkeypatch: pytest.Monk
     runner.exec_command("true")
     clock.now = 600
     monkeypatch.setitem(module._RUNNERS, "chat-1", runner)
-    module.stop_chat_runner("chat-1")
+    module.stop_chat_runner("chat-1").join(timeout=10)
     clock.now = 900
     assert runner.take_charge_cents() == _cents(600)
     assert runner.take_charge_cents() == 0
@@ -557,12 +557,13 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_commands_ask_only_in_ask_mode() -> None:
-    """Check that a command asks first in Ask mode, and runs without a prompt in the other modes."""
-    for name in (EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL):
-        assert _needs_approval(name, "ask") is True
-        assert _needs_approval(name, "auto_safe") is False
-        assert _needs_approval(name, "yolo") is False
-        assert chat_rule_allowed(name) is True
+    """Check that a command asks first in Ask mode, and its write_stdin calls never ask."""
+    assert _needs_approval(EXEC_COMMAND_TOOL, "ask") is True
+    assert chat_rule_allowed(EXEC_COMMAND_TOOL) is True
+    for mode in ("ask", "auto_safe", "yolo"):
+        assert _needs_approval(WRITE_STDIN_TOOL, mode) is False
+    for mode in ("auto_safe", "yolo"):
+        assert _needs_approval(EXEC_COMMAND_TOOL, mode) is False
 
 
 def test_failed_start_stops_the_box() -> None:
@@ -689,6 +690,7 @@ def test_a_file_that_cannot_be_copied_leaves_the_others_working() -> None:
     boxes: list[FakeBox] = []
     runner = make_runner(files, boxes, Clock())
     put = runner._put
+    tried: list[str] = []
 
     def put_or_fail(env: Any, file: ChatFile) -> None:
         """Fail on the long name, as a file system does.
@@ -700,6 +702,7 @@ def test_a_file_that_cannot_be_copied_leaves_the_others_working() -> None:
         Raises:
             RuntimeError: For the long name.
         """
+        tried.append(file.id)
         if file.id == "bad":
             raise RuntimeError("File name too long")
         put(env, file)
@@ -707,6 +710,53 @@ def test_a_file_that_cannot_be_copied_leaves_the_others_working() -> None:
     runner._put = put_or_fail  # type: ignore[method-assign]
     assert "ran: ls" in runner.exec_command("ls")
     assert set(boxes[0].written) == {"attachments/m2/b.txt"}
+    assert "rm -rf .skynet-upload/bad.* attachments/bad" in boxes[0].commands
+    runner.exec_command("ls")
+    assert tried == ["bad", "m2"]
+    runner.close()
+
+
+def test_a_failed_removal_closes_the_box() -> None:
+    """Check that a file that left the chat but stays in the box closes that box, and the next box lacks it."""
+    files = [ChatFile("m1", "a.txt", b"a"), ChatFile("m2", "b.txt", b"b")]
+    boxes: list[FakeBox] = []
+    runner = make_runner(files, boxes, Clock())
+    runner.exec_command("true")
+    exec_ = boxes[0].exec
+
+    async def fail_rm(command: str, **kwargs: Any) -> ExecResult:
+        """Fail the removal, and run any other command.
+
+        Args:
+            command: The shell command.
+            **kwargs: The other arguments.
+
+        Returns:
+            The result.
+        """
+        if command.startswith("rm -rf attachments/"):
+            return ExecResult(exit_code=1, stdout="", stderr="busy")
+        return await exec_(command, **kwargs)
+
+    boxes[0].exec = fail_rm  # type: ignore[method-assign]
+    del files[0]
+    assert "did not open" in runner.exec_command("ls")
+    assert boxes[0].stopped
+    assert "ran: ls" in runner.exec_command("ls")
+    assert set(boxes[1].written) == {"attachments/m2/b.txt"}
+    runner.close()
+
+
+def test_mac_restart_writes_a_file_whose_folder_is_empty(tmp_path: Path) -> None:
+    """Check that an empty file folder left by a failed write does not count as a copied file."""
+    workspace = tmp_path / "ws"
+    (workspace / "attachments" / "m1").mkdir(parents=True)
+    files = [ChatFile("m1", "a.txt", b"a")]
+    runner = module._LocalFilesRunner(
+        workspace, lambda skip: ({f.id for f in files}, [f for f in files if f.id not in skip])
+    )
+    runner.exec_command("true")
+    assert (workspace / "attachments" / "m1" / "a.txt").read_bytes() == b"a"
     runner.close()
 
 

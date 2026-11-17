@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "جارٍ تحميل {name}",
   "shared.agent.media_download_name": "تنزيل {name}",
   "agent.media.upload_failed": "تعذّر إرفاق {name}.",
+  "agent.media.unreadable": "تعذّر رفع {name}. لا يستطيع الوكيل قراءة هذا الملف.",
   "agent.media.too_large": "{name} كبير جدًا. الحد 3 MB للصور و20 MB للصوت و50 MB للفيديو.",
   "agent.media.unsupported": "{name} ليس ملف صورة أو فيديو أو صوت مدعومًا.",
   "agent.media.quota": "مساحة التخزين ممتلئة. احذف بعض الملفات لإرفاق المزيد.",

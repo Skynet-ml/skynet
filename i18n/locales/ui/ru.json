@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "Загрузка {name}",
   "shared.agent.media_download_name": "Скачать {name}",
   "agent.media.upload_failed": "Не удалось прикрепить {name}.",
+  "agent.media.unreadable": "Не удалось загрузить {name}. Агент не может прочитать этот файл.",
   "agent.media.too_large": "{name} слишком большой. Изображения — до 3 МБ, аудио — до 20 МБ, видео — до 50 МБ.",
   "agent.media.unsupported": "{name} не является поддерживаемым файлом изображения, видео или аудио.",
   "agent.media.quota": "Хранилище заполнено. Удалите файлы, чтобы прикрепить новые.",

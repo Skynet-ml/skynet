@@ -386,7 +386,9 @@ void test("each same-name card keeps its own original when the other's upload fa
   );
   await flush();
   // The agent cannot read a file with no stored original, so the user is told (SKY-781).
-  assert.deepEqual(errors.slice(errorsBefore), ["Could not attach a.pdf."]);
+  assert.deepEqual(errors.slice(errorsBefore), [
+    "Could not upload a.pdf. The agent cannot read this file.",
+  ]);
   // The first upload failed: its card has no original, and the second keeps its own.
   assert.deepEqual(
     documents(draft().ready(cards("c-1", "c-2"))).map((m) => m.card),

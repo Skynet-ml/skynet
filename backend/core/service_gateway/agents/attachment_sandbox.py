@@ -283,6 +283,8 @@ class SandboxCommandRunner(SessionTable):
         self._box_charged = 0
         self._owed = 0
         self._copied: set[str] = set()
+        # Files that failed to copy into this box; they are not tried again until a new box opens.
+        self._failed: set[str] = set()
         self._futures: dict[int, Future[ExecResult]] = {}
         self._closed = False
         self._lifetime = sandbox_lifetime_seconds()
@@ -444,16 +446,26 @@ class SandboxCommandRunner(SessionTable):
                     self._stop(env)
                     raise
                 self._env, self._box_started, self._box_charged = env, self._clock(), 0
-                self._copied = set()
+                self._copied, self._failed = set(), set()
             env = self._env
-            held, new = self._load_files(set(self._copied))
+            held, new = self._load_files(self._copied | self._failed)
+            self._failed &= held
             # A file that left the chat (a delete, or an edit that dropped it) leaves the box too.
             gone = sorted(self._copied - held)
             if gone:
                 folders = " ".join(shlex.quote(f"attachments/{media_id}") for media_id in gone)
-                result = sync_bridge.run(partial(env.exec, f"rm -rf {folders}", timeout_sec=COMMAND_TIMEOUT_SECONDS))
-                if not result.ok:
-                    raise RuntimeError(f"Could not remove old files from the workspace: {result.stderr[-500:]}")
+                try:
+                    result = sync_bridge.run(
+                        partial(env.exec, f"rm -rf {folders}", timeout_sec=COMMAND_TIMEOUT_SECONDS)
+                    )
+                    if not result.ok:
+                        raise RuntimeError(f"Could not remove old files from the workspace: {result.stderr[-500:]}")
+                except Exception:
+                    # A deleted file must not stay readable, so the next command opens a new box without it.
+                    self._env = None
+                    self._owed += self._box_cents(self._clock()) - self._box_charged
+                    self._stop(env)
+                    raise
                 self._copied -= set(gone)
             for file in new:
                 try:
@@ -463,6 +475,15 @@ class SandboxCommandRunner(SessionTable):
                     logger.warning(
                         "Could not copy a chat file into the box for %s", self._conversation_id, exc_info=True
                     )
+                    self._failed.add(file.id)
+                    with contextlib.suppress(Exception):
+                        sync_bridge.run(
+                            partial(
+                                env.exec,
+                                f"rm -rf {_UPLOAD_DIR}/{file.id}.* {shlex.quote(f'attachments/{file.id}')}",
+                                timeout_sec=COMMAND_TIMEOUT_SECONDS,
+                            )
+                        )
                     continue
                 self._copied.add(file.id)
             return env
@@ -625,7 +646,8 @@ class _LocalFilesRunner(LocalCommandRunner):
         # The folder outlives the app, so files copied before a restart are known and can be removed.
         attachments = self.workspace / "attachments"
         self._copied: set[str] = (
-            {p.name for p in attachments.iterdir() if p.is_dir() and not p.is_symlink()}
+            # An empty folder is a write that failed, so its file is written again.
+            {p.name for p in attachments.iterdir() if p.is_dir() and not p.is_symlink() and any(p.iterdir())}
             if attachments.is_dir() and not attachments.is_symlink()
             else set()
         )
@@ -770,17 +792,35 @@ def _close_all(runners: list[CommandRunner]) -> None:
             logger.exception("A chat command runner failed to close")
 
 
-def stop_chat_runner(conversation_id: str) -> None:
+def stop_chat_runner(conversation_id: str) -> threading.Thread:
     """Stop a chat's commands and its box, and delete its Mac workspace, when the chat is deleted.
+
+    A close can wait on a command that is starting or on the box's stop, so
+    it runs in its own thread and the delete request does not wait for it.
 
     Args:
         conversation_id: The chat.
+
+    Returns:
+        The started thread that closes the runner.
     """
     with _RUNNERS_LOCK:
         runner = _RUNNERS.pop(conversation_id, None)
         _RUNNERS_USED.pop(conversation_id, None)
+    thread = threading.Thread(target=_close_chat, args=(conversation_id, runner), name="chat-sandbox-stop", daemon=True)
+    thread.start()
+    return thread
+
+
+def _close_chat(conversation_id: str, runner: CommandRunner | None) -> None:
+    """Close a deleted chat's runner, or delete its Mac workspace when it has none.
+
+    Args:
+        conversation_id: The chat.
+        runner: The chat's runner, or None.
+    """
     if runner is not None:
-        runner.close()
+        _close_all([runner])
     elif settings.local_mode:
         # A workspace outlives the app process that made it, so a chat deleted
         # after a restart has a folder but no runner.

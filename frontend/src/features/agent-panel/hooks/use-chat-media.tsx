@@ -253,7 +253,7 @@ export function useChatMedia(): ChatMediaDraft {
         // The file's card still goes, with no path, so the toast tells the user the agent cannot read it.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
-          toast.error(msg("agent.media.upload_failed", { name: item.name }));
+          toast.error(msg("agent.media.unreadable", { name: item.name }));
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };

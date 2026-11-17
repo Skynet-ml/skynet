@@ -4559,6 +4559,7 @@
   "shared.agent.media_buffering": "Caricamento di {name}",
   "shared.agent.media_download_name": "Scarica {name}",
   "agent.media.upload_failed": "Impossibile allegare {name}.",
+  "agent.media.unreadable": "Impossibile caricare {name}. L’agente non può leggere questo file.",
   "agent.media.too_large": "{name} è troppo grande. Le immagini possono arrivare a 3 MB, l’audio a 20 MB e i video a 50 MB.",
   "agent.media.unsupported": "{name} non è un file immagine, video o audio supportato.",
   "agent.media.quota": "Lo spazio di archiviazione è pieno. Elimina alcuni file per allegarne altri.",
