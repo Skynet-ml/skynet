@@ -62,7 +62,8 @@ export function EntryRow({
         </dt>
         <pre
           className="whitespace-pre-wrap break-words font-mono text-[0.6875rem]/[1.55] max-h-52 overflow-y-auto rounded-md border border-border/40 bg-background/70 p-2 text-foreground/90"
-          dir="ltr"
+          // Plain multi-line text (often Hebrew) keeps its own direction; only code is forced LTR.
+          dir={CODE_KEYS.has(argKey) ? "ltr" : "auto"}
         >
           {value}
         </pre>

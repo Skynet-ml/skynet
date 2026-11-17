@@ -150,3 +150,16 @@ void test("the header opens and closes the arguments; a call with no arguments h
   assert.equal(bare.container.querySelector("button[aria-expanded]"), null);
   await React.act(async () => bare.root.unmount());
 });
+
+void test("multi-line text keeps its own direction; only code keys are forced left-to-right", async () => {
+  // Built from code points: the lint rule bans Hebrew literals outside the message catalogs.
+  const hebrew = (...cps: number[]) => String.fromCodePoint(...cps);
+  const shin = hebrew(0x5e9);
+  const reason = `${hebrew(0x5e9, 0x5dc, 0x5d5, 0x5dd)}\n${hebrew(0x5e2, 0x5d5, 0x5dc, 0x5dd)}`;
+  const { container, root } = await mount({ arguments: { reason, code: "a = 1\nb = 2" } });
+  const blocks = [...container.querySelectorAll("pre")];
+  assert.equal(blocks.length, 2, container.innerHTML);
+  assert.equal(blocks.find((b) => b.textContent?.startsWith(shin))?.getAttribute("dir"), "auto");
+  assert.equal(blocks.find((b) => b.textContent?.startsWith("a ="))?.getAttribute("dir"), "ltr");
+  await React.act(async () => root.unmount());
+});
