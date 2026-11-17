@@ -208,6 +208,8 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
         extension.upgrade()
         rename.upgrade()
         rename.upgrade()
+        # Migration c4f1a7e9d2b6 (SKY-710) adds this column, and ExecutionBudgetModel maps it.
+        connection.execute(text("ALTER TABLE execution_budgets ADD COLUMN workspace_id VARCHAR(36)"))
     service = BudgetService(engine=database)
     budget = service.create("alice", 10, idempotency_key="migrated")
     assert budget.uncapped is False
