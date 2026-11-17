@@ -13,6 +13,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.sandbox import trees as tree_helpers
 from core.sandbox.errors import SandboxInfraError
@@ -138,11 +140,30 @@ class _DyingSession:
         self._inner.close()
 
 
+class _FailingTarSession(_DyingSession):
+    """Wrap a local box whose pack ``tar`` writes its archive and then fails, as on an unreadable file."""
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Run the command; in the pack command, ``tar`` exits 2 after it writes.
+
+        Args:
+            command: The shell command.
+            **options: The run options.
+
+        Returns:
+            The inner box's result.
+        """
+        if "tar -czf" in command:
+            command = 'tar() { command tar "$@"; return 2; }; ' + command
+        return self._inner.run(command, **options)
+
+
 @dataclass
 class _Runtime:
     """Open local boxes and record each spec; the first ``dying`` boxes die mid-command."""
 
     dying: int = 0
+    failing_tar: bool = False
     specs: list[SandboxSpec] = field(default_factory=list)
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
@@ -159,6 +180,8 @@ class _Runtime:
         if self.dying:
             self.dying -= 1
             return _DyingSession(box)  # type: ignore[return-value]
+        if self.failing_tar:
+            return _FailingTarSession(box)  # type: ignore[return-value]
         return box
 
 
@@ -492,7 +515,7 @@ class _FakeBox:
 class _FakeSource:
     """A box source that resolves no grants, gives one fake box and records each call."""
 
-    def __init__(self, box: _FakeBox, release_error: Exception | None = None) -> None:
+    def __init__(self, box: _FakeBox, release_error: BaseException | None = None) -> None:
         """Bind the source to its box.
 
         Args:
@@ -525,7 +548,7 @@ class _FakeSource:
             healthy: Whether the box is still good.
 
         Raises:
-            Exception: The chosen release error.
+            BaseException: The chosen release error.
         """
         self.released.append(healthy)
         if self.release_error is not None:
@@ -533,7 +556,7 @@ class _FakeSource:
 
 
 def _fake_sandbox(
-    trees: TreeStore, step_log: StepLogStore, box: _FakeBox, release_error: Exception | None = None
+    trees: TreeStore, step_log: StepLogStore, box: _FakeBox, release_error: BaseException | None = None
 ) -> tuple[TreeSandbox, _FakeSource]:
     """Build the layer with one fake source for both roles.
 
@@ -607,6 +630,44 @@ def test_a_release_error_does_not_replace_the_box_failure(trees: TreeStore, step
 
     assert raised.value.step_id == f"{RUN}:agent-1:1"
     assert source.released == [False]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetReached("stopped"),
+        BudgetError("no room"),
+        UsagePendingError("pending"),
+        UnpricedOperationError("unpriced"),
+    ],
+)
+def test_a_budget_error_of_a_failed_box_release_replaces_the_box_failure(
+    trees: TreeStore, step_log: StepLogStore, error: BaseException
+) -> None:
+    """Every budget error of an unhealthy release stops the caller, so a budget stop is never lost.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        error: The budget error the release raises.
+    """
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(SandboxInfraError("The box stopped.")), error)
+
+    with pytest.raises(type(error)):
+        sandbox.run(_step(), _tree(trees, {}), "true", [])
+
+    assert source.released == [False]
+
+
+def test_a_pack_tar_that_fails_is_a_box_failure_not_a_partial_tree(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A tar that writes its archive and exits non-zero stops the step; the tree is not stored."""
+    sandbox, candidates, _ = _sandbox(trees, step_log, _Runtime(failing_tar=True))
+
+    with pytest.raises(BoxFailureError):
+        sandbox.run(_step(), _tree(trees, {}), "echo data > a.txt", [])
+
+    assert candidates.released == [False]
+    assert step_log.get_step(f"{RUN}:agent-1:1") is None
 
 
 @pytest.mark.parametrize("call", ["run", "score"])

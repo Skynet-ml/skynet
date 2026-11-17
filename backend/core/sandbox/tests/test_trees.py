@@ -144,17 +144,18 @@ def test_each_typed_error_names_its_step(error_type: type[TreeSandboxError]) -> 
     assert "job-ada:agent-1:3" in str(error)
 
 
-def _archive(*members: tuple[tarfile.TarInfo, bytes]) -> bytes:
+def _archive(*members: tuple[tarfile.TarInfo, bytes], format: int = tarfile.PAX_FORMAT) -> bytes:
     """Build a gzip archive from raw members.
 
     Args:
         *members: Each member header and its file content.
+        format: The tar header format.
 
     Returns:
         The archive bytes.
     """
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=format) as archive:
         for info, content in members:
             if info.isreg():
                 info.size = len(content)
@@ -257,3 +258,75 @@ def test_data_that_is_not_an_archive_is_a_bad_archive(trees: TreeStore) -> None:
     """A read error is a bad archive, not a raw tar error."""
     with pytest.raises(BadArchiveError, match="does not read"):
         tar_to_tree(trees, RUN, b"not a tar archive")
+
+
+@pytest.mark.parametrize("format", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_a_huge_long_name_header_is_refused_before_it_is_read(trees: TreeStore, format: int) -> None:
+    """A small gzip with a 5 MB long-name header stops at the read limit.
+
+    Args:
+        trees: The tree store.
+        format: The tar format that holds the long name.
+    """
+    data = _archive((_info("a" * 5 * 1024 * 1024), b""), format=format)
+
+    with pytest.raises(BadArchiveError, match="header larger than the read limit"):
+        tar_to_tree(trees, RUN, data)
+
+
+@pytest.mark.parametrize("field", ["name", "linkname"])
+def test_a_member_name_or_link_target_over_the_name_limit_is_refused(trees: TreeStore, field: str) -> None:
+    """A name or a symlink target longer than the name limit is a bad archive.
+
+    Args:
+        trees: The tree store.
+        field: The header field that is too long.
+    """
+    long = "a" * (tree_helpers.MAX_NAME_BYTES + 1)
+    info = _info(long) if field == "name" else _info("link", tarfile.SYMTYPE, long)
+
+    with pytest.raises(BadArchiveError, match="longer than"):
+        tar_to_tree(trees, RUN, _archive((info, b"")))
+
+
+def test_header_bytes_count_toward_the_unpacked_size(trees: TreeStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long-name header with no file data still counts toward the size limit."""
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_BYTES", 0)
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_MEMBERS", 1)
+    data = _archive((_info("a" * 2000), b""), format=tarfile.GNU_FORMAT)
+
+    with pytest.raises(BadArchiveError, match="unpacks to more than"):
+        tar_to_tree(trees, RUN, data)
+
+
+@pytest.mark.parametrize("kind", ["name", "symlink"])
+def test_a_name_or_link_target_that_is_not_utf8_is_a_bad_archive(trees: TreeStore, kind: str) -> None:
+    """A non-UTF-8 byte in a name or a symlink target is refused, not a box failure.
+
+    Args:
+        trees: The tree store.
+        kind: Where the non-UTF-8 byte is.
+    """
+    info = _info("a\udcff.txt") if kind == "name" else _info("link", tarfile.SYMTYPE, "a\udcff")
+
+    with pytest.raises(BadArchiveError, match="does not store"):
+        tar_to_tree(trees, RUN, _archive((info, b"x"), format=tarfile.GNU_FORMAT))
+
+
+@pytest.mark.parametrize("kind", [tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_a_file_after_a_folder_of_the_same_name_is_a_bad_archive(trees: TreeStore, kind: bytes) -> None:
+    """A later file, symlink or hard link does not replace a folder and its files.
+
+    Args:
+        trees: The tree store.
+        kind: The tar type of the later member.
+    """
+    data = _archive(
+        (_info("b.txt"), b"b\n"),
+        (_info("a", tarfile.DIRTYPE), b""),
+        (_info("a/x"), b"x\n"),
+        (_info("a", kind, "b.txt"), b""),
+    )
+
+    with pytest.raises(BadArchiveError, match="is a folder and a file"):
+        tar_to_tree(trees, RUN, data)

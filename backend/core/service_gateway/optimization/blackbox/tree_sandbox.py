@@ -51,6 +51,7 @@ OUTPUTS_DIR = "outputs"
 METRIC_DIR = "metric"
 _IN_DIR = ".tree-in"
 _OUT_FILE = ".tree-out.b64"
+_TAR_FILE = ".tree-out.tgz"
 _MOVE_TIMEOUT_SECONDS = 600
 # Base64 text is 4/3 of the archive, plus line breaks on Linux.
 _MAX_OUT_FILE_BYTES = 2 * MAX_ARCHIVE_BYTES
@@ -333,6 +334,9 @@ class TreeSandbox:
             # Also on a BaseException such as a cancel, so the box always goes back.
             try:
                 source.release(box, healthy)
+            except _BUDGET_ERRORS:
+                # A budget stop wins over the step's own error, so the run stops.
+                raise
             except Exception as error:
                 if healthy:
                     raise
@@ -384,7 +388,8 @@ class TreeSandbox:
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
             # The size check runs in the box, so the worker never reads an oversized file.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf - -C {folder} . | base64 > {_OUT_FILE};"
+            # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
+            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .; base64 < {_TAR_FILE} > {_OUT_FILE};"
             f' [ "$(wc -c < {_OUT_FILE})" -le {_MAX_OUT_FILE_BYTES} ] || exit {_TOO_LARGE_EXIT}',
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )

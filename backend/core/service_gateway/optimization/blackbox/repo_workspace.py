@@ -34,7 +34,7 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -44,7 +44,7 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
-from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ....sandbox.grants import METRIC_BOX_GRANTS, Grant
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -56,7 +56,6 @@ from .repo_tree import (
     strip_archive,
 )
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
-from .tree_sandbox import RuntimeBoxSource
 
 logger = logging.getLogger(__name__)
 
@@ -450,25 +449,73 @@ def _close_quietly(session: SandboxSession, what: str) -> None:
         logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
 
 
-def _release_failed(source: RuntimeBoxSource, session: SandboxSession, what: str) -> None:
+class RepoBoxSource:
+    """Open a fresh evaluation box for each acquire and close it at release (SKY-718).
+
+    The repository rules accept hosts that the grant rules refuse (a port, one
+    label), so this source puts the role's hosts on the box as given, without
+    grant resolution, and a run's network stays what its ``[run]`` and
+    ``[metric]`` tables say.
+    """
+
+    def __init__(self, runtime: SandboxRuntime, spec: SandboxSpec) -> None:
+        """Bind the source to a runtime and the spec of its boxes.
+
+        Args:
+            runtime: Opens the boxes.
+            spec: The box spec; the grant hosts replace its network fields.
+        """
+        self._runtime = runtime
+        self._spec = spec
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new box whose allowed hosts are the grant hosts.
+
+        Args:
+            agent_id: The box role; each call gets its own box.
+            grants: The role's grants; empty keeps the box offline.
+
+        Returns:
+            The open box.
+        """
+        hosts = tuple(grant.host for grant in grants)
+        return self._runtime.open(replace(self._spec, network_disabled=not hosts, allowed_hosts=hosts))
+
+    def release(self, box: SandboxSession, healthy: bool) -> None:
+        """Close the box; a close error goes to the caller.
+
+        Args:
+            box: A box that :meth:`acquire` gave.
+            healthy: Not used: a closed box is never reused.
+        """
+        box.close()
+
+
+def _release_failed(source: RepoBoxSource, session: SandboxSession, what: str) -> None:
     """Give a failed box back to its source as unhealthy, and log only a failure's type.
 
     Args:
         source: The source that gave the box.
         session: The box.
         what: Names the box in the log line.
+
+    Raises:
+        BudgetReached: And the other budget errors of the close, in place of the box's own failure.
     """
     try:
         source.release(session, healthy=False)
+    except _BUDGET_ERRORS:
+        # A budget stop must not be lost, so it replaces the box's own failure.
+        raise
     except Exception as release_error:
-        # The caller raises or returns the box's own failure; a budget error of the close must not replace it.
+        # The caller raises or returns the box's own failure.
         logger.warning("%s did not close cleanly (%s)", what, type(release_error).__name__)
 
 
 class CandidateBox:
     """One evaluation's candidate box C: the prepared repository with the version laid out."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, source: RuntimeBoxSource) -> None:
+    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, source: RepoBoxSource) -> None:
         """Bind an open, laid-out box to the workspace that checks its protected files.
 
         Args:
@@ -626,7 +673,7 @@ class MetricBox:
     """One evaluation's metric box M: the metric state, the metric files and the runner, no repository."""
 
     def __init__(
-        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, source: RuntimeBoxSource
+        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, source: RepoBoxSource
     ) -> None:
         """Bind an open metric box.
 
@@ -855,15 +902,8 @@ class RepoWorkspace:
             on_output: Receives setup output as it streams.
 
         Raises:
-            RepoSetupError: When a role's network hosts are not valid grant hosts, or a step fails.
+            RepoSetupError: When a step fails.
         """
-        # The repository rules accept hosts that the grant rules refuse (a port, one label,
-        # ``*.com``), so refuse them here, before the setup box costs anything.
-        for role, grants in (("[run]", self._run_grants), ("[metric]", self._metric_grants)):
-            try:
-                resolve_grants(grants, {})
-            except GrantError as error:
-                raise RepoSetupError(f"The {role} network hosts are not valid: {error}") from error
         if self._folder is None:
             self._folder = Path(tempfile.mkdtemp(prefix="repo-workspace-"))
             self._requirements = read_metric_requirements(self._archive)
@@ -1062,14 +1102,14 @@ class RepoWorkspace:
 
     def _open_box(
         self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]
-    ) -> tuple[RuntimeBoxSource, SandboxSession]:
-        """Open one box from a saved state through the tree-sandbox box source (SKY-718).
+    ) -> tuple[RepoBoxSource, SandboxSession]:
+        """Open one box from a saved state through the evaluation box source (SKY-718).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
             role: ``candidate`` or ``metric``.
-            grants: The role's network grants, checked by :meth:`prepare`; empty keeps the box offline.
+            grants: The role's network grants; empty keeps the box offline.
 
         Returns:
             The source that takes the box back, and the open box, with a tar state unpacked.
@@ -1082,7 +1122,7 @@ class RepoWorkspace:
             spec = replace(spec, snapshot_id=state.snapshot_id)
         elif state is not None and state.archive is not None:
             spec = replace(spec, snapshot_archive=str(state.archive))
-        source = RuntimeBoxSource(self._runtime, spec)
+        source = RepoBoxSource(self._runtime, spec)
         try:
             session = source.acquire(role, grants)
         except _BUDGET_ERRORS:

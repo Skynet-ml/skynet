@@ -27,6 +27,10 @@ import httpx
 import pytest
 from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
+from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
@@ -43,6 +47,7 @@ from ..repo_workspace import (
     WORK_DIR,
     CandidateBox,
     MetricBox,
+    RepoBoxSource,
     RepoSetupError,
     RepoWorkspace,
     read_metric_requirements,
@@ -51,7 +56,6 @@ from ..repo_workspace import (
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import ParentSandboxSession
 from ..sandbox_runtime import AsyncBridgeSession
-from ..tree_sandbox import RuntimeBoxSource
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -1513,11 +1517,11 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
 def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each evaluation box opens through the tree-sandbox box source, with the role's hosts as grants (SKY-718)."""
+    """Each evaluation box opens through the evaluation box source, with the role's hosts as grants (SKY-718)."""
     calls: list[tuple[str, tuple[Grant, ...]]] = []
-    acquire = RuntimeBoxSource.acquire
+    acquire = RepoBoxSource.acquire
 
-    def recorded(self: RuntimeBoxSource, agent_id: str, grants: Any) -> Any:
+    def recorded(self: RepoBoxSource, agent_id: str, grants: Any) -> Any:
         """Record the role and grants, then open the box.
 
         Args:
@@ -1531,7 +1535,7 @@ def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
         calls.append((agent_id, tuple(grants)))
         return acquire(self, agent_id, grants)
 
-    monkeypatch.setattr(RuntimeBoxSource, "acquire", recorded)
+    monkeypatch.setattr(RepoBoxSource, "acquire", recorded)
     runtime = _Runtime()
     space, _ = _scoring_space(tmp_path, runtime, run_hosts=["api.example.com"], metric_hosts=["judge.example.com"])
     try:
@@ -1550,9 +1554,9 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
 ) -> None:
     """Closing an evaluation box releases it through the box source, with its health (SKY-718)."""
     released: list[bool] = []
-    release = RuntimeBoxSource.release
+    release = RepoBoxSource.release
 
-    def recorded(self: RuntimeBoxSource, box: Any, healthy: bool) -> None:
+    def recorded(self: RepoBoxSource, box: Any, healthy: bool) -> None:
         """Record the health, then release the box.
 
         Args:
@@ -1563,7 +1567,7 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
         released.append(healthy)
         release(self, box, healthy)
 
-    monkeypatch.setattr(RuntimeBoxSource, "release", recorded)
+    monkeypatch.setattr(RepoBoxSource, "release", recorded)
     space, _ = _scoring_space(tmp_path, _Runtime())
     try:
         _open(space, "").close()
@@ -1573,22 +1577,84 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
     assert released == [True, False]
 
 
-@pytest.mark.parametrize("role", ["run", "metric"])
-def test_a_role_host_that_is_not_a_grant_host_stops_setup_before_any_box(tmp_path: Path, role: str) -> None:
-    """A host with a port fails the grant rules, so prepare refuses it before it opens a box (SKY-718).
-
-    Args:
-        tmp_path: Scratch folder.
-        role: The role whose hosts hold the bad host.
-    """
+def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
+    """Hosts that the repository rules accept but the grant rules refuse still open the boxes (SKY-718)."""
     runtime = _Runtime()
-    space, _ = _scoring_space(tmp_path, runtime, **{f"{role}_hosts": ["api.example.com:8443"]})
+    hosts = ["api.example.com:8443", "redis"]
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=hosts, metric_hosts=hosts)
     try:
-        with pytest.raises(RepoSetupError, match=rf"The \[{role}\] network hosts are not valid"):
-            space.prepare()
+        _open(space, "").close()
+        space.open_metric().close()
     finally:
         space.close()
-    assert runtime.boxes == []
+    _, candidate, metric = runtime.boxes
+    for box in (candidate, metric):
+        assert (box.spec.network_disabled, box.spec.allowed_hosts) == (False, tuple(hosts))
+
+
+def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing a candidate or metric box raises the box's close error, as a plain session close does."""
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        candidate = _open(space, "")
+        metric = space.open_metric()
+
+        def broken(self: _Box) -> None:
+            """Close the box, then fail as a settlement can.
+
+            Args:
+                self: The box.
+            """
+            self._inner.close()
+            raise RuntimeError("settlement failed")
+
+        monkeypatch.setattr(_Box, "close", broken)
+        for box in (candidate, metric):
+            with pytest.raises(RuntimeError, match="settlement failed"):
+                box.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetReached("stopped"),
+        BudgetError("no room"),
+        UsagePendingError("pending"),
+        UnpricedOperationError("unpriced"),
+    ],
+)
+def test_a_budget_error_of_a_failed_box_release_is_raised(error: BaseException) -> None:
+    """Every budget error of a failed box's close stops the caller; another close error is only logged.
+
+    Args:
+        error: The budget error the close raises.
+    """
+
+    class _Source:
+        """Fail each release with the next error."""
+
+        def __init__(self, failure: BaseException) -> None:
+            """Keep the error to raise.
+
+            Args:
+                failure: The release error.
+            """
+            self.failure = failure
+
+        def release(self, box: Any, healthy: bool) -> None:
+            """Raise the error.
+
+            Args:
+                box: The box.
+                healthy: The box's health.
+            """
+            raise self.failure
+
+    with pytest.raises(type(error)):
+        repo_workspace._release_failed(_Source(error), None, "The candidate box")  # type: ignore[arg-type]
+    repo_workspace._release_failed(_Source(RuntimeError("gone")), None, "The candidate box")  # type: ignore[arg-type]
 
 
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
