@@ -6,6 +6,7 @@ import asyncio
 import base64
 import math
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -31,6 +32,10 @@ from core.service_gateway.agents.attachment_sandbox import (
 )
 from core.service_gateway.agents.generalist import _needs_approval, chat_rule_allowed
 from core.storage.models import Base, ChatMediaModel
+
+on_mac = pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(), reason="needs macOS sandbox-exec"
+)
 
 
 class FakeBox:
@@ -610,7 +615,7 @@ def test_close_before_the_command_is_sent_sends_nothing(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(runner, "open", open_then_close)
     result = runner.exec_command("echo hi")
-    assert "this chat was deleted" in result
+    assert "the file workspace closed before the command started" in result
     assert "echo hi" not in boxes[0].commands
     assert boxes[0].stopped
 
@@ -633,6 +638,7 @@ def test_mac_removal_never_leaves_the_workspace(tmp_path: Path) -> None:
     runner.close()
 
 
+@on_mac
 def test_mac_close_during_the_file_copy_ends_the_new_command(tmp_path: Path) -> None:
     """Check that a chat deleted while files are copied still ends the command that then starts."""
     workspace = tmp_path / "ws"
@@ -675,3 +681,71 @@ def test_mac_close_during_the_file_copy_ends_the_new_command(tmp_path: Path) -> 
     closer[0].join(timeout=10)
     assert not closer[0].is_alive()
     assert started[0].process.wait(timeout=5) != 0
+
+
+def test_a_file_that_cannot_be_copied_leaves_the_others_working() -> None:
+    """Check that one failed copy skips that file, and commands still run on the other files."""
+    files = [ChatFile("bad", "x" * 300, b"a"), ChatFile("m2", "b.txt", b"b")]
+    boxes: list[FakeBox] = []
+    runner = make_runner(files, boxes, Clock())
+    put = runner._put
+
+    def put_or_fail(env: Any, file: ChatFile) -> None:
+        """Fail on the long name, as a file system does.
+
+        Args:
+            env: The box.
+            file: The file.
+
+        Raises:
+            RuntimeError: For the long name.
+        """
+        if file.id == "bad":
+            raise RuntimeError("File name too long")
+        put(env, file)
+
+    runner._put = put_or_fail  # type: ignore[method-assign]
+    assert "ran: ls" in runner.exec_command("ls")
+    assert set(boxes[0].written) == {"attachments/m2/b.txt"}
+    runner.close()
+
+
+def test_a_running_command_keeps_its_box_until_near_its_end() -> None:
+    """Check that a reopen waits for a running command, unless the box is near its end."""
+    clock = Clock()
+    boxes: list[FakeBox] = []
+    runner = make_runner([], boxes, clock)
+    runner.exec_command("true")
+    boxes[0].gate = asyncio.Event()
+    runner.exec_command("sleep 600", yield_time_ms=0)
+    clock.now = runner._reopen_after
+    runner.exec_command("ls", yield_time_ms=0)
+    assert len(boxes) == 1
+    clock.now = runner._reopen_by
+    runner.exec_command("ls", yield_time_ms=0)
+    assert len(boxes) == 2
+    assert boxes[0].stopped
+    runner.close()
+
+
+def test_mac_restart_still_removes_files_that_left_the_chat(tmp_path: Path) -> None:
+    """Check that a file copied before a restart leaves the workspace when it leaves the chat."""
+    workspace = tmp_path / "ws"
+    files = [ChatFile("m1", "a.txt", b"a")]
+
+    def load(skip: set[str]) -> tuple[set[str], list[ChatFile]]:
+        """Return the chat's ids and its other files.
+
+        Args:
+            skip: The held ids.
+
+        Returns:
+            The ids, and the other files.
+        """
+        return {f.id for f in files}, [f for f in files if f.id not in skip]
+
+    module._LocalFilesRunner(workspace, load).exec_command("true")
+    assert (workspace / "attachments" / "m1" / "a.txt").exists()
+    files.clear()
+    module._LocalFilesRunner(workspace, load).exec_command("true")
+    assert not (workspace / "attachments" / "m1").exists()

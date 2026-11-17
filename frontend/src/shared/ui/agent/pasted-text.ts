@@ -83,7 +83,7 @@ export function attachedFile(name: string, text: string): AttachedFile & { id: s
 /**
  * Put a workspace path at the top of each file card (SKY-781): ``paths`` holds
  * one path, or null, for each card in order. A card that a fork put back
- * names the source chat's copy, so its old path goes first.
+ * names the source chat's copy, so its old path is removed first.
  */
 export function withFilePaths(value: string, paths: ReadonlyArray<string | null>): string {
   const draft = splitPastes(value);

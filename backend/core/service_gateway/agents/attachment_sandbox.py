@@ -57,6 +57,8 @@ MAX_SANDBOX_LIFETIME_SECONDS = 12 * 3600
 COMMAND_TIMEOUT_SECONDS = 600
 # ``upload_files`` writes text only, so a file goes in as base64 parts of this many chars.
 _UPLOAD_PART_CHARS = 4_000_000
+# The time a new box needs to start and take the chat's files.
+_REOPEN_MARGIN_SECONDS = 60
 _UPLOAD_DIR = ".skynet-upload"
 
 FILE_TOOLS_PROMPT = """\
@@ -286,6 +288,8 @@ class SandboxCommandRunner(SessionTable):
         self._lifetime = sandbox_lifetime_seconds()
         # A command may run for its whole timeout, so a box opens again before a command could outlive it.
         self._reopen_after = max(self._lifetime - COMMAND_TIMEOUT_SECONDS, self._lifetime / 2)
+        # A running command keeps its box until the box is this close to its end.
+        self._reopen_by = max(self._lifetime - _REOPEN_MARGIN_SECONDS, self._reopen_after)
 
     def exec_command(
         self,
@@ -334,7 +338,8 @@ class SandboxCommandRunner(SessionTable):
         with self._box_lock:
             if self._env is not env:
                 session.finish(1)
-                session.append("Error: this chat was deleted, so its file workspace is closed.")
+                # A chat delete, a failed command or a reopen can close the box here; the chat may still exist.
+                session.append("Error: the file workspace closed before the command started. Run the command again.")
                 return self.collect(session, started=started, yield_ms=0, max_output_tokens=max_output_tokens)
             future = sync_bridge.submit(
                 partial(env.exec, command, timeout_sec=COMMAND_TIMEOUT_SECONDS, on_output=sink),
@@ -425,7 +430,8 @@ class SandboxCommandRunner(SessionTable):
             if self._closed:
                 return None
             now = self._clock()
-            if self._env is not None and now - self._box_started >= self._reopen_after:
+            age = now - self._box_started
+            if self._env is not None and age >= self._reopen_after and (not self._futures or age >= self._reopen_by):
                 old, self._env = self._env, None
                 self._owed += self._box_cents(now) - self._box_charged
                 self._stop(old)
@@ -450,7 +456,14 @@ class SandboxCommandRunner(SessionTable):
                     raise RuntimeError(f"Could not remove old files from the workspace: {result.stderr[-500:]}")
                 self._copied -= set(gone)
             for file in new:
-                self._put(env, file)
+                try:
+                    self._put(env, file)
+                except Exception:
+                    # One file that cannot be copied must not close the workspace for every other file.
+                    logger.warning(
+                        "Could not copy a chat file into the box for %s", self._conversation_id, exc_info=True
+                    )
+                    continue
                 self._copied.add(file.id)
             return env
 
@@ -609,7 +622,13 @@ class _LocalFilesRunner(LocalCommandRunner):
         """
         super().__init__(workspace)
         self._load_files = load_files
-        self._copied: set[str] = set()
+        # The folder outlives the app, so files copied before a restart are known and can be removed.
+        attachments = self.workspace / "attachments"
+        self._copied: set[str] = (
+            {p.name for p in attachments.iterdir() if p.is_dir() and not p.is_symlink()}
+            if attachments.is_dir() and not attachments.is_symlink()
+            else set()
+        )
         self._files_lock = threading.Lock()
         self._closed = False
 
