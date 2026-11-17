@@ -302,8 +302,7 @@ class TreeCompactor:
                     if code != _INVALID_RANGE:
                         raise
                     # The S3 store always sends a Range header, and S3 answers 416 for an empty object.
-                    # The pack is then empty, so the short-pack check below marks it broken.
-                    pack = b""
+                    # The pack then stays empty, so the short-pack check below marks it broken.
             piece = pack[row.pack_offset : row.pack_offset + row.pack_length]
             # A short pack would shift the offsets of every later row, so its rows leave the pass.
             if len(piece) != row.pack_length:

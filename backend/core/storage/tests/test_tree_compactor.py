@@ -389,11 +389,13 @@ def test_a_lone_pack_is_not_merged(engine, objects, store, make_compactor) -> No
 
 
 def test_a_large_pack_is_not_merged(engine, objects, store, make_compactor) -> None:
-    """A pack over half the target size stays as it is."""
-    _fill(store, flushes=2)
-    size = min(len(objects.get(key)) for key in objects.list("packs/w1/"))
+    """A pack over half the target size stays out, even when it and a small pack fit the target together."""
+    (_, large_size), (_, small_size) = _fill_sizes(store, [1000, 300])
+    target = large_size + small_size
+    assert 2 * large_size > target
 
-    assert make_compactor(target_bytes=size).merge() == 0
+    assert make_compactor(target_bytes=target).merge() == 0
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
 
 
 def test_a_read_during_compaction_finds_each_tree_in_the_old_or_the_new_pack(

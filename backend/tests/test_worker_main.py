@@ -14,7 +14,7 @@ from core.storage.remote import RemoteDBJobStore
 
 @pytest.mark.parametrize("compactor_started", [True, False])
 def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, compactor_started):
-    """Start and stop the worker; stop the tree compactor only when ``start_tree_compactor`` returns one."""
+    """Start and stop the worker; stop the tree compactor it gets, or stop cleanly when it gets ``None``."""
     store = create_autospec(RemoteDBJobStore, instance=True)
     store.recover_pending_jobs.return_value = []
     stopped = threading.Event()
@@ -43,4 +43,6 @@ def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, compact
     store.recover_orphaned_jobs.assert_called_once_with()
     worker_main.get_worker.return_value.stop.assert_called_once_with()
     worker_main.start_tree_compactor.assert_called_once_with(store.engine)
-    assert compactor.stop.call_count == (1 if compactor_started else 0)
+    # With None, the run itself is the check: a None in the sweeper list fails at its stop() call.
+    if compactor_started:
+        compactor.stop.assert_called_once_with()
