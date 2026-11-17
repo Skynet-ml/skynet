@@ -64,7 +64,7 @@ from ..repo_scorer import (
     _StageRelay,
     fold_case_scores,
 )
-from ..repo_workspace import CandidateBox, RepoWorkspace
+from ..repo_workspace import CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -184,6 +184,34 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
     }
+
+
+def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
+    scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One score takes a candidate box and a separate metric box from the evaluation box source, both offline (SKY-718)."""
+    scorer, _, _ = scored
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+    acquire = RepoBoxSource.acquire
+
+    def recorded(self: RepoBoxSource, agent_id: str, grants: Any) -> Any:
+        """Record the role and grants, then open the box.
+
+        Args:
+            self: The box source.
+            agent_id: The box role.
+            grants: The role's grants.
+
+        Returns:
+            The open box.
+        """
+        calls.append((agent_id, tuple(grants)))
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(RepoBoxSource, "acquire", recorded)
+
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert sorted(calls) == [("candidate", ()), ("metric", ())]
 
 
 class _ParkLog:

@@ -27,7 +27,12 @@ import httpx
 import pytest
 from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
+from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
 
@@ -42,6 +47,7 @@ from ..repo_workspace import (
     WORK_DIR,
     CandidateBox,
     MetricBox,
+    RepoBoxSource,
     RepoSetupError,
     RepoWorkspace,
     read_metric_requirements,
@@ -573,7 +579,7 @@ def test_a_temporary_answer_file_write_error_goes_up_raw(status: int) -> None:
 def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_reports_a_lasting_one() -> None:
     """With no protected files, a 429 on the answer write goes up raw; a 404 still gives an unchecked answer."""
     session = _RefusingSession(_write_error(429))
-    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace")  # type: ignore[arg-type]
+    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace", None)  # type: ignore[arg-type]
     with pytest.raises(SandboxFilesystemWriteError) as raised:
         box.answer("calls/000001/stages/a.json", "{}")
     assert raised.value is session.error
@@ -1508,6 +1514,196 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert candidate.spec.operation_key != metric.spec.operation_key
 
 
+def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each evaluation box opens through the evaluation box source, with the role's hosts as grants (SKY-718)."""
+    calls: list[tuple[str, tuple[Grant, ...]]] = []
+    acquire = RepoBoxSource.acquire
+
+    def recorded(self: RepoBoxSource, agent_id: str, grants: Any) -> Any:
+        """Record the role and grants, then open the box.
+
+        Args:
+            self: The box source.
+            agent_id: The box role.
+            grants: The role's grants.
+
+        Returns:
+            The open box.
+        """
+        calls.append((agent_id, tuple(grants)))
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(RepoBoxSource, "acquire", recorded)
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=["api.example.com"], metric_hosts=["judge.example.com"])
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert calls == [("candidate", (Grant("api.example.com"),)), ("metric", (Grant("judge.example.com"),))]
+    _, candidate, metric = runtime.boxes
+    assert (candidate.spec.network_disabled, candidate.spec.allowed_hosts) == (False, ("api.example.com",))
+    assert (metric.spec.network_disabled, metric.spec.allowed_hosts) == (False, ("judge.example.com",))
+
+
+def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing an evaluation box releases it through the box source as healthy (SKY-718)."""
+    released: list[bool] = []
+    release = RepoBoxSource.release
+
+    def recorded(self: RepoBoxSource, box: Any, healthy: bool) -> None:
+        """Record the health, then release the box.
+
+        Args:
+            self: The box source.
+            box: The box.
+            healthy: Whether the box is still good.
+        """
+        released.append(healthy)
+        release(self, box, healthy)
+
+    monkeypatch.setattr(RepoBoxSource, "release", recorded)
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert released == [True, True]
+
+
+def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
+    """Hosts that the repository rules accept but the grant rules refuse still open the boxes (SKY-718)."""
+    runtime = _Runtime()
+    hosts = ["api.example.com:8443", "redis"]
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=hosts, metric_hosts=hosts)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    _, candidate, metric = runtime.boxes
+    for box in (candidate, metric):
+        assert (box.spec.network_disabled, box.spec.allowed_hosts) == (False, tuple(hosts))
+
+
+def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing a candidate or metric box raises the box's close error, as a plain session close does."""
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        candidate = _open(space, "")
+        metric = space.open_metric()
+
+        def broken(self: _Box) -> None:
+            """Close the box, then fail as a settlement can.
+
+            Args:
+                self: The box.
+            """
+            self._inner.close()
+            raise RuntimeError("settlement failed")
+
+        monkeypatch.setattr(_Box, "close", broken)
+        for box in (candidate, metric):
+            with pytest.raises(RuntimeError, match="settlement failed"):
+                box.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetReached("stopped"),
+        BudgetError("no room"),
+        UsagePendingError("pending"),
+        UnpricedOperationError("unpriced"),
+    ],
+)
+def test_a_budget_error_of_a_failed_box_release_is_raised(
+    error: BaseException, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every budget error of a failed box's close stops the caller; another close error is only logged.
+
+    Args:
+        error: The budget error the close raises.
+        caplog: Captures the log line of the other close error.
+    """
+
+    class _Source:
+        """Fail each release with the next error."""
+
+        def __init__(self, failure: BaseException) -> None:
+            """Keep the error to raise.
+
+            Args:
+                failure: The release error.
+            """
+            self.failure = failure
+
+        def release(self, box: Any, healthy: bool) -> None:
+            """Raise the error.
+
+            Args:
+                box: The box.
+                healthy: The box's health.
+            """
+            raise self.failure
+
+    with pytest.raises(type(error)):
+        repo_workspace._release_failed(_Source(error), None, "The candidate box")  # type: ignore[arg-type]
+    caplog.clear()
+    raised: list[BaseException] = []
+    with caplog.at_level(logging.WARNING, logger=repo_workspace.logger.name):
+        try:
+            repo_workspace._release_failed(_Source(RuntimeError("gone")), None, "The candidate box")  # type: ignore[arg-type]
+        except BaseException as other:
+            raised.append(other)
+    assert raised == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "The candidate box did not close cleanly (RuntimeError)"
+    ]
+
+
+def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version that does not apply releases its box once, even when that close raises a budget error."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    closes: list[_Box] = []
+    try:
+        space.prepare()
+
+        def pending(self: _Box) -> None:
+            """Close the box, then fail as a settlement that is still pending.
+
+            Args:
+                self: The box.
+
+            Raises:
+                UsagePendingError: Always.
+            """
+            closes.append(self)
+            self._inner.close()
+            raise UsagePendingError("pending")
+
+        monkeypatch.setattr(_Box, "close", pending)
+        with pytest.raises(UsagePendingError):
+            space.open_candidate(
+                "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
+            )
+    finally:
+        monkeypatch.undo()
+        space.close()
+    assert len(closes) == 1
+
+
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
     tmp_path: Path,
 ) -> None:
@@ -1686,7 +1882,7 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
-        box = CandidateBox(space, session, "/workspace")
+        box = CandidateBox(space, session, "/workspace", None)  # type: ignore[arg-type]
         assert box.stamp_before_run() is None
         assert box.answer(f"{call}/stages/x.json", '{"output": 1}') == ()
         assert session.read_file(f"{call}/stages/x.json") == '{"output": 1}'

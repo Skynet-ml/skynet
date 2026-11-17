@@ -128,6 +128,7 @@ from .repo_staging import (
     publish_improvement,
     stage_repository,
 )
+from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
 from .vercel_dspy import run_vercel_dspy
@@ -284,6 +285,8 @@ class BackgroundWorker:
         self._processing_jobs: set[str] = set()
         self._claimed_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
+        # (worker id, run id) for each run that its worker parked and has not yet marked done.
+        self._parked_jobs: set[tuple[int, str]] = set()
         self._queue_lock = threading.Lock()
         poll_raw = str(settings.cancel_poll_interval)
         try:
@@ -499,14 +502,26 @@ class BackgroundWorker:
             )
         return True
 
-    def _mark_job_done(self, optimization_id: str) -> None:
+    def _mark_job_done(self, optimization_id: str, worker_id: int | None = None) -> None:
         """Release the claim and clean up per-job worker state.
 
         Args:
             optimization_id: ID of the job that just finished.
+            worker_id: The worker thread that processed the job, when known.
+                When ``None``, the run counts as parked if any pair in
+                ``_parked_jobs`` has this run id, so a caller with no worker
+                id still honors a park.
         """
         was_claimed = False
         with self._queue_lock:
+            if worker_id is None:
+                parked = next((pair for pair in self._parked_jobs if pair[1] == optimization_id), None)
+            else:
+                parked = (worker_id, optimization_id)
+            if parked is not None and parked in self._parked_jobs:
+                # park_job already freed this worker's claim; the maps and the lease may belong to a later claim.
+                self._parked_jobs.discard(parked)
+                return
             self._processing_jobs.discard(optimization_id)
             self._cancel_events.pop(optimization_id, None)
             if optimization_id in self._claimed_jobs:
@@ -519,6 +534,135 @@ class BackgroundWorker:
                 pass
             except Exception:
                 logger.exception("release_job failed for %s", optimization_id)
+
+    def park_job(self, worker_id: int, optimization_id: str, generation: int, wake_at: datetime) -> bool:
+        """Put a waiting run in the wait state and free this worker's claim on it.
+
+        The worker ``worker_id`` must be processing the run now. Its later
+        ``_mark_job_done`` for the run then does nothing.
+
+        The API treats ``paused`` as a terminal status, so today a user cannot
+        cancel a waiting run. Before an engine calls this method, the cancel
+        path must accept a ``paused`` run whose recovery phase is ``waiting``.
+
+        Args:
+            worker_id: The worker thread that processes the run.
+            optimization_id: The run that waits.
+            generation: The execution generation this worker owns.
+            wake_at: When the orphan sweep makes the run claimable again.
+
+        Returns:
+            ``True`` when the run left this worker, so the worker must stop
+            work on it. That is a park that succeeds, and also a park that
+            raises when this worker no longer owns the run or cannot read
+            whether it does; it logs the error. It is also a park that fails
+            while a later claim of the run on this pod holds the run; that
+            claim keeps the maps and the lease. ``False`` when the worker
+            does not process the run, when this worker already parked the
+            run, or when another owner changed the run first; the worker
+            state then comes back. If the worker finished the run during a
+            failed park, the claim is released and no state comes back.
+
+        Raises:
+            Exception: The park's error, when the park raises and the run is
+                still validating or running at ``generation``. The worker
+                state then comes back.
+        """
+        pair = (worker_id, optimization_id)
+        # The maps change before the park, so a thread that claims the woken run
+        # adds it to the maps only after this pop. The activity lock keeps the
+        # worker from finishing the run between the check and the pair.
+        with self._queue_lock, self._activity_lock:
+            # A second park of a parked run would fail and its undo would drop the pair.
+            if self._thread_current_job.get(worker_id) != optimization_id or pair in self._parked_jobs:
+                return False
+            was_claimed = optimization_id in self._claimed_jobs
+            was_processing = optimization_id in self._processing_jobs
+            cancel = self._cancel_events.pop(optimization_id, None)
+            # The run has no lease after the park: a heartbeat would find no claim and cancel the job as stolen.
+            self._claimed_jobs.discard(optimization_id)
+            self._processing_jobs.discard(optimization_id)
+            self._parked_jobs.add(pair)
+        parked = False
+        try:
+            # No lock is held here: a slow database must not block the other workers and their leases.
+            # If the worker finishes the run now, its _mark_job_done takes the pair and does nothing:
+            # the maps are already clear, and a park that succeeds clears the lease itself.
+            parked = park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at)
+        except Exception:
+            # A park can commit and raise, and the run can then wake and be claimed again before
+            # this read. Only a run still at this worker's generation gets its state back; in any
+            # other case a restore would let this thread's _mark_job_done release a later claim's
+            # lease. The pair stays, and a lease of this generation that nobody renews expires.
+            try:
+                owns: bool | None = still_owns_run(self._job_store.engine, optimization_id, generation)
+            except Exception:
+                logger.exception(
+                    "park_run raised for %s and the ownership read failed; the run leaves this worker",
+                    optimization_id,
+                )
+                owns = None
+            if owns:
+                raise
+            parked = True
+            if owns is False:
+                logger.exception("park_run raised for %s and this worker no longer owns the run", optimization_id)
+        finally:
+            if not parked:
+                parked = self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)
+        return parked
+
+    def _undo_park(
+        self, pair: tuple[int, str], *, was_claimed: bool, was_processing: bool, cancel: threading.Event | None
+    ) -> bool:
+        """Give a run that did not park its worker state back.
+
+        If the worker finished the run during the park, its ``_mark_job_done``
+        took the pair and skipped the release. The run is not parked, so this
+        method then releases the claim in its place, and restores no state.
+
+        If another claim of the run on this pod happened during the park, that
+        claim owns the maps and the lease. This method then restores and
+        releases nothing, and keeps the pair, so the old worker's
+        ``_mark_job_done`` does nothing.
+
+        Args:
+            pair: The (worker id, run id) that ``park_job`` recorded.
+            was_claimed: Whether this pod held the claim before the park.
+            was_processing: Whether the run was in the processing set before the park.
+            cancel: The run's cancel event before the park.
+
+        Returns:
+            ``True`` when a later claim holds the run, so the run left this worker.
+        """
+        optimization_id = pair[1]
+        with self._queue_lock:
+            finished = pair not in self._parked_jobs
+            # park_job removed the run from the claims, so a claim here is a later one. release_job
+            # matches only the pod, so a restore and a release would take that claim's lease.
+            if optimization_id in self._claimed_jobs:
+                return True
+            self._parked_jobs.discard(pair)
+            if not finished:
+                if was_claimed:
+                    self._claimed_jobs.add(optimization_id)
+                if was_processing:
+                    self._processing_jobs.add(optimization_id)
+                # A claim made during the unlocked park owns the newer event; keep it so a cancel reaches that worker.
+                if cancel is not None:
+                    restored = self._cancel_events.setdefault(optimization_id, cancel)
+                    # stop() clears _running before it sets the events under this lock, so a stop
+                    # during the park either sets the restored event itself or leaves _running False.
+                    # A user cancel in that window finds no event; the heartbeat's store poll
+                    # (_raise_if_store_cancelled) still stops the run.
+                    if not self._running:
+                        restored.set()
+        if finished and was_claimed:
+            try:
+                self._job_store.release_job(optimization_id, self._pod_name)
+            except Exception:
+                logger.exception("release_job failed for %s", optimization_id)
+        return False
 
     def _worker_loop(self, worker_id: int) -> None:
         """Poll for jobs and process them until stopped.
@@ -562,7 +706,7 @@ class BackgroundWorker:
                 finally:
                     with self._activity_lock:
                         self._thread_current_job.pop(worker_id, None)
-                    self._mark_job_done(optimization_id)
+                    self._mark_job_done(optimization_id, worker_id)
         except Exception:
             logger.exception("Worker %d died unexpectedly", worker_id)
 

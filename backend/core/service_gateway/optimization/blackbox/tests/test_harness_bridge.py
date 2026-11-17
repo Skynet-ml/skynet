@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from .. import harness, harness_bridge
+from .. import exec_shim, harness, harness_bridge
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -1555,3 +1555,468 @@ def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
     else:
         assert outcome.refusals == []
         assert "hello" in _FakeChat.tool_outputs[0]
+
+
+def _fake_tool(bin_dir: Path, name: str, script: str) -> None:
+    """Write an executable shell command into ``bin_dir``.
+
+    Args:
+        bin_dir: Folder for the command.
+        name: The command name.
+        script: Its shell body.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    tool = bin_dir / name
+    tool.write_text(f"#!/bin/sh\n{script}\n")
+    tool.chmod(0o755)
+
+
+def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_through(tmp_path: Path) -> None:
+    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior."""
+    bin_dir = tmp_path / "bin"
+    _fake_tool(bin_dir, "probe", 'echo "out $*"; echo err >&2; exit 3')
+    _fake_tool(bin_dir, "outer", "probe inner; exit 0")
+    proposer = {
+        **_PLAIN,
+        "run_command": 'probe "a b" 2>/dev/null; echo "rc=$?"; outer; ls >/dev/null',
+        "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        "exec_commands": ["probe", "outer"],
+    }
+    session = tmp_path / "session"
+
+    outcome = run_session(
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+    )
+
+    assert outcome.returncode == 0
+    assert outcome.text == "out a b\nrc=3\nout inner"
+    records = [json.loads(line) for line in (session / harness_bridge.EXEC_LOG).read_text().splitlines()]
+    assert records == [
+        {"command": "probe 'a b'", "exit_code": 3, "stdout": "out a b\n", "stderr": "err\n"},
+        {"command": "outer", "exit_code": 0, "stdout": "out inner\n", "stderr": "err\n"},
+    ]
+
+
+def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> None:
+    """A listed command that is not installed fails with 127 and is still logged."""
+    proposer = {**_PLAIN, "run_command": 'no-such-tool-xyz; echo "rc=$?"', "exec_commands": ["no-such-tool-xyz"]}
+    session = tmp_path / "session"
+
+    outcome = run_session(
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+    )
+
+    assert outcome.text == "rc=127"
+    [record] = [json.loads(line) for line in (session / harness_bridge.EXEC_LOG).read_text().splitlines()]
+    assert (record["command"], record["exit_code"]) == ("no-such-tool-xyz", 127)
+
+
+def test_run_session_without_exec_commands_installs_no_exec_shim(tmp_path: Path) -> None:
+    """A launch that lists no command gets no shim folder and no log, and sees its session folder."""
+    proposer = {**_PLAIN, "run_command": 'echo "$APP_SESSION_DIR"; echo "$PATH"'}
+    session = tmp_path / "session"
+
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+
+    session_line, path_line = (outcome.text or "").splitlines()
+    assert session_line == str(session)
+    assert str(session / harness_bridge.EXEC_SHIM_DIR) not in path_line
+    assert not (session / harness_bridge.EXEC_LOG).exists()
+
+
+def _shim_env(tmp_path: Path, names: list[str], log: Path | None) -> dict[str, str]:
+    """Install exec shim wrappers and return the environment that runs them.
+
+    Args:
+        tmp_path: Pytest's temporary folder; ``bin`` holds the real commands.
+        names: The command names to wrap.
+        log: The exec log, or ``None`` for a launch with no log.
+
+    Returns:
+        The process environment.
+    """
+    shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", names, sys.executable)
+    env = {key: value for key, value in os.environ.items() if key != "APP_EXEC_LOG"}
+    env.update({"PATH": f"{shim_dir}{os.pathsep}{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"})
+    if log is not None:
+        env["APP_EXEC_LOG"] = str(log)
+    return env
+
+
+def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_path: Path) -> None:
+    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself."""
+    _fake_tool(tmp_path / "bin", "probe", "echo real; exit 5")
+    env = {key: value for key, value in _shim_env(tmp_path, ["probe"], None).items() if not key.startswith("APP_")}
+
+    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout) == (5, b"real\n")
+
+
+@pytest.mark.parametrize("logged", [True, False])
+def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_entry(
+    tmp_path: Path, logged: bool
+) -> None:
+    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once."""
+    _fake_tool(tmp_path / "here", "probe", "echo real; exit 5")
+    shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
+    # The wrapper counts its runs: a bare-name match would make Popen find the wrapper on PATH again.
+    calls, wrapper = tmp_path / "calls", shim_dir / "probe"
+    wrapper.write_text(wrapper.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\necho x >> {shlex.quote(str(calls))}\n"))
+    log = tmp_path / "exec.jsonl"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("APP_")}
+    env["PATH"] = f"{shim_dir}{os.pathsep}{os.pathsep}{os.environ['PATH']}"
+    if logged:
+        env["APP_EXEC_LOG"] = str(log)
+
+    done = subprocess.run(["probe"], env=env, cwd=tmp_path / "here", capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (5, b"real\n", b"")
+    assert calls.read_text() == "x\n"
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"]) == ("probe", 5)
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", "..", ".", "", "x\0y"])
+def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_outside(
+    tmp_path: Path, name: str
+) -> None:
+    """A command name with a path part, or a NUL, raises ValueError before any file is written."""
+    shim_dir = tmp_path / "shim"
+
+    with pytest.raises(ValueError, match="plain name"):
+        harness_bridge.install_exec_shim(shim_dir, [name], sys.executable)
+
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")) == ["shim"]
+
+
+def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, monkeypatch) -> None:
+    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper."""
+    monkeypatch.setattr(harness_bridge, "__file__", str(tmp_path / "bridge" / "harness_bridge.py"))
+
+    with pytest.raises(FileNotFoundError, match="exec shim not found"):
+        harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
+
+    assert not (tmp_path / "shim").exists()
+
+
+def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:
+    """The caller gets the full output; the log keeps its tail."""
+    _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["big"], env=_shim_env(tmp_path, ["big"], log), capture_output=True, timeout=10, check=True)
+
+    assert done.stdout == b"a" * 70000 + b"END"
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["stdout"] == "a" * (64 * 1024 - 3) + "END"
+
+
+def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path) -> None:
+    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+
+    env = _shim_env(tmp_path, ["probe"], None)
+    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (4, b"out\n", b"err\n")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bin", "shim"]
+
+
+def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> None:
+    """A line the command prints reaches the caller while the command still runs."""
+    flag = tmp_path / "flag"
+    _fake_tool(tmp_path / "bin", "slow", f'echo first; while [ ! -f "{flag}" ]; do sleep 0.05; done; echo second')
+    process = subprocess.Popen(
+        ["slow"], env=_shim_env(tmp_path, ["slow"], tmp_path / "exec.jsonl"), stdout=subprocess.PIPE
+    )
+    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging.
+    timer = threading.Timer(5.0, flag.touch)
+    # Ends a shim that never runs the command, so readline returns and the test fails.
+    killer = threading.Timer(10.0, process.kill)
+    timer.start()
+    killer.start()
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == b"first\n"
+        assert not flag.exists()
+    finally:
+        flag.touch()
+        timer.cancel()
+        process.wait(timeout=10)
+        killer.cancel()
+    assert process.returncode == 0
+
+
+def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path) -> None:
+    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it."""
+    _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
+    # Ends a shim that never runs the command, so readline returns and the test fails.
+    killer = threading.Timer(10.0, process.kill)
+    killer.start()
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == b"ready\n"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        killer.cancel()
+        process.kill()
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGTERM
+
+
+@pytest.mark.parametrize("logged", [True, False])
+def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, logged: bool) -> None:
+    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
+    bin_dir.mkdir()
+    (bin_dir / "plain").write_text('echo "plain $1"\nexit 3\n')
+    (bin_dir / "plain").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["plain"], log if logged else None)
+    done = subprocess.run(["plain", "a"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout) == (3, b"plain a\n")
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"], record["stdout"]) == ("plain a", 3, "plain a\n")
+
+
+def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> None:
+    """A command whose interpreter is missing exits 126, and its record is still written."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
+    bin_dir.mkdir()
+    (bin_dir / "broken").write_text("#!/no/such/interpreter\n")
+    (bin_dir / "broken").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["broken"], log)
+    done = subprocess.run(["broken"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert done.returncode == 126
+    assert done.stderr.startswith(b"broken: ")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["command"], record["exit_code"]) == ("broken", 126)
+
+
+def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_written(tmp_path: Path) -> None:
+    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+    log = tmp_path / "log-folder"
+    log.mkdir()
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["probe"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (4, b"out\n", b"err\n")
+    assert list(log.iterdir()) == []
+
+
+def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Path) -> None:
+    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore."""
+    probe = "import signal; print(signal.getsignal(signal.SIGINT) is signal.SIG_IGN)"
+    _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(
+        ["/bin/sh", "-c", 'trap "" INT; exec probe'], env=env, capture_output=True, timeout=10, check=False
+    )
+
+    assert (done.returncode, done.stdout) == (0, b"True\n"), done.stderr
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["stdout"] == "True\n"
+
+
+def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp_path: Path) -> None:
+    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141."""
+    _fake_tool(tmp_path / "bin", "inf", "exec yes")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(
+        ["/bin/sh", "-c", "inf | head -c 5 >/dev/null; echo ok"],
+        env=_shim_env(tmp_path, ["inf"], log),
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, _ = process.communicate(timeout=10)
+    finally:
+        # A shim that keeps the pipe open never ends; stop its whole group so the test fails and leaves nothing.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+    assert stdout == b"ok\n"
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGPIPE
+
+
+def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_line_into_a_closed_reader(
+    tmp_path: Path,
+) -> None:
+    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr."""
+    _fake_tool(tmp_path / "bin", "lines", "while true; do echo hi; sleep 0.01; done")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(
+        ["/bin/bash", "-c", 'lines | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"'],
+        env=_shim_env(tmp_path, ["lines"], log),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+    assert (stdout, stderr) == (f"status {128 + signal.SIGPIPE} 0\n".encode(), b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGPIPE
+
+
+def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(tmp_path: Path) -> None:
+    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut."""
+    _fake_tool(tmp_path / "bin", "probe", 'echo "$#"')
+    log = tmp_path / "exec.jsonl"
+    args = [b"\xff" * 60000] * 3
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run([b"probe", *args], env=env, capture_output=True, timeout=10, check=True)
+
+    assert done.stdout == b"3\n"
+    [line] = log.read_bytes().splitlines()
+    assert len(line) < 6 * exec_shim.COMMAND_LIMIT + 1024
+    command = json.loads(line)["command"]
+    assert command.endswith(exec_shim.COMMAND_CUT)
+    head = command[: -len(exec_shim.COMMAND_CUT)].encode("utf-8", "surrogateescape")
+    assert len(head) == exec_shim.COMMAND_LIMIT
+    assert head.startswith(b"probe '\xff")
+
+
+def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(tmp_path: Path) -> None:
+    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's."""
+    probe = (
+        "import os\n"
+        "os.write(3, b'sub\\n')\n"
+        "open_fds = []\n"
+        "for fd in range(3, 256):\n"
+        "    try:\n"
+        "        os.fstat(fd)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    open_fds.append(fd)\n"
+        "print(open_fds)\n"
+    )
+    _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["/bin/sh", "-c", "probe 3>&1"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"sub\n[3]\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["exit_code"], record["stdout"]) == (0, "[3]\n")
+
+
+def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_the_record(tmp_path: Path) -> None:
+    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback."""
+    _fake_tool(tmp_path / "bin", "probe", "echo err >&2; exit 4")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["/bin/sh", "-c", "probe >&-"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stderr) == (4, b"err\n")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["command"], record["exit_code"], record["stderr"]) == ("probe", 4, "err\n")
+
+
+@pytest.mark.parametrize("mode", ["logged", "nested", "no-log"])
+@pytest.mark.parametrize(
+    ("command", "code", "stdout"), [("probe", 4, b"out\n"), ("nosuch", 127, b""), ("broken", 126, b"")]
+)
+def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_command_code(
+    tmp_path: Path, mode: str, command: str, code: int, stdout: bytes
+) -> None:
+    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+    (tmp_path / "bin" / "broken").write_text("#!/no/such/interpreter\n")
+    (tmp_path / "bin" / "broken").chmod(0o755)
+    log = tmp_path / "exec.jsonl"
+    env = _shim_env(tmp_path, ["probe", "nosuch", "broken"], None if mode == "no-log" else log)
+    if mode == "nested":
+        env[exec_shim.ACTIVE_ENV] = "1"
+
+    done = subprocess.run(["/bin/sh", "-c", f"{command} 2>&-"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (code, stdout, b"")
+    if mode == "logged":
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"], record["stdout"]) == (command, code, stdout.decode())
+    else:
+        assert not log.exists()
+
+
+@pytest.mark.parametrize("logged", [True, False])
+@pytest.mark.parametrize(("closed", "kept"), [("2>&-", "stdout"), (">&-", "stderr")])
+def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_go_on(
+    tmp_path: Path, logged: bool, closed: str, kept: str
+) -> None:
+    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE."""
+    lost = "1" if kept == "stderr" else "2"
+    shown = "2" if kept == "stderr" else "1"
+    _fake_tool(tmp_path / "bin", "tw", f"echo a >&{lost}; sleep 0.2; echo b >&{lost}; echo kept >&{shown}; exit 0")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["tw"], log if logged else None)
+    done = subprocess.run(["/bin/sh", "-c", f"tw {closed}"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert done.returncode == 0, done
+    assert getattr(done, kept).endswith(b"kept\n")
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        lost_stream = "stdout" if kept == "stderr" else "stderr"
+        assert (record["exit_code"], record[lost_stream], record[kept]) == (0, "a\nb\n", "kept\n")
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGKILL])
+def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, number: signal.Signals) -> None:
+    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal."""
+    _fake_tool(tmp_path / "bin", "zz", f"echo out; kill -{number.name[3:]} $$")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["zz"], env=_shim_env(tmp_path, ["zz"], log), capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (-number, b"out\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["exit_code"], record["stdout"]) == (128 + number, "out\n")
+
+
+def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tmp_path: Path) -> None:
+    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own."""
+    # SIGXFSZ writes a core on Linux, but makes no crash report on macOS, so the test leaves nothing behind.
+    _fake_tool(tmp_path / "bin", "zz", "echo out; kill -XFSZ $$")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["zz"], env=_shim_env(tmp_path, ["zz"], log), capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (128 + signal.SIGXFSZ, b"out\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGXFSZ
+
+
+def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
+    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "pp").write_text('#!/bin/bash\nyes | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"\n')
+    (tmp_path / "bin" / "pp").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["pp"], None)
+    done = subprocess.run(["pp"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"status 141 0\n", b"")
