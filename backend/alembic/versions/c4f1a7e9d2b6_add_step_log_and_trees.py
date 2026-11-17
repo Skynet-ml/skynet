@@ -52,7 +52,8 @@ def upgrade() -> None:
     op.create_index("ix_storage_packs_worker_id", "storage_packs", ["worker_id"])
     op.create_table(
         "agent_steps",
-        sa.Column("step_id", sa.String(100), primary_key=True),
+        # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
+        sa.Column("step_id", sa.String(112), primary_key=True),
         sa.Column(
             "run_id",
             sa.String(36),
@@ -71,7 +72,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=_now()),
     )
     op.create_index("ix_agent_steps_run_id", "agent_steps", ["run_id"])
-    op.create_index("ux_agent_steps_agent_seq", "agent_steps", ["agent_id", "seq"], unique=True)
+    op.create_index("ux_agent_steps_run_agent_seq", "agent_steps", ["run_id", "agent_id", "seq"], unique=True)
     op.create_table(
         "tree_objects",
         sa.Column("username", sa.String(255), primary_key=True),
@@ -92,7 +93,7 @@ def upgrade() -> None:
             primary_key=True,
         ),
         sa.Column("effect_key", sa.String(255), primary_key=True),
-        sa.Column("step_id", sa.String(100), nullable=True),
+        sa.Column("step_id", sa.String(112), nullable=True),
         sa.Column("state", sa.String(16), nullable=False),
         sa.Column("result", postgresql.JSONB(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=_now()),

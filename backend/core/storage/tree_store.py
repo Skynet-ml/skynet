@@ -9,7 +9,8 @@ id.
 
 Objects travel through the :class:`StepLogStore` buffer, in the same packs
 and flushes as the steps, and each one counts toward its account's stored
-bytes. Only account deletion removes them.
+bytes. Only account deletion removes them. A read names its run: before the
+flush only that run sees the object, after it every run of the same account.
 """
 
 from __future__ import annotations
@@ -147,53 +148,56 @@ class TreeStore:
         self._step_log.put_object(run_id, object_id, stored)
         return object_id
 
-    def get_blob(self, object_id: str) -> bytes | None:
-        """Return a blob's file bytes, from the buffer before its flush.
+    def get_blob(self, run_id: str, object_id: str) -> bytes | None:
+        """Return a blob's file bytes for a run, from the buffer before its flush.
 
         Args:
+            run_id: The job that reads the blob.
             object_id: The blob's object id.
 
         Returns:
-            The file bytes, or ``None`` when no such object exists.
+            The file bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
             ValueError: When the stored bytes do not match the id or are not a blob.
         """
-        stored = self._get(object_id)
+        stored = self._get(run_id, object_id)
         if stored is None:
             return None
         if not stored.startswith(_BLOB_HEADER):
             raise ValueError(f"object {object_id} is not a blob")
         return stored[len(_BLOB_HEADER) :]
 
-    def get_tree(self, object_id: str) -> list[TreeEntry] | None:
-        """Return a tree's entries, from the buffer before its flush.
+    def get_tree(self, run_id: str, object_id: str) -> list[TreeEntry] | None:
+        """Return a tree's entries for a run, from the buffer before its flush.
 
         Args:
+            run_id: The job that reads the tree.
             object_id: The tree's object id.
 
         Returns:
-            The entries, or ``None`` when no such object exists.
+            The entries, or ``None`` when the run cannot see such an object.
 
         Raises:
             ValueError: When the stored bytes do not match the id or are not a tree.
         """
-        stored = self._get(object_id)
+        stored = self._get(run_id, object_id)
         return None if stored is None else decode_tree(stored)
 
-    def _get(self, object_id: str) -> bytes | None:
-        """Return an object's stored bytes after a check that they hash to the id.
+    def _get(self, run_id: str, object_id: str) -> bytes | None:
+        """Return an object's stored bytes for a run after a check that they hash to the id.
 
         Args:
+            run_id: The job that reads the object.
             object_id: The object id.
 
         Returns:
-            The stored bytes, or ``None`` when no such object exists.
+            The stored bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
             ValueError: When the bytes do not hash to the id.
         """
-        stored = self._step_log.get_object(object_id)
+        stored = self._step_log.get_object(run_id, object_id)
         if stored is not None and object_id_of(stored) != object_id:
             raise ValueError(f"object {object_id} does not match its content")
         return stored

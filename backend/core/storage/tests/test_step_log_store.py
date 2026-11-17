@@ -182,7 +182,7 @@ def test_commit_returns_the_step_id_before_any_write(make_store, engine, objects
 
     step_id = _commit(store)
 
-    assert step_id == "agent-a:1"
+    assert step_id == "job-1:agent-a:1"
     assert objects.puts == 0
     assert _step_rows(engine) == 0
     with pytest.raises(TimeoutError):
@@ -248,12 +248,12 @@ def test_a_stale_generation_fails_the_step_with_a_fence_error(make_store, engine
 
     store.flush()
 
-    with pytest.raises(StepFenceError, match="agent-a:1") as raised:
+    with pytest.raises(StepFenceError, match="job-1:agent-a:1") as raised:
         store.durable(step_id)
     assert raised.value.step_id == step_id
     assert _step_rows(engine) == 0
     assert store.get_step(step_id) is None
-    with pytest.raises(StepFenceError, match="agent-a:1"):
+    with pytest.raises(StepFenceError, match="job-1:agent-a:1"):
         _commit(store, seq=2)
 
 
@@ -293,8 +293,8 @@ def test_a_retried_commit_with_the_same_step_id_is_a_no_op(make_store, engine, o
     assert restarted.get_step(first)["body"] == {"command": "ls", "output": "a\n"}
 
 
-def test_agent_and_seq_are_unique_in_the_database(engine) -> None:
-    """The schema refuses a second step at the same agent and position."""
+def test_run_agent_and_seq_are_unique_in_the_database(engine) -> None:
+    """The schema refuses a second step at the same run, agent and position, but not in another run."""
     row = {
         "run_id": "job-1",
         "agent_id": "agent-a",
@@ -308,10 +308,84 @@ def test_agent_and_seq_are_unique_in_the_database(engine) -> None:
     }
     with Session(engine) as session:
         session.add(AgentStepModel(step_id="one", **row))
+        session.add(AgentStepModel(step_id="other-run", **{**row, "run_id": "job-2"}))
         session.commit()
         session.add(AgentStepModel(step_id="two", **row))
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+def test_two_runs_with_the_same_agent_and_seq_keep_their_own_steps(make_store, engine) -> None:
+    """In one buffer, the same agent and seq in two runs give two ids, two rows and two bodies."""
+    store = make_store()
+    first = _commit(store, body={"command": "first", "output": ""})
+    second = _commit(store, run_id="job-2", body={"command": "second", "output": ""})
+
+    assert first != second
+    store.flush()
+    store.durable(first, timeout=0)
+    store.durable(second, timeout=0)
+    assert _step_rows(engine) == 2
+    assert (store.get_step(first)["run_id"], store.get_step(first)["body"]["command"]) == ("job-1", "first")
+    assert (store.get_step(second)["run_id"], store.get_step(second)["body"]["command"]) == ("job-2", "second")
+
+
+def test_after_a_restart_another_run_with_the_same_agent_and_seq_lands(make_store, engine) -> None:
+    """A new store with an empty buffer commits the same agent and seq for another run, and the row lands."""
+    store = make_store()
+    _commit(store, body={"command": "first", "output": ""})
+    store.flush()
+    restarted = make_store()
+
+    second = _commit(restarted, run_id="job-2", body={"command": "second", "output": ""})
+    restarted.flush()
+
+    restarted.durable(second, timeout=0)
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, second).run_id == "job-2"
+    assert restarted.get_step(second)["body"]["command"] == "second"
+
+
+def test_a_fence_failure_in_one_run_does_not_fail_the_same_agent_id_in_another_run(make_store, engine) -> None:
+    """The failure an agent sees on its next commit belongs to its own run only."""
+    store = make_store()
+    stale = _commit(store, run_id="job-2")
+    with Session(engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == "job-2").values(execution_generation=2))
+        session.commit()
+    store.flush()
+
+    _commit(store, seq=2)
+    with pytest.raises(StepFenceError, match=stale):
+        _commit(store, run_id="job-2", seq=2)
+
+
+def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
+    """A run id that names no job reads no object, before or after the flush."""
+    store = make_store()
+    store.put_object("job-1", "c" * 64, b"blob\0hello")
+
+    assert store.get_object("no-such-run", "c" * 64) is None
+    store.flush()
+    assert store.get_object("job-1", "c" * 64) == b"blob\0hello"
+    assert store.get_object("no-such-run", "c" * 64) is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"run_id": ""},
+        {"run_id": "job:1"},
+        {"seq": -1},
+        {"seq": 2**31},
+    ],
+)
+def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, overrides: dict[str, Any]) -> None:
+    """An empty run id, a ``:`` in the run id, or a seq outside the column is refused before the buffer."""
+    store = make_store()
+
+    with pytest.raises(ValueError):
+        _commit(store, **overrides)
 
 
 def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
@@ -371,7 +445,7 @@ def test_a_read_before_the_flush_returns_the_buffered_bytes(make_store, objects)
 
     assert objects.list("packs/") == []
     assert store.get_step(step_id)["body"] == {"command": "pwd", "output": "/w\n"}
-    assert store.get_object("c" * 64) == b"blob\0hello"
+    assert store.get_object("job-1", "c" * 64) == b"blob\0hello"
 
     store.flush()
     reader = make_store()
@@ -380,7 +454,7 @@ def test_a_read_before_the_flush_returns_the_buffered_bytes(make_store, objects)
     assert step["tree_id"] == TREE
     assert step["grant_list_id"] == "grants-1"
     assert step["execution_generation"] == 1
-    assert reader.get_object("c" * 64) == b"blob\0hello"
+    assert reader.get_object("job-2", "c" * 64) == b"blob\0hello"
 
 
 def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
@@ -506,7 +580,7 @@ def test_postgres_flush_fences_and_dedupes(postgres_engine, tmp_path) -> None:
         with pytest.raises(StepFenceError):
             store.durable(stale)
         assert _step_rows(postgres_engine) == 1
-        assert store.get_object("d" * 64) == b"blob\0x"
+        assert store.get_object("job-1", "d" * 64) == b"blob\0x"
         assert store.get_step(fresh)["body"]["command"] == "echo 1"
     finally:
         store.close()

@@ -158,11 +158,11 @@ def test_a_kill_between_the_put_and_the_commit_leaves_no_step_and_recovery_adds_
 
     store = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
-        assert store.get_step("agent-a:1") is None
+        assert store.get_step("job-1:agent-a:1") is None
         assert store.recover() == 1
-        store.durable("agent-a:1", timeout=0)
-        assert store.get_step("agent-a:1")["body"] == {"command": "make", "output": "ok\n"}
-        assert store.get_object(OBJECT) == b"blob\0data"
+        store.durable("job-1:agent-a:1", timeout=0)
+        assert store.get_step("job-1:agent-a:1")["body"] == {"command": "make", "output": "ok\n"}
+        assert store.get_object("job-1", OBJECT) == b"blob\0data"
 
         assert store.recover() == 0
         store.commit(
@@ -194,7 +194,7 @@ def test_recovery_keeps_the_fence(tmp_path) -> None:
     try:
         assert store.recover() == 1
         with pytest.raises(KeyError):
-            store.durable("agent-a:1")
+            store.durable("job-1:agent-a:1")
     finally:
         store.close()
     assert _count(engine, AgentStepModel) == 0

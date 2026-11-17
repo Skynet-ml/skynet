@@ -19,7 +19,7 @@ from core.storage.usage import compute_user_storage
 
 @pytest.fixture
 def engine(tmp_path: Path) -> Engine:
-    """Return a SQLite file engine with the schema and two jobs of two accounts.
+    """Return a SQLite file engine with the schema and three jobs of two accounts.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -31,6 +31,7 @@ def engine(tmp_path: Path) -> Engine:
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         session.add(JobModel(optimization_id="job-ada", username="ada", execution_generation=1))
+        session.add(JobModel(optimization_id="job-ada-2", username="ada", execution_generation=1))
         session.add(JobModel(optimization_id="job-bob", username="bob", execution_generation=1))
         session.commit()
     return engine
@@ -107,15 +108,32 @@ def test_a_tree_reads_from_the_buffer_and_then_from_its_pack(step_log, engine, t
     root = trees.put_tree("job-ada", [TreeEntry("docs", "tree", sub), TreeEntry("main.txt", "file", blob)])
 
     assert _tree_rows(engine) == 0
-    assert trees.get_blob(blob) == b"hello\n"
-    assert [entry.name for entry in trees.get_tree(root)] == ["docs", "main.txt"]
+    assert trees.get_blob("job-ada", blob) == b"hello\n"
+    assert [entry.name for entry in trees.get_tree("job-ada", root)] == ["docs", "main.txt"]
 
     step_log.flush()
     reader = TreeStore(StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "w2", flush_window_seconds=60.0))
     assert _tree_rows(engine) == 3
-    assert reader.get_tree(sub) == [TreeEntry("greeting.txt", "file", blob)]
-    assert reader.get_blob(blob) == b"hello\n"
-    assert reader.get_blob("f" * 64) is None
+    assert reader.get_tree("job-ada", sub) == [TreeEntry("greeting.txt", "file", blob)]
+    assert reader.get_blob("job-ada", blob) == b"hello\n"
+    assert reader.get_blob("job-ada", "f" * 64) is None
+
+
+def test_another_account_cannot_read_the_object_before_or_after_the_flush(step_log) -> None:
+    """Before its flush only the writing run reads an object; after it, every run of the owner and no other account."""
+    trees = TreeStore(step_log)
+    blob = trees.put_blob("job-ada", b"secret")
+    root = trees.put_tree("job-ada", [TreeEntry("secret.txt", "file", blob)])
+
+    assert trees.get_blob("job-ada", blob) == b"secret"
+    assert trees.get_blob("job-bob", blob) is None
+    assert trees.get_tree("job-bob", root) is None
+    step_log.flush()
+
+    assert trees.get_blob("job-bob", blob) is None
+    assert trees.get_tree("job-bob", root) is None
+    assert trees.get_blob("job-ada-2", blob) == b"secret"
+    assert trees.get_tree("job-ada-2", root) == [TreeEntry("secret.txt", "file", blob)]
 
 
 def test_a_repeated_object_is_stored_once_per_account(step_log, engine) -> None:
@@ -140,9 +158,9 @@ def test_a_blob_read_as_a_tree_or_a_changed_object_is_refused(step_log) -> None:
     step_log.put_object("job-ada", "e" * 64, encode_blob(b"y"))
 
     with pytest.raises(ValueError, match="not a tree"):
-        trees.get_tree(blob)
+        trees.get_tree("job-ada", blob)
     with pytest.raises(ValueError, match="does not match"):
-        trees.get_blob("e" * 64)
+        trees.get_blob("job-ada", "e" * 64)
 
 
 def test_tree_bytes_count_toward_the_owner_footprint(step_log, engine) -> None:

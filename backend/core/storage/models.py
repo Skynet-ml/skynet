@@ -1541,16 +1541,17 @@ class StoragePackModel(Base):
 class AgentStepModel(Base):
     """One agent step: a command with its output and new tree, or a model response (SKY-710).
 
-    ``step_id`` is ``<agent_id>:<seq>``, so a retried commit maps to the same
-    row. The step body lives in the pack at ``pack_offset``/``pack_length``.
+    ``step_id`` is ``<run_id>:<agent_id>:<seq>``, so a retried commit maps to
+    the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
     ``run_id`` is the job id and the shard key. Rows go with their job via the
     cascading foreign key.
     """
 
     __tablename__ = "agent_steps"
-    __table_args__ = (Index("ux_agent_steps_agent_seq", "agent_id", "seq", unique=True),)
+    __table_args__ = (Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),)
 
-    step_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
+    step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
     run_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -1598,7 +1599,7 @@ class AgentEffectModel(Base):
         String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), primary_key=True
     )
     effect_key: Mapped[str] = mapped_column(String(255), primary_key=True)
-    step_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    step_id: Mapped[str | None] = mapped_column(String(112), nullable=True)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

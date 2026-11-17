@@ -8,7 +8,9 @@ transaction. :meth:`StepLogStore.durable` is the barrier that outside
 effects wait on.
 
 Until its flush commits, a step or tree object is read from the buffer (the
-LSM memtable), so the next box can mount a tree before it is durable.
+LSM memtable), so the next box can mount a tree before it is durable. A tree
+object in the buffer is visible only to the run that wrote it; after its
+flush, every run of the same account can read it, and no other account.
 
 Pack format, version 1: the step bodies and object bytes, back to back, then
 a JSON manifest, then the manifest length as an 8-byte big-endian integer.
@@ -34,7 +36,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -50,6 +52,9 @@ STEP_KINDS = frozenset({"command", "model"})
 PACK_VERSION = 1
 PACK_PREFIX = "packs"
 _FOOTER = struct.Struct(">Q")
+RUN_ID_MAX = 36
+AGENT_ID_MAX = 64
+SEQ_MAX = 2**31 - 1
 _STEP_FIELDS = (
     "step_id",
     "run_id",
@@ -75,17 +80,18 @@ class StepFenceError(RuntimeError):
         self.step_id = step_id
 
 
-def step_id_for(agent_id: str, seq: int) -> str:
-    """Return the id of an agent's step; a retry of the same step gets the same id.
+def step_id_for(run_id: str, agent_id: str, seq: int) -> str:
+    """Return the id of a run's agent step; a retry of the same step gets the same id.
 
     Args:
+        run_id: The job the step belongs to; it holds no ``:``.
         agent_id: The agent that commits the step.
         seq: The step's position in the agent's log.
 
     Returns:
-        ``<agent_id>:<seq>``.
+        ``<run_id>:<agent_id>:<seq>``.
     """
-    return f"{agent_id}:{seq}"
+    return f"{run_id}:{agent_id}:{seq}"
 
 
 @dataclass(frozen=True)
@@ -202,12 +208,11 @@ class StepLogStore:
         self._first_at: float | None = None
         # The memtable: buffered and in-flight entries, until their flush commits.
         self._steps: dict[str, tuple[_Step, bytes]] = {}
-        self._tree_objects: dict[str, bytes] = {}
-        # Each run's owner counts the object in its own footprint, so the buffer dedupes per run, not per id.
-        self._buffered_objects: set[tuple[str, str]] = set()
+        # Keyed by run, so an unflushed object never reaches another account and each owner counts its own bytes.
+        self._tree_objects: dict[tuple[str, str], bytes] = {}
         self._waiters: dict[str, threading.Event] = {}
         self._failures: dict[str, StepFenceError] = {}
-        self._agent_failures: dict[str, StepFenceError] = {}
+        self._agent_failures: dict[tuple[str, str], StepFenceError] = {}
         self._closed = False
         self._thread = threading.Thread(target=self._run, name=f"step-log-{worker_id}", daemon=True)
         self._thread.start()
@@ -237,25 +242,33 @@ class StepLogStore:
             tree_id: The workspace tree after a command.
 
         Returns:
-            The step id. A retry with the same agent and ``seq`` returns the
-            same id and changes nothing.
+            The step id, the idempotency key: the first commit of an id wins.
+            A retry with the same run, agent and ``seq`` returns the same id
+            and changes nothing.
 
         Raises:
-            StepFenceError: When an earlier step of this agent failed the fence.
-            ValueError: When ``kind`` is unknown, a command has no tree id, or
-                an id is longer than its column.
+            StepFenceError: When an earlier step of this agent in this run
+                failed the fence.
+            ValueError: When ``kind`` is unknown, a command has no tree id, an
+                id is empty or longer than its column, ``run_id`` holds a
+                ``:``, or ``seq`` is outside the ``seq`` column.
         """
         # A row the database refuses would fail every later flush of the batch, so refuse it here.
-        if len(run_id) > 36 or not 0 < len(agent_id) <= 64 or len(grant_list_id) > 64:
+        if not 0 < len(run_id) <= RUN_ID_MAX or not 0 < len(agent_id) <= AGENT_ID_MAX or len(grant_list_id) > 64:
             raise ValueError("run_id, agent_id or grant_list_id is too long or empty")
+        # With no ``:`` in the run id and only digits in seq, the first and last ``:`` split every step id one way.
+        if ":" in run_id:
+            raise ValueError(f"run_id must not hold a ':': {run_id!r}")
+        if not 0 <= seq <= SEQ_MAX:
+            raise ValueError(f"seq is outside 0..{SEQ_MAX}: {seq}")
         if kind not in STEP_KINDS:
             raise ValueError(f"unknown step kind: {kind!r}")
         if kind == "command" and tree_id is None:
             raise ValueError("a command step needs its new tree id")
-        step_id = step_id_for(agent_id, seq)
+        step_id = step_id_for(run_id, agent_id, seq)
         data = _encode_body(body)
         with self._cond:
-            failure = self._agent_failures.pop(agent_id, None)
+            failure = self._agent_failures.pop((run_id, agent_id), None)
             if failure is not None:
                 raise failure
             if self._closed:
@@ -271,6 +284,9 @@ class StepLogStore:
     def put_object(self, run_id: str, object_id: str, data: bytes) -> None:
         """Buffer one content-addressed tree object for the next flush.
 
+        Until the flush, only ``run_id`` reads the object; after it, every
+        run of the same account can.
+
         Args:
             run_id: The job whose owner owns the object.
             object_id: The object's content hash.
@@ -279,10 +295,9 @@ class StepLogStore:
         with self._cond:
             if self._closed:
                 raise RuntimeError("the step log is closed")
-            if (run_id, object_id) in self._buffered_objects:
+            if (run_id, object_id) in self._tree_objects:
                 return
-            self._buffered_objects.add((run_id, object_id))
-            self._tree_objects[object_id] = data
+            self._tree_objects[(run_id, object_id)] = data
             self._buffer(_Object(run_id, object_id), data)
 
     def _buffer(self, item: _Step | _Object, data: bytes) -> None:
@@ -347,22 +362,29 @@ class StepLogStore:
             location = (row.pack_key, row.pack_offset, row.pack_length)
         return {**record, "body": json.loads(self._objects.get(*location))}
 
-    def get_object(self, object_id: str) -> bytes | None:
-        """Return one tree object's stored bytes, from the buffer when it is not flushed yet.
+    def get_object(self, run_id: str, object_id: str) -> bytes | None:
+        """Return one tree object's stored bytes for a run, from the buffer when it is not flushed yet.
+
+        Before its flush, an object is visible only to the run that wrote it.
+        After the flush, each run of the same account can read it.
 
         Args:
+            run_id: The job that reads the object; its owner must own the object.
             object_id: The object's content hash.
 
         Returns:
-            The stored bytes, or ``None`` when no account has the object.
+            The stored bytes, or ``None`` when the run is unknown or its owner
+            does not have the object.
         """
         with self._cond:
-            buffered = self._tree_objects.get(object_id)
+            buffered = self._tree_objects.get((run_id, object_id))
         if buffered is not None:
             return buffered
+        # The same ``or ""`` as the flush, so a job without a username reads what the flush stored for it.
+        owner = select(func.coalesce(JobModel.username, "")).where(JobModel.optimization_id == run_id).scalar_subquery()
         with Session(self._engine) as session:
             row = session.scalars(
-                select(TreeObjectModel).where(TreeObjectModel.object_id == object_id).limit(1)
+                select(TreeObjectModel).where(TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner)
             ).first()
             if row is None:
                 return None
@@ -396,11 +418,10 @@ class StepLogStore:
                 for entry in stale:
                     error = StepFenceError(entry["step_id"])
                     self._failures[entry["step_id"]] = error
-                    self._agent_failures[entry["agent_id"]] = error
+                    self._agent_failures[(entry["run_id"], entry["agent_id"])] = error
                 for item, _ in batch:
                     if isinstance(item, _Object):
-                        self._buffered_objects.discard((item.run_id, item.object_id))
-                        self._tree_objects.pop(item.object_id, None)
+                        self._tree_objects.pop((item.run_id, item.object_id), None)
                         continue
                     self._steps.pop(item.step_id, None)
                     waiter = self._waiters.pop(item.step_id, None)
