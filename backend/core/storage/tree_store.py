@@ -126,6 +126,9 @@ class TreeStore:
 
         Returns:
             The blob's object id.
+
+        Raises:
+            ValueError: When ``run_id`` is not a valid run id.
         """
         stored = encode_blob(data)
         object_id = object_id_of(stored)
@@ -141,6 +144,10 @@ class TreeStore:
 
         Returns:
             The tree's object id.
+
+        Raises:
+            ValueError: When an entry is not valid (see :func:`encode_tree`)
+                or ``run_id`` is not a valid run id.
         """
         stored = encode_tree(entries)
         object_id = object_id_of(stored)
