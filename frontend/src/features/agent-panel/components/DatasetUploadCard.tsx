@@ -2,6 +2,7 @@
 
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import * as React from "react";
+import { toast } from "react-toastify";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { CircleNotch, UploadSimple } from "@/shared/ui/icons";
 import { formatMsg, msg } from "@/shared/lib/messages";
@@ -405,6 +406,58 @@ export function useLatestDatasetRead(
       },
     );
   }, []);
+}
+
+const COMPOSER_DATASET_READ_TOAST = "composer-dataset-read";
+
+/**
+ * Read dataset files attached from the composer, with a toast while they read.
+ *
+ * A large XLSX can take seconds to read, so a loading toast shows until the
+ * newest read ends. A read that fails shows the parse error instead.
+ *
+ * Args:
+ *   resetKey: The open chat's key. A new key drops the read and its toast.
+ *   onRead: Gets the read dataset and its file.
+ *
+ * Returns:
+ *   The attach handler.
+ */
+export function useComposerDatasetAttach(
+  resetKey: unknown,
+  onRead: (confirmed: ConfirmedDataset, file: File) => void,
+): (file: File) => void {
+  const read = useLatestDatasetRead(
+    resetKey,
+    React.useCallback(
+      (confirmed: ConfirmedDataset, file: File) => {
+        toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+        onRead(confirmed, file);
+      },
+      [onRead],
+    ),
+    React.useCallback(() => {
+      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+      toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
+    }, []),
+  );
+  React.useEffect(
+    () => () => {
+      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+    },
+    [resetKey],
+  );
+  return React.useCallback(
+    (file: File) => {
+      if (!toast.isActive(COMPOSER_DATASET_READ_TOAST)) {
+        toast.loading(msg("auto.features.agent.panel.components.datasetuploadcard.parsing"), {
+          toastId: COMPOSER_DATASET_READ_TOAST,
+        });
+      }
+      read(file);
+    },
+    [read],
+  );
 }
 
 export function DatasetUploadCard({

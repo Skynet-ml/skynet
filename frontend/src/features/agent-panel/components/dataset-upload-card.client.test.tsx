@@ -41,6 +41,7 @@ const {
   datasetAttachedNote,
   libraryPickOverride,
   readDatasetFile,
+  useComposerDatasetAttach,
   useDatasetDraft,
   useLatestDatasetRead,
   useSendAfterRender,
@@ -239,6 +240,85 @@ void test("a composer attach keeps only the newest read", async () => {
 
   await React.act(async () => root.unmount());
   container.remove();
+});
+
+void test("a composer attach shows one loading toast until the newest read ends", async () => {
+  const { toast } = await import("react-toastify");
+  const shown = new Set<string>();
+  const loading: string[] = [];
+  const errors: string[] = [];
+  const saved = {
+    loading: toast.loading,
+    dismiss: toast.dismiss,
+    error: toast.error,
+    isActive: toast.isActive,
+  };
+  toast.loading = ((content: string, options?: { toastId?: string }) => {
+    loading.push(content);
+    shown.add(options?.toastId ?? "");
+    return options?.toastId ?? "";
+  }) as typeof toast.loading;
+  toast.dismiss = ((id?: string) => {
+    if (id) shown.delete(id);
+  }) as typeof toast.dismiss;
+  toast.error = ((content: string) => {
+    errors.push(content);
+    return "error";
+  }) as typeof toast.error;
+  toast.isActive = ((id: string) => shown.has(id)) as typeof toast.isActive;
+
+  let finish: () => void = () => {};
+  const slow = new File(["q\nhi\n"], "slow.csv", { type: "text/csv" });
+  const readSlow = slow.text.bind(slow);
+  slow.text = () =>
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    }).then(readSlow);
+
+  const attached: string[] = [];
+  let attach: (file: File) => void = () => {};
+  function Probe({ chat }: { chat: string }) {
+    attach = useComposerDatasetAttach(chat, (d) => attached.push(d.fileName));
+    return null;
+  }
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(<Probe chat="a" />));
+
+    attach(slow);
+    attach(new File(["q\nhello\n"], "qa.csv", { type: "text/csv" }));
+    assert.equal(loading.length, 1, "a second pick does not show a second toast");
+    await settle();
+    assert.deepEqual(attached, ["qa.csv"]);
+    assert.equal(shown.size, 0, "the toast closes when the newest read attaches");
+    finish();
+    await settle();
+    assert.deepEqual(attached, ["qa.csv"], "the older read does not attach late");
+
+    attach(new File([""], "empty.csv", { type: "text/csv" }));
+    await settle();
+    assert.equal(shown.size, 0, "the toast closes when the read fails");
+    assert.equal(errors.length, 1, "a failed read shows the parse error");
+
+    attach(slow);
+    assert.equal(shown.size, 1);
+    await React.act(async () => root.render(<Probe chat="b" />));
+    assert.equal(shown.size, 0, "a chat switch closes the toast");
+
+    attach(slow);
+    await React.act(async () => root.unmount());
+    assert.equal(shown.size, 0, "an unmount closes the toast");
+  } finally {
+    Object.assign(toast, saved);
+    container.remove();
+  }
 });
 
 void test("the attached-file note has no RTL isolate marks in a Hebrew UI", () => {

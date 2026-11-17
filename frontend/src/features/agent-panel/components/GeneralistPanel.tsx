@@ -179,7 +179,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
-  useLatestDatasetRead,
+  useComposerDatasetAttach,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -251,8 +251,6 @@ interface GeneralistPanelProps {
   /** Optional wizard-state override. Defaults to the shared context. */
   wizardState?: WizardState;
 }
-
-const COMPOSER_DATASET_READ_TOAST = "composer-dataset-read";
 
 /**
  * Docked generalist agent panel. Renders as an aside anchored to the document's
@@ -1033,38 +1031,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [webChat, datasetDraft, addOriginals],
   );
 
-  const readDataset = useLatestDatasetRead(
-    agent.conversationId,
+  const attachComposerDataset = useComposerDatasetAttach(
+    agent.sessionKey,
     React.useCallback(
-      (confirmed: ConfirmedDataset, file: File) => {
-        toast.dismiss(COMPOSER_DATASET_READ_TOAST);
-        handleDatasetConfirm(undefined, confirmed, file);
-      },
+      (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
       [handleDatasetConfirm],
     ),
-    React.useCallback(() => {
-      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
-      toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
-    }, []),
-  );
-  // A large XLSX can take seconds to read, so show that the attach is under way.
-  const attachComposerDataset = React.useCallback(
-    (file: File) => {
-      if (!toast.isActive(COMPOSER_DATASET_READ_TOAST)) {
-        toast.loading(msg("auto.features.agent.panel.components.datasetuploadcard.parsing"), {
-          toastId: COMPOSER_DATASET_READ_TOAST,
-        });
-      }
-      readDataset(file);
-    },
-    [readDataset],
-  );
-  // A chat switch drops the read under way, so its pending toast goes too.
-  React.useEffect(
-    () => () => {
-      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
-    },
-    [agent.conversationId],
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1969,8 +1941,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             {!inSetup && modelMenuNode}
           </>
         }
-        // Dataset files go to the dataset upload card; any other file
-        // becomes a file card in the composer.
+        // Dataset files are read into rows first; every file then becomes
+        // a file card in the composer.
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat's file card gives only its type and size.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
