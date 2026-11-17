@@ -88,10 +88,10 @@ Você pode anexar arquivos a uma mensagem. Cada arquivo pode ter até 20 MB. Voc
 Para enviar um conjunto de dados pelo agente:
 
 1. Anexe um arquivo CSV, JSON ou Excel.
-2. Confira o cartão de envio. Ele mostra as colunas do arquivo.
-3. Defina os papéis das colunas no cartão e depois confirme.
+2. Enquanto o arquivo é lido, aparece o aviso "A ler o ficheiro…".
+3. O arquivo fica na sua mensagem como um cartão de arquivo. Envie a mensagem.
 
-Se o agente não conseguir ler o arquivo, o cartão mostra "Não foi possível ler o ficheiro. Utilize um ficheiro CSV, JSON ou XLSX."
+Se não for possível ler o arquivo, aparece o aviso "Não foi possível ler o ficheiro. Utilize um ficheiro CSV, JSON ou XLSX."
 
 Para as regras de arquivo, veja [Preparar um conjunto de dados](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ Para definir um modelo padrão para novas conversas, abra **Definições** > **P
 
 ### Custo
 
-As conversas com o agente em créditos Skynet usam o seu saldo. Se o seu saldo estiver vazio, o painel mostra "O seu saldo está vazio. Adicione fundos para continuar a conversar com o agente." Para os preços, leia [Orçamentos e cobrança](/docs/concepts/billing).
+As conversas com o agente em créditos Skynet usam o seu saldo. Se o seu saldo disponível for demasiado baixo, o painel mostra "O seu saldo disponível é demasiado baixo. As execuções ativas podem reservar parte do seu saldo." Selecione o botão da carteira (**Adicionar fundos**) para abrir as definições de **Faturação**. Para os preços, leia [Orçamentos e cobrança](/docs/concepts/billing).
 
 ## Dicas
 

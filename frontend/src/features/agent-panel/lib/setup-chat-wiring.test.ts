@@ -834,9 +834,11 @@ test("a confirmed dataset card stores its file's original under the card's id (S
   for (const webChat of [false, true]) {
     const calls: unknown[][] = [];
     const file = { name: "qa.xlsx" };
+    let uploads: ReadonlySet<string> = new Set();
     const confirm = expression(panel, "handleDatasetConfirm", {
       webChat,
-      confirmedDatasetCallsRef: { current: new Set<string>() },
+      setConfirmedUploadCalls: (update: (c: ReadonlySet<string>) => ReadonlySet<string>) =>
+        (uploads = update(uploads)),
       datasetDraft: { attach: (...args: unknown[]) => (calls.push(["attach", ...args]), "card-1") },
       addOriginals: (files: unknown) => calls.push(["addOriginals", files]),
     });
@@ -850,7 +852,19 @@ test("a confirmed dataset card stores its file's original under the card's id (S
             ["addOriginals", [{ file, card: "card-1" }]],
           ],
     );
+    // The turn drops a confirmed upload card, so it does not split the steps (SKY-783).
+    assert.deepEqual([...uploads], webChat ? [] : ["call-1"]);
   }
+  assert.match(source(panel), /if \(confirmedUploadCalls\.has\(call\.id\)\) return null;/);
+  // A switch to a hosted chat drops a composer read under way, as a chat switch does.
+  assert.match(
+    source(panel),
+    /useComposerDatasetAttach\(\s*`\$\{agent\.sessionKey\}:\$\{webChat\}`/,
+  );
+  // The composer reads a dataset file itself, except in a hosted chat, where it
+  // stays a plain file card (SKY-783).
+  assert.match(source(panel), /claimsFile=\{webChat \? undefined : isDatasetFile\}/);
+  assert.match(source(panel), /onAttachFile=\{attachComposerDataset\}/);
 });
 
 // Run the panel's handleSubmit with a pending dataset card (SKY-780).
@@ -943,12 +957,16 @@ test("a mid-turn Send with the dataset card goes through handleSubmit, not the q
 test("a dataset card that left the draft unsent reopens its tool card (SKY-780)", () => {
   const confirmedDatasetCallsRef = { current: new Set(["call-1", "call-2"]) };
   let cards: Record<string, number> = { "call-1": 1 };
+  let uploads: ReadonlySet<string> = new Set(["call-1", "call-2"]);
   const reopen = expression(panel, "reopenDatasetCard", {
     confirmedDatasetCallsRef,
+    setConfirmedUploadCalls: (update: (c: ReadonlySet<string>) => ReadonlySet<string>) =>
+      (uploads = update(uploads)),
     setReopenedCards: (update: (c: Record<string, number>) => Record<string, number>) => (cards = update(cards)),
   });
   reopen("call-1");
   assert.deepEqual([...confirmedDatasetCallsRef.current], ["call-2"]);
+  assert.deepEqual([...uploads], ["call-2"], "the turn shows the reopened card again");
   assert.deepEqual(cards, { "call-1": 2 });
   // The new key remounts the card, so it shows its picker again.
   assert.equal(source(panel).match(/key=\{`\$\{call\.id\}:\$\{reopenedCards\[call\.id\] \?\? 0\}`\}/g)?.length, 2);

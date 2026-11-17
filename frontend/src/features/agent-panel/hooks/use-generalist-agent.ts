@@ -94,6 +94,8 @@ export interface GeneralistAgentState {
   reconnect: ReconnectProgress | null;
   pendingApproval: PendingApprovalPayload | null;
   conversationId: string | null;
+  /** The open chat's local key. A new chat keeps it when it gets its id. */
+  sessionKey: string;
   /** LiteLLM id of the composer menu's chosen model; null runs the default. */
   model: string | null;
   setModel: (model: string | null) => void;
@@ -1695,6 +1697,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     reconnect: active.reconnect,
     pendingApproval: active.pendingApproval,
     conversationId: active.conversationId,
+    // Stays the same when a new chat gets its id from its first turn.
+    sessionKey: activeKey,
     model,
     setModel,
     reasoningEffort,

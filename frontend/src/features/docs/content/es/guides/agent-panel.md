@@ -88,10 +88,10 @@ Puedes adjuntar archivos a un mensaje. Cada archivo puede ocupar hasta 20 MB. Pu
 Para subir un conjunto de datos a través del agente:
 
 1. Adjunta un archivo CSV, JSON o Excel.
-2. Revisa la tarjeta de subida. Muestra las columnas del archivo.
-3. Fija los roles de columna en la tarjeta y luego confirma.
+2. Mientras se lee el archivo, aparece el aviso «Leyendo el archivo…».
+3. El archivo espera en tu mensaje como una tarjeta de archivo. Envía el mensaje.
 
-Si el agente no puede leer el archivo, la tarjeta muestra «No se pudo leer el archivo. Usa un archivo CSV, JSON o XLSX.»
+Si no se puede leer el archivo, aparece el aviso «No se pudo leer el archivo. Usa un archivo CSV, JSON o XLSX.»
 
 Para conocer las reglas de los archivos, consulta [Preparar un conjunto de datos](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ Para fijar un modelo predeterminado para los chats nuevos, abre **Ajustes** > **
 
 ### Coste
 
-Los chats con el agente que usan créditos de Skynet consumen tu saldo. Si tu saldo está vacío, el panel muestra «Tu saldo está vacío. Añade fondos para seguir chateando con el agente.» Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
+Los chats con el agente que usan créditos de Skynet consumen tu saldo. Si tu saldo disponible es demasiado bajo, el panel muestra «Tu saldo disponible es demasiado bajo. Las ejecuciones activas pueden reservar parte de tu saldo.» Selecciona el botón de la cartera (**Añadir fondos**) para abrir los ajustes de **Facturación**. Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
 
 ## Consejos
 

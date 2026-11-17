@@ -88,10 +88,10 @@ Sie können Dateien an eine Nachricht anhängen. Jede Datei darf bis zu 20 MB gr
 So laden Sie einen Datensatz über den Agenten hoch:
 
 1. Hängen Sie eine CSV-, JSON- oder Excel-Datei an.
-2. Prüfen Sie die Upload-Karte. Sie zeigt die Spalten der Datei.
-3. Legen Sie auf der Karte die Spaltenrollen fest und bestätigen Sie.
+2. Während die Datei gelesen wird, erscheint der Hinweis „Datei wird gelesen…“.
+3. Die Datei wartet als Dateikarte in Ihrer Nachricht. Senden Sie die Nachricht.
 
-Kann der Agent die Datei nicht lesen, zeigt die Karte „Datei konnte nicht gelesen werden. Verwende eine CSV-, JSON- oder XLSX-Datei.“
+Kann die Datei nicht gelesen werden, erscheint der Hinweis „Datei konnte nicht gelesen werden. Verwende eine CSV-, JSON- oder XLSX-Datei.“
 
 Die Regeln für Dateien finden Sie unter [Einen Datensatz vorbereiten](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen**
 
 ### Kosten
 
-Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Ist Ihr Guthaben leer, zeigt der Bereich „Ihr Guthaben ist aufgebraucht. Laden Sie Guthaben auf, um weiter mit dem Agenten zu chatten.“ Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
+Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Ist Ihr verfügbares Guthaben zu niedrig, zeigt der Bereich „Ihr verfügbares Guthaben ist zu niedrig. Aktive Läufe können einen Teil Ihres Guthabens reservieren.“ Wählen Sie die Geldbörsen-Schaltfläche (**Guthaben hinzufügen**), um die Einstellungen unter **Abrechnung** zu öffnen. Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
 
 ## Tipps
 

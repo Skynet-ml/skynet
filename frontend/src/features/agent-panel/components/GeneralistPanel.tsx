@@ -26,6 +26,7 @@ import {
   PencilSimple,
   Plus,
   MagicWand,
+  Wallet,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
@@ -35,7 +36,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
 
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
-import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { CHAT_ERROR_ICON_BUTTON_CLASS, ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { CAPACITY_ERROR_CODE, capacityRetryDelay } from "@/shared/ui/agent/capacity-retry";
 import { ReconnectingNotice } from "@/shared/ui/agent/reconnecting-notice";
 import { ModelChangedNotice } from "@/shared/ui/agent/chat-notices";
@@ -177,6 +179,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
+  useComposerDatasetAttach,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -213,7 +216,7 @@ const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset upload card instead of a file card. */
+/** Whether a composer file is read into dataset rows before it becomes a file card. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -981,16 +984,23 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   });
   // A fork during a manual /compact would copy the rows without the summary.
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
-  const [attachOpen, setAttachOpen] = React.useState(false);
-  // The composer's attach button opens the OS file picker; the popover only
-  // appears while a chosen dataset file is read, or when it cannot be read.
-  const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
+  // A confirmed upload card renders nothing, so the turn must drop it, or it
+  // splits the steps around it (SKY-743). State, so the turn redraws.
+  const [confirmedUploadCalls, setConfirmedUploadCalls] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // A new key remounts a tool card whose dataset left the draft unsent, so
   // the user can pick again.
   const [reopenedCards, setReopenedCards] = React.useState<Record<string, number>>({});
   const reopenDatasetCard = React.useCallback((callId: string) => {
     confirmedDatasetCallsRef.current.delete(callId);
+    setConfirmedUploadCalls((calls) => {
+      if (!calls.has(callId)) return calls;
+      const next = new Set(calls);
+      next.delete(callId);
+      return next;
+    });
     setReopenedCards((cards) => ({ ...cards, [callId]: (cards[callId] ?? 0) + 1 }));
   }, []);
 
@@ -1022,7 +1032,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
-      if (callId) confirmedDatasetCallsRef.current.add(callId);
+      if (callId) {
+        setConfirmedUploadCalls((calls) => new Set(calls).add(callId));
+      }
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       const card = datasetDraft.attach(confirmed, callId);
       // The card keeps its original as every attached file does (SKY-782),
@@ -1030,6 +1042,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       addOriginals([{ file, card }]);
     },
     [webChat, datasetDraft, addOriginals],
+  );
+
+  // A switch to a hosted chat also drops a read under way, so its toast closes
+  // instead of the file vanishing in handleDatasetConfirm.
+  const attachComposerDataset = useComposerDatasetAttach(
+    `${agent.sessionKey}:${webChat}`,
+    React.useCallback(
+      (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
+      [handleDatasetConfirm],
+    ),
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1166,6 +1188,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const renderToolCall = React.useCallback(
     (call: AgentToolCall, ctx: { isRetry: boolean }) => {
       if (call.tool === REQUEST_DATASET_TOOL) {
+        if (confirmedUploadCalls.has(call.id)) return null;
         // Intentionally NOT gated on ``streaming``: the agent's expected
         // flow is to call request_user_dataset and then submit in the
         // same turn, but MiniMax sometimes stops after the dataset
@@ -1179,7 +1202,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             disabled={webChat}
-            alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(confirmed, file) => handleDatasetConfirm(call.id, confirmed, file)}
           />
         );
@@ -1212,7 +1234,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, reopenedCards, streaming, webChat, writeBefore],
+    [
+      confirmedUploadCalls,
+      handleDatasetConfirm,
+      handleLibraryPick,
+      reopenedCards,
+      streaming,
+      webChat,
+      writeBefore,
+    ],
   );
 
   // Every call is a step in the turn's activity group except the ones the
@@ -1871,13 +1901,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                         }
                         action={
                           agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                            <Button
-                              size="sm"
-                              className="h-7"
+                            <RetryIconButton
+                              label={msg("billing.action.add_funds")}
+                              icon={Wallet}
                               onClick={() => openSettingsTo("billing")}
-                            >
-                              {msg("billing.action.add_funds")}
-                            </Button>
+                              className={CHAT_ERROR_ICON_BUTTON_CLASS}
+                            />
                           ) : undefined
                         }
                       />
@@ -1935,9 +1964,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             {!inSetup && modelMenuNode}
           </>
         }
-        // Dataset files go to the dataset upload card; any other file
-        // becomes a file card in the composer.
-        claimsFile={isDatasetFile}
+        // Dataset files are read into rows first; every file then becomes
+        // a file card in the composer. A hosted chat cannot take the rows,
+        // so there a dataset is a plain file card.
+        claimsFile={webChat ? undefined : isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat's file card gives only its type and size.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
@@ -1945,39 +1975,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // A file card gets its path only on Send, so it waits for the reply too.
         mediaWaiting={chatMedia.tiles.length > 0 || draftFiles.length > 0}
         sendBlocked={chatMedia.blocked(draftFiles)}
-        onAttachFile={(file) => {
-          setAttachFile(file);
-          setAttachOpen(true);
-        }}
+        // The file card in the draft shows the dataset, so nothing else opens (SKY-783).
+        onAttachFile={attachComposerDataset}
         leadingControls={
           <>
-            <Popover
-              open={attachOpen}
-              onOpenChange={(open) => {
-                setAttachOpen(open);
-                if (!open) setAttachFile(null);
-              }}
-            >
-              {/* Anchors the dataset card beside the composer's attach button. */}
-              <PopoverTrigger asChild>
-                <span aria-hidden className="pointer-events-none -ms-1 block size-0" />
-              </PopoverTrigger>
-              <PopoverContent
-                side="top"
-                align="start"
-                sideOffset={8}
-                className="w-96 max-w-[calc(100vw-2rem)] p-3"
-              >
-                <DatasetUploadCard
-                  initialFile={attachFile}
-                  onConfirm={(confirmed, file) => {
-                    setAttachOpen(false);
-                    setAttachFile(null);
-                    handleDatasetConfirm(undefined, confirmed, file);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
             {/* Every agent screen, setup too: in Ask mode the setup agent's file writes wait for approval. */}
             <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
             {inSetup && modelMenuNode}

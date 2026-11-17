@@ -11,6 +11,7 @@ import * as React from "react";
 import { JSDOM } from "jsdom";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
+import type { AgentToolCall } from "@/shared/ui/agent/types";
 import type { ConfirmedDataset } from "./DatasetUploadCard";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -40,13 +41,35 @@ const {
   applyDatasetUpload,
   datasetAttachedNote,
   libraryPickOverride,
+  readDatasetFile,
+  useComposerDatasetAttach,
   useDatasetDraft,
+  useLatestDatasetRead,
   useSendAfterRender,
 } = await import("./DatasetUploadCard");
 
 after(() => dom.window.close());
 
-void test("a read file attaches at once, with no role picker and no confirm button", async () => {
+const CALL: AgentToolCall = {
+  id: "call-1",
+  tool: "request_user_dataset_datasets_request_upload_post",
+  reason: "",
+  status: "running",
+  startedAt: 0,
+  endedAt: null,
+};
+
+/** Pick a file through the card's hidden file input, as the OS picker does. */
+async function pickFile(container: HTMLElement, file: File): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+  assert.ok(input, "the card has a file input");
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+  await React.act(async () => {
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+}
+
+void test("a picked file attaches at once, and the card then shows nothing", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -56,8 +79,9 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard initialFile={file} onConfirm={(d) => attached.push(d)} />),
+    root.render(<DatasetUploadCard call={CALL} onConfirm={(d) => attached.push(d)} />),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 20 && attached.length === 0; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
@@ -68,10 +92,8 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   assert.equal(dataset?.rowCount, 2);
   assert.deepEqual(dataset?.columns, ["question", "answer"]);
   assert.equal("columnRoles" in (dataset ?? {}), false, "the upload carries no column roles");
-  const text = container.textContent ?? "";
-  assert.match(text, /File attached/);
-  assert.doesNotMatch(text, /Confirm columns|Choose a role/);
-  assert.equal(container.querySelectorAll("button").length, 0, "no role or confirm controls");
+  // The file card in the user's message shows the upload, so the tool card goes away (SKY-783).
+  assert.equal(container.innerHTML, "", "no File attached card stays in the chat");
 
   await React.act(async () => root.unmount());
   container.remove();
@@ -85,8 +107,9 @@ void test("the card hands back the picked file, so the chat can keep its origina
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard initialFile={file} onConfirm={(_, f) => picked.push(f)} />),
+    root.render(<DatasetUploadCard call={CALL} onConfirm={(_, f) => picked.push(f)} />),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 20 && picked.length === 0; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
@@ -98,7 +121,7 @@ void test("the card hands back the picked file, so the chat can keep its origina
   container.remove();
 });
 
-void test("a Strict Mode remount attaches once, and a closed card attaches nothing", async () => {
+void test("a Strict Mode card attaches once, and a closed card attaches nothing", async () => {
   const csv = "question,answer\nWhat is 2+2?,4\n";
   const settle = async () => {
     for (let i = 0; i < 10; i += 1) {
@@ -113,18 +136,16 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
   await React.act(async () =>
     strictRoot.render(
       <React.StrictMode>
-        <DatasetUploadCard
-          initialFile={new File([csv], "qa.csv", { type: "text/csv" })}
-          onConfirm={(d) => strictAttached.push(d)}
-        />
+        <DatasetUploadCard call={CALL} onConfirm={(d) => strictAttached.push(d)} />
       </React.StrictMode>,
     ),
   );
+  await pickFile(strictContainer, new File([csv], "qa.csv", { type: "text/csv" }));
   await settle();
   assert.equal(
     strictAttached.length,
     1,
-    "Strict Mode runs the read effect twice but attaches once",
+    "Strict Mode runs effects twice but the card attaches once",
   );
   await React.act(async () => strictRoot.unmount());
   strictContainer.remove();
@@ -142,16 +163,186 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
       finishRead = resolve;
     }).then(readText);
   await React.act(async () =>
-    closedRoot.render(
-      <DatasetUploadCard initialFile={slowFile} onConfirm={(d) => closedAttached.push(d)} />,
-    ),
+    closedRoot.render(<DatasetUploadCard call={CALL} onConfirm={(d) => closedAttached.push(d)} />),
   );
-  assert.match(closedContainer.textContent ?? "", /Reading the file/, "the read is under way");
+  await pickFile(closedContainer, slowFile);
+  // The drop zone's exit animation can still show; a disabled input means the read is under way.
+  assert.equal(
+    closedContainer.querySelector<HTMLInputElement>('input[type="file"]')?.disabled,
+    true,
+    "the read is under way",
+  );
   await React.act(async () => closedRoot.unmount());
   finishRead();
   await settle();
   assert.equal(closedAttached.length, 0, "a card closed during the read attaches nothing");
   closedContainer.remove();
+});
+
+void test("readDatasetFile reads rows and columns, and rejects a file with no columns", async () => {
+  const read = await readDatasetFile(
+    new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" }),
+  );
+  assert.equal(read.fileName, "qa.csv");
+  assert.equal(read.rowCount, 1);
+  assert.deepEqual(read.columns, ["question", "answer"]);
+  await assert.rejects(readDatasetFile(new File([""], "empty.csv", { type: "text/csv" })));
+});
+
+void test("a composer attach keeps only the newest read", async () => {
+  const csv = "question,answer\nWhat is 2+2?,4\n";
+  // The first file's read waits for the test, so it ends after the second.
+  let finishSlow: () => void = () => {};
+  const slow = new File([csv], "big.csv", { type: "text/csv" });
+  const readSlow = slow.text.bind(slow);
+  slow.text = () =>
+    new Promise<void>((resolve) => {
+      finishSlow = resolve;
+    }).then(readSlow);
+  const fast = new File([csv], "qa.csv", { type: "text/csv" });
+  const late = new File([csv], "late.csv", { type: "text/csv" });
+  const readLate = late.text.bind(late);
+  let finishLate: () => void = () => {};
+  late.text = () =>
+    new Promise<void>((resolve) => {
+      finishLate = resolve;
+    }).then(readLate);
+
+  const attached: string[] = [];
+  let errors = 0;
+  let attach: (file: File) => void = () => {};
+  function Probe({ chat }: { chat: string }) {
+    attach = useLatestDatasetRead(
+      chat,
+      (d) => attached.push(d.fileName),
+      () => {
+        errors += 1;
+      },
+    );
+    return null;
+  }
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await React.act(async () => root.render(<Probe chat="a" />));
+
+  attach(slow);
+  attach(fast);
+  await settle();
+  finishSlow();
+  await settle();
+  assert.deepEqual(attached, ["qa.csv"], "the older, slower read does not replace the newer pick");
+
+  attach(late);
+  await React.act(async () => root.render(<Probe chat="b" />));
+  finishLate();
+  await settle();
+  assert.deepEqual(attached, ["qa.csv"], "a read from the earlier chat does not reach the new one");
+
+  attach(new File([""], "empty.csv", { type: "text/csv" }));
+  await settle();
+  assert.equal(errors, 1, "an unreadable file reports one error");
+
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
+void test("a composer attach shows one loading toast until the newest read ends", async () => {
+  const { toast } = await import("react-toastify");
+  // Like react-toastify, a dismissed id stays in the container until its exit
+  // ends, which never happens here, and a new toast with that id is dropped.
+  const shown = new Set<string>();
+  const used = new Set<string>();
+  const loading: string[] = [];
+  const errors: string[] = [];
+  const saved = {
+    loading: toast.loading,
+    dismiss: toast.dismiss,
+    error: toast.error,
+  };
+  toast.loading = ((content: string, options?: { toastId?: string }) => {
+    const id = options?.toastId ?? "";
+    if (used.has(id)) return id;
+    used.add(id);
+    loading.push(content);
+    shown.add(id);
+    return options?.toastId ?? "";
+  }) as typeof toast.loading;
+  toast.dismiss = ((id?: string) => {
+    if (id) shown.delete(id);
+  }) as typeof toast.dismiss;
+  toast.error = ((content: string) => {
+    errors.push(content);
+    return "error";
+  }) as typeof toast.error;
+
+  let finish: () => void = () => {};
+  const slow = new File(["q\nhi\n"], "slow.csv", { type: "text/csv" });
+  const readSlow = slow.text.bind(slow);
+  slow.text = () =>
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    }).then(readSlow);
+
+  const attached: string[] = [];
+  let attach: (file: File) => void = () => {};
+  function Probe({ chat }: { chat: string }) {
+    attach = useComposerDatasetAttach(chat, (d) => attached.push(d.fileName));
+    return null;
+  }
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  let remount: ReturnType<typeof createRoot> | null = null;
+  try {
+    await React.act(async () => root.render(<Probe chat="a" />));
+
+    attach(slow);
+    attach(new File(["q\nhello\n"], "qa.csv", { type: "text/csv" }));
+    assert.equal(loading.length, 1, "a second pick does not show a second toast");
+    await settle();
+    assert.deepEqual(attached, ["qa.csv"]);
+    assert.equal(shown.size, 0, "the toast closes when the newest read attaches");
+    finish();
+    await settle();
+    assert.deepEqual(attached, ["qa.csv"], "the older read does not attach late");
+
+    attach(new File([""], "empty.csv", { type: "text/csv" }));
+    assert.equal(shown.size, 1, "a pick right after a closed toast shows a new toast");
+    await settle();
+    assert.equal(shown.size, 0, "the toast closes when the read fails");
+    assert.equal(errors.length, 1, "a failed read shows the parse error");
+
+    attach(slow);
+    assert.equal(shown.size, 1);
+    await React.act(async () => root.render(<Probe chat="b" />));
+    assert.equal(shown.size, 0, "a chat switch closes the toast");
+
+    attach(slow);
+    assert.equal(shown.size, 1, "a pick in the new chat shows a toast");
+    await React.act(async () => root.unmount());
+    assert.equal(shown.size, 0, "an unmount closes the toast");
+
+    // A shell swap remounts the panel while the old toast still closes.
+    remount = createRoot(container);
+    await React.act(async () => remount?.render(<Probe chat="b" />));
+    attach(slow);
+    assert.equal(shown.size, 1, "a pick after a remount shows a new toast");
+    await React.act(async () => remount?.unmount());
+  } finally {
+    Object.assign(toast, saved);
+    container.remove();
+  }
 });
 
 void test("the attached-file note has no RTL isolate marks in a Hebrew UI", () => {
@@ -299,16 +490,15 @@ void test("a disabled card attaches nothing", async () => {
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(
-      <DatasetUploadCard disabled initialFile={file} onConfirm={(d) => attached.push(d)} />,
-    ),
+    root.render(<DatasetUploadCard call={CALL} disabled onConfirm={(d) => attached.push(d)} />),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 10; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
 
   assert.equal(attached.length, 0);
-  assert.doesNotMatch(container.textContent ?? "", /File attached/);
+  assert.notEqual(container.innerHTML, "", "a disabled card keeps its drop zone");
   await React.act(async () => root.unmount());
   container.remove();
 });

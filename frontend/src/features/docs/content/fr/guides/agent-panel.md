@@ -88,10 +88,10 @@ Vous pouvez joindre des fichiers à un message. Chaque fichier peut atteindre 20
 Pour importer un jeu de données par l'agent :
 
 1. Joignez un fichier CSV, JSON ou Excel.
-2. Vérifiez la carte d'importation. Elle affiche les colonnes du fichier.
-3. Définissez les rôles des colonnes sur la carte, puis confirmez.
+2. Pendant la lecture du fichier, la notification « Lecture du fichier… » s'affiche.
+3. Le fichier attend dans votre message sous forme de carte de fichier. Envoyez le message.
 
-Si l'agent ne peut pas lire le fichier, la carte affiche « Impossible de lire le fichier. Utilisez un fichier CSV, JSON ou XLSX. »
+Si le fichier ne peut pas être lu, la notification « Impossible de lire le fichier. Utilisez un fichier CSV, JSON ou XLSX. » s'affiche.
 
 Pour les règles relatives aux fichiers, consultez [Préparer un jeu de données](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ Pour définir un modèle par défaut pour les nouvelles discussions, ouvrez **Pa
 
 ### Coût
 
-Les discussions avec l'agent sur les crédits Skynet utilisent votre solde. Si votre solde est vide, le panneau affiche « Votre solde est vide. Ajoutez des fonds pour continuer à discuter avec l'agent. » Pour les tarifs, lisez [Facturation](/docs/concepts/billing).
+Les discussions avec l'agent sur les crédits Skynet utilisent votre solde. Si votre solde disponible est trop bas, le panneau affiche « Votre solde disponible est trop bas. Les exécutions en cours peuvent réserver une partie de votre solde. » Sélectionnez le bouton portefeuille (**Ajouter des fonds**) pour ouvrir les paramètres **Facturation**. Pour les tarifs, lisez [Facturation](/docs/concepts/billing).
 
 ## Conseils
 

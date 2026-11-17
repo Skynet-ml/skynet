@@ -2,7 +2,7 @@
 
 import { WizardStepper } from "@/shared/ui/wizard-stepper";
 
-import { WIZARD_STAGES } from "../constants";
+import { WIZARD_STAGE_ICONS, WIZARD_STAGES } from "../constants";
 import type { WizardV2Context } from "../lib/wizard-v2";
 
 type StepperContext = Pick<WizardV2Context, "state" | "steps" | "canEnter" | "stepIssue" | "goTo">;
@@ -19,7 +19,7 @@ export function SubmitStepper({ w }: { w: StepperContext }) {
 
   return (
     <WizardStepper
-      steps={stages.map((s) => ({ id: s.id, label: s.label() }))}
+      steps={stages.map((s) => ({ id: s.id, label: s.label(), icon: WIZARD_STAGE_ICONS[s.id] }))}
       step={step}
       maxReachableStep={reachable}
       validateStep={(index) => stepIssue(stages[index]?.id ?? state.step) === null}

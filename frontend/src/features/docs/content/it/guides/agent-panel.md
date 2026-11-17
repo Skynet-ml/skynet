@@ -88,10 +88,10 @@ Puoi allegare file a un messaggio. Ogni file può arrivare a 20 MB. Puoi allegar
 Per caricare un dataset tramite l'agente:
 
 1. Allega un file CSV, JSON o Excel.
-2. Controlla la scheda di caricamento. Mostra le colonne del file.
-3. Imposta i ruoli delle colonne nella scheda, poi conferma.
+2. Durante la lettura del file compare l'avviso «Lettura del file…».
+3. Il file resta nel tuo messaggio come scheda del file. Invia il messaggio.
 
-Se l'agente non riesce a leggere il file, la scheda mostra «Impossibile leggere il file. Usa un file CSV, JSON o XLSX.»
+Se il file non si può leggere, compare l'avviso «Impossibile leggere il file. Usa un file CSV, JSON o XLSX.»
 
 Per le regole sui file, vedi [Preparare un dataset](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ Per impostare un modello predefinito per le nuove chat, apri **Impostazioni** > 
 
 ### Costo
 
-Le chat con l'agente sui crediti Skynet usano il tuo saldo. Se il saldo è esaurito, il pannello mostra «Il tuo saldo è esaurito. Aggiungi fondi per continuare a chattare con l'agente.» Per i prezzi, leggi [Budget e fatturazione](/docs/concepts/billing).
+Le chat con l'agente sui crediti Skynet usano il tuo saldo. Se il saldo disponibile è troppo basso, il pannello mostra «Il tuo saldo disponibile è troppo basso. Le esecuzioni attive possono riservare parte del tuo saldo.» Seleziona il pulsante del portafoglio (**Aggiungi fondi**) per aprire le impostazioni di **Fatturazione**. Per i prezzi, leggi [Budget e fatturazione](/docs/concepts/billing).
 
 ## Suggerimenti
 
