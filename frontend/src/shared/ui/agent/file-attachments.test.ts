@@ -1,60 +1,70 @@
-/** Tests for reading files of any type into composer attachments. */
+/** Tests for attaching files of any type to a composer message. */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments.ts";
+import { MAX_ATTACHMENT_MB, describeAttachments, splitClaimed } from "./file-attachments.ts";
+import { attachmentPath } from "./file-originals.ts";
+import { withFilePaths } from "./pasted-text.ts";
 
-test("any file type is sent for reading, in the order picked", async () => {
+test("any file type becomes a card with its type and size, in the order picked", () => {
   const files = [
     new File(["MZ"], "tool.exe"),
-    new File(["png"], "photo.png", { type: "image/png" }),
     new File(["%PDF"], "report.pdf", { type: "application/pdf" }),
     new File(["plain"], "README"),
   ];
-  const seen: string[] = [];
-  const result = await readAttachments(files, async (file) => {
-    seen.push(file.name);
-    return `text of ${file.name}`;
-  });
-  assert.deepEqual(seen, ["tool.exe", "photo.png", "report.pdf", "README"]);
+  const result = describeAttachments(files);
   assert.deepEqual(
     result.attached.map((f) => f.name),
-    ["tool.exe", "photo.png", "report.pdf", "README"],
+    ["tool.exe", "report.pdf", "README"],
   );
-  assert.equal(result.attached[2].text, "text of report.pdf");
-  assert.deepEqual(result.failed, []);
+  assert.equal(result.attached[1].text, "type: application/pdf\nsize: 4 bytes");
+  assert.equal(result.attached[2].text, "type: unknown\nsize: 5 bytes");
   assert.deepEqual(result.tooLarge, []);
 });
 
-test("oversized files are skipped and failed reads are reported", async () => {
+test("oversized files are skipped", () => {
   const big = new File(["x"], "huge.bin");
   Object.defineProperty(big, "size", { value: MAX_ATTACHMENT_MB * 1024 * 1024 + 1 });
   const ok = new File(["b"], "ok.txt");
-  const result = await readAttachments([big, new File(["a"], "bad.docx"), ok], async (file) => {
-    if (file.name === "bad.docx") throw new Error("500");
-    return "ok";
-  });
+  const result = describeAttachments([big, ok]);
   assert.deepEqual(result.tooLarge, ["huge.bin"]);
-  assert.deepEqual(result.failed, ["bad.docx"]);
-  // Each read file keeps its picked file, so its original can be stored (SKY-782).
-  assert.deepEqual(result.attached, [{ name: "ok.txt", text: "ok", file: ok }]);
+  // Each file keeps its picked file, so its original can be stored (SKY-782).
+  assert.deepEqual(
+    result.attached.map((f) => [f.name, f.file]),
+    [["ok.txt", ok]],
+  );
 });
 
-test("files are read one at a time", async () => {
-  let running = 0;
-  let peak = 0;
-  await readAttachments(
-    [new File(["a"], "a.pdf"), new File(["b"], "b.pdf"), new File(["c"], "c.pdf")],
-    async () => {
-      running += 1;
-      peak = Math.max(peak, running);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      running -= 1;
-      return "ok";
-    },
+test("Send puts each file's path in its card, and each card keeps its id", () => {
+  const draft =
+    'look\n\n<attached_file name="a.csv" id="c1">\ntype: text/csv\n</attached_file>\n\n' +
+    '<attached_file name="a.csv" id="c2">\ntype: text/csv\n</attached_file>\n\n' +
+    '<attached_file name="b.pdf" id="c3">\ntype: application/pdf\n</attached_file>';
+  const sent = withFilePaths(draft, ["attachments/m1/a.csv", "attachments/m2/a.csv", null]);
+  assert.equal(
+    sent,
+    'look\n\n<attached_file name="a.csv" id="c1">\npath: attachments/m1/a.csv\ntype: text/csv\n</attached_file>\n\n' +
+      '<attached_file name="a.csv" id="c2">\npath: attachments/m2/a.csv\ntype: text/csv\n</attached_file>\n\n' +
+      '<attached_file name="b.pdf" id="c3">\ntype: application/pdf\n</attached_file>',
   );
-  assert.equal(peak, 1);
+  assert.equal(withFilePaths("hi", ["x"]), "hi");
+  const forked =
+    '<attached_file name="a.csv">\npath: attachments/old/a.csv\ntype: text/csv\n</attached_file>';
+  assert.equal(
+    withFilePaths(forked, ["attachments/new/a.csv"]),
+    '<attached_file name="a.csv">\npath: attachments/new/a.csv\ntype: text/csv\n</attached_file>',
+  );
+  assert.equal(
+    withFilePaths(forked, []),
+    '<attached_file name="a.csv">\ntype: text/csv\n</attached_file>',
+  );
+});
+
+test("a file's path uses the stored name and never points at a folder", () => {
+  assert.equal(attachmentPath("m1", "a b.csv"), "attachments/m1/a b.csv");
+  assert.equal(attachmentPath("m1", ".."), "attachments/m1/file");
+  assert.equal(attachmentPath("m1", ""), "attachments/m1/file");
 });
 
 test("the host claims only the first file it takes; the others are skipped", () => {

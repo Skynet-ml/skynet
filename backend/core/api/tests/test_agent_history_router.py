@@ -24,6 +24,7 @@ from ...storage.models import AgentConversationModel, AgentMessageModel, Base, C
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ..routers import agent_history
 from ..routers.agent_history import _fork_metadata, create_agent_history_router
 
 _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
@@ -372,3 +373,51 @@ def test_fork_metadata_keeps_each_document_original_card() -> None:
     copy = _fork_metadata(meta, {"doc-1": "doc-9"})
 
     assert copy == {"media": [{"id": "doc-9", "name": "a.pdf", "kind": "document", "card": "card-a"}]}
+
+
+def test_delete_and_bulk_delete_stop_the_chats_command_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting a chat stops its file workspace; a skipped id stops nothing."""
+    stopped: list[str] = []
+    monkeypatch.setattr(agent_history, "stop_chat_runner", stopped.append)
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"), ("c-2", "alice"), ("c-3", "bob"))
+    assert client.delete("/agent/conversations/c-1").status_code < 300
+    resp = client.post("/agent/conversations/bulk-delete", json={"ids": ["c-2", "c-3"]})
+    assert resp.status_code == 200, resp.text
+    assert stopped == ["c-1", "c-2"]
+
+
+def test_fork_points_file_paths_at_its_own_copies() -> None:
+    """A forked turn names the path of the fork's copy of a file, not the source chat's file."""
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    with store._session_factory() as session:
+        session.add_all(
+            [
+                ChatMediaModel(
+                    id="m-1",
+                    username="alice",
+                    filename="a.csv",
+                    kind="document",
+                    mime_type="application/octet-stream",
+                    byte_size=3,
+                    data=b"a,b",
+                    conversation_id="c-1",
+                ),
+                AgentMessageModel(
+                    conversation_id="c-1",
+                    role="user",
+                    content="path: attachments/m-1/a.csv",
+                    router_metadata={"media": [{"id": "m-1", "name": "a.csv", "kind": "document"}]},
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+
+    resp = client.post("/agent/conversations/c-1/fork", json={"user_turns": 1})
+    assert resp.status_code == 200, resp.text
+    message = client.get(f"/agent/conversations/{resp.json()['id']}").json()["messages"][0]
+    copy = message["media"][0]["id"]
+    assert copy != "m-1"
+    assert message["content"] == f"path: attachments/{copy}/a.csv"

@@ -27,7 +27,6 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import AgentConversationModel, AgentMessageModel, Base, ChatMediaModel
 from ...storage.remote import RemoteDBJobStore
 from ...storage.usage import UNSENT_MEDIA_RETENTION
@@ -35,6 +34,7 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers import chat_media
 from ..routers.chat_media import (
+    MAX_ATTACHMENT_BYTES,
     attach_media_to_chat,
     create_chat_media_router,
     load_media_data,
@@ -286,7 +286,7 @@ def test_a_zip64_end_cannot_hide_a_large_directory_from_the_cap() -> None:
 
 
 def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A document original does not use the cap that its file's text read already counted against."""
+    """A document original does not use the media upload cap; it has its own."""
     monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
 
     assert _upload(harness.client, _PNG).status_code == 201
@@ -409,7 +409,7 @@ def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
 def test_an_original_with_a_long_name_keeps_the_type_of_its_full_name(harness: SimpleNamespace) -> None:
     """The draft card links its original by id, so a cut stored name still gets the full name's type."""
     body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
-    assert len(body["name"]) == 255
+    assert len(body["name"]) == 200
     assert body["mime_type"] == "application/pdf"
 
 
@@ -433,7 +433,7 @@ def test_an_original_named_as_a_drawn_type_must_hold_that_type(
 
 
 def test_an_original_uses_the_originals_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any original counts against the originals cap, not the cap its text read already used."""
+    """Any original counts against the originals cap, not the media upload cap."""
     monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
 
     assert _upload(harness.client, _PNG).status_code == 201
@@ -452,9 +452,9 @@ def test_a_media_upload_keeps_the_allow_list(harness: SimpleNamespace) -> None:
     assert _upload(harness.client, b"<svg/>", name="logo.svg", content_type="image/svg+xml").status_code == 415
 
 
-def test_document_limit_matches_the_file_text_limit() -> None:
-    """Every file whose text the chat can read can keep its original."""
-    assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES
+def test_document_limit_is_the_attachment_limit() -> None:
+    """Every file the composer attaches, up to 20 MB, can keep its original."""
+    assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES == 20 * 1024 * 1024
 
 
 def test_safe_filename_drops_paths_quotes_and_control_characters() -> None:
@@ -462,7 +462,9 @@ def test_safe_filename_drops_paths_quotes_and_control_characters() -> None:
     assert chat_media._safe_filename('C:\\x\\a"b\x00\nc.png') == "abc.png"
     assert chat_media._safe_filename("///") == "file"
     assert chat_media._safe_filename(None) == "file"
-    assert len(chat_media._safe_filename("a" * 400)) == 255
+    assert len(chat_media._safe_filename("a" * 400)) == 200
+    # A name is cut by its UTF-8 bytes, never inside a letter.
+    assert chat_media._safe_filename("א" * 130) == "א" * 100
 
 
 def test_upload_rejects_svg_sent_as_png(harness: SimpleNamespace) -> None:
@@ -750,6 +752,23 @@ def test_send_with_a_file_deleted_after_the_load_is_a_404(harness: SimpleNamespa
     assert caught.value.status_code == 404
     with Session(engine) as session:
         assert session.scalars(select(AgentMessageModel)).all() == []
+
+
+def test_send_points_a_file_path_at_the_chats_copy(harness: SimpleNamespace) -> None:
+    """A file that another chat holds gets a copy, so the stored message names the copy's path."""
+    now = datetime.now(UTC)
+    with Session(harness.store.engine) as session:
+        session.add_all([_conversation("chat-a", _ALICE), _conversation("chat-b", _ALICE)])
+        session.flush()
+        session.add(_media_row("m-b", _ALICE, now, "chat-b"))
+        session.commit()
+    rows = load_owned_media(harness.store.engine, _ALICE, ["m-b"])
+    message_id = _persist_user_turn(harness.store, "chat-a", "path: attachments/m-b/f.png", media=rows)
+    with Session(harness.store.engine) as session:
+        message = session.get(AgentMessageModel, message_id)
+        copy = message.router_metadata["media"][0]["id"]
+        assert copy != "m-b"
+        assert message.content == f"path: attachments/{copy}/f.png"
 
 
 def test_the_content_type_column_holds_every_office_type() -> None:

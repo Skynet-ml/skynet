@@ -63,6 +63,7 @@ from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ..routers import account_data as account_data_mod
 from ..routers.account_data import create_account_data_router
 from ..routers.accounts import create_accounts_router
 
@@ -163,6 +164,15 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     @app.exception_handler(DomainError)
     async def _domain_error(request: Request, exc: DomainError) -> JSONResponse:
+        """Render a domain error as the app does.
+
+        Args:
+            request: The request.
+            exc: The error.
+
+        Returns:
+            The error response.
+        """
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail, "code": exc.code, "params": exc.params},
@@ -326,6 +336,27 @@ def test_export_lists_and_delete_removes_the_chat_media(
     with Session(harness.engine) as session:
         owners = session.scalars(select(ChatMediaModel.username)).all()
     assert owners == [_OTHER]
+
+
+def test_delete_stops_only_the_account_chat_sandboxes(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an account stops each of its chats' file sandboxes and leaves other accounts' sandboxes."""
+    stopped: list[str] = []
+    monkeypatch.setattr(account_data_mod, "stop_chat_runner", stopped.append)
+    with Session(harness.engine) as session:
+        for owner in (_EMAIL, _EMAIL, _OTHER):
+            session.add(AgentConversationModel(id=str(uuid4()), username=owner, title="t"))
+        session.commit()
+        owned = sorted(
+            session.scalars(select(AgentConversationModel.id).where(AgentConversationModel.username == _EMAIL))
+        )
+    assert len(owned) == 2
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert sorted(stopped) == owned
 
 
 def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespace) -> None:

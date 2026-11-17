@@ -285,6 +285,8 @@ export function TaggerInterview({
             disabled={!busy && messages.length === 0}
             streaming={busy}
             midTurn={midTurn}
+            // The interview agent has no tool that reads a file, so a card would give it only a name (SKY-781).
+            attachments={false}
             suggest={{ messages, model: interviewComposerModel(assist) }}
             placeholder={msg("tagger.assist.interview.placeholder")}
             modelMenu={

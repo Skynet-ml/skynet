@@ -917,14 +917,6 @@ void test("the composer's image tile opens one viewer that pages to the draft PD
 });
 
 void test("each attached file's original gets the id of its own draft card (SKY-782)", async () => {
-  const fetchAll = globalThis.fetch;
-  // The text reader: one file fails, the others read.
-  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
-    const file = (init?.body as FormData).get("file") as File;
-    return file.name === "bad.docx"
-      ? new Response(null, { status: 500 })
-      : Response.json({ text: `text of ${file.name}` });
-  }) as typeof fetch;
   const got: Array<{ file: File; card: string }> = [];
   const composer = await mount("", false, undefined, undefined, {
     onOriginalFiles: (files) => void got.push(...files),
@@ -934,7 +926,7 @@ void test("each attached file's original gets the id of its own draft card (SKY-
     Object.defineProperty(big, "size", { value: 20 * 1024 * 1024 + 1 });
     const files = [
       new NodeFile(["a"], "a.pdf", { type: "application/pdf" }),
-      new NodeFile(["b"], "bad.docx", { type: "application/x-test" }),
+      new NodeFile(["b"], "tool.exe"),
       big,
       new NodeFile(["a,b\n"], "a.pdf", { type: "application/pdf" }),
     ];
@@ -943,23 +935,22 @@ void test("each attached file's original gets the id of its own draft card (SKY-
     await React.act(async () => {
       composer.textarea.dispatchEvent(paste);
     });
-    await React.act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
     const cards = splitPastes(composer.drafts.at(-1) ?? "").files;
     assert.deepEqual(
       cards.map((c) => c.name),
-      ["a.pdf", "a.pdf"],
+      ["a.pdf", "tool.exe", "a.pdf"],
     );
-    // A failed or too large file has no card, so it gets no original.
+    // A too large file has no card, so it gets no original.
     assert.deepEqual(
       got.map((g) => [g.file, g.card]),
       [
         [files[0], cards[0]!.id],
-        [files[3], cards[1]!.id],
+        [files[1], cards[1]!.id],
+        [files[3], cards[2]!.id],
       ],
     );
-    assert.notEqual(cards[0]!.id, cards[1]!.id);
+    assert.equal(new Set(cards.map((c) => c.id)).size, 3);
   } finally {
-    globalThis.fetch = fetchAll;
     await composer.unmount();
   }
 });

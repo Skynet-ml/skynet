@@ -5,7 +5,6 @@
   "core/api/tests/test_admin_dashboard_router.py": 0.18471471598604694,
   "core/api/tests/test_admin_router.py": 0.3461283689830452,
   "core/api/tests/test_admin_storage_router.py": 0.1066082819015719,
-  "core/api/tests/test_agent_attachments.py": 1.9620193759910762,
   "core/api/tests/test_agent_engine.py": 3.1129406160325743,
   "core/api/tests/test_agent_history_router.py": 0.26804931793594733,
   "core/api/tests/test_agent_history_share.py": 4.025928733230103,

@@ -375,6 +375,7 @@ const cards = (...ids: string[]) => ids.map((id) => ({ id }));
 
 void test("each same-name card keeps its own original when the other's upload fails (SKY-782)", async () => {
   const { draft, unmount } = await mountDraft();
+  const errorsBefore = errors.length;
   nextUpload = Promise.resolve(new Response(null, { status: 500 }));
   await React.act(
     async () =>
@@ -384,7 +385,11 @@ void test("each same-name card keeps its own original when the other's upload fa
       ]),
   );
   await flush();
-  // The first upload failed: its card shows its text, and the second keeps its own original.
+  // The agent cannot read a file with no stored original, so the user is told (SKY-781).
+  assert.deepEqual(errors.slice(errorsBefore), [
+    "Could not attach a.pdf. The agent cannot read this file.",
+  ]);
+  // The first upload failed: its card has no original, and the second keeps its own.
   assert.deepEqual(
     documents(draft().ready(cards("c-1", "c-2"))).map((m) => m.card),
     ["c-2"],
@@ -480,7 +485,7 @@ void test("a file of any type keeps its original, which goes out on Send (SKY-78
   await unmount();
 });
 
-void test("an original over the file limit is not uploaded; the file keeps only its text", async () => {
+void test("an original over the file limit is not uploaded", async () => {
   const { draft, unmount } = await mountDraft();
   const before = originalUploads.length;
   const big = new File(["x"], "big.csv", { type: "text/csv" });
@@ -785,7 +790,7 @@ void test("Send waits for an original upload, and an unmount deletes one that en
   assert.deepEqual(deleted.slice(before), ["late-1"]);
 });
 
-void test("an original past the file limit stays out of the message and goes on clear", async () => {
+void test("originals past the file limit block Send, and a card that leaves unblocks it", async () => {
   const { draft, unmount } = await mountDraft();
   await React.act(async () =>
     draft().addFiles(Array.from({ length: MAX_MEDIA_PER_MESSAGE - 1 }, (_, n) => image(n))),
@@ -797,15 +802,21 @@ void test("an original past the file limit stays out of the message and goes on 
     ]),
   );
   await flush();
-  const media = draft().ready(cards("c-b", "c-c"))!;
-  assert.equal(media.length, MAX_MEDIA_PER_MESSAGE);
+  // The agent reads a file only from its stored original, so none may stay out (SKY-781).
+  assert.equal(
+    draft().blocked(cards("c-b", "c-c")),
+    `A message can have up to ${MAX_MEDIA_PER_MESSAGE} files.`,
+  );
+  assert.equal(draft().ready(cards("c-b", "c-c")), null);
+  // The c-c card left, so its original stays out and Send can go.
+  assert.equal(draft().blocked(cards("c-b")), null);
   assert.deepEqual(
-    documents(media).map((m) => m.name),
+    documents(draft().ready(cards("c-b"))!).map((m) => m.name),
     ["b.pdf"],
   );
   const before = deleted.length;
   const last = `s-${uploads}`;
-  await React.act(async () => draft().clear(cards("c-b", "c-c")));
+  await React.act(async () => draft().clear(cards("c-b")));
   assert.deepEqual(deleted.slice(before), [last]);
   await unmount();
 });
@@ -833,8 +844,10 @@ void test("a restore links each original to its card again, and skips one with n
     draft().tiles.map((t) => t.name),
     ["a.png"],
   );
-  // A document that does not load stays out with no error: its file still goes as text.
-  assert.equal(errors.length, errorsBefore);
+  // A document that does not load stays out, and the user is told the agent cannot read it.
+  assert.deepEqual(errors.slice(errorsBefore), [
+    "Could not attach lost.pdf. The agent cannot read this file.",
+  ]);
   assert.deepEqual(originalUploads.slice(uploadsBefore), ["r.pdf", "r.pdf"]);
   // The card c-2 left while the restore loaded, so its original stays out.
   assert.deepEqual(

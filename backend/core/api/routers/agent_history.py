@@ -33,6 +33,7 @@ from ...models import (
     BulkDeleteByIdsResponse,
     BulkDeleteByIdsSkipped,
 )
+from ...service_gateway.agents.attachment_sandbox import rewrite_paths, stop_chat_runner
 from ...service_gateway.embedding_pipeline.embeddings import get_embedder
 from ...storage.models import (
     AgentConversationModel,
@@ -326,6 +327,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 raise DomainError("agent.conversation.forbidden", status=403)
             session.delete(row)
             session.commit()
+        stop_chat_runner(conversation_id)
 
     @router.post(
         "/agent/conversations/{conversation_id}/fork",
@@ -403,7 +405,8 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 AgentMessageModel(
                     conversation_id=row.id,
                     role=m.role,
-                    content=m.content,
+                    # A copy's file paths name the fork's own copies of the files.
+                    content=rewrite_paths(m.content, held),
                     tool_calls=m.tool_calls,
                     model=m.model,
                     router_metadata=_fork_metadata(m.router_metadata, held),
@@ -465,6 +468,8 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 session.delete(row)
                 deleted.append(conversation_id)
             session.commit()
+        for conversation_id in deleted:
+            stop_chat_runner(conversation_id)
         return BulkDeleteByIdsResponse(deleted=deleted, skipped=skipped)
 
     return router
