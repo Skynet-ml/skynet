@@ -112,11 +112,15 @@ def test_a_tree_reads_from_the_buffer_and_then_from_its_pack(step_log, engine, t
     assert [entry.name for entry in trees.get_tree("job-ada", root)] == ["docs", "main.txt"]
 
     step_log.flush()
-    reader = TreeStore(StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "w2", flush_window_seconds=60.0))
-    assert _tree_rows(engine) == 3
-    assert reader.get_tree("job-ada", sub) == [TreeEntry("greeting.txt", "file", blob)]
-    assert reader.get_blob("job-ada", blob) == b"hello\n"
-    assert reader.get_blob("job-ada", "f" * 64) is None
+    reader_log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "w2", flush_window_seconds=60.0)
+    try:
+        reader = TreeStore(reader_log)
+        assert _tree_rows(engine) == 3
+        assert reader.get_tree("job-ada", sub) == [TreeEntry("greeting.txt", "file", blob)]
+        assert reader.get_blob("job-ada", blob) == b"hello\n"
+        assert reader.get_blob("job-ada", "f" * 64) is None
+    finally:
+        reader_log.close()
 
 
 def test_another_account_cannot_read_the_object_before_or_after_the_flush(step_log) -> None:

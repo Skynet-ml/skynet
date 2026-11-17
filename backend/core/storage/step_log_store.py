@@ -212,7 +212,8 @@ class StepLogStore:
         self._tree_objects: dict[tuple[str, str], bytes] = {}
         self._waiters: dict[str, threading.Event] = {}
         self._failures: dict[str, StepFenceError] = {}
-        self._agent_failures: dict[tuple[str, str], StepFenceError] = {}
+        # Keyed by generation too, so a fenced old incarnation does not fail the resumed run's first commit.
+        self._agent_failures: dict[tuple[str, str, int], StepFenceError] = {}
         self._closed = False
         self._thread = threading.Thread(target=self._run, name=f"step-log-{worker_id}", daemon=True)
         self._thread.start()
@@ -248,7 +249,7 @@ class StepLogStore:
 
         Raises:
             StepFenceError: When an earlier step of this agent in this run
-                failed the fence.
+                and generation failed the fence.
             ValueError: When ``kind`` is unknown, a command has no tree id, an
                 id is empty or longer than its column, ``run_id`` holds a
                 ``:``, or ``seq`` is outside the ``seq`` column.
@@ -268,7 +269,7 @@ class StepLogStore:
         step_id = step_id_for(run_id, agent_id, seq)
         data = _encode_body(body)
         with self._cond:
-            failure = self._agent_failures.pop((run_id, agent_id), None)
+            failure = self._agent_failures.pop((run_id, agent_id, execution_generation), None)
             if failure is not None:
                 raise failure
             if self._closed:
@@ -276,6 +277,8 @@ class StepLogStore:
             if step_id in self._steps:
                 return step_id
             step = _Step(step_id, run_id, agent_id, seq, kind, execution_generation, grant_list_id, tree_id)
+            # A new commit of a fenced id (a resumed run at the same seq) gets a new verdict at its own flush.
+            self._failures.pop(step_id, None)
             self._steps[step_id] = (step, data)
             self._waiters[step_id] = threading.Event()
             self._buffer(step, data)
@@ -341,7 +344,10 @@ class StepLogStore:
             raise failure
 
     def get_step(self, step_id: str) -> dict[str, Any] | None:
-        """Return one step with its body, from the buffer when it is not flushed yet.
+        """Return one step with its body: the stored row first, else the buffer when it is not flushed yet.
+
+        A retry of a stored step sits in the buffer until its flush; the
+        stored row wins, so a reader always sees the first commit.
 
         Args:
             step_id: The step id.
@@ -349,18 +355,20 @@ class StepLogStore:
         Returns:
             The step fields and ``body``, or ``None`` when no live step has the id.
         """
+        # Read the buffer before the row: the flush drops a step from the buffer only after its row commits.
         with self._cond:
             buffered = self._steps.get(step_id)
-        if buffered is not None:
-            step, data = buffered
-            return {**{name: getattr(step, name) for name in _STEP_FIELDS}, "body": json.loads(data)}
         with Session(self._engine) as session:
             row = session.get(AgentStepModel, step_id)
-            if row is None:
-                return None
-            record = {name: getattr(row, name) for name in _STEP_FIELDS}
-            location = (row.pack_key, row.pack_offset, row.pack_length)
-        return {**record, "body": json.loads(self._objects.get(*location))}
+            if row is not None:
+                record = {name: getattr(row, name) for name in _STEP_FIELDS}
+                location = (row.pack_key, row.pack_offset, row.pack_length)
+        if row is not None:
+            return {**record, "body": json.loads(self._objects.get(*location))}
+        if buffered is None:
+            return None
+        step, data = buffered
+        return {**{name: getattr(step, name) for name in _STEP_FIELDS}, "body": json.loads(data)}
 
     def get_object(self, run_id: str, object_id: str) -> bytes | None:
         """Return one tree object's stored bytes for a run, from the buffer when it is not flushed yet.
@@ -418,7 +426,7 @@ class StepLogStore:
                 for entry in stale:
                     error = StepFenceError(entry["step_id"])
                     self._failures[entry["step_id"]] = error
-                    self._agent_failures[(entry["run_id"], entry["agent_id"])] = error
+                    self._agent_failures[(entry["run_id"], entry["agent_id"], entry["execution_generation"])] = error
                 for item, _ in batch:
                     if isinstance(item, _Object):
                         self._tree_objects.pop((item.run_id, item.object_id), None)
@@ -466,6 +474,8 @@ class StepLogStore:
 
         The ``storage_packs`` row makes the apply happen once: a second apply
         of the same pack, by recovery or a retry, finds the row and stops.
+        A step that already has a row is never fenced and never inserted
+        again, so the first commit of a step id wins.
 
         Args:
             pack_key: The pack's object key.
@@ -473,7 +483,8 @@ class StepLogStore:
             manifest: The pack's manifest.
 
         Returns:
-            The manifest entries of the steps that failed the fence.
+            The manifest entries of the steps that failed the fence, here or
+            in the store that applied the pack first.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
@@ -495,11 +506,17 @@ class StepLogStore:
                 .values(pack_key=pack_key, worker_id=manifest["worker_id"], byte_size=byte_size, created_at=now)
                 .on_conflict_do_nothing()
             ).rowcount
+            # A step with a row is a retry of an applied step, or this pack applied by another store: it is done.
+            ids = [entry["step_id"] for entry in steps]
+            stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
             if not claimed:
                 session.rollback()
-                return []
+                # The store that applied this pack inserted every step it did not fence.
+                return [entry for entry in steps if entry["step_id"] not in stored]
             fresh, stale = [], []
             for entry in steps:
+                if entry["step_id"] in stored:
+                    continue
                 job = jobs.get(entry["run_id"])
                 current = job is not None and job.execution_generation == entry["execution_generation"]
                 (fresh if current else stale).append(entry)
@@ -571,6 +588,8 @@ class StepLogStore:
                 self.flush()
             except Exception:
                 logger.exception("step log flush failed; it tries again after the window")
+                # A fixed deadline: each commit notifies, and a retry on every commit would PUT the batch again each time.
+                deadline = time.monotonic() + self._window
                 with self._cond:
-                    if not self._closed:
-                        self._cond.wait(self._window)
+                    while not self._closed and (left := deadline - time.monotonic()) > 0:
+                        self._cond.wait(left)

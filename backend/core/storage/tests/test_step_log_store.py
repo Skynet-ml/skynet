@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, event, func, select, text, update
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from core.config import Settings, app_env, settings
@@ -284,6 +284,7 @@ def test_a_retried_commit_with_the_same_step_id_is_a_no_op(make_store, engine, o
     assert objects.puts == 1
 
     assert _commit(store, body={"command": "other", "output": ""}) == first
+    assert store.get_step(first)["body"] == {"command": "ls", "output": "a\n"}
     store.flush()
     restarted = make_store()
     assert _commit(restarted, body={"command": "again", "output": ""}) == first
@@ -291,6 +292,125 @@ def test_a_retried_commit_with_the_same_step_id_is_a_no_op(make_store, engine, o
 
     assert _step_rows(engine) == 1
     assert restarted.get_step(first)["body"] == {"command": "ls", "output": "a\n"}
+
+
+def test_a_retry_after_the_flush_reads_the_first_body(make_store) -> None:
+    """Between a retry and its flush, a reader sees the stored first body, not the retry's."""
+    store = make_store()
+    first = _commit(store, body={"command": "ls", "output": "a\n"})
+    store.flush()
+
+    _commit(store, body={"command": "retry", "output": ""})
+
+    assert store.get_step(first)["body"] == {"command": "ls", "output": "a\n"}
+
+
+def test_a_retry_of_a_durable_step_after_a_generation_bump_does_not_fail(make_store, engine) -> None:
+    """A retry of a step whose row exists is not fenced, and the agent's next commit at the new generation lands."""
+    store = make_store()
+    first = _commit(store)
+    store.flush()
+    _commit(store, body={"command": "retry", "output": ""})
+    with Session(engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == "job-1").values(execution_generation=2))
+        session.commit()
+
+    store.flush()
+
+    store.durable(first, timeout=0)
+    second = _commit(store, seq=2, execution_generation=2)
+    store.flush()
+    store.durable(second, timeout=0)
+    assert _step_rows(engine) == 2
+
+
+def test_a_fence_error_of_an_old_generation_does_not_fail_the_new_generation(make_store, engine) -> None:
+    """A fenced old incarnation stops; the run resumes at a new generation and its first commit lands."""
+    store = make_store()
+    _commit(store, execution_generation=1)
+    with Session(engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == "job-1").values(execution_generation=2))
+        session.commit()
+    store.flush()
+
+    step_id = _commit(store, execution_generation=2)
+    store.flush()
+
+    store.durable(step_id, timeout=0)
+    assert store.get_step(step_id)["execution_generation"] == 2
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=2, execution_generation=1)
+
+
+def test_a_pack_that_another_store_applied_reports_its_fenced_step(make_store, engine, objects, monkeypatch) -> None:
+    """When recovery by another store applies the pack first, ``durable`` still fails the step it fenced."""
+    store = make_store()
+    recovering = make_store()
+    fenced = _commit(store)
+    applied = _commit(store, run_id="job-2")
+    put = objects.put
+
+    def put_then_recover(key: str, data: bytes) -> None:
+        """Write the pack, then let the other store fence and apply it before this flush's transaction.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+        """
+        put(key, data)
+        with Session(engine) as session:
+            session.execute(update(JobModel).where(JobModel.optimization_id == "job-1").values(execution_generation=2))
+            session.commit()
+        assert recovering.recover() == 1
+
+    monkeypatch.setattr(objects, "put", put_then_recover)
+    store.flush()
+
+    store.durable(applied, timeout=0)
+    with pytest.raises(StepFenceError, match=fenced):
+        store.durable(fenced, timeout=0)
+    assert _step_rows(engine) == 1
+
+
+def test_a_failed_database_write_retries_once_per_window(make_store, engine, objects) -> None:
+    """New commits after a failed flush do not start a retry early, so each window costs at most one pack PUT."""
+    database_down = threading.Event()
+    database_down.set()
+
+    def fail_pack_insert(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Fail every statement on ``storage_packs`` while the database is down.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+
+        Raises:
+            OperationalError: While ``database_down`` is set.
+        """
+        if database_down.is_set() and "storage_packs" in statement:
+            raise OperationalError(statement, parameters, Exception("database is down"))
+
+    event.listen(engine, "before_cursor_execute", fail_pack_insert)
+    try:
+        store = make_store(flush_window_seconds=0.5)
+        _commit(store)
+        deadline = time.monotonic() + 2
+        while objects.puts == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert objects.puts == 1
+
+        for seq in range(2, 12):
+            _commit(store, seq=seq)
+            time.sleep(0.02)
+
+        assert objects.puts <= 2
+    finally:
+        database_down.clear()
+        event.remove(engine, "before_cursor_execute", fail_pack_insert)
 
 
 def test_run_agent_and_seq_are_unique_in_the_database(engine) -> None:
