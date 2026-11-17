@@ -300,10 +300,68 @@ def test_a_member_path_over_the_depth_limit_is_a_bad_archive(trees: TreeStore) -
 
 
 def test_a_member_path_at_the_depth_limit_is_stored(trees: TreeStore) -> None:
-    """A path of exactly the depth limit stores as a tree."""
+    """A path of exactly the depth limit stores as a tree, and the file reads back at the bottom."""
     path = "a/" * (tree_helpers.MAX_TREE_DEPTH - 1) + "f"
 
-    tar_to_tree(trees, RUN, _archive((_info(path), b"x")))
+    tree_id = tar_to_tree(trees, RUN, _archive((_info(path), b"x")))
+
+    for _ in range(tree_helpers.MAX_TREE_DEPTH - 1):
+        [entry] = trees.get_tree(RUN, tree_id) or []
+        assert (entry.name, entry.mode) == ("a", "tree")
+        tree_id = entry.object_id
+    [leaf] = trees.get_tree(RUN, tree_id) or []
+    assert leaf.name == "f"
+    assert trees.get_blob(RUN, leaf.object_id) == b"x"
+
+
+def test_a_member_path_one_level_over_the_depth_limit_is_a_bad_archive(trees: TreeStore) -> None:
+    """A path of the depth limit plus one level is refused."""
+    path = "a/" * tree_helpers.MAX_TREE_DEPTH + "f"
+
+    with pytest.raises(BadArchiveError, match="deeper than"):
+        tar_to_tree(trees, RUN, _archive((_info(path), b"x")))
+
+
+@pytest.mark.parametrize(
+    ("pax_headers", "content"),
+    [
+        ({"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.realsize": "0"}, b"1\n0\n0\n"),
+        ({"GNU.sparse.map": "0,0"}, b""),
+        ({"GNU.sparse.name": "f"}, b""),
+    ],
+)
+def test_a_pax_sparse_member_is_a_bad_archive(trees: TreeStore, pax_headers: dict[str, str], content: bytes) -> None:
+    """A GNU sparse 1.0 or 0.1 member, or any other GNU sparse pax key, is refused before tarfile reads a map.
+
+    Args:
+        trees: The tree store.
+        pax_headers: The member's pax keys.
+        content: The member's data; for sparse 1.0 it starts with the map.
+    """
+    info = _info("f")
+    info.pax_headers = pax_headers
+
+    with pytest.raises(BadArchiveError, match="sparse"):
+        tar_to_tree(trees, RUN, _archive((info, content)))
+
+
+def test_an_old_gnu_sparse_member_is_a_bad_archive(trees: TreeStore) -> None:
+    """An old GNU sparse header is refused before tarfile reads its extended headers."""
+    with pytest.raises(BadArchiveError, match="sparse"):
+        tar_to_tree(trees, RUN, _archive((_info("f", tarfile.GNUTYPE_SPARSE), b""), format=tarfile.GNU_FORMAT))
+
+
+def test_a_long_chain_of_pax_headers_is_a_bad_archive(trees: TreeStore) -> None:
+    """tarfile recurses once per pax header, so a long chain is refused as a bad archive, not a RecursionError."""
+    one = tarfile.TarInfo("x")
+    one.pax_headers = {"comment": "c"}
+    block = one.tobuf(tarfile.PAX_FORMAT)
+    # The pax header and its data, without the real member header after them.
+    pax_only = block[: len(block) - tarfile.BLOCKSIZE]
+    data = gzip.compress(pax_only * 2000 + tarfile.TarInfo("f").tobuf(tarfile.PAX_FORMAT) + b"\0" * 1024)
+
+    with pytest.raises(BadArchiveError, match="RecursionError"):
+        tar_to_tree(trees, RUN, data)
 
 
 def test_a_file_larger_than_one_read_chunk_comes_back_whole(trees: TreeStore) -> None:

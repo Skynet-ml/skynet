@@ -44,7 +44,7 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
-from ....sandbox.grants import METRIC_BOX_GRANTS, Grant
+from ....sandbox.grants import Grant
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -818,7 +818,7 @@ class RepoWorkspace:
         self._hidden = tuple(posixpath.normpath(path) for path in hidden_paths)
         self._run_grants = tuple(Grant(host) for host in run_hosts)
         self._run_vcpus = run_vcpus
-        self._metric_grants = tuple(Grant(host) for host in metric_hosts) or METRIC_BOX_GRANTS
+        self._metric_grants = tuple(Grant(host) for host in metric_hosts)
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
         self._secrets = dict(secrets)

@@ -172,6 +172,79 @@ class _CountingReader:
             raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
 
 
+class _NoSparseTarInfo(tarfile.TarInfo):
+    """Refuse GNU sparse members before tarfile reads their sparse map.
+
+    tarfile reads the map inside ``next()``, before the caller sees the member,
+    and the map has no size limit. A box's ``tar -czf`` without ``-S`` never
+    writes a sparse member.
+    """
+
+    def _proc_sparse(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        """Refuse an old GNU sparse member before its extended headers are read.
+
+        Args:
+            archive: Not read.
+
+        Raises:
+            BadArchiveError: Always.
+        """
+        raise BadArchiveError("The archive has a sparse member.")
+
+    def _proc_gnusparse_00(self, next: tarfile.TarInfo, pax_headers: dict[str, str], buf: bytes) -> None:
+        """Refuse a GNU sparse 0.0 member before its map is built.
+
+        Args:
+            next: Not used.
+            pax_headers: Not used.
+            buf: Not used.
+
+        Raises:
+            BadArchiveError: Always.
+        """
+        raise BadArchiveError("The archive has a sparse member.")
+
+    def _proc_gnusparse_01(self, next: tarfile.TarInfo, pax_headers: dict[str, str]) -> None:
+        """Refuse a GNU sparse 0.1 member before its map is built.
+
+        Args:
+            next: Not used.
+            pax_headers: Not used.
+
+        Raises:
+            BadArchiveError: Always.
+        """
+        raise BadArchiveError("The archive has a sparse member.")
+
+    def _proc_gnusparse_10(self, next: tarfile.TarInfo, pax_headers: dict[str, str], archive: tarfile.TarFile) -> None:
+        """Refuse a GNU sparse 1.0 member before its map is read.
+
+        Args:
+            next: Not used.
+            pax_headers: Not used.
+            archive: Not read.
+
+        Raises:
+            BadArchiveError: Always.
+        """
+        raise BadArchiveError("The archive has a sparse member.")
+
+    def _apply_pax_info(self, pax_headers: dict[str, str], encoding: str, errors: str) -> None:
+        """Refuse any GNU sparse pax key, then apply the pax fields.
+
+        Args:
+            pax_headers: The pax fields.
+            encoding: The name encoding.
+            errors: The decode error handler.
+
+        Raises:
+            BadArchiveError: When a key starts with ``GNU.sparse.``.
+        """
+        if any(key.startswith("GNU.sparse.") for key in pax_headers):
+            raise BadArchiveError("The archive has a sparse member.")
+        super()._apply_pax_info(pax_headers, encoding, errors)  # type: ignore[misc]  # not in the tarfile stubs
+
+
 def tree_to_tar(store: TreeStore, run_id: str, tree_id: str) -> bytes:
     """Return a gzip tar archive of a stored tree.
 
@@ -249,7 +322,9 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
     root: dict[str, object] = {}
     members = total = 0
     try:
-        with tarfile.open(fileobj=_CountingReader(raw), mode="r:") as archive:  # type: ignore[call-overload]
+        with tarfile.open(  # type: ignore[call-overload]
+            fileobj=_CountingReader(raw), mode="r:", tarinfo=_NoSparseTarInfo
+        ) as archive:
             for member in archive:
                 members += 1
                 if members > MAX_TREE_MEMBERS:
@@ -293,6 +368,10 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
     except BadArchiveError:
         raise
     except (tarfile.TarError, EOFError, OSError, zlib.error) as error:
+        raise BadArchiveError(f"The archive does not read ({type(error).__name__}).") from error
+    except (RecursionError, IndexError) as error:
+        # tarfile recurses once per pax or long-name header and indexes a cut-off header,
+        # so a hostile chain or a short header must be a bad archive, not a retryable box failure.
         raise BadArchiveError(f"The archive does not read ({type(error).__name__}).") from error
     except ValueError as error:
         # tarfile keeps a name that is not UTF-8 as surrogates, which the tree store cannot encode.

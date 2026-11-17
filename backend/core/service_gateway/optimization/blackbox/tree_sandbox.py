@@ -189,8 +189,8 @@ class TreeSandbox:
             GrantDeniedError: When the grants do not resolve.
             BoxFailureError: When the box fails, dies or does not go back;
                 retry the step.
-            TreeRejectedError: When the box's tree is over a size limit or
-                not a valid tree; do not retry.
+            TreeRejectedError: When the box's tree does not pack, is over a
+                size limit or is not a valid tree; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see the tree.
             BudgetReached: And the other budget errors; the run stops.
@@ -407,7 +407,7 @@ class TreeSandbox:
 
         Raises:
             RuntimeError: When the folder cannot be read back.
-            BadArchiveError: When the folder is over a size limit or not a valid tree.
+            BadArchiveError: When the folder does not pack, is over a size limit or is not a valid tree.
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
@@ -420,7 +420,11 @@ class TreeSandbox:
         )
         if result.exit_code == _TOO_LARGE_EXIT:
             raise BadArchiveError(f"The tree archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
-        text = box.read_file(_OUT_FILE) if result.ok else None
+        if not result.ok:
+            # The candidate's command controls the box state that the pack reads, and a box or provider
+            # failure raises an exception, not an exit code. So a new box would fail the same way.
+            raise BadArchiveError(f"The tree did not pack (exit code {result.exit_code}).")
+        text = box.read_file(_OUT_FILE)
         if text is None:
             raise RuntimeError(f"The tree could not be read back (exit code {result.exit_code}).")
         # The candidate controls the box, so the file can grow after the check.

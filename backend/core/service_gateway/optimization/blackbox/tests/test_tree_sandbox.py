@@ -709,13 +709,17 @@ def test_a_budget_error_of_a_failed_box_release_replaces_the_box_failure(
     assert source.released == [False]
 
 
-def test_a_pack_tar_that_fails_is_a_box_failure_not_a_partial_tree(trees: TreeStore, step_log: StepLogStore) -> None:
-    """A tar that writes its archive and exits non-zero stops the step; the tree is not stored."""
+def test_a_pack_tar_that_fails_is_a_tree_rejection_not_a_partial_tree(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A tar that writes its archive and exits non-zero stops the step without a retry; the tree is not stored.
+
+    The candidate's command controls the box state that the pack reads, so a new box would fail the same way.
+    """
     sandbox, candidates, _ = _sandbox(trees, step_log, _Runtime(failing_tar=True))
 
-    with pytest.raises(BoxFailureError):
+    with pytest.raises(TreeRejectedError) as raised:
         sandbox.run(_step(), _tree(trees, {}), "echo data > a.txt", [])
 
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
     assert candidates.released == [False]
     assert step_log.get_step(f"{RUN}:agent-1:1") is None
 
