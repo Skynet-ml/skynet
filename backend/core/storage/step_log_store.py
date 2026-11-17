@@ -60,6 +60,8 @@ PACK_PREFIX = "packs"
 _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
+WORKER_ID_MAX = 64
+GRANT_LIST_ID_MAX = 64
 SEQ_MAX = 2**31 - 1
 # Each stale step of a flush adds one verdict for its step and one for its agent, also when the agent stops after it.
 # A verdict is only a key and a step id: the two dicts keep about 0.4 KB for a stale step with a 60-character id.
@@ -177,6 +179,8 @@ class _Waiter(threading.Event):
     # On the waiter, not only in a dict by key: a retry of the same key can replace the dict entry first.
     # The value is the id of the fenced step; ``None`` means that the step passed the fence.
     failure: str | None = None
+    # Set when the last flush of ``close`` failed: no flusher is left to open the waiter.
+    closed: bool = False
 
 
 def _encode_body(body: dict[str, Any]) -> bytes:
@@ -262,7 +266,12 @@ class StepLogStore:
                 cap is below 1.
         """
         # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
-        if not 0 < len(worker_id) <= 64 or not _is_text_id(worker_id) or "/" in worker_id or worker_id in {".", ".."}:
+        if (
+            not 0 < len(worker_id) <= WORKER_ID_MAX
+            or not _is_text_id(worker_id)
+            or "/" in worker_id
+            or worker_id in {".", ".."}
+        ):
             raise ValueError(f"bad worker id: {worker_id!r}")
         self._engine = engine
         self._objects = objects
@@ -345,7 +354,7 @@ class StepLogStore:
         """
         # A row the database refuses would fail every later flush of the batch, so refuse it here.
         _check_run_id(run_id)
-        if not 0 < len(agent_id) <= AGENT_ID_MAX or not 0 < len(grant_list_id) <= 64:
+        if not 0 < len(agent_id) <= AGENT_ID_MAX or not 0 < len(grant_list_id) <= GRANT_LIST_ID_MAX:
             raise ValueError("agent_id or grant_list_id is too long or empty")
         if not _is_text_id(agent_id) or not _is_text_id(grant_list_id):
             raise ValueError("agent_id or grant_list_id is not printable ASCII")
@@ -453,6 +462,8 @@ class StepLogStore:
         if failure is None and waiter is not None:
             if not waiter.wait(timeout):
                 raise TimeoutError(f"step {step_id} is not durable yet")
+            if waiter.closed:
+                raise RuntimeError(f"the step log closed before step {step_id} was durable")
             failure = waiter.failure
         elif failure is None:
             with Session(self._engine) as session:
@@ -623,12 +634,23 @@ class StepLogStore:
             return applied
 
     def close(self) -> None:
-        """Stop the flusher thread, then flush what is left."""
+        """Stop the flusher thread, then flush what is left.
+
+        When that last flush fails, each open waiter opens with an error,
+        because no flusher is left to retry.
+        """
         with self._cond:
             self._closed = True
             self._cond.notify_all()
         self._thread.join()
-        self.flush()
+        try:
+            self.flush()
+        except Exception:
+            with self._cond:
+                for waiter in self._waiters.values():
+                    waiter.closed = True
+                    waiter.set()
+            raise
 
     def _apply(self, pack_key: str, byte_size: int, manifest: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
         """Record one pack's steps and objects in one transaction, behind the fence.

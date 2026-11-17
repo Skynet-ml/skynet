@@ -1202,6 +1202,35 @@ def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, obj
     assert _step_rows(engine) == 1
 
 
+def test_a_failed_flush_at_close_opens_the_waiters_with_an_error(make_store, objects, monkeypatch) -> None:
+    """A waiter with no time limit does not block forever when the last flush of ``close`` fails."""
+    store = make_store()
+    step_id = _commit(store)
+    errors: list[BaseException] = []
+
+    def wait() -> None:
+        """Wait for the step without a time limit and keep the error."""
+        try:
+            store.durable(step_id, 1)
+        except BaseException as exc:
+            errors.append(exc)
+
+    waiting = threading.Thread(target=wait, daemon=True)
+    waiting.start()
+    monkeypatch.setattr(objects, "put", lambda key, data: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError):
+        store.close()
+
+    waiting.join(timeout=5)
+    assert not waiting.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    with pytest.raises(RuntimeError, match="closed"):
+        store.durable(step_id, 1, timeout=5)
+    monkeypatch.undo()
+
+
 def test_the_flush_window_defaults_to_half_a_second() -> None:
     """The window and the size cap are settings; the window is 0.5 seconds by default."""
     assert Settings.model_fields["step_log_flush_window_seconds"].default == 0.5
