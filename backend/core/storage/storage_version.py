@@ -111,7 +111,7 @@ def ensure_current(engine: Engine, workspace_id: str) -> int:
 
     Raises:
         LookupError: The workspace does not exist.
-        StorageUpgradeError: A step failed; its cause is the step's error.
+        StorageUpgradeError: A step, its version update or its commit failed; its cause is that error.
         StorageVersionAheadError: Newer code already upgraded the data.
     """
     target = current_version()
@@ -123,17 +123,21 @@ def ensure_current(engine: Engine, workspace_id: str) -> int:
             raise StorageVersionAheadError(workspace_id, version)
         if version == target:
             return version
-        with Session(engine) as session, session.begin():
+        # Closing the session without a commit rolls back and releases the row lock.
+        with Session(engine) as session:
             version = _stored_version(session, workspace_id, lock=True)
             if version >= target:
                 continue
+            # A step's unflushed ORM writes reach the database only at the version update or the commit,
+            # so both sit in the try: their errors are the step's errors.
             try:
                 UPGRADES[version - BASE_VERSION](session, workspace_id)
+                session.execute(
+                    update(WorkspaceModel)
+                    .where(WorkspaceModel.id == workspace_id)
+                    .values(storage_version=version + 1, updated_at=datetime.now(UTC))
+                )
+                session.commit()
             except Exception as error:
                 raise StorageUpgradeError(workspace_id, version) from error
             version += 1
-            session.execute(
-                update(WorkspaceModel)
-                .where(WorkspaceModel.id == workspace_id)
-                .values(storage_version=version, updated_at=datetime.now(UTC))
-            )

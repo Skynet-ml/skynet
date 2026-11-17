@@ -89,18 +89,29 @@ def _recording_step(calls: list[str], name: str) -> Callable[[Session, str], Non
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Engine:
-    """Return a fresh SQLite file engine with the schema.
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    """Yield a fresh SQLite file engine with the schema, then dispose of it.
 
     Args:
         tmp_path: Pytest's temporary folder.
 
-    Returns:
+    Yields:
         The engine.
     """
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
     Base.metadata.create_all(engine)
-    return engine
+    yield engine
+    engine.dispose()
+
+
+def _duplicate_row_step(session: Session, workspace_id: str) -> None:
+    """Add a second row with the workspace's id, without a flush, so only a later flush fails.
+
+    Args:
+        session: The upgrade transaction.
+        workspace_id: The workspace to upgrade.
+    """
+    session.add(WorkspaceModel(id=workspace_id, username="dup", policy={}, storage_version=BASE_VERSION))
 
 
 def test_the_registry_starts_empty_at_version_1() -> None:
@@ -172,6 +183,20 @@ def test_a_failed_step_keeps_the_old_version_and_raises_a_typed_error(engine, mo
     row = _workspace(engine)
     assert row.storage_version == 2
     assert row.policy == {"to2": True}
+
+
+def test_an_unflushed_step_write_that_fails_raises_a_typed_error(engine, monkeypatch) -> None:
+    """A step's write that fails only at the flush raises ``StorageUpgradeError`` and keeps the version."""
+    monkeypatch.setattr(storage_version, "UPGRADES", (_duplicate_row_step,))
+    _add_workspace(engine)
+
+    with pytest.raises(StorageUpgradeError) as caught:
+        ensure_current(engine, "ws-1")
+
+    assert caught.value.from_version == 1
+    row = _workspace(engine)
+    assert row.storage_version == 1
+    assert row.username == "ada"
 
 
 def test_a_retry_after_a_failed_step_runs_only_that_step(engine, monkeypatch) -> None:
@@ -336,3 +361,15 @@ def test_postgres_a_failed_step_keeps_the_old_version(postgres_engine, monkeypat
     row = _workspace(postgres_engine)
     assert row.storage_version == 1
     assert row.username == "ada"
+
+
+@needs_postgres
+def test_postgres_an_unflushed_step_write_that_fails_raises_a_typed_error(postgres_engine, monkeypatch) -> None:
+    """On PostgreSQL, a step's write that fails only at the flush raises ``StorageUpgradeError``."""
+    monkeypatch.setattr(storage_version, "UPGRADES", (_duplicate_row_step,))
+    _add_workspace(postgres_engine)
+
+    with pytest.raises(StorageUpgradeError):
+        ensure_current(postgres_engine, "ws-1")
+
+    assert _workspace(postgres_engine).storage_version == 1
