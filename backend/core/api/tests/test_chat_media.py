@@ -410,6 +410,18 @@ def test_a_long_pdf_name_keeps_its_drawn_type(harness: SimpleNamespace) -> None:
     """A name cut at 255 characters for storage keeps the type the viewer sees in its full name."""
     body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
     assert body["mime_type"] == "application/pdf"
+    assert len(body["name"]) == 255
+    assert body["name"].endswith(".pdf")
+
+
+def test_the_stored_name_trims_only_what_the_viewer_trims(harness: SimpleNamespace) -> None:
+    """U+0085 is not JavaScript whitespace, so the stored name keeps it and the viewer does not draw a PDF."""
+    body = _upload_original(harness.client, _PDF, "a.pdf\u0085").json()
+    assert body["name"] == "a.pdf\u0085"
+    assert body["mime_type"] == "application/octet-stream"
+    body = _upload_original(harness.client, _PDF, "\ufeffb.pdf\u3000").json()
+    assert body["name"] == "b.pdf"
+    assert body["mime_type"] == "application/pdf"
 
 
 @pytest.mark.parametrize(

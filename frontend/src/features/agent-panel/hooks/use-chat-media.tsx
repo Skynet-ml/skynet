@@ -10,6 +10,7 @@ import {
   keptOriginals,
   nameKey,
   originalFormat,
+  pairedPlaces,
 } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
@@ -49,8 +50,6 @@ interface DraftOriginal {
   shown: MediaAttachment;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
-  /** A restore put it in the draft, so only a dataset card that a fork restored owns it. */
-  restored: boolean;
 }
 
 export interface ChatMediaDraft {
@@ -60,16 +59,15 @@ export interface ChatMediaDraft {
   shownOriginals: (files: ReadonlyArray<{ name: string }>) => readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
-  /**
-   * Keep the originals of attached files; the viewer draws a PDF, DOCX or XLSX
-   * one. ``replace`` drops that many of the oldest restored originals with
-   * each file's name, also ones a restore still loads. Returns the local ids.
-   */
-  addOriginals: (files: File[], options?: { replace?: number }) => string[];
+  /** Keep the originals of attached files; the viewer draws a PDF, DOCX or XLSX one. */
+  addOriginals: (files: File[]) => void;
   /** Drop the originals whose files left the draft; ``files`` are the draft's files. */
   keepOriginals: (files: ReadonlyArray<{ name: string }>) => void;
-  /** Drop one original by the local id ``addOriginals`` gave; false when the draft does not hold it. */
-  dropOriginal: (localId: string) => boolean;
+  /**
+   * Drop the originals that pair with the draft's ``files`` at the ``leaving``
+   * indexes, also ones a restore still loads, so the other files keep theirs.
+   */
+  dropPaired: (files: ReadonlyArray<{ name: string }>, leaving: ReadonlySet<number>) => void;
   /** Take a tile out of the draft, with Undo; the stored file goes when the toast closes. */
   remove: (localId: string) => void;
   /** The files to send, by stored id, originals last; null while an upload still runs. */
@@ -126,10 +124,9 @@ export function useChatMedia(): ChatMediaDraft {
   }, [draftOriginals]);
   // Restores whose files still load; Send waits for them.
   const [restoring, setRestoring] = React.useState(0);
-  // For each name key: the originals the running restore still loads, and how
-  // many of them a replacing original took out before they arrived.
-  const loadingRef = React.useRef<Map<string, number>>(new Map());
-  const skippedRef = React.useRef<Map<string, number>>(new Map());
+  // For each name key: the places, among the key's documents, of the originals
+  // the running restore still loads and still keeps.
+  const loadingRef = React.useRef<Map<string, number[]>>(new Map());
   // A newer restore or a closed panel makes an older restore drop its files.
   const restoreRef = React.useRef(0);
   // The composer reads a file before it adds the original, and a toast outlives the
@@ -214,30 +211,11 @@ export function useChatMedia(): ChatMediaDraft {
   );
 
   const keepFiles = React.useCallback(
-    (files: File[], replace: number, restored: boolean): string[] => {
+    (files: File[], first: boolean) => {
       if (closedRef.current) return [];
       // The server takes no original over the file limit, so a larger file
       // keeps only its text and is not uploaded for nothing.
       const fits = files.filter((file) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
-      for (const key of replace > 0 ? new Set(fits.map((file) => nameKey(file.name))) : []) {
-        // Only a restored card leaves with a same card, so a composer file's
-        // original with the same name stays.
-        const gone = originalsRef.current
-          .filter((o) => o.restored && nameKey(o.name) === key)
-          .slice(0, replace);
-        const late = Math.min(replace - gone.length, loadingRef.current.get(key) ?? 0);
-        if (late > 0) {
-          loadingRef.current.set(key, (loadingRef.current.get(key) ?? 0) - late);
-          skippedRef.current.set(key, (skippedRef.current.get(key) ?? 0) + late);
-        }
-        if (gone.length) {
-          syncOriginals(originalsRef.current.filter((o) => !gone.includes(o)));
-          for (const o of gone) {
-            unshownRef.current.push(o.shown.url);
-            if (o.serverId) void deleteChatMedia(o.serverId);
-          }
-        }
-      }
       const added = fits.map((file): DraftOriginal => {
         const localId = crypto.randomUUID();
         // The viewer shows a PDF in an unsandboxed frame before the server checks
@@ -251,10 +229,12 @@ export function useChatMedia(): ChatMediaDraft {
           name: file.name,
           shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob) },
           serverId: null,
-          restored,
         };
       });
-      syncOriginals([...originalsRef.current, ...added]);
+      // A restore's cards lead the draft, so its originals go first and pair with them.
+      syncOriginals(
+        first ? [...added, ...originalsRef.current] : [...originalsRef.current, ...added],
+      );
       added.forEach((item, i) => {
         // A failed upload is silent: the file still goes as text, and its slide shows the text.
         const drop = () => {
@@ -279,23 +259,31 @@ export function useChatMedia(): ChatMediaDraft {
           );
         }, drop);
       });
-      return added.map((item) => item.localId);
     },
     [syncOriginals],
   );
-  const addOriginals = React.useCallback(
-    (files: File[], { replace = 0 }: { replace?: number } = {}) => keepFiles(files, replace, false),
-    [keepFiles],
-  );
+  const addOriginals = React.useCallback((files: File[]) => keepFiles(files, false), [keepFiles]);
 
-  const dropOriginal = React.useCallback(
-    (localId: string) => {
-      const gone = originalsRef.current.find((o) => o.localId === localId);
-      if (!gone) return false;
-      syncOriginals(originalsRef.current.filter((o) => o !== gone));
-      unshownRef.current.push(gone.shown.url);
-      if (gone.serverId) void deleteChatMedia(gone.serverId);
-      return true;
+  const dropPaired = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>, leaving: ReadonlySet<number>) => {
+      for (const [key, places] of pairedPlaces(files, leaving)) {
+        // The restore's originals that still load come first in the key's pairs.
+        const loading = loadingRef.current.get(key) ?? [];
+        const loaded = originalsRef.current.filter((o) => nameKey(o.name) === key);
+        const late = new Set(places.filter((p) => p < loading.length).map((p) => loading[p]));
+        if (late.size)
+          loadingRef.current.set(
+            key,
+            loading.filter((p) => !late.has(p)),
+          );
+        const gone = places.flatMap((p) => loaded[p - loading.length] ?? []);
+        if (!gone.length) continue;
+        syncOriginals(originalsRef.current.filter((o) => !gone.includes(o)));
+        for (const o of gone) {
+          unshownRef.current.push(o.shown.url);
+          if (o.serverId) void deleteChatMedia(o.serverId);
+        }
+      }
     },
     [syncOriginals],
   );
@@ -399,31 +387,31 @@ export function useChatMedia(): ChatMediaDraft {
     (media: readonly MediaAttachment[]) => {
       if (!media.length || itemsRef.current.length) return;
       const run = ++restoreRef.current;
+      // Each document's place among the restore's documents with its key.
       loadingRef.current = new Map();
-      skippedRef.current = new Map();
-      for (const m of media) {
-        if (m.kind !== "document") continue;
+      const places = media.map((m) => {
+        if (m.kind !== "document") return -1;
         const key = nameKey(m.name);
-        loadingRef.current.set(key, (loadingRef.current.get(key) ?? 0) + 1);
-      }
+        const loading = loadingRef.current.get(key) ?? [];
+        loadingRef.current.set(key, [...loading, loading.length]);
+        return loading.length;
+      });
       setRestoring((n) => n + 1);
       // Each file uploads again as a new draft file. A sent id is the source
       // chat's: the server stores a copy under a new id that the client never learns.
       void Promise.allSettled(media.map((m) => fetchChatMedia(m.id))).then((blobs) => {
         setRestoring((n) => n - 1);
         // The user added files while these loaded, or the panel closed: the draft is theirs now.
-        if (run !== restoreRef.current || itemsRef.current.length) return;
+        if (run !== restoreRef.current) return;
+        const kept = loadingRef.current;
+        loadingRef.current = new Map();
+        if (itemsRef.current.length) return;
         // A document is a file's stored original (SKY-735), not a tile. One that
         // does not load stays out: its file still goes as text.
         const originals = media.flatMap((m, i) => {
           const got = blobs[i]!;
-          // An original that replaced this one while it loaded keeps its place.
-          const key = nameKey(m.name);
-          const skip = m.kind === "document" ? (skippedRef.current.get(key) ?? 0) : 0;
-          if (skip > 0) {
-            skippedRef.current.set(key, skip - 1);
-            return [];
-          }
+          // A card that left while its original loaded takes the original with it.
+          if (!kept.get(nameKey(m.name))?.includes(places[i]!)) return [];
           return m.kind === "document" && got.status === "fulfilled"
             ? [new File([got.value], m.name, { type: got.value.type })]
             : [];
@@ -457,7 +445,7 @@ export function useChatMedia(): ChatMediaDraft {
         });
         update(() => added.map((a) => a.item));
         for (const { item, file } of added) if (file) upload(item, file);
-        if (originals.length) keepFiles(originals, 0, true);
+        if (originals.length) keepFiles(originals, true);
       });
     },
     [update, upload, keepFiles],
@@ -512,7 +500,7 @@ export function useChatMedia(): ChatMediaDraft {
     addFiles,
     addOriginals,
     keepOriginals,
-    dropOriginal,
+    dropPaired,
     remove,
     ready,
     blocked,

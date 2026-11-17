@@ -365,6 +365,7 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
   const root = createRoot(container);
   const calls: Array<[string, string, unknown?]> = [];
   const released: string[] = [];
+  const left: Array<{ names: string[]; leaving: number[] }> = [];
   const wizard = {
     setField: (key: string, value: unknown) => calls.push(["set", key, value]),
     clearField: (key: string) => calls.push(["clear", key]),
@@ -384,6 +385,8 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
       stage,
       wizard,
       onRelease: (owner) => released.push(owner),
+      onLeave: (files, leaving) =>
+        left.push({ names: files.map((f) => f.name), leaving: [...leaving].sort() }),
     });
     return null;
   }
@@ -392,7 +395,7 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
     await React.act(async () => root.unmount());
     container.remove();
   };
-  return { live, calls, released, unmount };
+  return { live, calls, released, left, unmount };
 }
 
 const QA_DATASET: ConfirmedDataset = {
@@ -428,16 +431,37 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   await unmount();
 });
 
-void test("pendingChip gives the card the next attach takes out, and none after Send or a remove", async () => {
-  const { live, unmount } = await mountDatasetDraft(async () => "staged-p");
-  assert.equal(live.api.pendingChip(), null);
+const PASTED = '<attached_file name="qa.csv">\nmy own notes\n</attached_file>';
+
+void test("onLeave gets the places of the cards a new card takes out", async () => {
+  const { live, left, unmount } = await mountDatasetDraft(async () => "staged-l");
+  await React.act(async () => live.setDraft(`my text\n\n${PASTED}`));
   await React.act(async () => live.api.attach(QA_DATASET));
-  assert.equal(live.api.pendingChip()?.name, "qa.csv");
+  assert.deepEqual(left, [], "a file with the same name and other text stays");
+  // A fork restores the same card before the pending one: both leave.
+  const card = live.draft.slice(live.draft.indexOf("\n\n", "my text".length + 2) + 2);
+  await React.act(async () => live.setDraft(`my text\n\n${card}\n\n${PASTED}\n\n${card}`));
+  await React.act(async () => live.api.attach({ ...QA_DATASET, rowCount: 2 }));
+  assert.deepEqual(left, [{ names: ["qa.csv", "qa.csv", "qa.csv"], leaving: [0, 2] }]);
+  await unmount();
+});
+
+void test("onLeave gets the earlier card a library pick takes out, and nothing after Send", async () => {
+  const { live, left, unmount } = await mountDatasetDraft(async () => "staged-s");
+  await React.act(async () => live.api.attach(QA_DATASET));
+  const pick = {
+    sourceDatasetId: "lib-1",
+    name: "Saved QA",
+    rowCount: 5,
+    columns: ["q", "a"],
+    columnRoles: { q: "input", a: "output" },
+  } as never;
+  await React.act(async () => live.api.attachLibrary(pick));
+  assert.deepEqual(left, [{ names: ["qa.csv"], leaving: [0] }]);
   live.api.take(live.draft);
-  assert.equal(live.api.pendingChip(), null, "Send takes the card");
-  await React.act(async () => live.api.attach(QA_DATASET));
   await React.act(async () => live.setDraft("my text"));
-  assert.equal(live.api.pendingChip(), null, "a remove takes the card");
+  await React.act(async () => live.api.attach(QA_DATASET));
+  assert.deepEqual(left.length, 1, "an empty draft has no card to take out");
   await unmount();
 });
 

@@ -416,10 +416,8 @@ void test("an original over the file limit is not uploaded; the file keeps only 
   const before = originalUploads.length;
   const big = new File(["x"], "big.csv", { type: "text/csv" });
   Object.defineProperty(big, "size", { value: 20 * 1024 * 1024 + 1 });
-  let ids: string[] = [];
-  await React.act(async () => void (ids = draft().addOriginals([big, pdf("a.pdf")])));
+  await React.act(async () => void draft().addOriginals([big, pdf("a.pdf")]));
   await flush();
-  assert.equal(ids.length, 1);
   assert.deepEqual(originalUploads.slice(before), ["a.pdf"]);
   assert.deepEqual(
     documents(draft().ready()).map((m) => m.name),
@@ -428,12 +426,12 @@ void test("an original over the file limit is not uploaded; the file keeps only 
   await unmount();
 });
 
-void test("a replacing original drops only as many restored same-key originals as it is told", async () => {
+void test("dropPaired takes out the original at the leaving card's place, and keeps a composer one", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
-  let own: string[] = [];
-  // A composer file's original comes first, so a drop of the oldest would take it.
-  await React.act(async () => void (own = draft().addOriginals([pdf("a_1_.pdf")])));
+  await React.act(async () => void draft().addOriginals([pdf("a_1_.pdf")]));
+  await flush();
+  const [own] = documents(draft().ready()).map((m) => m.id);
   await React.act(async () =>
     draft().restore([
       { id: "sent-a1", name: "a<1>.pdf", kind: "document", url: "" },
@@ -442,31 +440,27 @@ void test("a replacing original drops only as many restored same-key originals a
     ]),
   );
   await flush();
+  // Restored cards lead the draft, so their originals come first.
   const stored = documents(draft().ready()).map((m) => m.id);
   assert.equal(stored.length, 4);
-  let next: string[] = [];
+  assert.equal(stored[3], own);
   // The block shows "a<1>.pdf" as "a_1_.pdf"; both have one key.
-  await React.act(
-    async () => void (next = draft().addOriginals([pdf("a_1_.pdf")], { replace: 1 })),
-  );
-  await flush();
   const files = [
     { name: "a_1_.pdf" },
     { name: "a_1_.pdf" },
-    { name: "a_1_.pdf" },
     { name: "b.pdf" },
+    { name: "a_1_.pdf" },
   ];
-  const shown = draft()
-    .shownOriginals(files)
-    .map((m) => m.id);
-  assert.equal(shown.length, 4);
-  assert.ok(shown.includes(own[0]!));
-  assert.ok(shown.includes(next[0]!));
+  await React.act(async () => draft().dropPaired(files, new Set([1])));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.id),
+    [stored[0], stored[2], own],
+  );
   assert.deepEqual(deleted.slice(before), [stored[1]]);
   await unmount();
 });
 
-void test("a replacing original skips only that many originals a restore still loads", async () => {
+void test("dropPaired skips the originals a restore still loads at the leaving places", async () => {
   const { draft, unmount } = await mountDraft();
   let release!: () => void;
   heldReads = new Promise<void>((resolve) => (release = resolve));
@@ -477,47 +471,43 @@ void test("a replacing original skips only that many originals a restore still l
       { id: "sent-b", name: "b.pdf", kind: "document", url: "" },
     ]),
   );
-  let next: string[] = [];
-  await React.act(async () => void (next = draft().addOriginals([pdf("a.pdf")], { replace: 1 })));
+  const files = [{ name: "a.pdf" }, { name: "a.pdf" }, { name: "b.pdf" }];
+  await React.act(async () => draft().dropPaired(files, new Set([0])));
+  // The places shift after a card leaves: the second "a.pdf" is now first.
+  await React.act(async () => draft().dropPaired(files.slice(1), new Set([0])));
   heldReads = null;
   release();
   await flush();
-  const shown = draft().shownOriginals([{ name: "a.pdf" }, { name: "a.pdf" }, { name: "b.pdf" }]);
-  assert.equal(shown.length, 3);
-  assert.equal(shown.filter((m) => m.name === "a.pdf").length, 2);
-  assert.ok(shown.some((m) => m.id === next[0]));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.name),
+    ["b.pdf"],
+  );
   await unmount();
 });
 
-void test("dropOriginal says whether the draft held the original", async () => {
-  const { draft, unmount } = await mountDraft();
-  let ids: string[] = [];
-  await React.act(async () => void (ids = draft().addOriginals([pdf("a.pdf")])));
-  let first = false;
-  let second = true;
-  await React.act(async () => void (first = draft().dropOriginal(ids[0]!)));
-  await React.act(async () => void (second = draft().dropOriginal(ids[0]!)));
-  assert.deepEqual([first, second], [true, false]);
-  await unmount();
-});
-
-void test("dropOriginal takes out only that original, and deletes its stored copy", async () => {
+void test("dropPaired counts the loading originals first, then the loaded ones", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
-  let first: string[] = [];
-  await React.act(async () => void (first = draft().addOriginals([pdf("a.pdf")])));
   await React.act(async () => void draft().addOriginals([pdf("a.pdf")]));
   await flush();
-  const [firstStored, secondStored] = documents(draft().ready()).map((m) => m.id);
-  await React.act(async () => draft().dropOriginal(first[0]!));
-  assert.deepEqual(
-    documents(draft().ready()).map((m) => m.id),
-    [secondStored],
+  const [own] = documents(draft().ready()).map((m) => m.id);
+  let release!: () => void;
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () =>
+    draft().restore([
+      { id: "sent-a1", name: "a.pdf", kind: "document", url: "" },
+      { id: "sent-a2", name: "a.pdf", kind: "document", url: "" },
+    ]),
   );
-  assert.deepEqual(deleted.slice(before), [firstStored]);
-  // An id that already left the draft does nothing.
-  await React.act(async () => draft().dropOriginal(first[0]!));
-  assert.deepEqual(deleted.slice(before), [firstStored]);
+  const files = [{ name: "a.pdf" }, { name: "a.pdf" }, { name: "a.pdf" }];
+  await React.act(async () => draft().dropPaired(files, new Set([0, 2])));
+  assert.deepEqual(deleted.slice(before), [own]);
+  heldReads = null;
+  release();
+  await flush();
+  const left = documents(draft().ready());
+  assert.equal(left.length, 1);
+  assert.notEqual(left[0]!.id, own);
   await unmount();
 });
 

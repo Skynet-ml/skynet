@@ -43,8 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
-import { attachedFile, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
-import { nameKey } from "@/shared/ui/agent/file-originals";
+import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
@@ -178,7 +177,6 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
-  datasetAttachedNote,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -216,11 +214,6 @@ const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
 /** Whether a file opens the dataset upload card instead of being read as text. */
-/** Tell if two attached files are one card: the same name and text. */
-function same(f: AttachedFile, c: AttachedFile): boolean {
-  return f.name === c.name && f.text === c.text;
-}
-
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -1022,62 +1015,33 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     stage: stageDataset,
     wizard: wizardCtx,
     onRelease: reopenDatasetCard,
+    // A card the new card takes out takes its stored original with it, so
+    // each name keeps one original for each card.
+    onLeave: chatMedia.dropPaired,
   });
-  const { addOriginals, dropOriginal } = chatMedia;
-  // The dataset card's stored original, and the card it pairs with.
-  const datasetOriginalRef = React.useRef<{ localId: string; chip: AttachedFile } | null>(null);
+  const addOriginals = chatMedia.addOriginals;
   const handleDatasetConfirm = React.useCallback(
     (callId: string | undefined, confirmed: ConfirmedDataset, file: File) => {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
       if (callId) confirmedDatasetCallsRef.current.add(callId);
-      // The card takes out of the draft the earlier dataset card and each same
-      // card, such as one a fork restored (putDatasetChip). Their originals go
-      // too, so each name keeps one original for each card and keepOriginals
-      // does not drop them all.
-      const chip = attachedFile(confirmed.fileName, datasetAttachedNote(confirmed));
-      // The same earlier card that putDatasetChip takes out: Send and a remove
-      // clear it, so a card they left behind does not count.
-      const earlier = datasetDraft.pendingChip();
-      // A tool card's click runs after the last render, so this draft is the
-      // one putDatasetChip changes.
-      const leaving = splitPastes(draft).files.filter(
-        (f) => same(f, chip) || (earlier !== null && same(f, earlier)),
-      );
-      // The earlier card's own original counts as one that leaves.
-      const own = datasetOriginalRef.current;
-      const ownGone =
-        own !== null &&
-        earlier !== null &&
-        same(own.chip, earlier) &&
-        leaving.some((f) => same(f, earlier)) &&
-        dropOriginal(own.localId);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       datasetDraft.attach(confirmed, callId);
       // The card keeps its original as every attached file does (SKY-782),
       // so the viewer shows the real workbook of an XLSX.
-      const key = nameKey(chip.name);
-      const replace = leaving.filter((f) => nameKey(f.name) === key).length - (ownGone ? 1 : 0);
-      const [localId] = addOriginals([file], { replace });
-      datasetOriginalRef.current = localId ? { localId, chip } : null;
+      addOriginals([file]);
     },
-    [webChat, datasetDraft, addOriginals, dropOriginal, draft],
+    [webChat, datasetDraft, addOriginals],
   );
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
-      // A library dataset has no local file, so it has no original; the
-      // earlier upload card's original must not pair with its card.
-      const own = datasetOriginalRef.current;
-      const earlier = datasetDraft.pendingChip();
-      if (own && earlier && same(own.chip, earlier)) dropOriginal(own.localId);
-      datasetOriginalRef.current = null;
       datasetDraft.attachLibrary(picked, callId);
     },
-    [webChat, datasetDraft, dropOriginal],
+    [webChat, datasetDraft],
   );
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;

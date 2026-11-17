@@ -64,6 +64,25 @@ export function pairOriginals<T extends { name: string }>(
 }
 
 /**
+ * For each name key, the places among the key's files of the files at the
+ * ``leaving`` indexes. The originals at those places pair with them (pairOriginals).
+ */
+export function pairedPlaces(
+  files: ReadonlyArray<{ name: string }>,
+  leaving: ReadonlySet<number>,
+): Map<string, number[]> {
+  const seen = new Map<string, number>();
+  const places = new Map<string, number[]>();
+  files.forEach((file, i) => {
+    const key = nameKey(file.name);
+    const place = seen.get(key) ?? 0;
+    seen.set(key, place + 1);
+    if (leaving.has(i)) places.set(key, [...(places.get(key) ?? []), place]);
+  });
+  return places;
+}
+
+/**
  * The originals that can go out with ``files``. Pairing by name is sure only
  * when a name has one original for each of its files. When the counts differ
  * (a file left, or an upload failed), no one can tell which file lost its

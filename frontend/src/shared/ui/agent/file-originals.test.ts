@@ -9,6 +9,7 @@ import {
   originalFormat,
   originalsToKeep,
   pairOriginals,
+  pairedPlaces,
 } from "./file-originals.ts";
 
 test("the viewer draws only a pdf, docx or xlsx original", () => {
@@ -99,7 +100,13 @@ test("an original the viewer draws fits before one it does not draw (SKY-782)", 
 });
 
 test("every read file keeps its original when its text went in (SKY-782)", () => {
-  const files = [{ name: "a.pdf" }, { name: "b.csv" }, { name: "big.xlsx" }, { name: "bad.docx" }, { name: "c.docx" }];
+  const files = [
+    { name: "a.pdf" },
+    { name: "b.csv" },
+    { name: "big.xlsx" },
+    { name: "bad.docx" },
+    { name: "c.docx" },
+  ];
   assert.deepEqual(
     originalsToKeep(files, ["big.xlsx", "bad.docx"]).map((f) => f.name),
     ["a.pdf", "b.csv", "c.docx"],
@@ -109,6 +116,26 @@ test("every read file keeps its original when its text went in (SKY-782)", () =>
 test("a file the viewer does not draw keeps its original in the message (SKY-782)", () => {
   const csv = { name: "rows.csv", id: "1" };
   const bin = { name: "README", id: "2" };
-  assert.deepEqual(keptOriginals([{ name: "rows.csv" }, { name: "README" }], [csv, bin]), [csv, bin]);
+  assert.deepEqual(keptOriginals([{ name: "rows.csv" }, { name: "README" }], [csv, bin]), [
+    csv,
+    bin,
+  ]);
   assert.deepEqual(keptOriginals([], [csv]), []);
+});
+
+test("pairedPlaces gives each leaving file's place among the files of its key (SKY-782)", () => {
+  const files = [
+    { name: "a<1>.pdf" },
+    { name: "b.pdf" },
+    { name: "a_1_.pdf" },
+    { name: "a_1_.pdf" },
+  ];
+  assert.deepEqual(
+    [...pairedPlaces(files, new Set([1, 3]))],
+    [
+      ["b.pdf", [0]],
+      ["a1.pdf", [2]],
+    ],
+  );
+  assert.deepEqual([...pairedPlaces(files, new Set())], []);
 });
