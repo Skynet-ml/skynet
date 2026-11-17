@@ -227,7 +227,8 @@ def postgres_engine() -> Iterator[Engine]:
     admin = create_engine(TEST_DB_URL)
     with admin.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"})
+    # The application name marks this test's sessions, so a lock count sees no other session of the database.
+    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema} -capplication_name={schema}"})
     try:
         Base.metadata.create_all(engine, tables=[WorkspaceModel.__table__], checkfirst=False)
         yield engine
@@ -239,10 +240,10 @@ def postgres_engine() -> Iterator[Engine]:
 
 
 def _lock_waiters(engine: Engine) -> int:
-    """Return how many sessions of this database wait for a lock now.
+    """Return how many sessions of this engine wait for a lock now.
 
     Args:
-        engine: The database.
+        engine: The database, with an application name that only this test uses.
 
     Returns:
         The number of waiting sessions.
@@ -250,7 +251,8 @@ def _lock_waiters(engine: Engine) -> int:
     with engine.connect() as connection:
         return connection.execute(
             text(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                " AND application_name = current_setting('application_name') AND wait_event_type = 'Lock'"
             )
         ).scalar_one()
 
@@ -295,10 +297,13 @@ def test_postgres_two_workers_run_each_step_once(postgres_engine, monkeypatch) -
     second = threading.Thread(target=wake, args=("second",))
     second.start()
     deadline = time.monotonic() + 10
-    while _lock_waiters(postgres_engine) < 1:
-        assert time.monotonic() < deadline, "the second worker never waited for the row lock"
-        time.sleep(0.05)
-    release.set()
+    try:
+        while _lock_waiters(postgres_engine) < 1:
+            assert time.monotonic() < deadline, "the second worker never waited for the row lock"
+            time.sleep(0.05)
+    finally:
+        # A failed assert must not leave the first worker to hold the lock for its full wait.
+        release.set()
     first.join(30)
     second.join(30)
 

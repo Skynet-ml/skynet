@@ -110,6 +110,7 @@ def ensure_current(engine: Engine, workspace_id: str) -> int:
         The workspace's storage version after the call, the current version.
 
     Raises:
+        LookupError: The workspace does not exist.
         StorageUpgradeError: A step failed; its cause is the step's error.
         StorageVersionAheadError: Newer code already upgraded the data.
     """
