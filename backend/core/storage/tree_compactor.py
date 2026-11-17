@@ -319,7 +319,23 @@ class TreeCompactor:
         del data
         with Session(self._engine) as session:
             moved = self._lock_and_move(session, keys, step_moves, object_moves, new_key)
-            if moved != len(step_moves) + len(object_moves):
+            expected = len(step_moves) + len(object_moves)
+            if moved is None:
+                logger.warning(
+                    "Tree compaction gave up a pass of %d packs and %d rows: another transaction holds a lock "
+                    "that the move needs; the next pass tries again",
+                    len(keys),
+                    expected,
+                )
+            elif moved != expected:
+                logger.warning(
+                    "Tree compaction gave up a pass of %d packs and %d rows: another pass moved %d of the rows "
+                    "first; the next pass tries again",
+                    len(keys),
+                    expected,
+                    expected - moved,
+                )
+            if moved != expected:
                 session.rollback()
                 self._discard(new_key)
                 return 0
@@ -348,7 +364,7 @@ class TreeCompactor:
         step_moves: list[tuple[Any, int]],
         object_moves: list[tuple[Any, int]],
         new_key: str,
-    ) -> int:
+    ) -> int | None:
         """Lock the jobs of the moved steps and the old packs, then point the rows at the new pack.
 
         Args:
@@ -359,7 +375,7 @@ class TreeCompactor:
             new_key: The new pack key.
 
         Returns:
-            The number of rows moved; ``0`` when another transaction holds one of the locks.
+            The number of rows moved; ``None`` when another transaction holds one of the locks.
         """
         run_ids = sorted({row.run_id for row, _ in step_moves})
         # Each lock is taken in one order and with NOWAIT, so a pass never waits and two passes over
@@ -384,7 +400,7 @@ class TreeCompactor:
         except OperationalError as error:
             if getattr(error.orig, "pgcode", None) != _LOCK_NOT_AVAILABLE:
                 raise
-            return 0
+            return None
         moved = 0
         for chunk in _chunks(step_moves):
             moved += session.execute(_move_chunk(_STEPS, ("step_id",), chunk, new_key)).rowcount

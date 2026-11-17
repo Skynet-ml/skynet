@@ -9,6 +9,7 @@ PostgreSQL database, in their own schema that they drop after.
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
 import threading
@@ -623,9 +624,11 @@ def test_a_second_compactor_does_not_merge_the_packs_again(engine, objects, stor
     _assert_all_readable(store, written)
 
 
-def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects, store, make_compactor) -> None:
+def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects, store, make_compactor, caplog) -> None:
     """A second pass merges the same packs during the first one's PUT; the first one moves no row and drops its pack."""
+    caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
     written = _fill(store)
+    rows = len(_rows_of_packs(engine))
     results: list[int] = []
 
     def merge_first(key: str) -> None:
@@ -641,6 +644,10 @@ def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects,
     results.append(make_compactor().merge())
 
     assert results == [3, 0]
+    assert [r.getMessage() for r in caplog.records if "gave up" in r.getMessage()] == [
+        f"Tree compaction gave up a pass of 3 packs and {rows} rows: another pass moved "
+        f"{rows} of the rows first; the next pass tries again"
+    ]
     (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
     assert _pack_keys_of_rows(engine) == {compacted}
     assert compacted in _pack_rows(engine)
@@ -973,6 +980,9 @@ def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_comp
     """A GET that fails with an error other than a missing object fails the merge and marks no pack."""
     _fill(store)
     failing = min(objects.list("packs/w1/"))
+    with Session(engine) as session:
+        size = session.get(StoragePackModel, failing).byte_size
+    assert size != BROKEN_BYTE_SIZE
     get = objects.get
 
     def flaky_get(key: str, *args: Any) -> bytes:
@@ -998,7 +1008,7 @@ def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_comp
         make_compactor().merge()
     assert objects.list(f"{COMPACTED_PREFIX}/") == []
     with Session(engine) as session:
-        assert session.get(StoragePackModel, failing).worker_id == "w1"
+        assert session.get(StoragePackModel, failing).byte_size == size
 
 
 def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine, objects, make_compactor) -> None:
@@ -1477,9 +1487,13 @@ def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
 
 
 @needs_postgres
-def test_postgres_a_merge_does_not_wait_for_a_locked_job(tmp_path, postgres_engine, objects, postgres_store) -> None:
+def test_postgres_a_merge_does_not_wait_for_a_locked_job(
+    tmp_path, postgres_engine, objects, postgres_store, caplog
+) -> None:
     """A job row that another transaction holds, as a job delete does, makes the merge give up at once."""
+    caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
     written = _fill(postgres_store)
+    rows = len(_rows_of_packs(postgres_engine))
     old = set(objects.list("packs/w1/"))
     results: list[int] = []
     compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
@@ -1494,6 +1508,10 @@ def test_postgres_a_merge_does_not_wait_for_a_locked_job(tmp_path, postgres_engi
 
     assert not waited
     assert results == [0]
+    assert [r.getMessage() for r in caplog.records if "gave up" in r.getMessage()] == [
+        f"Tree compaction gave up a pass of 3 packs and {rows} rows: another transaction holds a lock "
+        "that the move needs; the next pass tries again"
+    ]
     assert objects.list(f"{COMPACTED_PREFIX}/") == []
     assert _pack_keys_of_rows(postgres_engine) == old
     _assert_all_readable(postgres_store, written)
