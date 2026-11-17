@@ -1,10 +1,9 @@
 "use client";
 
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
-import { Button } from "@/shared/ui/primitives/button";
 import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Check, CircleNotch, FileXls, UploadSimple } from "@/shared/ui/icons";
+import { CircleNotch, UploadSimple } from "@/shared/ui/icons";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
@@ -29,9 +28,6 @@ interface DatasetUploadCardProps {
   call?: AgentToolCall;
   disabled?: boolean;
   alreadyConfirmed?: boolean;
-  /** File already chosen via the OS picker; when set, the card skips the
-   *  dropzone entirely and parses it straight away. */
-  initialFile?: File | null;
   /** The picked file goes too, so the chat can keep its original for the viewer. */
   onConfirm: (confirmed: ConfirmedDataset, file: File) => void;
 }
@@ -357,27 +353,36 @@ export function useDatasetDraft({
   );
 }
 
+/** Read a dataset file into rows and columns. A file with no columns fails. */
+export async function readDatasetFile(file: File): Promise<ConfirmedDataset> {
+  const result = await parseDatasetFile(file);
+  if (!result.columns.length) throw new Error("empty");
+  return {
+    fileName: file.name,
+    rows: result.rows,
+    rowCount: result.rowCount,
+    columns: result.columns,
+  };
+}
+
 export function DatasetUploadCard({
   call,
   disabled,
   alreadyConfirmed,
-  initialFile,
   onConfirm,
 }: DatasetUploadCardProps) {
   const reduceMotion = useReducedMotion();
   const inputRef = React.useRef<HTMLInputElement | null>(null);
-  const [parsed, setParsed] = React.useState<ConfirmedDataset | null>(null);
   const [parsing, setParsing] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const [parseError, setParseError] = React.useState<string | null>(null);
   const [confirmed, setConfirmed] = React.useState(!!alreadyConfirmed);
-  // A new onConfirm on each parent render must not re-read the initial file.
   const onConfirmRef = React.useRef(onConfirm);
   React.useEffect(() => {
     onConfirmRef.current = onConfirm;
   }, [onConfirm]);
-  // The drop zone and the initial file reach handleFile without the
-  // disabled controls, so the read itself must refuse a disabled card.
+  // The drop zone reaches handleFile without the disabled controls, so the
+  // read itself must refuse a disabled card.
   const disabledRef = React.useRef(disabled);
   React.useEffect(() => {
     disabledRef.current = disabled;
@@ -387,9 +392,15 @@ export function DatasetUploadCard({
     if (alreadyConfirmed) setConfirmed(true);
   }, [alreadyConfirmed]);
 
-  // Each read gets a number; a newer read, an unmount or a Strict Mode
-  // remount drops an older one, so a closed card attaches nothing.
+  // Each read gets a number; a newer read or an unmount drops an older one,
+  // so a closed card attaches nothing.
   const readRef = React.useRef(0);
+  React.useEffect(
+    () => () => {
+      readRef.current += 1;
+    },
+    [],
+  );
 
   const handleFile = React.useCallback(async (file: File) => {
     if (disabledRef.current) return;
@@ -397,33 +408,17 @@ export function DatasetUploadCard({
     setParsing(true);
     setParseError(null);
     try {
-      const result = await parseDatasetFile(file);
+      const read = await readDatasetFile(file);
       if (readId !== readRef.current) return;
-      if (!result.columns.length) throw new Error("empty");
-      const read: ConfirmedDataset = {
-        fileName: file.name,
-        rows: result.rows,
-        rowCount: result.rowCount,
-        columns: result.columns,
-      };
-      setParsed(read);
       setConfirmed(true);
       onConfirmRef.current(read, file);
     } catch {
       if (readId !== readRef.current) return;
-      setParsed(null);
       setParseError(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
     } finally {
       if (readId === readRef.current) setParsing(false);
     }
   }, []);
-
-  React.useEffect(() => {
-    if (initialFile) void handleFile(initialFile);
-    return () => {
-      readRef.current += 1;
-    };
-  }, [initialFile, handleFile]);
 
   const onPickClick = React.useCallback(() => {
     inputRef.current?.click();
@@ -453,6 +448,9 @@ export function DatasetUploadCard({
     [handleFile],
   );
 
+  // The file card in the user's message shows the upload (SKY-783).
+  if (confirmed) return null;
+
   const fade = reduceMotion
     ? { initial: false, animate: { opacity: 1 }, exit: { opacity: 0 } }
     : {
@@ -466,11 +464,7 @@ export function DatasetUploadCard({
     <div className="w-full">
       <motion.div
         layout={!reduceMotion}
-        className={cn(
-          "relative overflow-hidden rounded-md border bg-card",
-          "border-primary-fill/40",
-          confirmed && "from-[#F4F0E8] dark:from-[#423b2f] to-[#EEE6D7] dark:to-[#464034] border-primary-fill/30",
-        )}
+        className="relative overflow-hidden rounded-md border bg-card border-primary-fill/40"
       >
         <div className="px-4 pt-3.5 pb-2.5 border-b border-primary-fill/25 bg-white/40 dark:bg-white/5">
           <div className="flex items-start gap-2.5">
@@ -480,13 +474,11 @@ export function DatasetUploadCard({
                 "bg-primary-fill text-primary-foreground",
               )}
             >
-              {confirmed ? <Check className="size-3.5" /> : <UploadSimple className="size-3.5" />}
+              <UploadSimple className="size-3.5" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[0.8125rem] font-semibold text-primary leading-tight">
-                {confirmed
-                  ? msg("auto.features.agent.panel.components.datasetuploadcard.attached")
-                  : msg("auto.features.agent.panel.components.datasetuploadcard.title")}
+                {msg("auto.features.agent.panel.components.datasetuploadcard.title")}
               </div>
             </div>
           </div>
@@ -498,28 +490,11 @@ export function DatasetUploadCard({
           accept={DATASET_FILE_ACCEPT}
           className="hidden"
           onChange={onInputChange}
-          disabled={disabled || parsing || confirmed}
+          disabled={disabled || parsing}
         />
 
         <AnimatePresence mode="wait" initial={false}>
-          {!parsed && !parsing && initialFile && parseError && (
-            <motion.div key="pick-error" {...fade} className="px-4 py-3.5 space-y-2">
-              <InlineErrorRow message={parseError} className="py-2" />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onPickClick}
-                disabled={disabled}
-                className="w-full"
-              >
-                <UploadSimple className="size-3.5" />
-                {msg("auto.features.agent.panel.components.datasetuploadcard.replace")}
-              </Button>
-            </motion.div>
-          )}
-
-          {!parsed && !parsing && !initialFile && !confirmed && (
+          {!parsing && (
             <motion.div key="empty" {...fade} className="px-4 py-3.5">
               <button
                 type="button"
@@ -563,37 +538,6 @@ export function DatasetUploadCard({
             </motion.div>
           )}
 
-          {parsed && (
-            <motion.div key="parsed" {...fade} className="px-4 py-3 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <FileXls className="size-3.5 text-primary shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-[0.75rem] font-medium text-primary truncate">
-                      {parsed.fileName}
-                    </div>
-                    <div className="text-[0.6875rem] text-[#8A7866] dark:text-[#cdbaa7] tabular-nums leading-tight">
-                      {parsed.rowCount}{" "}
-                      {msg("auto.features.agent.panel.components.datasetuploadcard.rows_suffix")} ·{" "}
-                      {parsed.columns.length}{" "}
-                      {msg("auto.features.agent.panel.components.datasetuploadcard.columns_suffix")}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {parsed.columns.map((col) => (
-                  <span
-                    key={col}
-                    dir="auto"
-                    className="max-w-full truncate rounded-md bg-white/60 dark:bg-white/10 px-1.5 py-0.5 text-[0.6875rem] text-[#6B5B4A] dark:text-[#cfbdaa]"
-                  >
-                    {col}
-                  </span>
-                ))}
-              </div>
-            </motion.div>
-          )}
         </AnimatePresence>
       </motion.div>
     </div>

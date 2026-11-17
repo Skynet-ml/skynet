@@ -32,7 +32,6 @@
   "auto.features.agent.panel.components.datasetuploadcard.drop_label": "Arraste um arquivo para aqui ou clique para escolher",
   "auto.features.agent.panel.components.datasetuploadcard.parse_error": "Não foi possível ler o arquivo. Utilize um arquivo CSV, JSON ou XLSX.",
   "auto.features.agent.panel.components.datasetuploadcard.parsing": "Lendo o arquivo…",
-  "auto.features.agent.panel.components.datasetuploadcard.replace": "Substituir arquivo",
   "auto.features.agent.panel.components.datasetuploadcard.title": "Anexar um arquivo",
   "auto.features.agent.panel.components.inferenceformcard.literal.8": "Carregando campos…",
   "auto.features.agent.panel.components.searchresultscard.running": "Pesquisando…",

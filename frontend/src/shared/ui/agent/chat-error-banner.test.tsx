@@ -22,7 +22,7 @@ function messageTag(html: string): string {
 }
 
 void describe("ChatErrorBanner", () => {
-  void it("keeps the message on one line and puts the action on its own row", () => {
+  void it("keeps the message on one line with the action at the end of the same row", () => {
     const html = renderToStaticMarkup(
       <ChatErrorBanner message={BALANCE} action={<button type="button">{ADD_FUNDS}</button>} />,
     );
@@ -30,8 +30,9 @@ void describe("ChatErrorBanner", () => {
     assert.match(p, /\btruncate\b/);
     assert.doesNotMatch(p, /break-words/);
     assert.ok(p.includes(`title="${BALANCE}"`), p);
-    // The action renders after the message row closes, not beside the text.
-    assert.match(html, /<\/p><\/div><div class="mt-2 ps-10"><button/);
+    // One rectangular row: the action follows the message inside the banner (SKY-783).
+    assert.match(html, /^<div role="alert" class="flex [^"]*\brounded-md\b/);
+    assert.match(html, /<\/p><button type="button">Add funds<\/button><\/div>$/);
   });
 
   void it("lets an error without an action wrap", () => {

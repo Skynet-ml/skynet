@@ -26,6 +26,7 @@ import {
   PencilSimple,
   Plus,
   MagicWand,
+  Wallet,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
@@ -36,6 +37,7 @@ import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip
 
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { CAPACITY_ERROR_CODE, capacityRetryDelay } from "@/shared/ui/agent/capacity-retry";
 import { ReconnectingNotice } from "@/shared/ui/agent/reconnecting-notice";
 import { ModelChangedNotice } from "@/shared/ui/agent/chat-notices";
@@ -177,6 +179,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
+  readDatasetFile,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -981,10 +984,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   });
   // A fork during a manual /compact would copy the rows without the summary.
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
-  const [attachOpen, setAttachOpen] = React.useState(false);
-  // The composer's attach button opens the OS file picker; the popover only
-  // appears while a chosen dataset file is read, or when it cannot be read.
-  const [attachFile, setAttachFile] = React.useState<File | null>(null);
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
   // A new key remounts a tool card whose dataset left the draft unsent, so
   // the user can pick again.
@@ -1871,13 +1870,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                         }
                         action={
                           agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                            <Button
-                              size="sm"
-                              className="h-7"
+                            <RetryIconButton
+                              label={msg("billing.action.add_funds")}
+                              icon={Wallet}
                               onClick={() => openSettingsTo("billing")}
-                            >
-                              {msg("billing.action.add_funds")}
-                            </Button>
+                              className="border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)]"
+                            />
                           ) : undefined
                         }
                       />
@@ -1945,39 +1943,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // A file card gets its path only on Send, so it waits for the reply too.
         mediaWaiting={chatMedia.tiles.length > 0 || draftFiles.length > 0}
         sendBlocked={chatMedia.blocked(draftFiles)}
+        // The file card in the draft shows the dataset, so nothing else opens (SKY-783).
         onAttachFile={(file) => {
-          setAttachFile(file);
-          setAttachOpen(true);
+          readDatasetFile(file)
+            .then((confirmed) => handleDatasetConfirm(undefined, confirmed, file))
+            .catch(() =>
+              toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error")),
+            );
         }}
         leadingControls={
           <>
-            <Popover
-              open={attachOpen}
-              onOpenChange={(open) => {
-                setAttachOpen(open);
-                if (!open) setAttachFile(null);
-              }}
-            >
-              {/* Anchors the dataset card beside the composer's attach button. */}
-              <PopoverTrigger asChild>
-                <span aria-hidden className="pointer-events-none -ms-1 block size-0" />
-              </PopoverTrigger>
-              <PopoverContent
-                side="top"
-                align="start"
-                sideOffset={8}
-                className="w-96 max-w-[calc(100vw-2rem)] p-3"
-              >
-                <DatasetUploadCard
-                  initialFile={attachFile}
-                  onConfirm={(confirmed, file) => {
-                    setAttachOpen(false);
-                    setAttachFile(null);
-                    handleDatasetConfirm(undefined, confirmed, file);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
             {/* Every agent screen, setup too: in Ask mode the setup agent's file writes wait for approval. */}
             <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
             {inSetup && modelMenuNode}

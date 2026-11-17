@@ -16,10 +16,7 @@ interface ChatErrorBannerProps {
    * each failure, so the countdown starts again.
    */
   retryInSeconds?: number | null;
-  /**
-   * A compact action (e.g. "Add funds"), shown on its own row under the
-   * message. The message then stays on one line.
-   */
+  /** A compact icon action with a tooltip (e.g. "Add funds"), at the end of the row. */
   action?: React.ReactNode;
   className?: string;
 }
@@ -39,38 +36,35 @@ export function ChatErrorBanner({
   return (
     <div
       role="alert"
-      className={cn("rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-dim)] p-3", className)}
+      className={cn(
+        "flex items-center gap-2.5 rounded-md border border-[var(--danger-border)] bg-[var(--danger-dim)] py-2 ps-3 pe-2",
+        className,
+      )}
     >
-      <div className="flex items-center gap-3">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--danger-dim)] text-[var(--danger)]">
-          <XCircle className="size-3.5" aria-hidden="true" />
-        </span>
-        {/* Beside the message, the action left too little room and the short
-            balance message wrapped. With the action on its own row, the
-            message fits one line at the 480px panel minimum; narrower panes
-            truncate it and the title keeps the full text. */}
-        <p
-          className={cn(
-            "min-w-0 flex-1 text-xs leading-[1.45] text-foreground/85",
-            action ? "truncate" : "max-h-32 overflow-y-auto break-words text-pretty",
-          )}
-          dir="auto"
-          title={action && typeof message === "string" ? message : undefined}
-        >
-          {message}
-        </p>
-        {onRetry && retryInSeconds != null && (
-          <RetryCountdownButton seconds={retryInSeconds} onRetry={onRetry} />
+      <XCircle className="size-3.5 shrink-0 text-[var(--danger)]" aria-hidden="true" />
+      {/* An action keeps the message on one line; narrow panes truncate it and
+          the title keeps the full text. */}
+      <p
+        className={cn(
+          "min-w-0 flex-1 text-xs leading-[1.45] text-foreground/85",
+          action ? "truncate" : "max-h-32 overflow-y-auto break-words text-pretty",
         )}
-        {onRetry && retryLabel && retryInSeconds == null && (
-          <RetryIconButton
-            label={retryLabel}
-            onClick={onRetry}
-            className="size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
-          />
-        )}
-      </div>
-      {action && <div className="mt-2 ps-10">{action}</div>}
+        dir="auto"
+        title={action && typeof message === "string" ? message : undefined}
+      >
+        {message}
+      </p>
+      {onRetry && retryInSeconds != null && (
+        <RetryCountdownButton seconds={retryInSeconds} onRetry={onRetry} />
+      )}
+      {onRetry && retryLabel && retryInSeconds == null && (
+        <RetryIconButton
+          label={retryLabel}
+          onClick={onRetry}
+          className="size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
+        />
+      )}
+      {action}
     </div>
   );
 }

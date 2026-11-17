@@ -46,7 +46,17 @@ const {
 
 after(() => dom.window.close());
 
-void test("a read file attaches at once, with no role picker and no confirm button", async () => {
+/** Pick a file through the card's hidden file input, as the OS picker does. */
+async function pickFile(container: HTMLElement, file: File): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+  assert.ok(input, "the card has a file input");
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+  await React.act(async () => {
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+}
+
+void test("a picked file attaches at once, and the card then shows nothing", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -56,8 +66,9 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard initialFile={file} onConfirm={(d) => attached.push(d)} />),
+    root.render(<DatasetUploadCard onConfirm={(d) => attached.push(d)} />),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 20 && attached.length === 0; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
@@ -68,10 +79,8 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   assert.equal(dataset?.rowCount, 2);
   assert.deepEqual(dataset?.columns, ["question", "answer"]);
   assert.equal("columnRoles" in (dataset ?? {}), false, "the upload carries no column roles");
-  const text = container.textContent ?? "";
-  assert.match(text, /File attached/);
-  assert.doesNotMatch(text, /Confirm columns|Choose a role/);
-  assert.equal(container.querySelectorAll("button").length, 0, "no role or confirm controls");
+  // The file card in the user's message shows the upload, so the tool card goes away (SKY-783).
+  assert.equal(container.innerHTML, "", "no File attached card stays in the chat");
 
   await React.act(async () => root.unmount());
   container.remove();
@@ -85,8 +94,9 @@ void test("the card hands back the picked file, so the chat can keep its origina
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard initialFile={file} onConfirm={(_, f) => picked.push(f)} />),
+    root.render(<DatasetUploadCard onConfirm={(_, f) => picked.push(f)} />),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 20 && picked.length === 0; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
@@ -98,7 +108,7 @@ void test("the card hands back the picked file, so the chat can keep its origina
   container.remove();
 });
 
-void test("a Strict Mode remount attaches once, and a closed card attaches nothing", async () => {
+void test("a Strict Mode card attaches once, and a closed card attaches nothing", async () => {
   const csv = "question,answer\nWhat is 2+2?,4\n";
   const settle = async () => {
     for (let i = 0; i < 10; i += 1) {
@@ -113,19 +123,13 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
   await React.act(async () =>
     strictRoot.render(
       <React.StrictMode>
-        <DatasetUploadCard
-          initialFile={new File([csv], "qa.csv", { type: "text/csv" })}
-          onConfirm={(d) => strictAttached.push(d)}
-        />
+        <DatasetUploadCard onConfirm={(d) => strictAttached.push(d)} />
       </React.StrictMode>,
     ),
   );
+  await pickFile(strictContainer, new File([csv], "qa.csv", { type: "text/csv" }));
   await settle();
-  assert.equal(
-    strictAttached.length,
-    1,
-    "Strict Mode runs the read effect twice but attaches once",
-  );
+  assert.equal(strictAttached.length, 1, "Strict Mode runs effects twice but the card attaches once");
   await React.act(async () => strictRoot.unmount());
   strictContainer.remove();
 
@@ -143,10 +147,16 @@ void test("a Strict Mode remount attaches once, and a closed card attaches nothi
     }).then(readText);
   await React.act(async () =>
     closedRoot.render(
-      <DatasetUploadCard initialFile={slowFile} onConfirm={(d) => closedAttached.push(d)} />,
+      <DatasetUploadCard onConfirm={(d) => closedAttached.push(d)} />,
     ),
   );
-  assert.match(closedContainer.textContent ?? "", /Reading the file/, "the read is under way");
+  await pickFile(closedContainer, slowFile);
+  // The drop zone's exit animation can still show; a disabled input means the read is under way.
+  assert.equal(
+    closedContainer.querySelector<HTMLInputElement>('input[type="file"]')?.disabled,
+    true,
+    "the read is under way",
+  );
   await React.act(async () => closedRoot.unmount());
   finishRead();
   await settle();
@@ -300,15 +310,16 @@ void test("a disabled card attaches nothing", async () => {
 
   await React.act(async () =>
     root.render(
-      <DatasetUploadCard disabled initialFile={file} onConfirm={(d) => attached.push(d)} />,
+      <DatasetUploadCard disabled onConfirm={(d) => attached.push(d)} />,
     ),
   );
+  await pickFile(container, file);
   for (let i = 0; i < 10; i += 1) {
     await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
   }
 
   assert.equal(attached.length, 0);
-  assert.doesNotMatch(container.textContent ?? "", /File attached/);
+  assert.notEqual(container.innerHTML, "", "a disabled card keeps its drop zone");
   await React.act(async () => root.unmount());
   container.remove();
 });
