@@ -351,6 +351,27 @@ def test_an_old_gnu_sparse_member_is_a_bad_archive(trees: TreeStore) -> None:
         tar_to_tree(trees, RUN, _archive((_info("f", tarfile.GNUTYPE_SPARSE), b""), format=tarfile.GNU_FORMAT))
 
 
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("_proc_sparse", (None,)),
+        ("_proc_gnusparse_00", (None, {}, b"")),  # Python 3.11: (next, pax_headers, buf)
+        ("_proc_gnusparse_00", (None, {})),  # Python 3.12+: (next, raw_headers)
+        ("_proc_gnusparse_01", (None, {})),
+        ("_proc_gnusparse_10", (None, {}, None)),
+    ],
+)
+def test_the_sparse_overrides_refuse_on_every_python_signature(method: str, args: tuple[object, ...]) -> None:
+    """Each sparse override raises BadArchiveError for the 3.11 and the 3.12+ argument counts.
+
+    Args:
+        method: The overridden tarfile method.
+        args: The positional arguments that tarfile passes on one Python version.
+    """
+    with pytest.raises(BadArchiveError, match="sparse"):
+        getattr(tree_helpers._NoSparseTarInfo("f"), method)(*args)
+
+
 def test_a_long_chain_of_pax_headers_is_a_bad_archive(trees: TreeStore) -> None:
     """tarfile recurses once per pax header, so a long chain is refused as a bad archive, not a RecursionError."""
     one = tarfile.TarInfo("x")

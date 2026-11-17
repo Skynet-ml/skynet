@@ -178,51 +178,51 @@ class _NoSparseTarInfo(tarfile.TarInfo):
     tarfile reads the map inside ``next()``, before the caller sees the member,
     and the map has no size limit. A box's ``tar -czf`` without ``-S`` never
     writes a sparse member.
+
+    The sparse overrides take ``*args`` because these private signatures change
+    between Python versions: ``_proc_gnusparse_00`` takes
+    ``(next, pax_headers, buf)`` on 3.11 and ``(next, raw_headers)`` on 3.12+.
+    A fixed signature would raise TypeError instead of BadArchiveError.
     """
 
-    def _proc_sparse(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+    def _proc_sparse(self, *args: object) -> tarfile.TarInfo:
         """Refuse an old GNU sparse member before its extended headers are read.
 
         Args:
-            archive: Not read.
+            *args: Not used.
 
         Raises:
             BadArchiveError: Always.
         """
         raise BadArchiveError("The archive has a sparse member.")
 
-    def _proc_gnusparse_00(self, next: tarfile.TarInfo, pax_headers: dict[str, str], buf: bytes) -> None:
+    def _proc_gnusparse_00(self, *args: object) -> None:
         """Refuse a GNU sparse 0.0 member before its map is built.
 
         Args:
-            next: Not used.
-            pax_headers: Not used.
-            buf: Not used.
+            *args: Not used.
 
         Raises:
             BadArchiveError: Always.
         """
         raise BadArchiveError("The archive has a sparse member.")
 
-    def _proc_gnusparse_01(self, next: tarfile.TarInfo, pax_headers: dict[str, str]) -> None:
+    def _proc_gnusparse_01(self, *args: object) -> None:
         """Refuse a GNU sparse 0.1 member before its map is built.
 
         Args:
-            next: Not used.
-            pax_headers: Not used.
+            *args: Not used.
 
         Raises:
             BadArchiveError: Always.
         """
         raise BadArchiveError("The archive has a sparse member.")
 
-    def _proc_gnusparse_10(self, next: tarfile.TarInfo, pax_headers: dict[str, str], archive: tarfile.TarFile) -> None:
+    def _proc_gnusparse_10(self, *args: object) -> None:
         """Refuse a GNU sparse 1.0 member before its map is read.
 
         Args:
-            next: Not used.
-            pax_headers: Not used.
-            archive: Not read.
+            *args: Not used.
 
         Raises:
             BadArchiveError: Always.
