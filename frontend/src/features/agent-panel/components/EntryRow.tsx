@@ -53,7 +53,8 @@ export function EntryRow({
   const labelBase = cn("text-[0.6875rem]/[1.55]", labelFont, labelClassName);
   const valueClasses = "text-foreground/90 text-[0.6875rem]/[1.55]";
 
-  if (CODE_KEYS.has(argKey) && typeof value === "string" && value.length > 0) {
+  // Multi-line text reads as a file body even when its key is not a code key (SKY-799).
+  if (typeof value === "string" && value.length > 0 && (CODE_KEYS.has(argKey) || value.includes("\n"))) {
     return (
       <div className="min-w-0">
         <dt className={cn("mb-1", labelBase)} dir={labelDir}>

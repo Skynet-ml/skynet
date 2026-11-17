@@ -3,54 +3,107 @@
 import * as React from "react";
 
 import { msg } from "@/shared/lib/messages";
+import { cn } from "@/shared/lib/utils";
 import { CircleNotch, Shield } from "@/shared/ui/icons";
 
+import { ApprovalShell, SEVERITY_STYLES } from "./ApprovalShell";
 import { getToolMeta } from "../lib/tool-meta";
 import type { PendingApprovalPayload } from "../lib/types";
 
 interface AutoReviewDeniedRowProps {
   payload: PendingApprovalPayload;
   onResolve: (approved: boolean) => void | Promise<void>;
+  className?: string;
 }
 
-const action =
-  "h-6 shrink-0 cursor-pointer rounded-md px-2 text-[0.75rem] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:opacity-60";
+const STYLES = { ...SEVERITY_STYLES.info, iconBg: "bg-destructive/10", iconText: "text-destructive" };
 
 /**
- * The quiet row for a call the auto-review stopped (SKY-706), after Codex:
- * "Auto-review denied", the action and a fixed reason (decision models give no
- * free-text reason). "Approve anyway" runs the call through the normal confirm;
- * "Keep denied" tells the agent it did not run.
+ * The card for a call the auto-review stopped (SKY-706, SKY-799). It uses the
+ * approval card's frame. Key 1 keeps the call denied and tells the agent it did
+ * not run; key 2 approves it anyway through the normal confirm.
+ *
+ * Args:
+ *   payload: The pending call.
+ *   onResolve: Called with the answer.
+ *   className: Extra classes for the frame.
+ *
+ * Returns:
+ *   The card element.
  */
-export function AutoReviewDeniedRow({ payload, onResolve }: AutoReviewDeniedRowProps) {
-  const [busy, setBusy] = React.useState<"approve" | "deny" | null>(null);
+export function AutoReviewDeniedRow({ payload, onResolve, className }: AutoReviewDeniedRowProps) {
+  const [busy, setBusy] = React.useState<boolean | null>(null);
+  const [focus, setFocus] = React.useState(0);
+  const rows = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const options = [
+    { approved: false, label: msg("agent.approval.keep_denied") },
+    { approved: true, label: msg("agent.approval.approve_anyway") },
+  ];
   const handle = async (approved: boolean) => {
-    if (busy) return;
-    setBusy(approved ? "approve" : "deny");
+    if (busy !== null) return;
+    setBusy(approved);
     try {
       await onResolve(approved);
     } finally {
       setBusy(null);
     }
   };
-  const spinner = <CircleNotch className="size-3 animate-spin motion-reduce:animate-none" aria-hidden="true" />;
+  const onKey = (e: React.KeyboardEvent) => {
+    if (busy !== null) return;
+    const n = Number(e.key);
+    if (n === 1 || n === 2) {
+      e.preventDefault();
+      void handle(options[n - 1]!.approved);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = 1 - focus;
+      setFocus(next);
+      rows.current[next]?.focus();
+    }
+  };
 
   return (
-    <div role="group" aria-label={msg("agent.approval.auto_review_denied")} className="py-1 text-[0.8125rem] text-muted-foreground">
-      <div className="flex w-full min-w-0 items-center gap-2">
-        <Shield className="size-3.5 shrink-0 text-destructive" aria-hidden="true" />
-        <span className="shrink-0">{msg("agent.approval.auto_review_denied")}</span>
-        <span className="min-w-0 truncate text-foreground/70">{getToolMeta(payload.tool).title}</span>
-        <span className="ms-auto flex shrink-0 items-center gap-1">
-          <button type="button" className={action} disabled={busy !== null} onClick={() => handle(false)}>
-            {busy === "deny" ? spinner : msg("agent.approval.keep_denied")}
+    <ApprovalShell
+      icon={Shield}
+      title={`${msg("agent.approval.auto_review_denied")}: ${getToolMeta(payload.tool).title}`}
+      entries={Object.entries(payload.arguments ?? {})}
+      styles={STYLES}
+      className={className}
+    >
+      <div
+        role="group"
+        aria-label={msg("agent.approval.auto_review_denied")}
+        onKeyDown={onKey}
+        className="flex flex-col gap-0.5"
+      >
+        {options.map((option, i) => (
+          <button
+            key={option.label}
+            ref={(el) => {
+              rows.current[i] = el;
+            }}
+            type="button"
+            disabled={busy !== null}
+            onFocus={() => setFocus(i)}
+            onClick={() => void handle(option.approved)}
+            className={cn(
+              "flex h-8 cursor-pointer items-center gap-2.5 rounded px-2 text-start text-[0.8125rem] outline-none transition-colors disabled:cursor-default disabled:opacity-60",
+              focus === i ? "bg-accent text-foreground" : "text-foreground/85 hover:bg-accent/60",
+            )}
+          >
+            <kbd className="flex size-5 shrink-0 items-center justify-center rounded border border-border font-sans text-[0.6875rem] tabular-nums text-muted-foreground">
+              {i + 1}
+            </kbd>
+            <span className="min-w-0 truncate">
+              {busy === option.approved ? (
+                <CircleNotch className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              ) : (
+                option.label
+              )}
+            </span>
           </button>
-          <button type="button" className={action} disabled={busy !== null} onClick={() => handle(true)}>
-            {busy === "approve" ? spinner : msg("agent.approval.approve_anyway")}
-          </button>
-        </span>
+        ))}
       </div>
-      <p className="ps-5.5 pt-0.5 text-[0.75rem]">{msg("agent.approval.auto_review_mismatch")}</p>
-    </div>
+    </ApprovalShell>
   );
 }
