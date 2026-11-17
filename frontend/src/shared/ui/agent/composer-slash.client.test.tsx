@@ -886,17 +886,16 @@ void test("Enter on a labels-only command with no matching label runs nothing", 
 });
 
 void test("the composer's image tile opens one viewer that pages to the draft PDF's original (SKY-736)", async () => {
-  const draft = joinPastes({
-    text: "",
-    pastes: [],
-    files: [attachedFile("scan.pdf", "Page 1\nHello")],
-  });
+  const scan = attachedFile("scan.pdf", "Page 1\nHello");
+  const draft = joinPastes({ text: "", pastes: [], files: [scan] });
   const composer = await mount(draft, false, undefined, undefined, {
     media: {
       items: [{ id: "m-1", name: "photo.png", kind: "image", url: "https://example.test/1.png" }],
       onRemove: () => {},
     },
-    originals: [{ id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan" }],
+    originals: [
+      { id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan", card: scan.id },
+    ],
   });
   const open = document.querySelector<HTMLElement>('button[aria-label="Open photo.png"]');
   assert.ok(open, "the image tile");

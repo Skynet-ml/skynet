@@ -4,14 +4,13 @@
  * short note when it cannot), so the composer never filters by extension.
  */
 
-import type { AttachedFile } from "./pasted-text.ts";
-
 /** Matches the backend's MAX_ATTACHMENT_BYTES; larger files are not uploaded. */
 export const MAX_ATTACHMENT_MB = 20;
 const MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
 
 export interface ReadAttachments {
-  attached: AttachedFile[];
+  /** Each read file's name and text, and the picked file itself for its original. */
+  attached: Array<{ name: string; text: string; file: File }>;
   failed: string[];
   tooLarge: string[];
 }
@@ -51,7 +50,7 @@ export async function readAttachments(
       continue;
     }
     try {
-      result.attached.push({ name: file.name, text: await extract(file) });
+      result.attached.push({ name: file.name, text: await extract(file), file });
     } catch {
       result.failed.push(file.name);
     }

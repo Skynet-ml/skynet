@@ -9,9 +9,9 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 
-import { attachedFile, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
+import { attachedFile, type AttachedFile } from "@/shared/ui/agent/pasted-text";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
-import { draftHasChip, putDatasetChip, sameFile } from "../lib/dataset-chip";
+import { draftHasChip, putDatasetChip } from "../lib/dataset-chip";
 import type { WizardState } from "../lib/types";
 import type { ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 
@@ -216,11 +216,10 @@ function libraryPickNote(picked: ConfirmedLibraryDataset): string {
  *   wizard: The shared wizard context, or null when no wizard is mounted.
  *   onRelease: Gets the owner of a dataset whose card left the draft unsent
  *     (removed, or replaced by another dataset), so its tool card can reopen.
- *   onLeave: Gets the draft's files and the indexes of the ones a new card
- *     takes out, so their stored originals can go too.
  *
  * Returns:
- *   ``attach`` and ``attachLibrary`` put a card in the draft. ``holds``
+ *   ``attach`` and ``attachLibrary`` put a card in the draft; ``attach``
+ *   returns the card's id, which links its stored original. ``holds``
  *   tells if a draft has the pending card. ``staging``
  *   tells if Send must wait for the rows. ``take`` applies the dataset of a
  *   draft on Send and returns its turn override, or null for no dataset.
@@ -231,16 +230,14 @@ export function useDatasetDraft({
   stage,
   wizard,
   onRelease,
-  onLeave,
 }: {
   draft: string;
   setDraft: (update: (draft: string) => string) => void;
   stage: (dataset: ConfirmedDataset) => Promise<string | undefined>;
   wizard: DatasetUploadWizard | null;
   onRelease?: (owner: string) => void;
-  onLeave?: (files: readonly AttachedFile[], leaving: ReadonlySet<number>) => void;
 }): {
-  attach: (dataset: ConfirmedDataset, owner?: string) => void;
+  attach: (dataset: ConfirmedDataset, owner?: string) => string;
   attachLibrary: (picked: ConfirmedLibraryDataset, owner?: string) => void;
   holds: (draft: string) => boolean;
   staging: (draft: string) => boolean;
@@ -259,30 +256,14 @@ export function useDatasetDraft({
     onReleaseRef.current = onRelease;
   }, [onRelease]);
 
-  const onLeaveRef = React.useRef(onLeave);
-  React.useEffect(() => {
-    onLeaveRef.current = onLeave;
-  }, [onLeave]);
-
   const putCard = React.useCallback(
     (next: DraftDataset) => {
       const earlier = pendingRef.current;
-      // The cards putDatasetChip takes out: the earlier card and each same
-      // card, such as one a fork restored. This draft is the last render's;
-      // dropPaired changes only the leaving cards' keys, so a file added
-      // since then keeps its original.
-      const files = splitPastes(draft).files;
-      const leaving = new Set(
-        files.flatMap((f, i) =>
-          sameFile(f, next.chip) || (earlier && sameFile(f, earlier.chip)) ? [i] : [],
-        ),
-      );
-      if (leaving.size) onLeaveRef.current?.(files, leaving);
       update(next);
       setDraft((draft) => putDatasetChip(draft, next.chip, earlier?.chip ?? null));
       if (earlier?.owner) onReleaseRef.current?.(earlier.owner);
     },
-    [draft, setDraft, update],
+    [setDraft, update],
   );
 
   // A card the user removed from the draft drops its dataset.
@@ -295,9 +276,10 @@ export function useDatasetDraft({
 
   const attach = React.useCallback(
     (dataset: ConfirmedDataset, owner?: string) => {
+      const chip = attachedFile(dataset.fileName, datasetAttachedNote(dataset));
       const next: DraftDataset = {
         kind: "upload",
-        chip: attachedFile(dataset.fileName, datasetAttachedNote(dataset)),
+        chip,
         owner,
         dataset,
         staging: true,
@@ -310,6 +292,7 @@ export function useDatasetDraft({
         .then((stagedId) => {
           if (pendingRef.current === next) update({ ...next, staging: false, stagedId });
         });
+      return chip.id;
     },
     [putCard, stage, update],
   );

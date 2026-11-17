@@ -53,6 +53,8 @@ export interface GeneralistAgentRequest {
   chat_allowed_tools?: string[];
   /** Ids of the stored images, video and audio sent with this message. */
   media_ids?: string[];
+  /** For each sent document original, the id of its file card (SKY-782). */
+  media_cards?: Record<string, string>;
 }
 
 interface ConversationMetaPayload {

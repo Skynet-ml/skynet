@@ -406,25 +406,17 @@ def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
     assert (body["name"], body["mime_type"]) == ("notes.pdf%22", "application/octet-stream")
 
 
-@pytest.mark.parametrize("name", ["a" * 300 + ".pdf", "a" * 300 + ".csv"])
-def test_an_original_whose_cut_name_changes_its_key_is_refused(harness: SimpleNamespace, name: str) -> None:
-    """History names an original by its stored name, so a cut name would pair with no file after a reload."""
-    assert _upload_original(harness.client, _PDF, name).status_code == 422
-    with Session(harness.store.engine) as session:
-        assert session.scalars(select(ChatMediaModel)).all() == []
-    body = _upload_original(harness.client, _PDF, "a" * 251 + ".pdf").json()
-    assert body["name"] == "a" * 251 + ".pdf"
+def test_an_original_with_a_long_name_keeps_the_type_of_its_full_name(harness: SimpleNamespace) -> None:
+    """The draft card links its original by id, so a cut stored name still gets the full name's type."""
+    body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
+    assert len(body["name"]) == 255
     assert body["mime_type"] == "application/pdf"
 
 
-def test_the_stored_name_trims_only_what_the_viewer_trims(harness: SimpleNamespace) -> None:
-    """U+0085 is not JavaScript whitespace, so the stored name keeps it and the viewer does not draw a PDF."""
-    body = _upload_original(harness.client, _PDF, "a.pdf\u0085").json()
-    assert body["name"] == "a.pdf\u0085"
-    assert body["mime_type"] == "application/octet-stream"
-    body = _upload_original(harness.client, _PDF, "\ufeffb.pdf\u3000").json()
-    assert body["name"] == "b.pdf"
-    assert body["mime_type"] == "application/pdf"
+def test_the_type_trims_only_what_the_viewer_trims(harness: SimpleNamespace) -> None:
+    """U+0085 is not JavaScript whitespace, so the viewer does not draw "a.pdf\u0085" as a PDF."""
+    assert _upload_original(harness.client, _PDF, "a.pdf\u0085").json()["mime_type"] == "application/octet-stream"
+    assert _upload_original(harness.client, _PDF, "\ufeffb.pdf\u3000").json()["mime_type"] == "application/pdf"
 
 
 @pytest.mark.parametrize(

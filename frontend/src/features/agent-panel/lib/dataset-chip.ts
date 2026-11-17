@@ -5,8 +5,7 @@
 
 import { joinPastes, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
 
-/** Whether two file cards are the same card: the same name and text. */
-export function sameFile(a: AttachedFile, b: AttachedFile): boolean {
+function sameFile(a: AttachedFile, b: AttachedFile): boolean {
   return a.name === b.name && a.text === b.text;
 }
 

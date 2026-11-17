@@ -41,6 +41,8 @@ export interface MediaAttachment {
   url: string;
   /** The upload failed, or the stored file could not be fetched. */
   status?: "failed";
+  /** For a document original: the id of the file card it belongs to (SKY-782). */
+  card?: string;
 }
 
 /** An attached file the viewer shows as a readable page: code, a table, Markdown or text. */

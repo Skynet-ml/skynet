@@ -365,7 +365,6 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
   const root = createRoot(container);
   const calls: Array<[string, string, unknown?]> = [];
   const released: string[] = [];
-  const left: Array<{ names: string[]; leaving: number[] }> = [];
   const wizard = {
     setField: (key: string, value: unknown) => calls.push(["set", key, value]),
     clearField: (key: string) => calls.push(["clear", key]),
@@ -385,8 +384,6 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
       stage,
       wizard,
       onRelease: (owner) => released.push(owner),
-      onLeave: (files, leaving) =>
-        left.push({ names: files.map((f) => f.name), leaving: [...leaving].sort() }),
     });
     return null;
   }
@@ -395,7 +392,7 @@ async function mountDatasetDraft(stage: () => Promise<string | undefined>) {
     await React.act(async () => root.unmount());
     container.remove();
   };
-  return { live, calls, released, left, unmount };
+  return { live, calls, released, unmount };
 }
 
 const QA_DATASET: ConfirmedDataset = {
@@ -413,7 +410,7 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   await React.act(async () => live.api.attach(QA_DATASET));
   assert.match(
     live.draft,
-    /^my text\n\n<attached_file name="qa.csv">\nDataset `qa.csv` attached \(1 rows\)/,
+    /^my text\n\n<attached_file name="qa.csv" id="[0-9a-f-]{36}">\nDataset `qa.csv` attached \(1 rows\)/,
   );
   assert.equal(calls.length, 0, "the wizard changes only on Send");
   assert.ok(!live.api.staging(live.draft), "staging ended");
@@ -433,35 +430,20 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
 
 const PASTED = '<attached_file name="qa.csv">\nmy own notes\n</attached_file>';
 
-void test("onLeave gets the places of the cards a new card takes out", async () => {
-  const { live, left, unmount } = await mountDatasetDraft(async () => "staged-l");
+void test("attach gives the new card a fixed id, and a new card takes out only the pending one (SKY-782)", async () => {
+  const { live, unmount } = await mountDatasetDraft(async () => "staged-l");
   await React.act(async () => live.setDraft(`my text\n\n${PASTED}`));
-  await React.act(async () => live.api.attach(QA_DATASET));
-  assert.deepEqual(left, [], "a file with the same name and other text stays");
-  // A fork restores the same card before the pending one: both leave.
-  const card = live.draft.slice(live.draft.indexOf("\n\n", "my text".length + 2) + 2);
-  await React.act(async () => live.setDraft(`my text\n\n${card}\n\n${PASTED}\n\n${card}`));
-  await React.act(async () => live.api.attach({ ...QA_DATASET, rowCount: 2 }));
-  assert.deepEqual(left, [{ names: ["qa.csv", "qa.csv", "qa.csv"], leaving: [0, 2] }]);
-  await unmount();
-});
-
-void test("onLeave gets the earlier card a library pick takes out, and nothing after Send", async () => {
-  const { live, left, unmount } = await mountDatasetDraft(async () => "staged-s");
-  await React.act(async () => live.api.attach(QA_DATASET));
-  const pick = {
-    sourceDatasetId: "lib-1",
-    name: "Saved QA",
-    rowCount: 5,
-    columns: ["q", "a"],
-    columnRoles: { q: "input", a: "output" },
-  } as never;
-  await React.act(async () => live.api.attachLibrary(pick));
-  assert.deepEqual(left, [{ names: ["qa.csv"], leaving: [0] }]);
-  live.api.take(live.draft);
-  await React.act(async () => live.setDraft("my text"));
-  await React.act(async () => live.api.attach(QA_DATASET));
-  assert.deepEqual(left.length, 1, "an empty draft has no card to take out");
+  let first = "";
+  await React.act(async () => void (first = live.api.attach(QA_DATASET)));
+  assert.match(first, /^[0-9a-f-]{36}$/);
+  assert.ok(live.draft.includes(`id="${first}"`), "the card carries its id");
+  assert.ok(live.draft.includes(PASTED), "a file with the same name and other text stays");
+  let second = "";
+  await React.act(async () => void (second = live.api.attach({ ...QA_DATASET, rowCount: 2 })));
+  assert.notEqual(second, first);
+  assert.ok(!live.draft.includes(first), "the earlier pending card left");
+  assert.ok(live.draft.includes(`id="${second}"`));
+  assert.ok(live.draft.includes(PASTED));
   await unmount();
 });
 
@@ -499,7 +481,7 @@ void test("a library pick waits in the draft and applies its override on Send", 
       columnRoles: { q: "input", a: "output" },
     } as never),
   );
-  assert.match(live.draft, /<attached_file name="Saved QA">/);
+  assert.match(live.draft, /<attached_file name="Saved QA" id="[0-9a-f-]{36}">/);
   assert.equal(calls.length, 0);
   const taken = live.api.take(live.draft);
   assert.deepEqual(taken?.override, {

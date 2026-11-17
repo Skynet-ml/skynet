@@ -226,8 +226,7 @@ def _draw_key(raw: str | None) -> str:
     """
     # The same key as the viewer's ``nameKey``. The composer's block changes
     # ``"<>`` to ``_``, so the raw name, the block's name and the stored name
-    # all give one answer. The upload refuses an original whose stored name
-    # has another key, so a reload pairs each original with its file.
+    # all give one answer.
     name = unicodedata.normalize("NFC", re.split(r"[\\/]", raw or "")[-1])
     return _KEY_DROPPED.sub("", name).strip(_JS_TRIMMED)
 
@@ -285,7 +284,7 @@ def _safe_filename(raw: str | None) -> str:
         A filename of at most 255 characters; ``file`` when nothing is left.
     """
     name = unicodedata.normalize("NFC", (raw or "").replace("\\", "/").rsplit("/", 1)[-1])
-    name = _UNSAFE_FILENAME.sub("", name).strip(_JS_TRIMMED)
+    name = _UNSAFE_FILENAME.sub("", name).strip()
     return name[:255] or "file"
 
 
@@ -529,8 +528,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         Raises:
             HTTPException: 415 for a type that is not allowed or a document
                 whose name has another type's extension, 413 for a file over
-                its kind's limit, 422 for an original whose stored name has
-                another name key than the name it came with.
+                its kind's limit.
             DomainError: 429 over the hourly cap (file text reads share it,
                 and document originals have their own), 409 over the storage
                 quota.
@@ -560,11 +558,6 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         raw_name = file.filename if name is None else name
         filename = _safe_filename(raw_name)
         if original:
-            # History names an original by its stored name and the draft's block
-            # by the full name. A cut name has another key, so the original
-            # would pair with no file after a reload.
-            if _draw_key(filename) != _draw_key(raw_name):
-                raise HTTPException(status_code=422, detail="This file name is not supported.")
             sniffed = SniffedMedia("document", _original_type(head, data, raw_name))
         elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)

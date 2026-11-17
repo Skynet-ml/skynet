@@ -1153,6 +1153,9 @@ def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
     only_file = '<attached_file name="report.pdf">\nPage 1\nQuarterly revenue\n</attached_file>'
     assert agent_mod._derive_title(only_file) == "report.pdf"
     assert agent_mod._derive_title("<pasted_text>\nlong paste\n</pasted_text>") == ""
+    with_id = '<attached_file name="report.pdf" id="c-1">\nPage 1\n</attached_file>'
+    assert agent_mod._derive_title(with_id) == "report.pdf"
+    assert agent_mod._derive_title("Read it " + with_id) == "Read it"
 
 
 def test_title_skips_the_setup_wizard_hidden_turns() -> None:
@@ -1395,10 +1398,10 @@ def _add_media(engine: Engine, media_id: str, kind: str, owner: str = "alice@exa
     Args:
         engine: The SQLite engine.
         media_id: The row id.
-        kind: ``image``, ``video`` or ``audio``.
+        kind: ``image``, ``video``, ``audio`` or ``document``.
         owner: The username that owns the row.
     """
-    mime = {"image": "image/png", "video": "video/mp4", "audio": "audio/mpeg"}[kind]
+    mime = {"image": "image/png", "video": "video/mp4", "audio": "audio/mpeg", "document": "application/pdf"}[kind]
     with Session(engine) as session:
         session.add(
             ChatMediaModel(
@@ -1530,6 +1533,57 @@ def test_stored_turn_names_its_media_and_moves_it_to_the_chat(
         ]
         owners = {row.id: row.conversation_id for row in session.query(ChatMediaModel)}
     assert owners == {"img-1": turn.conversation_id, "vid-1": turn.conversation_id}
+
+
+def test_stored_turn_links_each_document_original_to_its_file_block(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document original keeps its file block's id as ``card``; other media gets none."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "doc-1", "document")
+    _add_media(engine, "doc-2", "document")
+    _add_media(engine, "img-1", "image")
+
+    resp, _ = _media_turn(
+        client,
+        monkeypatch,
+        ["doc-1", "doc-2", "img-1"],
+        vision=True,
+        persist=True,
+        media_cards={"doc-1": "card-a", "img-1": "card-x"},
+    )
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        turn = session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").one()
+        assert turn.router_metadata["media"] == [
+            {"id": "doc-1", "name": "doc-1.bin", "kind": "document", "card": "card-a"},
+            {"id": "doc-2", "name": "doc-2.bin", "kind": "document"},
+            {"id": "img-1", "name": "img-1.bin", "kind": "image"},
+        ]
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [{"doc-2": "card-a"}, {"doc-1": "bad card"}, {"doc-1": ""}, {"doc-1": "a" * 65}, {"doc-1": '"><x'}],
+)
+def test_turn_refuses_a_bad_media_card_link(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    cards: dict[str, str],
+) -> None:
+    """A card link for a file the turn does not send, or a card id that is not plain, is a 422."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "doc-1", "document")
+
+    resp, _ = _media_turn(client, monkeypatch, ["doc-1"], vision=True, persist=True, media_cards=cards)
+
+    assert resp.status_code == 422
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
 
 
 @pytest.mark.parametrize("text", ["", "same"])
