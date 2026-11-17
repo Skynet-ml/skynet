@@ -49,6 +49,10 @@ void describe("WizardStepper", () => {
       done.match(/<svg.*<\/svg>/s)?.[0],
       renderToStaticMarkup(<Lightbulb className="size-5" weight="fill" aria-hidden />),
     );
+    assert.equal(
+      active.match(/<svg.*<\/svg>/s)?.[0],
+      renderToStaticMarkup(<Database className="size-5" weight="regular" aria-hidden />),
+    );
   });
 
   void it("shows numbers and a check mark for steps without an icon", () => {

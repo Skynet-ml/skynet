@@ -81,9 +81,10 @@ export function WizardStepper({
                 )}
               >
                 {StepIcon ? (
+                  // The regular weight, filled once done, as the setup draft dialog draws them.
                   <StepIcon
                     className="size-5"
-                    weight={completed ? "fill" : undefined}
+                    weight={completed ? "fill" : "regular"}
                     aria-hidden
                   />
                 ) : completed ? (
