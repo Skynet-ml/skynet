@@ -595,6 +595,24 @@ void test("a dataset card wired as the panel wires it keeps one original, its ow
   await React.act(async () => root.unmount());
 });
 
+void test("dropPaired drops a key's originals when a failed upload left fewer than its files", async () => {
+  const { draft, unmount } = await mountDraft();
+  const before = deleted.length;
+  nextUpload = Promise.resolve(new Response(null, { status: 500 }));
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf")]));
+  await flush();
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf")]));
+  await flush();
+  const [second] = documents(draft().ready()).map((m) => m.id);
+  // The second card leaves; its original sits at place 0 now, not 1.
+  await React.act(async () =>
+    draft().dropPaired([{ name: "a.pdf" }, { name: "a.pdf" }], new Set([1])),
+  );
+  assert.deepEqual(documents(draft().ready()), []);
+  assert.deepEqual(deleted.slice(before), [second]);
+  await unmount();
+});
+
 /** Run ``body`` with URL.revokeObjectURL recording the URLs it frees. */
 async function recordingRevokes(body: (revoked: string[]) => Promise<void>) {
   const revoked: string[] = [];

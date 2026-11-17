@@ -264,30 +264,6 @@ export function useChatMedia(): ChatMediaDraft {
   );
   const addOriginals = React.useCallback((files: File[]) => keepFiles(files, false), [keepFiles]);
 
-  const dropPaired = React.useCallback(
-    (files: ReadonlyArray<{ name: string }>, leaving: ReadonlySet<number>) => {
-      for (const [key, places] of pairedPlaces(files, leaving)) {
-        // The restore's originals that still load come first in the key's pairs.
-        const loading = loadingRef.current.get(key) ?? [];
-        const loaded = originalsRef.current.filter((o) => nameKey(o.name) === key);
-        const late = new Set(places.filter((p) => p < loading.length).map((p) => loading[p]));
-        if (late.size)
-          loadingRef.current.set(
-            key,
-            loading.filter((p) => !late.has(p)),
-          );
-        const gone = places.flatMap((p) => loaded[p - loading.length] ?? []);
-        if (!gone.length) continue;
-        syncOriginals(originalsRef.current.filter((o) => !gone.includes(o)));
-        for (const o of gone) {
-          unshownRef.current.push(o.shown.url);
-          if (o.serverId) void deleteChatMedia(o.serverId);
-        }
-      }
-    },
-    [syncOriginals],
-  );
-
   const keepOriginals = React.useCallback(
     (files: ReadonlyArray<{ name: string }>) => {
       // An original a restore still loads counts as one the key holds. Else a
@@ -310,6 +286,34 @@ export function useChatMedia(): ChatMediaDraft {
       }
     },
     [syncOriginals],
+  );
+
+  const dropPaired = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>, leaving: ReadonlySet<number>) => {
+      // A failed upload leaves its key with fewer originals than files, so the
+      // places would not line up: such a key drops all its originals first.
+      keepOriginals(files);
+      for (const [key, places] of pairedPlaces(files, leaving)) {
+        // The restore's originals that still load come first in the key's pairs.
+        const loading = loadingRef.current.get(key) ?? [];
+        const loaded = originalsRef.current.filter((o) => nameKey(o.name) === key);
+        const late = new Set(places.filter((p) => p < loading.length).map((p) => loading[p]));
+        if (late.size) {
+          loadingRef.current.set(
+            key,
+            loading.filter((p) => !late.has(p)),
+          );
+        }
+        const gone = places.flatMap((p) => loaded[p - loading.length] ?? []);
+        if (!gone.length) continue;
+        syncOriginals(originalsRef.current.filter((o) => !gone.includes(o)));
+        for (const o of gone) {
+          unshownRef.current.push(o.shown.url);
+          if (o.serverId) void deleteChatMedia(o.serverId);
+        }
+      }
+    },
+    [keepOriginals, syncOriginals],
   );
 
   const remove = React.useCallback(

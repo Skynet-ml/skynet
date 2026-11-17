@@ -106,8 +106,9 @@ export function keptOriginals<T extends { name: string }>(
 
 /**
  * The originals that fit in ``room`` places of a message, the ones the viewer
- * draws first. A name's originals go together or not at all: half a group would leave its counts unequal, so
- * keptOriginals would drop the half that went too.
+ * draws first. A name's originals go together or not at all: half a group
+ * would leave its counts unequal, so keptOriginals would drop the half that
+ * went too.
  */
 export function fitOriginals<T extends { name: string }>(
   originals: readonly T[],

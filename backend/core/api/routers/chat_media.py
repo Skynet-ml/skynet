@@ -529,7 +529,8 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         Raises:
             HTTPException: 415 for a type that is not allowed or a document
                 whose name has another type's extension, 413 for a file over
-                its kind's limit.
+                its kind's limit, 422 for an original whose stored name has
+                another name key than the name it came with.
             DomainError: 429 over the hourly cap (file text reads share it,
                 and document originals have their own), 409 over the storage
                 quota.
@@ -563,7 +564,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             # by the full name. A cut name has another key, so the original
             # would pair with no file after a reload.
             if _draw_key(filename) != _draw_key(raw_name):
-                raise HTTPException(status_code=422, detail="This file name is too long.")
+                raise HTTPException(status_code=422, detail="This file name is not supported.")
             sniffed = SniffedMedia("document", _original_type(head, data, raw_name))
         elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)
