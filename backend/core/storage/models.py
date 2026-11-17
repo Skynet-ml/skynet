@@ -836,6 +836,7 @@ class ExecutionBudgetModel(Base):
     billed_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class ExecutionOperationModel(Base):
@@ -1300,6 +1301,7 @@ class JobModel(Base):
     conversation_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
@@ -1489,6 +1491,120 @@ class RunCandidateModel(Base):
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class WorkspaceModel(Base):
+    """A user's agent workspace: its policy, its budget and its storage format (SKY-710).
+
+    ``storage_version`` names the tree and pack format the workspace's data
+    uses, so a later format change can tell old data from new.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, nullable=False, default=dict)
+    execution_budget_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    storage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class StoragePackModel(Base):
+    """One pack object that one step log flush wrote to the object store (SKY-710).
+
+    The row commits in the same transaction as the pack's steps and tree
+    objects, so a pack without a row is a flush that crashed after its PUT;
+    recovery applies it.
+    """
+
+    __tablename__ = "storage_packs"
+
+    pack_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    worker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class AgentStepModel(Base):
+    """One agent step: a command with its output and new tree, or a model response (SKY-710).
+
+    ``step_id`` is ``<run_id>:<agent_id>:<seq>``, so a retried commit maps to
+    the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
+    ``run_id`` is the job id and the shard key. Rows go with their job via the
+    cascading foreign key.
+    """
+
+    __tablename__ = "agent_steps"
+    __table_args__ = (Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),)
+
+    # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
+    step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    grant_list_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tree_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pack_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    pack_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_length: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class TreeObjectModel(Base):
+    """One content-addressed tree or blob object that an account owns (SKY-710).
+
+    ``object_id`` is the SHA-256 of the stored bytes, so the same content has
+    one row for each account. ``byte_size`` counts toward the owner's storage
+    footprint. No job foreign key: a tree outlives its run. Nothing deletes
+    tree objects yet; the tree retention issue (SKY-733) adds deletion,
+    also on account deletion.
+    """
+
+    __tablename__ = "tree_objects"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    object_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    pack_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_length: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class AgentEffectModel(Base):
+    """One outside effect of a run, keyed by its effect key, so a retry does it only once (SKY-710)."""
+
+    __tablename__ = "agent_effects"
+
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), primary_key=True
+    )
+    effect_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    step_id: Mapped[str | None] = mapped_column(String(112), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(

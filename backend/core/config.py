@@ -751,6 +751,23 @@ class Settings(BaseSettings):
         ge=1,
         description="Per-file cap on compressed dataset bytes saved to a user's library",
     )
+    tree_bucket: str | None = Field(
+        default=None,
+        alias="SKYNET_TREE_BUCKET",
+        description="S3 bucket that holds the agent step log packs and tree objects",
+    )
+    step_log_flush_window_seconds: float = Field(
+        default=0.5,
+        gt=0,
+        alias="STEP_LOG_FLUSH_WINDOW_SECONDS",
+        description="Seconds a worker buffers agent steps before one pack write and one database commit",
+    )
+    step_log_flush_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=1,
+        alias="STEP_LOG_FLUSH_MAX_BYTES",
+        description="Buffered step log bytes that start a flush before the window ends",
+    )
     connector_import_max_rows: int = Field(
         default=20000,
         ge=1,
