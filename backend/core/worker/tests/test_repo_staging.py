@@ -3249,7 +3249,7 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
     )
     assert record["contract_sha256"] == hashlib.sha256(tree["optimize.toml"].encode()).hexdigest()
     assert record["metric_sha256"] == metric.hexdigest()
-    assert record["metric_home"] == "repository"
+    assert record["metric_source"] == "repository"
     assert record["cases_sha256"] == hashlib.sha256(_CASES_JSONL.encode()).hexdigest()
     assert record["cases_source"] == "file"
     assert record["seed"] == 7
@@ -3265,14 +3265,14 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
         assert secret_or_content not in text
 
 
-def test_a_draft_metric_file_makes_the_judge_the_metric_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A draft that replaces a [metric] file is held by Skynet, not by the pinned commit."""
+def test_a_draft_metric_file_makes_the_request_the_metric_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft that replaces a [metric] file comes from the run request, not from the pinned commit."""
     payload = _record_payload()
     payload["target"]["repo"]["draft_files"] = {"eval/scorer.py": "def score(): return 2\n"}
     _, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
     staged.cleanup()
 
-    assert staged.record_facts["metric_home"] == "judge"
+    assert staged.record_facts["metric_source"] == "request"
     metric = _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): return 2\n")
     assert staged.record_facts["metric_sha256"] == hashlib.sha256(metric).hexdigest()
 
@@ -3369,10 +3369,10 @@ def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch:
     assert all(isinstance(size, int) and 0 < size <= repo_staging._HASH_CHUNK for size in sizes)
 
 
-def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_judge(
+def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Request cases hash as sorted compact JSON; a file with no [metric] files has the judge as home."""
+    """Request cases hash as sorted compact JSON; a file with no [metric] files has the request as source."""
     cases = [{"input": "é", "expected": 1}, {"input": "b", "expected": 2}]
     staged_payload, staged = _stage_with(_FILES, monkeypatch, _record_payload(cases=cases))
     try:
@@ -3385,7 +3385,7 @@ def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_judge(
     canonical = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     assert record["cases_sha256"] == hashlib.sha256(canonical).hexdigest()
     assert record["cases_source"] == "request"
-    assert record["metric_home"] == "judge"
+    assert record["metric_source"] == "request"
     assert record["metric_sha256"] == hashlib.sha256(_framed("metric.py", _RECORD_METRIC.encode())).hexdigest()
     assert record["image"] is None
     assert record["contract_met"] is True
@@ -3462,9 +3462,14 @@ def _recorded(**verdict: Any) -> dict[str, Any]:
         The result.
     """
     record = {
+        "record_version": 1,
+        "base_commit": "c" * 40,
+        "change_sha256": "4" * 64,
+        "baseline_score": 0.1 + 0.2,
+        "final_score": 0.85,
         "contract_sha256": "1" * 64,
         "metric_sha256": "2" * 64,
-        "metric_home": "repository",
+        "metric_source": "repository",
         "cases_sha256": "3" * 64,
         "cases_source": "file",
         "seed": 7,
@@ -3486,11 +3491,103 @@ def test_the_pull_request_shows_the_record_for_a_run_that_met_the_contract() -> 
     assert "This run met the contract.\n\nRun record:\n" in body
     for digest in ("1" * 64, "2" * 64, "3" * 64):
         assert f"`{digest}`" in body
-    assert "(metric home: repository)" in body
+    assert "(metric source: repository)" in body
     assert "- Seed: 7" in body
     assert "- Split: `pairs`, seed 7: search [2, 0]; validation [1]; held_out [3]" in body
     assert f"- Sandbox image: `{_PINNED_IMAGE}`" in body
-    assert body.index("Run record:") < body.index("Review the run:")
+    assert "- Record version: 1" in body
+    assert f"- Base commit: `{'c' * 40}`" in body
+    assert f"- Change SHA-256: `{'4' * 64}`" in body
+    assert "- Baseline score: 0.30000000000000004" in body
+    assert "- Final score: 0.85" in body
+    assert body.index("Run record:") < body.index("Record as JSON") < body.index("Review the run:")
+
+
+def _json_block(body: str) -> Any:
+    """Parse the one JSON block of the pull request's collapsed record section.
+
+    Args:
+        body: The pull request text.
+
+    Returns:
+        The parsed JSON value.
+    """
+    assert body.count("```json\n") == 1
+    start = body.index("<summary>Record as JSON</summary>\n\n```json\n") + len(
+        "<summary>Record as JSON</summary>\n\n```json\n"
+    )
+    return json.loads(body[start : body.index("\n```\n", start)])
+
+
+def test_the_pull_request_json_block_parses_to_the_stored_record() -> None:
+    """The collapsed section holds the whole record, so a reviewer can read every key by machine (SKY-764)."""
+    result = _recorded(target_reached=True, contract_met=True)
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert _json_block(body) == result["details"]["record"]
+    assert "<details>\n<summary>Record as JSON</summary>" in body
+
+
+def test_a_backtick_in_a_guest_reason_keeps_the_json_block_whole() -> None:
+    """A failed minimum's reason comes from the guest, so a code fence in it cannot end the JSON block early."""
+    reason = "```\n</details>\nfake"
+    result = _recorded(
+        minimums_passed=False,
+        failed_minimums=[{"name": "recall", "minimum": 0.8, "value": 0.5, "reason": reason}],
+        contract_met=False,
+    )
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert _json_block(body) == result["details"]["record"]
+
+
+def test_a_long_record_stays_out_of_the_pull_request_text() -> None:
+    """A split of 6,000 cases would pass GitHub's 65,536-character limit, so the text points to the stored record."""
+    result = _recorded(target_reached=True, contract_met=True)
+    positions = list(range(6_000))
+    result["details"]["record"]["split"] = {
+        "rule": "pairs",
+        "seed": 7,
+        "search": positions[:3_600],
+        "validation": positions[3_600:4_800],
+        "held_out": positions[4_800:],
+    }
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert len(body) < 65_536
+    assert "```json" not in body
+    assert "Record as JSON" not in body
+    assert "The record is too long to print as JSON here. `get_run` returns it in `details.record`.\n\n" in body
+    assert "- Split: `pairs`, seed 7: 3600 search, 1200 validation, 1200 held_out cases" in body
+    assert body.index("Run record:") < body.index("The record is too long") < body.index("Review the run:")
+
+
+def test_a_record_at_the_json_limit_still_prints_its_json_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The limit counts the JSON text as printed, and a record of exactly that length keeps its block."""
+    result = _recorded(target_reached=True, contract_met=True)
+    printed = json.dumps(result["details"]["record"], indent=2, ensure_ascii=False).replace("`", "\\u0060")
+
+    monkeypatch.setattr(repo_staging, "_RECORD_JSON_LIMIT", len(printed))
+    assert _json_block(repo_staging._description(result, _EDIT, "https://x/run")) == result["details"]["record"]
+
+    monkeypatch.setattr(repo_staging, "_RECORD_JSON_LIMIT", len(printed) - 1)
+    assert "```json" not in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
+    """A record with no change hash and no scores says so in plain words."""
+    result = _recorded(contract_met=True)
+    result["details"]["record"].update(change_sha256=None, baseline_score=None, final_score=None)
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "- Change SHA-256: none, the reported patch is empty" in body
+    assert "- Baseline score: none" in body
+    assert "- Final score: none" in body
+    assert _json_block(body) == result["details"]["record"]
 
 
 @pytest.mark.parametrize(
@@ -3594,6 +3691,123 @@ def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.
     record = result["details"]["record"]
     assert "forged" not in record
     assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+
+
+def test_the_record_names_the_start_commit_the_change_hash_and_both_scores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reviewer can check the score claim: the pinned commit, the patch hash and full-precision scores (SKY-764)."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.1 + 0.2, 0.123456789012345678)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert record["record_version"] == 1
+    assert record["base_commit"] == staged_payload["target"]["repo"]["commit"] == "c" * 40
+    assert record["change_sha256"] == hashlib.sha256(_EDIT.encode("utf-8")).hexdigest()
+    assert record["baseline_score"] == 0.1 + 0.2 == 0.30000000000000004
+    assert record["final_score"] == 0.123456789012345678
+
+
+@pytest.mark.parametrize("best", ["", "  \n", None], ids=["empty", "blank", "missing"])
+def test_an_empty_patch_has_no_change_hash(monkeypatch: pytest.MonkeyPatch, best: str | None) -> None:
+    """When the reported patch is empty, there is no change to hash."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.5, best=best)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    assert result["details"]["record"]["change_sha256"] is None
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [{"baseline_score": None, "best_score": None}, {}],
+    ids=["null", "absent"],
+)
+def test_a_score_the_run_does_not_have_is_null(monkeypatch: pytest.MonkeyPatch, scores: dict[str, Any]) -> None:
+    """The record never invents a score: a missing start or final score is null."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = {**_result(0.5, 0.8), "baseline_score": None, "best_score": None}
+        for key in ("baseline_score", "best_score"):
+            if key not in scores:
+                del result[key]
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert (record["baseline_score"], record["final_score"]) == (None, None)
+
+
+def test_the_change_hash_covers_only_the_scored_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An edit to a hidden path never leaves the run, so the hash covers the patch the run reports."""
+    hidden_edit = (
+        "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
+        "@@ -1 +1 @@\n-def score(): ...\n+def score(): return 1\n"
+    )
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    try:
+        result = _result(0.5, 0.8, best=_EDIT + hidden_edit)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+        repo_staging.drop_hidden_edits(result, staged.hidden_paths)
+    finally:
+        staged.cleanup()
+
+    assert result["best_candidate"] == _EDIT
+    assert result["details"]["record"]["change_sha256"] == hashlib.sha256(_EDIT.encode("utf-8")).hexdigest()
+
+
+def test_the_published_pull_request_carries_the_record_and_adds_no_record_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pushed change is the patch alone, and the text's JSON block equals ``details.record`` (SKY-764)."""
+    pushed: list[tuple[Any, ...]] = []
+    opened: list[dict[str, Any]] = []
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args, **kwargs: pushed.append(args))
+
+    def fake_open(token: str, repository: str, **fields: Any) -> PublishedChange:
+        """Record the pull request instead of opening it.
+
+        Args:
+            token: The GitHub token.
+            repository: The target repository.
+            fields: The pull request fields.
+
+        Returns:
+            A fixed draft pull request.
+        """
+        opened.append(fields)
+        return PublishedChange(branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True)
+
+    monkeypatch.setattr(repo_staging, "open_pull_request", fake_open)
+    try:
+        result = _result(0.5, 0.8)
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+        repo_staging.publish_improvement(
+            result,
+            staged_payload,
+            staged,
+            username="ada",
+            engine=None,
+            optimization_id="0123456789abcdef",
+            app_url="https://skynetml.com/",
+        )
+    finally:
+        staged.cleanup()
+
+    record = result["details"]["record"]
+    assert pushed[0][2] == _EDIT
+    assert [line for line in pushed[0][2].splitlines() if line.startswith("diff --git")] == [
+        "diff --git a/src/app.py b/src/app.py"
+    ]
+    assert record["change_sha256"] == hashlib.sha256(pushed[0][2].encode("utf-8")).hexdigest()
+    assert _json_block(opened[0]["body"]) == record
 
 
 _HUGE = 10**400

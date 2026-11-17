@@ -470,12 +470,17 @@ def test_get_run_is_owner_scoped(harness: Any, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_get_run_returns_the_run_record_as_stored(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The record of a contract run reaches the caller with every field unchanged (SKY-694)."""
+    """The record of a contract run reaches the caller with every field unchanged (SKY-694, SKY-764)."""
     client, _store, _calls = harness
     record = {
+        "record_version": 1,
+        "base_commit": "c" * 40,
+        "change_sha256": "4" * 64,
+        "baseline_score": 0.1 + 0.2,
+        "final_score": 0.9,
         "contract_sha256": "1" * 64,
         "metric_sha256": "2" * 64,
-        "metric_home": "repository",
+        "metric_source": "repository",
         "cases_sha256": None,
         "cases_source": None,
         "seed": 7,

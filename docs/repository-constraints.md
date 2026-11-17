@@ -120,13 +120,38 @@ has no stop score.
 ## Run record: `details.record`
 
 A run with an `optimize.toml` stores a record that lets another person
-reproduce its score. The record is `details.record` in the run result, and
+check its score. The record is `details.record` in the run result, and
 `get_run` returns it. A pull request from the run shows the same record in
 a short block. The first line of the block says if the run met the
 contract, which rule failed with its numbers, or that the file sets no
-target and no minimum. The record holds no secret, no case content and no
-metric code. It has these keys:
+target and no minimum. Then comes one line for each fact. Last comes a
+collapsed section, "Record as JSON". It holds the full record as one JSON
+block, which parses to the same object as `details.record`. GitHub limits
+the length of a pull request text. When the JSON is longer than 20,000
+characters, for example in a run with thousands of cases, the pull request
+shows no JSON block. One line then says that `get_run` returns the record.
+The run writes no record file into the repository. The record holds no secret, no case
+content and no metric code. It has these keys:
 
+- `record_version`: the integer `1`.
+- `base_commit`: the full commit SHA that the patch applies to. Staging
+  pins this commit.
+- `change_sha256`: the SHA-256 of the reported version's patch text, as
+  UTF-8 bytes. The reported version is `best_candidate` in the `get_run`
+  result. The patch never holds an edit to a hidden path. It is null when
+  the patch is empty, because there is no change to hash. A run that starts
+  from a patch (`seed_candidate`, for example a continuous check) keeps a
+  hash, also when no version scores better. To compute it by hand, write
+  `best_candidate` with no added newline and hash the bytes:
+  `jq -j '.result.best_candidate' run.json | sha256sum`. The
+  patch applies to `base_commit` after the run's draft files apply. The
+  pull request branch also holds those draft files, and can hold a test
+  suite from hardening. So its diff can differ from `best_candidate`.
+- `baseline_score`: the score of the start version (`baseline_score` of the
+  run result), at full precision. It is null when the run has no such score.
+- `final_score`: the score that the `[outcome]` verdict judges
+  (`best_score` of the run result), at full precision. It is null when the
+  run has no such score. The run scores the final version one time.
 - `contract_sha256`: the SHA-256 of the `optimize.toml` bytes the run read,
   after the draft files apply.
 - `metric_sha256`: one SHA-256 over framed parts. The first part is the
@@ -137,9 +162,10 @@ metric code. It has these keys:
   the staged tree lists a path twice, the later entry counts, as extraction
   writes it last. For an entry code and one file, this gives the hash:
   `{ printf 'metric.py\0%s\0%s' "$code_len" "$code_hex"; printf 'eval/scorer.py\0%s\0%s' "$len" "$hex"; } | sha256sum`.
-- `metric_home`: `repository` when the file sets `[metric] files` and every
-  one comes from the pinned commit. `judge` when the file sets no
-  `[metric] files`, or a draft file replaces or adds one.
+- `metric_source`: `repository` or `request`. `repository` when the file
+  sets `[metric] files` and every one comes from the pinned commit.
+  `request` when the file sets no `[metric] files`, or a draft file in the
+  run request replaces or adds one.
 - `cases_sha256` and `cases_source`: with `[data] cases`, the SHA-256 of the
   file bytes and `file`. With uploaded cases, the SHA-256 of the cases as
   compact JSON with sorted keys in UTF-8 (`json.dumps(cases,
@@ -160,6 +186,10 @@ metric code. It has these keys:
 
 A run from before the record, or a run whose sandbox image writes no split
 positions, has no `record` key.
+
+One limit stays. A hosted run's sandbox image is in a private registry, so
+an outside person cannot pull it. SKY-737 (the contract names its own image
+for the metric) removes this limit later.
 
 ## Cases: `[data] cases`
 
