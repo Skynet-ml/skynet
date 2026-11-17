@@ -1,8 +1,8 @@
 """Tests for the effect log: an outside effect of a step runs once, and only after the step is durable.
 
 Most tests use a SQLite file and the local-filesystem object store. The last
-test needs Postgres row locks; it runs only when ``APP_TEST_DB_URL`` names a
-disposable PostgreSQL database, in its own schema that it drops after.
+tests need Postgres row locks; they run only when ``APP_TEST_DB_URL`` names a
+disposable PostgreSQL database, each in its own schema that it drops after.
 """
 
 from __future__ import annotations
@@ -336,16 +336,18 @@ def test_a_crash_after_the_effect_and_before_its_commit_runs_it_again(engine, st
     assert effect.calls == 2
 
 
-def _race(first: EffectStore, second: EffectStore, step_id: str) -> None:
+def _race(first: EffectStore, second: EffectStore, step_id: str, *, first_fails: bool = False) -> None:
     """Call ``once`` with one key from two stores at the same time and check that the effect runs once.
 
     The first store's effect holds until the second call is waiting, so the
-    two calls overlap.
+    two calls overlap. With ``first_fails``, the first effect then raises, so
+    its insert rolls back under the waiting second call, which runs the effect.
 
     Args:
         first: The store whose call starts first.
         second: The other store.
         step_id: The durable step.
+        first_fails: Whether the first effect raises after the second call waits.
     """
     entered, release = threading.Event(), threading.Event()
     calls: list[str] = []
@@ -365,10 +367,15 @@ def _race(first: EffectStore, second: EffectStore, step_id: str) -> None:
 
             Returns:
                 The caller's result.
+
+            Raises:
+                RuntimeError: For the first caller when ``first_fails`` is set.
             """
             calls.append(name)
             entered.set()
             assert release.wait(5)
+            if first_fails and name == "a":
+                raise RuntimeError("GitHub refused")
             return {"by": name}
 
         return run
@@ -382,12 +389,22 @@ def _race(first: EffectStore, second: EffectStore, step_id: str) -> None:
     a.join(10)
     b.join(10)
 
-    assert calls == ["a"]
-    assert out_a == out_b == [{"by": "a"}]
+    if first_fails:
+        assert calls == ["a", "b"]
+        assert [type(error) for error in out_a] == [RuntimeError]
+        assert out_b == [{"by": "b"}]
+    else:
+        assert calls == ["a"]
+        assert out_a == out_b == [{"by": "a"}]
 
 
-def test_two_workers_with_the_same_key_run_the_effect_once(tmp_path: Path, steps) -> None:
-    """Two workers, each with its own engine on the same database, overlap on one key: one runs it, one waits."""
+def test_sqlite_workers_with_the_same_key_serialize_within_the_busy_timeout(tmp_path: Path, steps) -> None:
+    """Two workers, each with its own engine on one SQLite file, overlap on one key: one runs it, one waits.
+
+    This proves the order only while the first call ends inside SQLite's busy
+    timeout (5 s); a longer effect makes the second call raise
+    ``OperationalError``. The PostgreSQL tests below prove the real wait.
+    """
     step_id = _step(steps)
     steps.flush()
     url = f"sqlite:///{tmp_path / 'db.sqlite'}"
@@ -444,6 +461,22 @@ def test_postgres_workers_with_the_same_key_run_the_effect_once(postgres_engine,
         step_id = _step(one)
         one.flush()
         _race(EffectStore(postgres_engine, one), EffectStore(postgres_engine, two), step_id)
+    finally:
+        one.close()
+        two.close()
+
+
+@needs_postgres
+def test_postgres_a_waiting_worker_runs_the_effect_when_the_first_rolls_back(postgres_engine, tmp_path) -> None:
+    """On Postgres, the first effect raises while the second insert waits: the second then runs it and stores it."""
+    objects = LocalObjectStore(tmp_path)
+    one = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0)
+    two = StepLogStore(postgres_engine, objects, "w2", flush_window_seconds=60.0)
+    try:
+        step_id = _step(one)
+        one.flush()
+        _race(EffectStore(postgres_engine, one), EffectStore(postgres_engine, two), step_id, first_fails=True)
+        assert _effect_rows(postgres_engine) == [("k", "done", step_id, {"by": "b"})]
     finally:
         one.close()
         two.close()

@@ -408,7 +408,8 @@ def open_pull_request(
 ) -> PublishedChange:
     """Open a draft pull request, or a regular one where the plan has no drafts.
 
-    When an open pull request for ``head`` exists, return it and open none.
+    When an open pull request for ``head`` exists, into ``base_branch`` when
+    it is set, return it and open none.
 
     Args:
         token: GitHub token with ``repo`` scope.
@@ -444,10 +445,11 @@ def open_pull_request(
         return PublishedChange(**found)
     url = f"{API_URL}/repos/{repository}/pulls"
     owner = repository.split("/", 1)[0]
+    params = {"head": f"{owner}:{head}", "state": "open"}
+    if base_branch:
+        params["base"] = base_branch
     try:
-        open_ones = get_json(
-            url, provider=PROVIDER, headers=_headers(token), params={"head": f"{owner}:{head}", "state": "open"}
-        )
+        open_ones = get_json(url, provider=PROVIDER, headers=_headers(token), params=params)
     except DomainError as error:
         raise RepoPublishError("GitHub refused to list the open pull requests.") from error
     if open_ones:

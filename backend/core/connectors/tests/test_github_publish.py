@@ -267,7 +267,7 @@ def _github(
         if refuse_draft and json.get("draft"):
             raise DomainError("connectors.provider_error", status=502, provider="GitHub", status_code=422)
         body = {"html_url": "https://github.com/acme/app/pull/7", "number": 7, "draft": bool(json.get("draft"))}
-        pulls.append({**body, "head": f"acme:{json['head']}"})
+        pulls.append({**body, "head": f"acme:{json['head']}", "base": json["base"]})
         return httpx.Response(201, json=body)
 
     def fake_get_json(url: str, *, params: dict[str, str] | None = None, **_: Any) -> Any:
@@ -279,12 +279,16 @@ def _github(
             **_: Other request options, ignored.
 
         Returns:
-            The repository, or the open pull requests of the asked head.
+            The repository, or the open pull requests of the asked head, and of the asked base when one is given.
         """
         if url == "https://api.github.com/repos/acme/app/pulls":
             assert params is not None
             assert params["state"] == "open"
-            return [pull for pull in pulls if pull["head"] == params["head"]]
+            return [
+                pull
+                for pull in pulls
+                if pull["head"] == params["head"] and params.get("base", pull["base"]) == pull["base"]
+            ]
         assert url == "https://api.github.com/repos/acme/app"
         return {"default_branch": "trunk"}
 
@@ -365,8 +369,20 @@ def test_hardening_summary_takes_zero_counts() -> None:
 
 def test_pull_request_returns_the_open_one_for_the_same_head(monkeypatch: pytest.MonkeyPatch) -> None:
     """An open pull request for the head is returned, and no new one is opened."""
-    existing = {"html_url": "https://github.com/acme/app/pull/3", "number": 3, "draft": True, "head": "acme:skynet/x"}
-    other = {"html_url": "https://github.com/acme/app/pull/4", "number": 4, "draft": False, "head": "acme:skynet/y"}
+    existing = {
+        "html_url": "https://github.com/acme/app/pull/3",
+        "number": 3,
+        "draft": True,
+        "head": "acme:skynet/x",
+        "base": "main",
+    }
+    other = {
+        "html_url": "https://github.com/acme/app/pull/4",
+        "number": 4,
+        "draft": False,
+        "head": "acme:skynet/y",
+        "base": "main",
+    }
     sent = _github(monkeypatch, open_pulls=[existing, other])
 
     change = open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B")
@@ -378,6 +394,40 @@ def test_pull_request_returns_the_open_one_for_the_same_head(monkeypatch: pytest
         3,
         True,
     )
+
+
+def test_pull_request_for_the_same_head_into_another_base_is_not_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open pull request of the head into another base is not returned: a new one opens into the asked base."""
+    elsewhere = {
+        "html_url": "https://github.com/acme/app/pull/3",
+        "number": 3,
+        "draft": True,
+        "head": "acme:skynet/x",
+        "base": "release",
+    }
+    sent = _github(monkeypatch, open_pulls=[elsewhere])
+
+    change = open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B")
+
+    assert [body["base"] for body in sent] == ["main"]
+    assert change.number == 7
+
+
+def test_pull_request_with_no_base_reuses_the_open_one_into_any_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no base named, the lookup does not filter by base, so the open pull request of the head is returned."""
+    elsewhere = {
+        "html_url": "https://github.com/acme/app/pull/3",
+        "number": 3,
+        "draft": True,
+        "head": "acme:skynet/x",
+        "base": "release",
+    }
+    sent = _github(monkeypatch, open_pulls=[elsewhere])
+
+    change = open_pull_request("tok", "acme/app", head="skynet/x", base_branch=None, title="T", body="B")
+
+    assert sent == []
+    assert change.number == 3
 
 
 def test_pull_request_reports_a_refused_list(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,6 +474,20 @@ def test_a_push_onto_a_branch_with_other_content_raises(tmp_path: Path) -> None:
         push_version("acme/app", pinned, patch, "skynet/optimize-1", "Apply it", None, remote=f"file://{origin}")
 
     assert _git(origin, "rev-parse", "skynet/optimize-1") == before
+
+
+def test_a_branch_whose_name_ends_the_same_is_not_the_branch(tmp_path: Path) -> None:
+    """A ref ``a/refs/heads/<branch>`` with other content is not the branch: the push still goes through."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+    patch = _patch(origin, pinned)
+    _git(origin, "branch", "a/refs/heads/skynet/optimize-1", "main")
+
+    pushed = push_version("acme/app", pinned, patch, "skynet/optimize-1", "Apply it", None, remote=f"file://{origin}")
+
+    assert pushed == _git(origin, "rev-parse", "refs/heads/skynet/optimize-1")
+    assert _git(origin, "rev-parse", f"{pushed}^") == pinned
+    assert _git(origin, "rev-parse", "refs/heads/a/refs/heads/skynet/optimize-1") == _git(origin, "rev-parse", "main")
 
 
 def test_a_candidate_branch_with_other_content_raises(tmp_path: Path) -> None:
