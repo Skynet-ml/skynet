@@ -1942,7 +1942,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
         originals={webChat ? undefined : draftOriginals}
-        mediaWaiting={chatMedia.tiles.length > 0}
+        // A file card gets its path only on Send, so it waits for the reply too.
+        mediaWaiting={chatMedia.tiles.length > 0 || draftFiles.length > 0}
         sendBlocked={chatMedia.blocked(draftFiles)}
         onAttachFile={(file) => {
           setAttachFile(file);

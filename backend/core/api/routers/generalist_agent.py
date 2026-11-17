@@ -1913,7 +1913,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
         conversation_id, title, user_message_id, held_media = await asyncio.to_thread(_setup_turn)
-        file_tools = await asyncio.to_thread(chat_command_tools, engine, current_user.username, conversation_id)
+        file_runner, file_tools = await asyncio.to_thread(
+            chat_command_tools, engine, current_user.username, conversation_id
+        )
         agent_message = _with_media_references(
             rewrite_paths(req.user_message, held_media), media_references, held_media if file_tools else None
         )
@@ -2070,13 +2072,13 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             Returns:
                 The cents charged.
             """
-            if not (file_tools and conversation_id):
+            if file_runner is None or not conversation_id:
                 return 0
             return await _finish_in_thread(
                 charge_chat_sandbox,
                 engine,
                 current_user.username,
-                conversation_id,
+                file_runner,
                 settlement_key=f"chat-sandbox:{conversation_id}:{user_message_id}",
             )
 

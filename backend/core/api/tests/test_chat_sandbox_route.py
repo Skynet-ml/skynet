@@ -18,6 +18,8 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..routers import generalist_agent as agent_mod
 
 _USER = "alice@example.com"
+# The turn hands this runner back to the charge, as it does the real one.
+_RUNNER = object()
 
 
 class _Store:
@@ -60,22 +62,22 @@ def charges(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """
     monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
     monkeypatch.setattr(agent_mod, "enforce_llm_balance", lambda job_store, username: None)
-    monkeypatch.setattr(agent_mod, "chat_command_tools", lambda engine, username, conversation_id: ["tool"])
+    monkeypatch.setattr(agent_mod, "chat_command_tools", lambda engine, username, conversation_id: (_RUNNER, ["tool"]))
     calls: list[dict[str, Any]] = []
 
-    def charge(engine: Engine, username: str, conversation_id: str, *, settlement_key: str) -> int:
+    def charge(engine: Engine, username: str, runner: object, *, settlement_key: str) -> int:
         """Record one charge.
 
         Args:
             engine: The wallet engine.
             username: The chat's owner.
-            conversation_id: The chat.
+            runner: The runner that the turn used.
             settlement_key: The charge's idempotency key.
 
         Returns:
             No cents.
         """
-        calls.append({"username": username, "conversation_id": conversation_id, "key": settlement_key})
+        calls.append({"username": username, "runner": runner, "key": settlement_key})
         return 0
 
     monkeypatch.setattr(agent_mod, "charge_chat_sandbox", charge)
@@ -126,7 +128,7 @@ def test_a_turn_with_file_tools_gets_one_sandbox_charge(
     assert seen == [["tool"]]
     assert len(charges) == 1
     assert charges[0]["username"] == _USER
-    assert charges[0]["conversation_id"] == conversation_id
+    assert charges[0]["runner"] is _RUNNER
     assert charges[0]["key"].startswith(f"chat-sandbox:{conversation_id}:")
     assert charges[0]["key"] != f"chat-sandbox:{conversation_id}:"
 
@@ -155,7 +157,8 @@ def test_a_turn_that_fails_early_still_gets_its_sandbox_charge(
     with pytest.raises(RuntimeError, match="boom"):
         _post(engine)
     assert len(charges) == 1
-    assert charges[0]["key"].startswith(f"chat-sandbox:{charges[0]['conversation_id']}:")
+    assert charges[0]["runner"] is _RUNNER
+    assert charges[0]["key"].startswith("chat-sandbox:")
 
 
 def test_a_sandbox_charge_adds_its_cents_to_the_turn_cost(

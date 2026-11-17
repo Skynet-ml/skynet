@@ -78,7 +78,8 @@ class ChatFile:
     data: bytes
 
 
-FileLoader = Callable[[set[str]], Iterable[ChatFile]]
+# Takes the ids a workspace holds; gives the ids the chat holds now, and the chat's other files.
+FileLoader = Callable[[set[str]], tuple[set[str], Iterable[ChatFile]]]
 
 
 class CommandRunner(Protocol):
@@ -183,17 +184,34 @@ def chat_file_loader(engine: Any, username: str, conversation_id: str) -> FileLo
         conversation_id: The chat.
 
     Returns:
-        A function that takes the ids the workspace holds and yields the other files.
+        A function that takes the ids the workspace holds. It gives the ids the
+        chat holds now, and the chat's other files.
     """
 
-    def load(skip: set[str]) -> Iterator[ChatFile]:
-        """Read the chat's files that are not in ``skip``, one file at a time.
+    def read(new: list[tuple[str, str]]) -> Iterator[ChatFile]:
+        """Read files one at a time.
+
+        Args:
+            new: The id and name of each file to read.
+
+        Yields:
+            Each file, with its bytes.
+        """
+        # A chat can hold many 50 MB videos, so only one file's bytes are in memory at a time.
+        for media_id, name in new:
+            with Session(engine) as session:
+                data = session.scalar(select(ChatMediaModel.data).where(ChatMediaModel.id == media_id))
+            if data is not None:
+                yield ChatFile(media_id, name, data)
+
+    def load(skip: set[str]) -> tuple[set[str], Iterator[ChatFile]]:
+        """List the chat's files, and read the ones that are not in ``skip``.
 
         Args:
             skip: The ids the workspace already holds.
 
-        Yields:
-            Each other file, with its bytes.
+        Returns:
+            The ids the chat holds now, and each other file with its bytes.
         """
         with Session(engine) as session:
             rows = session.execute(
@@ -201,12 +219,7 @@ def chat_file_loader(engine: Any, username: str, conversation_id: str) -> FileLo
                     ChatMediaModel.conversation_id == conversation_id, ChatMediaModel.username == username
                 )
             ).all()
-        # A chat can hold many 50 MB videos, so only one file's bytes are in memory at a time.
-        for media_id, name in [(row.id, row.filename) for row in rows if row.id not in skip]:
-            with Session(engine) as session:
-                data = session.scalar(select(ChatMediaModel.data).where(ChatMediaModel.id == media_id))
-            if data is not None:
-                yield ChatFile(media_id, name, data)
+        return {row.id for row in rows}, read([(row.id, row.filename) for row in rows if row.id not in skip])
 
     return load
 
@@ -390,6 +403,9 @@ class SandboxCommandRunner(SessionTable):
             # A turn that is still running holds this runner, so a later command must not open a box nobody stops.
             self._closed = True
             env, self._env = self._env, None
+            if env is not None:
+                # A chat deleted mid-turn closes the box; the turn still charges its live time.
+                self._owed += self._box_cents(self._clock()) - self._box_charged
         if env is not None:
             self._stop(env)
 
@@ -413,7 +429,16 @@ class SandboxCommandRunner(SessionTable):
                 self._env, self._box_started, self._box_charged = env, self._clock(), 0
                 self._copied = set()
             env = self._env
-            for file in self._load_files(set(self._copied)):
+            held, new = self._load_files(set(self._copied))
+            # A file that left the chat (a delete, or an edit that dropped it) leaves the box too.
+            gone = sorted(self._copied - held)
+            if gone:
+                folders = " ".join(shlex.quote(f"attachments/{media_id}") for media_id in gone)
+                result = sync_bridge.run(partial(env.exec, f"rm -rf {folders}", timeout_sec=COMMAND_TIMEOUT_SECONDS))
+                if not result.ok:
+                    raise RuntimeError(f"Could not remove old files from the workspace: {result.stderr[-500:]}")
+                self._copied -= set(gone)
+            for file in new:
                 self._put(env, file)
                 self._copied.add(file.id)
             return env
@@ -598,7 +623,12 @@ class _LocalFilesRunner(LocalCommandRunner):
         with self._files_lock:
             if self._closed:
                 return "Error: this chat was deleted, so its file workspace is closed."
-            for file in self._load_files(set(self._copied)):
+            held, new = self._load_files(set(self._copied))
+            # A file that left the chat (a delete, or an edit that dropped it) leaves the workspace too.
+            for media_id in self._copied - held:
+                shutil.rmtree(self.workspace / "attachments" / media_id, ignore_errors=True)
+            self._copied &= held
+            for file in new:
                 try:
                     _write_inside(self.workspace, attachment_path(file.id, file.name), file.data)
                 except OSError:
@@ -716,20 +746,21 @@ def stop_chat_runner(conversation_id: str) -> None:
         shutil.rmtree(local_workspace(conversation_id), ignore_errors=True)
 
 
-def charge_chat_sandbox(engine: Any, username: str, conversation_id: str, *, settlement_key: str) -> int:
+def charge_chat_sandbox(engine: Any, username: str, runner: CommandRunner, *, settlement_key: str) -> int:
     """Debit the live time of the chat's box since its last charge.
+
+    The turn passes the runner it used, because a chat deleted during the turn
+    is no longer in the runner table.
 
     Args:
         engine: The SQLAlchemy engine of the wallet.
         username: The chat's owner.
-        conversation_id: The chat.
+        runner: The chat's command runner that the turn used.
         settlement_key: The idempotency key of this turn's charge.
 
     Returns:
         The cents charged; 0 when the chat has no box or nothing to pay.
     """
-    with _RUNNERS_LOCK:
-        runner = _RUNNERS.get(conversation_id)
     if not isinstance(runner, SandboxCommandRunner) or engine is None:
         return 0
     cents = runner.take_charge_cents()
@@ -836,7 +867,9 @@ def command_tools(runner: CommandRunner) -> list[dspy.Tool]:
     ]
 
 
-def chat_command_tools(engine: Any, username: str, conversation_id: str | None) -> list[dspy.Tool]:
+def chat_command_tools(
+    engine: Any, username: str, conversation_id: str | None
+) -> tuple[CommandRunner | None, list[dspy.Tool]]:
     """Build the file tools of a stored chat.
 
     Args:
@@ -845,17 +878,20 @@ def chat_command_tools(engine: Any, username: str, conversation_id: str | None) 
         conversation_id: The stored chat, or None for a chat that is not stored.
 
     Returns:
-        The two tools, or none when the chat holds no files.
+        The chat's runner and its two tools, or ``(None, [])`` when the chat holds no files.
     """
     if engine is None or not conversation_id:
-        return []
+        return None, []
     with Session(engine) as session:
         has_files = session.scalar(
             select(ChatMediaModel.id)
             .where(ChatMediaModel.conversation_id == conversation_id, ChatMediaModel.username == username)
             .limit(1)
         )
-    return command_tools(chat_runner(engine, username, conversation_id)) if has_files else []
+    if not has_files:
+        return None, []
+    runner = chat_runner(engine, username, conversation_id)
+    return runner, command_tools(runner)
 
 
 __all__: Iterable[str] = (

@@ -18,12 +18,15 @@ from core.billing.vercel_usage import sandbox_hold_cents
 from core.sandbox.environment import ExecResult
 from core.service_gateway.agents import attachment_sandbox as module
 from core.service_gateway.agents.attachment_sandbox import (
+    EXEC_COMMAND_TOOL,
+    WRITE_STDIN_TOOL,
     ChatFile,
     SandboxCommandRunner,
     attachment_path,
     chat_file_loader,
     rewrite_paths,
 )
+from core.service_gateway.agents.generalist import _needs_approval, chat_rule_allowed
 from core.storage.models import Base, ChatMediaModel
 
 
@@ -74,6 +77,10 @@ class FakeBox:
             parts = sorted(k for k in self.files if k.startswith(f".skynet-upload/{media_id}."))
             self.written[target] = base64.b64decode("".join(self.files[k] for k in parts))
             return ExecResult(exit_code=0, stdout="", stderr="")
+        if command.startswith("rm -rf "):
+            folders = [part.strip("'") + "/" for part in command.split()[2:]]
+            self.written = {k: v for k, v in self.written.items() if not k.startswith(tuple(folders))}
+            return ExecResult(exit_code=0, stdout="", stderr="")
         if self.dead:
             # Failing after a short wait ends the future on the bridge loop, where its callback then runs.
             await asyncio.sleep(0.05)
@@ -113,16 +120,16 @@ def make_runner(files: list[ChatFile], boxes: list[FakeBox], clock: Clock) -> Sa
         The runner.
     """
 
-    def load(skip: set[str]) -> list[ChatFile]:
-        """Return the files not in ``skip``.
+    def load(skip: set[str]) -> tuple[set[str], list[ChatFile]]:
+        """Return the chat's ids and the files not in ``skip``.
 
         Args:
             skip: The held ids.
 
         Returns:
-            The other files.
+            The chat's ids, and the other files.
         """
-        return [file for file in files if file.id not in skip]
+        return {file.id for file in files}, [file for file in files if file.id not in skip]
 
     def factory(_conversation_id: str) -> Any:
         """Open a new fake box.
@@ -171,6 +178,37 @@ def test_box_opens_on_first_command_and_copies_files() -> None:
     assert len(copies) == 2
     runner.close()
     assert boxes[0].stopped
+
+
+def test_file_that_left_the_chat_leaves_the_box() -> None:
+    """Check that a deleted file is removed from the live box before the next command."""
+    files = [ChatFile("m1", "a.txt", b"a"), ChatFile("m2", "b.txt", b"b")]
+    boxes: list[FakeBox] = []
+    runner = make_runner(files, boxes, Clock())
+    runner.exec_command("true")
+    del files[0]
+    runner.exec_command("ls")
+    assert set(boxes[0].written) == {"attachments/m2/b.txt"}
+    assert "rm -rf attachments/m1" in boxes[0].commands
+    runner.exec_command("ls")
+    assert boxes[0].commands.count("rm -rf attachments/m1") == 1
+    runner.close()
+
+
+def test_file_that_left_the_chat_leaves_the_mac_workspace(tmp_path: Path) -> None:
+    """Check that a deleted file is removed from the Mac workspace before the next command."""
+    workspace = tmp_path / "ws"
+    files = [ChatFile("m1", "a.txt", b"a"), ChatFile("m2", "b.txt", b"b")]
+    runner = module._LocalFilesRunner(
+        workspace, lambda skip: ({f.id for f in files}, [f for f in files if f.id not in skip])
+    )
+    runner.exec_command("true")
+    assert (workspace / "attachments" / "m1" / "a.txt").exists()
+    del files[0]
+    runner.exec_command("true")
+    assert not (workspace / "attachments" / "m1").exists()
+    assert (workspace / "attachments" / "m2" / "b.txt").read_bytes() == b"b"
+    runner.close()
 
 
 def test_large_file_goes_in_parts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,7 +343,7 @@ def test_closed_runner_opens_no_new_box() -> None:
 def test_closed_mac_runner_writes_no_files_again(tmp_path: Path) -> None:
     """Check that a Mac turn still running after its chat is deleted does not write the files back."""
     workspace = tmp_path / "ws"
-    runner = module._LocalFilesRunner(workspace, lambda skip: [ChatFile("m1", "a.txt", b"a")])
+    runner = module._LocalFilesRunner(workspace, lambda skip: ({"m1"}, [ChatFile("m1", "a.txt", b"a")]))
     runner.close()
     assert runner.exec_command("true").startswith("Error: this chat was deleted")
     assert not (workspace / "attachments").exists()
@@ -330,7 +368,8 @@ def test_file_loader_reads_one_file_at_a_time(tmp_path: Path) -> None:
                 )
             )
         session.commit()
-    files = chat_file_loader(engine, "a@x.com", "c1")({"m1"})
+    held, files = chat_file_loader(engine, "a@x.com", "c1")({"m1"})
+    assert held == {"m1", "m2"}
     assert isinstance(files, Iterator)
     assert [(f.id, f.name, f.data) for f in files] == [("m2", "m2.txt", b"m2")]
     engine.dispose()
@@ -430,6 +469,19 @@ def test_stop_chat_runner_closes_the_box(monkeypatch: pytest.MonkeyPatch) -> Non
     assert boxes[0].stopped
 
 
+def test_a_chat_deleted_mid_turn_still_charges_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a box closed by a chat delete keeps its live time for the turn's charge."""
+    clock = Clock()
+    runner = make_runner([], [], clock)
+    runner.exec_command("true")
+    clock.now = 600
+    monkeypatch.setitem(module._RUNNERS, "chat-1", runner)
+    module.stop_chat_runner("chat-1")
+    clock.now = 900
+    assert runner.take_charge_cents() == _cents(600)
+    assert runner.take_charge_cents() == 0
+
+
 def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the debit asks for the owed cents and gives them back on failure."""
     clock = Clock()
@@ -464,8 +516,7 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
             return max(1, math.ceil(raw * module.usage_markup() / module.CENT_USD_VALUE))
 
     monkeypatch.setattr(module, "StripeBillingService", Billing)
-    monkeypatch.setitem(module._RUNNERS, "chat-1", runner)
-    charged = module.charge_chat_sandbox(object(), "ann", "chat-1", settlement_key="k1")
+    charged = module.charge_chat_sandbox(object(), "ann", runner, settlement_key="k1")
     assert charged == _cents(600)
     assert calls[0]["settlement_key"] == "k1"
     assert calls[0]["token_source"] == "managed"
@@ -488,6 +539,15 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
 
     clock.now = 1200
     monkeypatch.setattr(module, "StripeBillingService", Broken)
-    assert module.charge_chat_sandbox(object(), "ann", "chat-1", settlement_key="k2") == 0
+    assert module.charge_chat_sandbox(object(), "ann", runner, settlement_key="k2") == 0
     assert runner.take_charge_cents() == _cents(1200) - _cents(600)
     runner.close()
+
+
+def test_commands_ask_only_in_ask_mode() -> None:
+    """Check that a command asks first in Ask mode, and runs without a prompt in the other modes."""
+    for name in (EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL):
+        assert _needs_approval(name, "ask") is True
+        assert _needs_approval(name, "auto_safe") is False
+        assert _needs_approval(name, "yolo") is False
+        assert chat_rule_allowed(name) is True

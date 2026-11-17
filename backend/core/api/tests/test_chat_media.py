@@ -409,7 +409,7 @@ def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
 def test_an_original_with_a_long_name_keeps_the_type_of_its_full_name(harness: SimpleNamespace) -> None:
     """The draft card links its original by id, so a cut stored name still gets the full name's type."""
     body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
-    assert len(body["name"]) == 255
+    assert len(body["name"]) == 200
     assert body["mime_type"] == "application/pdf"
 
 
@@ -462,7 +462,9 @@ def test_safe_filename_drops_paths_quotes_and_control_characters() -> None:
     assert chat_media._safe_filename('C:\\x\\a"b\x00\nc.png') == "abc.png"
     assert chat_media._safe_filename("///") == "file"
     assert chat_media._safe_filename(None) == "file"
-    assert len(chat_media._safe_filename("a" * 400)) == 255
+    assert len(chat_media._safe_filename("a" * 400)) == 200
+    # A name is cut by its UTF-8 bytes, never inside a letter.
+    assert chat_media._safe_filename("א" * 130) == "א" * 100
 
 
 def test_upload_rejects_svg_sent_as_png(harness: SimpleNamespace) -> None:

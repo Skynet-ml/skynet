@@ -147,18 +147,20 @@ def test_long_command_gives_session_and_stdin(tmp_path: Path) -> None:
     runner.close()
 
 
-def test_prunes_oldest_session_and_keeps_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that at the limit the oldest session ends and the 8 newest stay."""
+def test_prunes_least_recently_used_session_and_keeps_recent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that at the limit the least recently used session ends and the 8 most recently used stay."""
     runner = LocalCommandRunner(tmp_path / "ws")
     ended: list[int] = []
     monkeypatch.setattr(runner_module, "MAX_SESSIONS", 10)
     for session_id in range(1, 11):
         session = CommandSession(session_id)
-        session.started = time.monotonic() + session_id
+        session.last_used = time.monotonic() - 100 + session_id
         runner._sessions[session_id] = session
     monkeypatch.setattr(runner, "_end", lambda session: ended.append(session.id))
+    # A read with write_stdin marks session 1 as used now, so session 2 ends.
+    assert runner.get(1) is not None
     runner._prune()
-    assert ended == [1]
+    assert ended == [2]
 
 
 def test_python_root_never_opens_the_home(tmp_path: Path) -> None:

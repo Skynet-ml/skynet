@@ -280,11 +280,13 @@ def _safe_filename(raw: str | None) -> str:
         raw: The filename from the upload, if any.
 
     Returns:
-        A filename of at most 255 characters; ``file`` when nothing is left.
+        A filename of at most 200 UTF-8 bytes; ``file`` when nothing is left.
     """
     name = unicodedata.normalize("NFC", (raw or "").replace("\\", "/").rsplit("/", 1)[-1])
     name = _UNSAFE_FILENAME.sub("", name).strip()
-    return name[:255] or "file"
+    # The chat's workspace writes the file under this name, and a file system
+    # allows 255 bytes in one name. The Mac app's temporary name adds 34 (SKY-781).
+    return name.encode()[:200].decode("utf-8", "ignore").strip() or "file"
 
 
 def _engine(job_store: Any) -> Any:

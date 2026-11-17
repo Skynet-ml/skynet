@@ -33,7 +33,7 @@ CHARS_PER_TOKEN = 4
 # The most output one session holds between two reads, at each end.
 KEEP_CHARS = 200_000
 MAX_SESSIONS = 64
-# Codex never ends the newest sessions to make room for a new one.
+# Codex never ends the most recently used sessions to make room for a new one.
 PROTECTED_SESSIONS = 8
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 _SHELL = "/bin/bash"
@@ -113,7 +113,7 @@ class CommandSession:
             keep_chars: The most unread output kept at each end.
         """
         self.id = session_id
-        self.started = time.monotonic()
+        self.last_used = time.monotonic()
         self.exit_code: int | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self._keep = keep_chars
@@ -213,7 +213,10 @@ class SessionTable:
             The session, or None when it is unknown or ended and read.
         """
         with self._lock:
-            return self._sessions.get(session_id)
+            session = self._sessions.get(session_id)
+            if session is not None:
+                session.last_used = time.monotonic()
+            return session
 
     def collect(self, session: CommandSession, *, started: float, yield_ms: int, max_output_tokens: int | None) -> str:
         """Read a session's new output and write the result text.
@@ -253,13 +256,13 @@ class SessionTable:
             return sessions
 
     def _prune(self) -> None:
-        """End the oldest session outside the newest ones when the table is full."""
+        """End the least recently used session outside the most recently used ones when the table is full."""
         if len(self._sessions) < MAX_SESSIONS:
             return
-        by_age = sorted(self._sessions.values(), key=lambda session: session.started)
-        protected = {session.id for session in by_age[-PROTECTED_SESSIONS:]}
-        finished = [session for session in by_age if session.done and session.id not in protected]
-        victim = (finished or [session for session in by_age if session.id not in protected])[0]
+        by_use = sorted(self._sessions.values(), key=lambda session: session.last_used)
+        protected = {session.id for session in by_use[-PROTECTED_SESSIONS:]}
+        finished = [session for session in by_use if session.done and session.id not in protected]
+        victim = (finished or [session for session in by_use if session.id not in protected])[0]
         self._sessions.pop(victim.id, None)
         self._end(victim)
 
