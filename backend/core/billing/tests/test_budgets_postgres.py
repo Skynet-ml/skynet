@@ -16,7 +16,7 @@ from alembic.operations import Operations
 from sqlalchemy import Engine, create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
-from core.billing.budget_amounts import CENT_SCALE
+from core.billing.budget_amounts import CENT_SCALE, wallet_reserved_cents
 from core.billing.budgets import BudgetConflictError, BudgetInFlightError, BudgetService
 from core.config import app_env, settings
 from core.storage.models import (
@@ -89,6 +89,25 @@ def _reserve(service: BudgetService, budget_id: str, key: str, maximum: int = 40
         price_snapshot={"version": "fixture-v1"},
         max_cents=maximum,
     )
+
+
+def test_old_unconfirmed_hold_releases_on_postgres(database: Engine) -> None:
+    """Free the account hold of a call whose bill never came, with time-zone-aware times (SKY-784)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    operation = _reserve(service, budget.id, "lost-bill")
+    service.mark_dispatched(operation.id, "alice", "gen-lost")
+    service.mark_pending(operation.id, "alice")
+    with Session(database) as session:
+        assert wallet_reserved_cents(session, "alice") == 40
+        session.get(ExecutionOperationModel, operation.id).dispatched_at = datetime.now(UTC) - timedelta(minutes=20)
+        session.commit()
+    released = service.release_unconfirmed(
+        operation.id, "alice", dispatched_before=datetime.now(UTC) - timedelta(minutes=15), reason="no bill"
+    )
+    assert (released.state, released.budget.billed_cents) == ("released", 0)
+    with Session(database) as session:
+        assert wallet_reserved_cents(session, "alice") == 0
 
 
 @pytest.mark.parametrize("shared_budget", [False, True])

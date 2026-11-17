@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from core.billing.budget_amounts import wallet_reserved_cents
 from core.billing.model_dispatch import OpenRouterDispatcher, generation_charge
 from core.billing.model_reconciliation import OpenRouterUsageReconciler
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
@@ -233,6 +235,53 @@ def test_sweep_releases_a_refusal_that_earlier_runtimes_parked_as_pending(databa
     assert [result.state for result in page.results] == ["released"]
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert (snapshot.pending_operations, snapshot.reserved_cents) == (0, 0)
+    assert reconciler.sweep(limit=4).results == ()
+
+
+def test_sweep_releases_a_hold_whose_bill_stays_unconfirmed_for_15_minutes(database) -> None:
+    """Release, at no charge, a model call that answered without usage and never got a bill (SKY-784)."""
+    runtime = _runtime(database)
+
+    def unbilled_provider(request: httpx.Request) -> httpx.Response:
+        """Answer the only POST with a generation id and no usage."""
+        if request.url.path.endswith("/endpoints"):
+            return httpx.Response(200, json={"data": CATALOG})
+        return httpx.Response(200, json={"id": "gen-never-billed"})
+
+    with httpx.Client(transport=httpx.MockTransport(unbilled_provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="original",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("managed_model"),
+            client=client,
+        )
+        with pytest.raises(UsagePendingError):
+            dispatcher.dispatch("/chat/completions", REQUEST)
+    with Session(database) as session:
+        held = wallet_reserved_cents(session, "alice")
+    assert held > 0
+    # The original key rotated, so no lookup can ever confirm the bill.
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: None)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["pending"]
+    with Session(database) as session:
+        assert wallet_reserved_cents(session, "alice") == held
+        operation = session.scalar(select(ExecutionOperationModel))
+        assert operation.state == "pending"
+        operation.dispatched_at = datetime.now(UTC) - timedelta(minutes=20)
+        session.commit()
+
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["released"]
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.pending_operations, snapshot.reserved_cents, snapshot.setup_spent_cents) == (0, 0, 0)
+    with Session(database) as session:
+        assert wallet_reserved_cents(session, "alice") == 0
+        assert session.scalar(select(ExecutionOperationModel.state)) == "released"
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.issue == "unconfirmed")
+        ).one()
+        assert (evidence.final, evidence.billed_cents) == (True, 0)
     assert reconciler.sweep(limit=4).results == ()
 
 
