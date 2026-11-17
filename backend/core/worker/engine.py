@@ -285,6 +285,8 @@ class BackgroundWorker:
         self._processing_jobs: set[str] = set()
         self._claimed_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
+        # (thread id, run id) for each run that its thread parked and has not yet marked done.
+        self._parked_jobs: set[tuple[int, str]] = set()
         self._queue_lock = threading.Lock()
         poll_raw = str(settings.cancel_poll_interval)
         try:
@@ -508,6 +510,11 @@ class BackgroundWorker:
         """
         was_claimed = False
         with self._queue_lock:
+            parked = (threading.get_ident(), optimization_id)
+            if parked in self._parked_jobs:
+                # park_job already freed this thread's claim; the maps and the lease may belong to a later claim.
+                self._parked_jobs.discard(parked)
+                return
             self._processing_jobs.discard(optimization_id)
             self._cancel_events.pop(optimization_id, None)
             if optimization_id in self._claimed_jobs:
@@ -524,6 +531,13 @@ class BackgroundWorker:
     def park_job(self, optimization_id: str, generation: int, wake_at: datetime) -> bool:
         """Put a waiting run in the wait state and free this worker's claim on it.
 
+        Call it on the thread that processes the job: that thread's later
+        ``_mark_job_done`` for the run then does nothing.
+
+        The API treats ``paused`` as a terminal status, so today a user cannot
+        cancel a waiting run. Before an engine calls this method, the cancel
+        path must accept a ``paused`` run whose recovery phase is ``waiting``.
+
         Args:
             optimization_id: The run that waits.
             generation: The execution generation this worker owns.
@@ -532,11 +546,15 @@ class BackgroundWorker:
         Returns:
             Whether the run was parked; ``False`` when another owner changed it first.
         """
-        if not park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at):
-            return False
-        # The run has no lease now: a heartbeat would find no claim and cancel the job as stolen.
+        # The lock spans the park, so a thread that claims the woken run adds it to the maps only after this pop.
         with self._queue_lock:
+            if not park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at):
+                return False
+            # The run has no lease now: a heartbeat would find no claim and cancel the job as stolen.
             self._claimed_jobs.discard(optimization_id)
+            self._processing_jobs.discard(optimization_id)
+            self._cancel_events.pop(optimization_id, None)
+            self._parked_jobs.add((threading.get_ident(), optimization_id))
         return True
 
     def _worker_loop(self, worker_id: int) -> None:

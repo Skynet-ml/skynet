@@ -9,6 +9,7 @@ lease runs out, and its buffered steps never flush in its own generation.
 from __future__ import annotations
 
 import contextlib
+import pickle
 import time
 import uuid
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from gepa.core.state import GEPAState, ValsetEvaluation
 from sqlalchemy import create_engine, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -25,10 +27,11 @@ import core.storage.remote as remote_mod
 from core.billing.budgets import BudgetService
 from core.config import app_env
 from core.constants import WORKER_RESTART_CAUSE
-from core.storage.models import Base, BillingCustomerModel, JobModel
+from core.storage.models import Base, BillingCustomerModel, GepaCheckpointModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
 from core.storage.step_log_store import StepFenceError, StepLogStore
+from core.worker.checkpoint_compat import checkpoint_manifest
 from core.worker.step_recovery import last_committed_step, open_step_log, park_run
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
@@ -609,3 +612,118 @@ def test_a_bad_wake_at_is_skipped_and_other_runs_still_wake(store: StepJobStore,
 
     assert store.get_job("bad")["status"] == "paused"
     assert store.get_job("good")["status"] == "pending"
+
+
+def _save_checkpoint(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the run a GEPA payload and a real checkpoint pinned to the current worker version.
+
+    Args:
+        store: The job store.
+        monkeypatch: Pytest fixture that binds the current sandbox profile.
+    """
+    monkeypatch.setattr(remote_mod.settings, "vercel_sandbox_max_lifetime_seconds", 60.0)
+    job = store.get_job(RUN)
+    payload = {
+        "strategy": {"mode": "single", "engine": "gepa"},
+        "dataset": [{"x": "sample"}],
+        "execution_runtime": "vercel",
+        "execution_budget_id": job["execution_budget_id"],
+        "execution_budget_generation": 0,
+    }
+    store.update_job(RUN, payload=payload, code_version=store._current_code_version)
+    state = GEPAState({"predict": "seed"}, ValsetEvaluation({0: "answer"}, {0: 0.5}))
+    state.i = 3
+    data = pickle.dumps(state.__dict__)
+    store.save_gepa_checkpoint(
+        RUN, data, 3, manifest=checkpoint_manifest(data, payload, store.get_job(RUN)["code_version"])
+    )
+
+
+def test_the_waiver_starts_at_a_checkpoint_older_than_the_steps(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a checkpoint and steps, the earlier of the two bounds the waiver: work after the checkpoint is waived."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _bill(store, "kept", 1)
+    _save_checkpoint(store, monkeypatch)
+    time.sleep(0.02)
+    _bill(store, "after-checkpoint", 2)
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    time.sleep(0.02)
+    _bill(store, "after-step", 3)
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["code_version"] == store._current_code_version
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert budget.billed_cents == 1
+
+
+def test_a_manual_resume_of_an_interrupted_step_log_run_resumes(store: StepJobStore, step_logs: Any) -> None:
+    """A user resumes a run the sweep stopped as interrupted; it resumes from its steps on any worker version."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    _set_job(
+        store,
+        status="failed",
+        code_version="old-version",
+        recovery={"state": "interrupted", "interrupted_budget_generation": 0},
+    )
+
+    assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["attempts"] == 1
+    assert job["code_version"] is None
+
+
+def test_waking_a_run_with_a_checkpoint_keeps_the_worker_version(store: StepJobStore) -> None:
+    """A woken run with a checkpoint stays pinned to the worker version that wrote the checkpoint."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    _set_job(store, code_version="old-version")
+    with Session(store.engine) as session:
+        session.add(GepaCheckpointModel(optimization_id=RUN, data=b"state"))
+        session.commit()
+
+    assert store._wake_waiting_runs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["code_version"] == "old-version"
+
+
+def test_a_failed_wake_does_not_stop_the_orphan_recovery(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the wake raises, the sweep logs it and still requeues a run whose worker died."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    _kill(store)
+
+    def broken_wake() -> int:
+        """Fail as a wake with a database error would.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("wake failed")
+
+    monkeypatch.setattr(store, "_wake_waiting_runs", broken_wake)
+
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["status"] == "pending"

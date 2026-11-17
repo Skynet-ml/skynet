@@ -26,10 +26,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from sqlalchemy.orm import Session
 
 import core.worker.engine as engine_module
 from core.exceptions import INFRASTRUCTURE_INTERRUPTION
 from core.storage.base import JobStore
+from core.storage.models import JobModel
 from core.worker.constants import (
     EVENT_AGENT_RUN,
     EVENT_ERROR,
@@ -696,6 +698,37 @@ def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
     assert not w.park_job(RUN, generation - 1, datetime.now(UTC))
     assert RUN in w._claimed_jobs
     assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_parked_thread_cleanup_keeps_a_later_claim_of_the_woken_run(tmp_path: Path) -> None:
+    """The parked thread's ``_mark_job_done`` leaves a later thread's claim and lease on the woken run."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    assert w.park_job(RUN, generation, datetime.now(UTC))
+    assert job_store._wake_waiting_runs() == 1
+    claimed: list[str | None] = []
+
+    def claim_on_other_thread() -> None:
+        """Claim the woken run the way another worker thread does."""
+        claimed.append(w._claim_job_from_store())
+
+    other = threading.Thread(target=claim_on_other_thread)
+    other.start()
+    other.join()
+    assert claimed == [RUN]
+
+    w._mark_job_done(RUN)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
+    assert not w._parked_jobs
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]

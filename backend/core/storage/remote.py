@@ -1768,11 +1768,17 @@ class RemoteDBJobStore:
                 and isinstance(job.recovery, dict)
                 and job.recovery.get("interrupted_budget_generation") is not None
             )
-            # Each agent keeps its steps up to its own newest one, so the agent that
-            # committed last-but-oldest bounds the work that every agent keeps. An
-            # agent with no committed step is not seen by this bound. created_at is
-            # the time the pack was applied, not the commit time, so the bound can
-            # be a flush window late (SKY-711 follow-up).
+            # Each agent keeps its steps up to its own newest one, so the agent whose
+            # newest step is the oldest bounds the work that the run keeps. The
+            # operations carry no agent id, so the bound is the same for all agents:
+            # - An agent with no committed step is not seen. Its work before the
+            #   bound stays billed, though it runs again.
+            # - An agent that stopped early moves the bound back. Later work of the
+            #   other agents is waived, though they keep it.
+            # A per-agent waiver needs the agent id on execution operations; add it
+            # before an engine with more than one agent writes the step log.
+            # created_at is the time the pack was applied, not the commit time, so
+            # the bound can be a flush window late (SKY-711 follow-up).
             newest_per_agent = (
                 session.query(func.max(AgentStepModel.created_at).label("newest"))
                 .filter(AgentStepModel.run_id == optimization_id)
@@ -2462,7 +2468,11 @@ class RemoteDBJobStore:
         Returns:
             Number of orphaned jobs requeued or marked failed.
         """
-        self._wake_waiting_runs()
+        try:
+            self._wake_waiting_runs()
+        except Exception:
+            # A failed wake must not stop the orphan recovery; the next sweep wakes again.
+            logger.exception("Could not wake waiting runs; orphan recovery continues")
         session = self._get_session()
         try:
             now = datetime.now(UTC)
@@ -2572,6 +2582,21 @@ class RemoteDBJobStore:
         try:
             woken = 0
             for identifier, generation in due:
+                values = {
+                    JobModel.status: "pending",
+                    JobModel.execution_generation: generation + 1,
+                    JobModel.recovery: None,
+                    JobModel.message: "Continuing after its wait",
+                }
+                has_checkpoint = (
+                    session.query(GepaCheckpointModel.optimization_id)
+                    .filter(GepaCheckpointModel.optimization_id == identifier)
+                    .first()
+                    is not None
+                )
+                if not has_checkpoint:
+                    # A checkpoint ties the run to one worker version; without one, any worker may resume it.
+                    values[JobModel.code_version] = None
                 woken += (
                     session.query(JobModel)
                     .filter(
@@ -2579,17 +2604,7 @@ class RemoteDBJobStore:
                         JobModel.status == "paused",
                         JobModel.execution_generation == generation,
                     )
-                    .update(
-                        {
-                            JobModel.status: "pending",
-                            JobModel.execution_generation: generation + 1,
-                            JobModel.recovery: None,
-                            # A step log run carries no checkpoint of one worker version.
-                            JobModel.code_version: None,
-                            JobModel.message: "Continuing after its wait",
-                        },
-                        synchronize_session=False,
-                    )
+                    .update(values, synchronize_session=False)
                 )
                 session.commit()
             return woken
