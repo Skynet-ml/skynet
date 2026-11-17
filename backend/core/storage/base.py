@@ -1,7 +1,8 @@
 """JobStore Protocol defining the contract for all storage backends.
 
-Declares the typed dictionary records returned by stores and the
-``JobStore`` runtime-checkable protocol every backend must satisfy.
+Declares the typed dictionary records returned by stores, the
+``JobStore`` runtime-checkable protocol every backend must satisfy, and the
+``ObjectStore`` protocol behind the step log packs.
 """
 
 from __future__ import annotations
@@ -522,5 +523,46 @@ class JobStore(Protocol):
 
         Returns:
             One summary for each candidate on the page.
+        """
+        ...
+
+
+@runtime_checkable
+class ObjectStore(Protocol):
+    """Protocol for the blob store that holds step log packs (S3, or a local folder)."""
+
+    def put(self, key: str, data: bytes) -> None:
+        """Write one whole object under ``key``.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+        """
+        ...
+
+    def get(self, key: str, offset: int = 0, length: int | None = None) -> bytes:
+        """Read a byte range of one object.
+
+        Args:
+            key: The object key.
+            offset: The first byte to read.
+            length: The number of bytes to read; ``None`` reads to the end.
+
+        Returns:
+            The bytes of the range.
+
+        Raises:
+            KeyError: When no object is filed under ``key``.
+        """
+        ...
+
+    def list(self, prefix: str) -> list[str]:
+        """Return the keys that start with ``prefix``, in key order.
+
+        Args:
+            prefix: The key prefix.
+
+        Returns:
+            The matching keys.
         """
         ...
