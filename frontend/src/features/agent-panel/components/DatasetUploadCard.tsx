@@ -25,7 +25,7 @@ export interface ConfirmedDataset {
 
 interface DatasetUploadCardProps {
   /** The agent tool call that requested the upload. */
-  call?: AgentToolCall;
+  call: AgentToolCall;
   disabled?: boolean;
   /** The picked file goes too, so the chat can keep its original for the viewer. */
   onConfirm: (confirmed: ConfirmedDataset, file: File) => void;

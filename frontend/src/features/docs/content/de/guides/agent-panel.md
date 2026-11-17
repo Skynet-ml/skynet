@@ -109,7 +109,7 @@ Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen**
 
 ### Kosten
 
-Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Ist Ihr verfügbares Guthaben zu niedrig, zeigt der Bereich „Ihr verfügbares Guthaben ist zu niedrig. Aktive Läufe können einen Teil Ihres Guthabens reservieren.“ Wählen Sie die Geldbörsen-Schaltfläche (**Guthaben hinzufügen**), um die Abrechnungseinstellungen zu öffnen. Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
+Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Ist Ihr verfügbares Guthaben zu niedrig, zeigt der Bereich „Ihr verfügbares Guthaben ist zu niedrig. Aktive Läufe können einen Teil Ihres Guthabens reservieren.“ Wählen Sie die Geldbörsen-Schaltfläche (**Guthaben hinzufügen**), um die Einstellungen unter **Abrechnung** zu öffnen. Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
 
 ## Tipps
 

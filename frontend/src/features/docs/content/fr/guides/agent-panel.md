@@ -109,7 +109,7 @@ Pour définir un modèle par défaut pour les nouvelles discussions, ouvrez **Pa
 
 ### Coût
 
-Les discussions avec l'agent sur les crédits Skynet utilisent votre solde. Si votre solde disponible est trop bas, le panneau affiche « Votre solde disponible est trop bas. Les exécutions en cours peuvent réserver une partie de votre solde. » Sélectionnez le bouton portefeuille (**Ajouter des fonds**) pour ouvrir les paramètres de facturation. Pour les tarifs, lisez [Facturation](/docs/concepts/billing).
+Les discussions avec l'agent sur les crédits Skynet utilisent votre solde. Si votre solde disponible est trop bas, le panneau affiche « Votre solde disponible est trop bas. Les exécutions en cours peuvent réserver une partie de votre solde. » Sélectionnez le bouton portefeuille (**Ajouter des fonds**) pour ouvrir les paramètres **Facturation**. Pour les tarifs, lisez [Facturation](/docs/concepts/billing).
 
 ## Conseils
 

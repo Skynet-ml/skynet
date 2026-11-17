@@ -109,7 +109,7 @@ Para fijar un modelo predeterminado para los chats nuevos, abre **Ajustes** > **
 
 ### Coste
 
-Los chats con el agente que usan créditos de Skynet consumen tu saldo. Si tu saldo disponible es demasiado bajo, el panel muestra «Tu saldo disponible es demasiado bajo. Las ejecuciones activas pueden reservar parte de tu saldo.» Selecciona el botón de la cartera (**Añadir fondos**) para abrir los ajustes de facturación. Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
+Los chats con el agente que usan créditos de Skynet consumen tu saldo. Si tu saldo disponible es demasiado bajo, el panel muestra «Tu saldo disponible es demasiado bajo. Las ejecuciones activas pueden reservar parte de tu saldo.» Selecciona el botón de la cartera (**Añadir fondos**) para abrir los ajustes de **Facturación**. Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
 
 ## Consejos
 

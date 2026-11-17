@@ -11,6 +11,7 @@ import * as React from "react";
 import { JSDOM } from "jsdom";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
+import type { AgentToolCall } from "@/shared/ui/agent/types";
 import type { ConfirmedDataset } from "./DatasetUploadCard";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -49,6 +50,15 @@ const {
 
 after(() => dom.window.close());
 
+const CALL: AgentToolCall = {
+  id: "call-1",
+  tool: "request_user_dataset_datasets_request_upload_post",
+  reason: "",
+  status: "running",
+  startedAt: 0,
+  endedAt: null,
+};
+
 /** Pick a file through the card's hidden file input, as the OS picker does. */
 async function pickFile(container: HTMLElement, file: File): Promise<void> {
   const input = container.querySelector<HTMLInputElement>('input[type="file"]');
@@ -69,7 +79,7 @@ void test("a picked file attaches at once, and the card then shows nothing", asy
   });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard onConfirm={(d) => attached.push(d)} />),
+    root.render(<DatasetUploadCard call={CALL} onConfirm={(d) => attached.push(d)} />),
   );
   await pickFile(container, file);
   for (let i = 0; i < 20 && attached.length === 0; i += 1) {
@@ -97,7 +107,7 @@ void test("the card hands back the picked file, so the chat can keep its origina
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard onConfirm={(_, f) => picked.push(f)} />),
+    root.render(<DatasetUploadCard call={CALL} onConfirm={(_, f) => picked.push(f)} />),
   );
   await pickFile(container, file);
   for (let i = 0; i < 20 && picked.length === 0; i += 1) {
@@ -126,7 +136,7 @@ void test("a Strict Mode card attaches once, and a closed card attaches nothing"
   await React.act(async () =>
     strictRoot.render(
       <React.StrictMode>
-        <DatasetUploadCard onConfirm={(d) => strictAttached.push(d)} />
+        <DatasetUploadCard call={CALL} onConfirm={(d) => strictAttached.push(d)} />
       </React.StrictMode>,
     ),
   );
@@ -153,7 +163,7 @@ void test("a Strict Mode card attaches once, and a closed card attaches nothing"
       finishRead = resolve;
     }).then(readText);
   await React.act(async () =>
-    closedRoot.render(<DatasetUploadCard onConfirm={(d) => closedAttached.push(d)} />),
+    closedRoot.render(<DatasetUploadCard call={CALL} onConfirm={(d) => closedAttached.push(d)} />),
   );
   await pickFile(closedContainer, slowFile);
   // The drop zone's exit animation can still show; a disabled input means the read is under way.
@@ -480,7 +490,7 @@ void test("a disabled card attaches nothing", async () => {
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(<DatasetUploadCard disabled onConfirm={(d) => attached.push(d)} />),
+    root.render(<DatasetUploadCard call={CALL} disabled onConfirm={(d) => attached.push(d)} />),
   );
   await pickFile(container, file);
   for (let i = 0; i < 10; i += 1) {
