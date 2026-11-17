@@ -12,9 +12,9 @@ import worker_main
 from core.storage.remote import RemoteDBJobStore
 
 
-@pytest.mark.parametrize("bucket_set", [True, False])
-def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, bucket_set):
-    """Start and stop the worker and its tree compactor, also with no compactor when no bucket is set."""
+@pytest.mark.parametrize("compactor_started", [True, False])
+def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, compactor_started):
+    """Start and stop the worker; stop the tree compactor only when ``start_tree_compactor`` returns one."""
     store = create_autospec(RemoteDBJobStore, instance=True)
     store.recover_pending_jobs.return_value = []
     stopped = threading.Event()
@@ -32,7 +32,7 @@ def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, bucket_
     ):
         monkeypatch.setattr(worker_main, name, MagicMock())
     compactor = MagicMock()
-    worker_main.start_tree_compactor.return_value = compactor if bucket_set else None
+    worker_main.start_tree_compactor.return_value = compactor if compactor_started else None
     monkeypatch.setattr(worker_main, "get_job_store", lambda: store)
     monkeypatch.setattr(worker_main, "signal", types.SimpleNamespace(signal=MagicMock(), SIGTERM=15, SIGINT=2))
     monkeypatch.setattr(worker_main, "threading", types.SimpleNamespace(Event=lambda: stopped))
@@ -43,4 +43,4 @@ def test_run_worker_boots_against_the_real_store_signatures(monkeypatch, bucket_
     store.recover_orphaned_jobs.assert_called_once_with()
     worker_main.get_worker.return_value.stop.assert_called_once_with()
     worker_main.start_tree_compactor.assert_called_once_with(store.engine)
-    assert compactor.stop.call_count == (1 if bucket_set else 0)
+    assert compactor.stop.call_count == (1 if compactor_started else 0)

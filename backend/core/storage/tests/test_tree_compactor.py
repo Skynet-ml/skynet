@@ -1072,6 +1072,47 @@ def test_a_missing_pack_in_the_window_leaves_the_other_packs_merged(engine, obje
     _assert_all_readable(store, _without_pack(engine, written, missing))
 
 
+def test_an_empty_pack_that_s3_refuses_to_range_is_marked_broken(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """A GET that fails with S3's InvalidRange, as a range GET on an empty object does, marks the pack broken."""
+    written = _fill(store)
+    empty = min(objects.list("packs/w1/"))
+    get = objects.get
+
+    class InvalidRangeError(Exception):
+        """Carry the response shape of a boto3 ClientError for a 416 answer."""
+
+        response = {"Error": {"Code": "InvalidRange"}, "ResponseMetadata": {"HTTPStatusCode": 416}}
+
+    def empty_get(key: str, *args: Any) -> bytes:
+        """Refuse the range GET of one pack, as S3 does for an empty object.
+
+        Args:
+            key: The object key.
+            *args: The range arguments.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            InvalidRangeError: For the empty pack.
+        """
+        if key == empty:
+            raise InvalidRangeError("InvalidRange")
+        return get(key, *args)
+
+    monkeypatch.setattr(objects, "get", empty_get)
+
+    assert make_compactor().merge() == 2
+
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, empty).byte_size == BROKEN_BYTE_SIZE
+    assert len(objects.list(f"{COMPACTED_PREFIX}/")) == 1
+    monkeypatch.setattr(objects, "get", get)
+    _assert_all_readable(store, _without_pack(engine, written, empty))
+
+
 def test_a_short_pack_leaves_the_pass_and_shifts_no_offsets(engine, objects, store, make_compactor) -> None:
     """A pack object shorter than its rows is broken; its rows stay on it, and the other two packs read back."""
     written = _fill(store)

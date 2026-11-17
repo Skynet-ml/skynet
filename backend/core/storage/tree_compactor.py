@@ -83,6 +83,8 @@ FULL_COMPACTOR_ID = f"{COMPACTOR_ID}/full"
 BROKEN_BYTE_SIZE = -1
 # PostgreSQL's lock_not_available: a NOWAIT lock found the row held by another transaction.
 _LOCK_NOT_AVAILABLE = "55P03"
+# The S3 error code in a boto3 ClientError response; read from the dict, so boto3 need not be installed.
+_INVALID_RANGE = "InvalidRange"
 MIN_AGE_SECONDS = 600.0
 # Much longer than a read of a row and then of its pack range.
 GRACE_SECONDS = 600.0
@@ -293,6 +295,14 @@ class TreeCompactor:
                     logger.exception("Pack %s is missing; its rows stay on it and it leaves the candidates", pack_key)
                     broken.add(pack_key)
                     continue
+                except Exception as error:
+                    response = getattr(error, "response", None)
+                    code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+                    if code != _INVALID_RANGE:
+                        raise
+                    # The S3 store always sends a Range header, and S3 answers 416 for an empty object.
+                    # The pack is then empty, so the short-pack check below marks it broken.
+                    pack = b""
             piece = pack[row.pack_offset : row.pack_offset + row.pack_length]
             # A short pack would shift the offsets of every later row, so its rows leave the pass.
             if len(piece) != row.pack_length:
