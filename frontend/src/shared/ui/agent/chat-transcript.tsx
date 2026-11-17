@@ -36,7 +36,7 @@ interface ChatTranscriptProps {
   onRunCode?: (code: string, language: string) => void;
   /** Which links in agent answers stay links; the rest render as plain text. */
   allowLink?: (href: string) => boolean;
-  /** What an agent message shows after its text, such as a tool's closing outcome. */
+  /** What an agent message shows after its text once its turn ends, such as the files it edited. */
   renderAfterContent?: (msg: AgentMessage) => React.ReactNode;
   animatePairs?: boolean;
   trailing?: (state: ChatTranscriptState) => React.ReactNode;
@@ -240,7 +240,7 @@ export function ChatTranscript({
                 toolCallsBeforeContent={toolCallsBeforeContent}
                 onRunCode={onRunCode}
                 allowLink={allowLink}
-                afterContent={renderAfterContent?.(agentMsg)}
+                afterContent={isStreamingThisPair ? undefined : renderAfterContent?.(agentMsg)}
                 className="max-w-full"
               />
               {showActions && (
