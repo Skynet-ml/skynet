@@ -428,6 +428,19 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   await unmount();
 });
 
+void test("pendingChip gives the card the next attach takes out, and none after Send or a remove", async () => {
+  const { live, unmount } = await mountDatasetDraft(async () => "staged-p");
+  assert.equal(live.api.pendingChip(), null);
+  await React.act(async () => live.api.attach(QA_DATASET));
+  assert.equal(live.api.pendingChip()?.name, "qa.csv");
+  live.api.take(live.draft);
+  assert.equal(live.api.pendingChip(), null, "Send takes the card");
+  await React.act(async () => live.api.attach(QA_DATASET));
+  await React.act(async () => live.setDraft("my text"));
+  assert.equal(live.api.pendingChip(), null, "a remove takes the card");
+  await unmount();
+});
+
 void test("Send waits while the rows stage", async () => {
   let finish: (id: string) => void = () => {};
   const { live, unmount } = await mountDatasetDraft(

@@ -49,6 +49,8 @@ interface DraftOriginal {
   shown: MediaAttachment;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
+  /** A restore put it in the draft, so only a dataset card that a fork restored owns it. */
+  restored: boolean;
 }
 
 export interface ChatMediaDraft {
@@ -60,8 +62,8 @@ export interface ChatMediaDraft {
   addFiles: (files: File[]) => void;
   /**
    * Keep the originals of attached files; the viewer draws a PDF, DOCX or XLSX
-   * one. ``replace`` drops that many of the oldest originals with each file's
-   * name, also ones a restore still loads. Returns the local ids.
+   * one. ``replace`` drops that many of the oldest restored originals with
+   * each file's name, also ones a restore still loads. Returns the local ids.
    */
   addOriginals: (files: File[], options?: { replace?: number }) => string[];
   /** Drop the originals whose files left the draft; ``files`` are the draft's files. */
@@ -211,14 +213,18 @@ export function useChatMedia(): ChatMediaDraft {
     [update, upload],
   );
 
-  const addOriginals = React.useCallback(
-    (files: File[], { replace = 0 }: { replace?: number } = {}): string[] => {
+  const keepFiles = React.useCallback(
+    (files: File[], replace: number, restored: boolean): string[] => {
       if (closedRef.current) return [];
       // The server takes no original over the file limit, so a larger file
       // keeps only its text and is not uploaded for nothing.
       const fits = files.filter((file) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
       for (const key of replace > 0 ? new Set(fits.map((file) => nameKey(file.name))) : []) {
-        const gone = originalsRef.current.filter((o) => nameKey(o.name) === key).slice(0, replace);
+        // Only a restored card leaves with a same card, so a composer file's
+        // original with the same name stays.
+        const gone = originalsRef.current
+          .filter((o) => o.restored && nameKey(o.name) === key)
+          .slice(0, replace);
         const late = Math.min(replace - gone.length, loadingRef.current.get(key) ?? 0);
         if (late > 0) {
           loadingRef.current.set(key, (loadingRef.current.get(key) ?? 0) - late);
@@ -245,6 +251,7 @@ export function useChatMedia(): ChatMediaDraft {
           name: file.name,
           shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob) },
           serverId: null,
+          restored,
         };
       });
       syncOriginals([...originalsRef.current, ...added]);
@@ -275,6 +282,10 @@ export function useChatMedia(): ChatMediaDraft {
       return added.map((item) => item.localId);
     },
     [syncOriginals],
+  );
+  const addOriginals = React.useCallback(
+    (files: File[], { replace = 0 }: { replace?: number } = {}) => keepFiles(files, replace, false),
+    [keepFiles],
   );
 
   const dropOriginal = React.useCallback(
@@ -446,10 +457,10 @@ export function useChatMedia(): ChatMediaDraft {
         });
         update(() => added.map((a) => a.item));
         for (const { item, file } of added) if (file) upload(item, file);
-        if (originals.length) addOriginals(originals);
+        if (originals.length) keepFiles(originals, 0, true);
       });
     },
-    [update, upload, addOriginals],
+    [update, upload, keepFiles],
   );
 
   // A closed panel frees the local URLs of files still in the draft. An upload

@@ -33,6 +33,8 @@ after(() => dom.window.close());
 
 let uploads = 0;
 const originalUploads: string[] = [];
+// The name field of each original upload, which the server types it by.
+const originalNames: unknown[] = [];
 const deleted: string[] = [];
 // A test sets this to hold the next upload until it settles the promise.
 let nextUpload: Promise<Response> | null = null;
@@ -59,6 +61,7 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
   // The server stores an upload marked as an original as a document, whatever its type.
   const original = form?.get("original") === "true";
   if (original) originalUploads.push(name);
+  if (original) originalNames.push(form?.get("name"));
   const kind = original || /\.(pdf|docx|xlsx)$/.test(name) ? "document" : "image";
   return Response.json({ id: `s-${uploads}`, name, kind });
 }) as typeof fetch;
@@ -396,12 +399,14 @@ void test("a file of any type keeps its original, which goes out on Send (SKY-78
   const { draft, unmount } = await mountDraft();
   const before = originalUploads.length;
   const csv = new File(["a,b\n1,2\n"], "rows.csv", { type: "text/csv" });
-  await React.act(async () => void draft().addOriginals([csv, pdf("a.pdf")]));
+  await React.act(async () => void draft().addOriginals([csv, pdf('x.p"df')]));
   await flush();
-  assert.deepEqual(originalUploads.slice(before), ["rows.csv", "a.pdf"]);
+  assert.deepEqual(originalUploads.slice(before), ["rows.csv", 'x.p"df']);
+  // The browser escapes '"' in the multipart filename; the field keeps it.
+  assert.deepEqual(originalNames.slice(before), ["rows.csv", 'x.p"df']);
   assert.deepEqual(
     documents(draft().ready()).map((m) => m.name),
-    ["rows.csv", "a.pdf"],
+    ["rows.csv", 'x.p"df'],
   );
   await unmount();
 });
@@ -423,30 +428,41 @@ void test("an original over the file limit is not uploaded; the file keeps only 
   await unmount();
 });
 
-void test("a replacing original drops only as many same-key originals as it is told", async () => {
+void test("a replacing original drops only as many restored same-key originals as it is told", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;
-  let old: string[] = [];
-  await React.act(
-    async () => void (old = draft().addOriginals([pdf("a<1>.pdf"), pdf("a<1>.pdf"), pdf("b.pdf")])),
+  let own: string[] = [];
+  // A composer file's original comes first, so a drop of the oldest would take it.
+  await React.act(async () => void (own = draft().addOriginals([pdf("a_1_.pdf")])));
+  await React.act(async () =>
+    draft().restore([
+      { id: "sent-a1", name: "a<1>.pdf", kind: "document", url: "" },
+      { id: "sent-a2", name: "a<1>.pdf", kind: "document", url: "" },
+      { id: "sent-b", name: "b.pdf", kind: "document", url: "" },
+    ]),
   );
   await flush();
   const stored = documents(draft().ready()).map((m) => m.id);
+  assert.equal(stored.length, 4);
   let next: string[] = [];
   // The block shows "a<1>.pdf" as "a_1_.pdf"; both have one key.
   await React.act(
     async () => void (next = draft().addOriginals([pdf("a_1_.pdf")], { replace: 1 })),
   );
   await flush();
-  const files = [{ name: "a_1_.pdf" }, { name: "a_1_.pdf" }, { name: "b.pdf" }];
-  assert.deepEqual(
-    draft()
-      .shownOriginals(files)
-      .map((m) => m.id)
-      .sort(),
-    [old[1], old[2], next[0]].sort(),
-  );
-  assert.deepEqual(deleted.slice(before), [stored[0]]);
+  const files = [
+    { name: "a_1_.pdf" },
+    { name: "a_1_.pdf" },
+    { name: "a_1_.pdf" },
+    { name: "b.pdf" },
+  ];
+  const shown = draft()
+    .shownOriginals(files)
+    .map((m) => m.id);
+  assert.equal(shown.length, 4);
+  assert.ok(shown.includes(own[0]!));
+  assert.ok(shown.includes(next[0]!));
+  assert.deepEqual(deleted.slice(before), [stored[1]]);
   await unmount();
 });
 

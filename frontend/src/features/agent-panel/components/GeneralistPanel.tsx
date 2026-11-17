@@ -216,6 +216,11 @@ const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
 /** Whether a file opens the dataset upload card instead of being read as text. */
+/** Tell if two attached files are one card: the same name and text. */
+function same(f: AttachedFile, c: AttachedFile): boolean {
+  return f.name === c.name && f.text === c.text;
+}
+
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -1032,17 +1037,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // too, so each name keeps one original for each card and keepOriginals
       // does not drop them all.
       const chip = attachedFile(confirmed.fileName, datasetAttachedNote(confirmed));
-      const earlier = datasetOriginalRef.current;
-      const same = (f: AttachedFile, c: AttachedFile) => f.name === c.name && f.text === c.text;
+      // The same earlier card that putDatasetChip takes out: Send and a remove
+      // clear it, so a card they left behind does not count.
+      const earlier = datasetDraft.pendingChip();
+      // A tool card's click runs after the last render, so this draft is the
+      // one putDatasetChip changes.
       const leaving = splitPastes(draft).files.filter(
-        (f) => same(f, chip) || (earlier !== null && same(f, earlier.chip)),
+        (f) => same(f, chip) || (earlier !== null && same(f, earlier)),
       );
-      // The earlier card's own original counts as one that leaves, unless
-      // Send or a remove already took it.
+      // The earlier card's own original counts as one that leaves.
+      const own = datasetOriginalRef.current;
       const ownGone =
+        own !== null &&
         earlier !== null &&
-        dropOriginal(earlier.localId) &&
-        leaving.some((f) => same(f, earlier.chip));
+        same(own.chip, earlier) &&
+        leaving.some((f) => same(f, earlier)) &&
+        dropOriginal(own.localId);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       datasetDraft.attach(confirmed, callId);
       // The card keeps its original as every attached file does (SKY-782),
@@ -1061,7 +1071,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       confirmedDatasetCallsRef.current.add(callId);
       // A library dataset has no local file, so it has no original; the
       // earlier upload card's original must not pair with its card.
-      if (datasetOriginalRef.current) dropOriginal(datasetOriginalRef.current.localId);
+      const own = datasetOriginalRef.current;
+      const earlier = datasetDraft.pendingChip();
+      if (own && earlier && same(own.chip, earlier)) dropOriginal(own.localId);
       datasetOriginalRef.current = null;
       datasetDraft.attachLibrary(picked, callId);
     },

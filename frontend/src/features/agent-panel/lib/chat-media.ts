@@ -44,6 +44,9 @@ export async function uploadChatMedia(
   body.append("file", file, file.name);
   // An attached file's original is stored whatever its type (SKY-782).
   if (original) body.append("original", "true");
+  // The browser escapes '"', CR and LF in a multipart filename; the field
+  // keeps the name exact, so the server types the original by the viewer's key.
+  body.append("name", file.name);
   const res = await fetchWithAuthRetry(apiUrl("/agent/media"), { method: "POST", body }).catch(
     () => null,
   );

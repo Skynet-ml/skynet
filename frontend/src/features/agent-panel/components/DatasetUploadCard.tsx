@@ -219,7 +219,8 @@ function libraryPickNote(picked: ConfirmedLibraryDataset): string {
  *
  * Returns:
  *   ``attach`` and ``attachLibrary`` put a card in the draft. ``holds``
- *   tells if a draft has the pending card. ``staging``
+ *   tells if a draft has the pending card, and ``pendingChip`` gives that
+ *   card, which the next ``attach`` takes out. ``staging``
  *   tells if Send must wait for the rows. ``take`` applies the dataset of a
  *   draft on Send and returns its turn override, or null for no dataset.
  */
@@ -239,6 +240,7 @@ export function useDatasetDraft({
   attach: (dataset: ConfirmedDataset, owner?: string) => void;
   attachLibrary: (picked: ConfirmedLibraryDataset, owner?: string) => void;
   holds: (draft: string) => boolean;
+  pendingChip: () => AttachedFile | null;
   staging: (draft: string) => boolean;
   take: (draft: string) => { override: WizardState | undefined } | null;
 } {
@@ -310,6 +312,8 @@ export function useDatasetDraft({
     return Boolean(current && draftHasChip(draft, current.chip));
   }, []);
 
+  const pendingChip = React.useCallback(() => pendingRef.current?.chip ?? null, []);
+
   const staging = React.useCallback(
     (draft: string) =>
       pending?.kind === "upload" && pending.staging && draftHasChip(draft, pending.chip),
@@ -349,8 +353,8 @@ export function useDatasetDraft({
   );
 
   return React.useMemo(
-    () => ({ attach, attachLibrary, holds, staging, take }),
-    [attach, attachLibrary, holds, staging, take],
+    () => ({ attach, attachLibrary, holds, pendingChip, staging, take }),
+    [attach, attachLibrary, holds, pendingChip, staging, take],
   );
 }
 

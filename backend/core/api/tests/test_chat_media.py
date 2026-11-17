@@ -378,12 +378,32 @@ def test_an_original_named_x_p_df_must_be_a_real_pdf(harness: SimpleNamespace) -
     assert body["mime_type"] == "application/pdf"
 
 
-def test_a_browser_escaped_quote_in_a_name_gives_the_viewers_key(harness: SimpleNamespace) -> None:
-    """A browser sends 'x.p"df' as 'x.p%22df'; the viewer draws it as a PDF, so it must hold a real PDF."""
-    assert chat_media._form_filename("a%22b%0d%0A.pdf") == 'a"b\r\n.pdf'
-    assert _upload_original(harness.client, b"notes", "x.p%22df").status_code == 415
-    body = _upload_original(harness.client, _PDF, "x.p%22df").json()
+def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
+    """The name field, not the multipart filename, decides the type the viewer draws."""
+
+    def upload(data: bytes, name: str) -> object:
+        """POST an original whose multipart filename differs from its name field.
+
+        Args:
+            data: The file bytes.
+            name: The name field.
+
+        Returns:
+            The response.
+        """
+        return harness.client.post(
+            "/agent/media",
+            files={"file": ("x.p%22df", data, "application/octet-stream")},
+            data={"original": "true", "name": name},
+        )
+
+    # The browser sends 'x.p"df' as 'x.p%22df'; the viewer draws it as a PDF.
+    assert upload(b"notes", 'x.p"df').status_code == 415
+    body = upload(_PDF, 'x.p"df').json()
     assert (body["name"], body["mime_type"]) == ("x.pdf", "application/pdf")
+    # A real 'notes.pdf%22' name is not a PDF to the viewer.
+    body = upload(b"notes", "notes.pdf%22").json()
+    assert (body["name"], body["mime_type"]) == ("notes.pdf%22", "application/octet-stream")
 
 
 def test_a_long_pdf_name_keeps_its_drawn_type(harness: SimpleNamespace) -> None:
