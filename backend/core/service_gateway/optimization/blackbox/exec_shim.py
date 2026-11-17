@@ -13,6 +13,7 @@ maps do not ship it yet.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -21,7 +22,7 @@ import signal
 import subprocess
 import sys
 import threading
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 LOG_ENV = "APP_EXEC_LOG"
 # Set for the children of a recorded command, so a nested listed command is
@@ -30,6 +31,7 @@ ACTIVE_ENV = "APP_EXEC_SHIM_ACTIVE"
 # The log keeps only the tail of each stream: a command can print without limit.
 OUTPUT_LIMIT = 64 * 1024
 _NOT_FOUND = 127
+_CANNOT_RUN = 126
 
 
 def _real_command(shim_dir: str, name: str) -> str | None:
@@ -71,6 +73,57 @@ def _pump(source: BinaryIO, sink: BinaryIO, tail: bytearray) -> None:
                 forward = False
 
 
+def _spawn(real: str, name: str, args: list[str]) -> subprocess.Popen[bytes]:
+    """Start the real command with piped output, as the shell would start it.
+
+    Args:
+        real: The command's path.
+        name: The command name, its ``argv[0]``.
+        args: Its arguments.
+
+    Returns:
+        The child process.
+
+    Raises:
+        OSError: When the command cannot run.
+    """
+    options: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": {**os.environ, ACTIVE_ENV: "1"},
+    }
+    try:
+        return subprocess.Popen([name, *args], executable=real, **options)
+    except OSError as error:
+        if error.errno != errno.ENOEXEC:
+            raise
+    # A script with no shebang line: the shell runs it with sh, so the shim does too.
+    return subprocess.Popen(["/bin/sh", real, *args], **options)
+
+
+def _exec(real: str, name: str, args: list[str]) -> int:
+    """Replace the shim with the real command, as the shell would run it.
+
+    Args:
+        real: The command's path.
+        name: The command name, its ``argv[0]``.
+        args: Its arguments.
+
+    Returns:
+        126 when the command cannot run; otherwise it does not return.
+    """
+    try:
+        try:
+            os.execv(real, [name, *args])
+        except OSError as error:
+            if error.errno != errno.ENOEXEC:
+                raise
+            os.execv("/bin/sh", [name, real, *args])
+    except OSError as error:
+        print(f"{name}: {error.strerror}", file=sys.stderr)
+    return _CANNOT_RUN
+
+
 def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     """Run the real command, stream its output through and forward SIGTERM and SIGINT to it.
 
@@ -80,17 +133,38 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
         args: Its arguments.
 
     Returns:
-        The stdout tail, the stderr tail and the exit code (128 plus the signal number when a signal ended it).
+        The stdout tail, the stderr tail and the exit code (128 plus the
+        signal number when a signal ended it, 126 when it cannot run).
     """
-    process = subprocess.Popen(
-        [name, *args],
-        executable=real,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, ACTIVE_ENV: "1"},
-    )
+    # The handlers go in before the child starts: a signal that comes before
+    # the child exists waits in ``pending``, so the shim does not die and orphan it.
+    started: list[subprocess.Popen[bytes]] = []
+    pending: list[int] = []
+
+    def forward(signum: int, _frame: object) -> None:
+        """Send the signal to the child, or keep it until the child starts.
+
+        Args:
+            signum: The signal number.
+            _frame: The interrupted frame.
+        """
+        if started:
+            started[0].send_signal(signum)
+        else:
+            pending.append(signum)
+
     for number in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(number, lambda signum, _frame: process.send_signal(signum))
+        signal.signal(number, forward)
+    try:
+        process = _spawn(real, name, args)
+    except OSError as error:
+        message = f"{name}: {error.strerror}\n".encode()
+        sys.stderr.buffer.write(message)
+        sys.stderr.buffer.flush()
+        return b"", message, _CANNOT_RUN
+    started.append(process)
+    for number in pending:
+        process.send_signal(number)
     tails = (bytearray(), bytearray())
     pumps = [
         threading.Thread(target=_pump, args=(stream, sink, tail), daemon=True)
@@ -108,15 +182,15 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
 
 
 def _tail(data: bytes) -> str:
-    """Decode the end of one output stream for the log.
+    """Decode one captured output stream for the log.
 
     Args:
-        data: The captured bytes.
+        data: The captured bytes; ``_pump`` already keeps only the last ``OUTPUT_LIMIT``.
 
     Returns:
-        At most ``OUTPUT_LIMIT`` bytes of the end, decoded with replacement.
+        The bytes, decoded with replacement.
     """
-    return data[-OUTPUT_LIMIT:].decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
 
 
 def _append(log: str, record: dict[str, object]) -> None:
@@ -142,8 +216,8 @@ def main(argv: list[str]) -> int:
         argv: The shim folder, the command name, then its arguments.
 
     Returns:
-        The command's exit code: 127 when it is not installed, 128 plus the
-        signal number when a signal ended it.
+        The command's exit code: 127 when it is not installed, 126 when it
+        cannot run, 128 plus the signal number when a signal ended it.
     """
     shim_dir, name, args = argv[0], argv[1], argv[2:]
     real = _real_command(shim_dir, name)
@@ -152,7 +226,7 @@ def main(argv: list[str]) -> int:
         if real is None:
             print(f"{name}: command not found", file=sys.stderr)
             return _NOT_FOUND
-        os.execv(real, [name, *args])
+        return _exec(real, name, args)
     if real is None:
         stdout, stderr, code = b"", f"{name}: command not found\n".encode(), _NOT_FOUND
         sys.stderr.buffer.write(stderr)

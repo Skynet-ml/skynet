@@ -23,7 +23,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 
-from .. import harness_bridge, harness_capture
+from .. import exec_shim, harness_bridge, harness_capture
 from ..harness_bridge import SESSIONS_DIR, install_shim
 from ..harness_capture import HarnessCapture, restore_session, snapshot_session
 
@@ -479,8 +479,8 @@ def test_an_exec_log_replaced_by_a_pipe_does_not_hang_the_capture(step_log, tmp_
     assert result == [[]]
 
 
-def test_one_read_of_the_exec_log_takes_at_most_the_limit(step_log, tmp_path, monkeypatch) -> None:
-    """A large log commits over several calls, and a line longer than the limit is skipped whole."""
+def test_one_finish_reads_a_log_larger_than_the_read_limit(step_log, tmp_path, monkeypatch) -> None:
+    """One finish reads the log in limit-sized chunks to its end, and a line longer than the limit is skipped whole."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -491,11 +491,162 @@ def test_one_read_of_the_exec_log_takes_at_most_the_limit(step_log, tmp_path, mo
     capture = _capture(step_log, workspace, session_dir, exec_log=log)
     log.write_text("x" * limit + "\n" + make + ls)
 
+    steps = capture.finish()
+
+    assert [step_log.get_step(step)["body"]["command"] for step in steps] == ["make", "ls"]
     assert capture.finish() == []
-    [first] = capture.finish()
-    [second] = capture.finish()
+
+
+def test_a_tool_round_skips_every_exec_record_of_a_log_larger_than_the_read_limit(
+    step_log, tmp_path, monkeypatch
+) -> None:
+    """A tool round moves the log position to the end, so the next model call commits none of those records."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    make = _record("make")
+    monkeypatch.setattr(harness_capture, "_EXEC_READ_LIMIT", len(make) + 5)
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(make * 3)
+
+    assert len(capture.observe(_tool_round("t1", "make", "ok"))) == 1
     assert capture.finish() == []
-    assert [step_log.get_step(step)["body"]["command"] for step in (first, second)] == ["make", "ls"]
+
+
+def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_pairs_again(step_log, tmp_path) -> None:
+    """Each pair is recorded right after its commit, so a retry commits only the pairs that did not commit."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+    request = _tool_round("t1", "make", "ok")
+    request["messages"][1]["content"].append(
+        {"type": "tool_use", "id": "t2", "name": "bash", "input": {"command": "ls"}}
+    )
+    request["messages"][2]["content"].append({"type": "tool_result", "tool_use_id": "t2", "content": "a"})
+    real_commit, calls = step_log.commit, []
+
+    def flaky_commit(**kwargs: Any) -> str:
+        """Fail on the second call, else commit.
+
+        Args:
+            **kwargs: The commit arguments.
+
+        Returns:
+            The step id.
+
+        Raises:
+            RuntimeError: On the second call.
+        """
+        calls.append(kwargs["seq"])
+        if len(calls) == 2:
+            raise RuntimeError("fence")
+        return real_commit(**kwargs)
+
+    step_log.commit = flaky_commit
+    with pytest.raises(RuntimeError, match="fence"):
+        capture.observe(request)
+    [retry] = capture.observe(request)
+
+    assert calls == [0, 1, 1]
+    assert step_log.get_step(retry)["body"]["command"] == {"command": "ls"}
+
+
+def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_exec_records_again(step_log, tmp_path) -> None:
+    """Each exec record moves the log position right after its commit, so a retry starts at the failed one."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(_record("make") + _record("ls"))
+    real_commit, calls = step_log.commit, []
+
+    def flaky_commit(**kwargs: Any) -> str:
+        """Fail on the second call, else commit.
+
+        Args:
+            **kwargs: The commit arguments.
+
+        Returns:
+            The step id.
+
+        Raises:
+            RuntimeError: On the second call.
+        """
+        calls.append(kwargs["body"]["command"])
+        if len(calls) == 2:
+            raise RuntimeError("fence")
+        return real_commit(**kwargs)
+
+    step_log.commit = flaky_commit
+    with pytest.raises(RuntimeError, match="fence"):
+        capture.finish()
+    capture.finish()
+
+    assert calls == ["make", "ls", "ls"]
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        {"type": "tool_use", "id": ["t1"], "name": "bash", "input": {}},
+        {"type": "tool_use", "id": {"a": 1}, "name": "bash", "input": {}},
+        {"type": "tool_use", "name": "bash", "input": {}},
+        {"type": "tool_use", "id": "", "name": "bash", "input": {}},
+    ],
+)
+def test_a_tool_call_with_a_bad_id_is_skipped(step_log, tmp_path, use) -> None:
+    """A list, dict, empty or missing id does not break the capture; only the well-formed pair commits."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+    request = _tool_round("t2", "ls", "a")
+    request["messages"][1]["content"].append(use)
+    request["messages"][2]["content"].append({"type": "tool_result", "tool_use_id": use.get("id"), "content": "x"})
+
+    [step] = capture.observe(request)
+
+    assert step_log.get_step(step)["body"]["command"] == {"command": "ls"}
+
+
+def test_a_deeply_nested_tool_input_is_skipped(step_log, tmp_path) -> None:
+    """An input too deep to redact is not stored, and the capture goes on."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+    deep: dict[str, Any] = {}
+    for _ in range(5000):
+        deep = {"a": deep}
+    request = _tool_round("t2", "ls", "a")
+    request["messages"][1]["content"].append({"type": "tool_use", "id": "t1", "name": "bash", "input": deep})
+    request["messages"][2]["content"].append({"type": "tool_result", "tool_use_id": "t1", "content": "x"})
+
+    [step] = capture.observe(request)
+
+    assert step_log.get_step(step)["body"]["command"] == {"command": "ls"}
+    assert capture.observe(request) == []
+
+
+def test_a_route_key_cut_at_the_start_of_an_output_tail_is_not_stored(step_log, tmp_path) -> None:
+    """The shim keeps the last bytes of a stream; a key part at the start of a full tail is dropped."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    tail = KEY[3:] + "y" * (exec_shim.OUTPUT_LIMIT - len(KEY) + 3)
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": tail, "stderr": "short"}) + "\n")
+
+    [step] = capture.finish()
+
+    body = step_log.get_step(step)["body"]
+    assert KEY[3:] not in body["stdout"]
+    assert body["stdout"].endswith("y" * 100)
+    assert body["stderr"] == "short"
 
 
 def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> None:
@@ -595,6 +746,30 @@ def test_a_file_swapped_for_a_link_after_lstat_is_not_read(step_log, tmp_path, m
     tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
 
     assert "data.txt" not in _tree_files(TreeStore(step_log), tree_id)
+
+
+def test_a_name_that_is_not_utf8_is_left_out(step_log, tmp_path, monkeypatch) -> None:
+    """``os.listdir`` gives such a name with surrogate escapes; the tree cannot encode it, so the walk skips it."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    (workspace / "main.py").write_text("x = 1\n")
+    bad = "bad\udcff"
+    # APFS rejects such names, so the walk sees a fake link entry.
+    real_listdir, real_readlink = os.listdir, os.readlink
+    monkeypatch.setattr(
+        os, "listdir", lambda path: [*real_listdir(path), bad] if isinstance(path, int) else real_listdir(path)
+    )
+    monkeypatch.setattr(
+        os, "readlink", lambda path, *, dir_fd=None: "t" if path == bad else real_readlink(path, dir_fd=dir_fd)
+    )
+    link_info = list((workspace / "main.py").lstat())[:10]
+    link_info[0] = stat.S_IFLNK | 0o777
+    _lstat_lies(monkeypatch, bad, os.stat_result(link_info))
+
+    tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
+
+    assert set(_tree_files(TreeStore(step_log), tree_id)) == {"main.py"}
 
 
 def test_a_pipe_that_looks_like_a_file_does_not_hang_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
@@ -731,6 +906,7 @@ def _claude(env: dict[str, str], workspace: Path, *args: str) -> str:
         capture_output=True,
         text=True,
         check=True,
+        timeout=30,
     )
     return json.loads(done.stdout)["result"]
 

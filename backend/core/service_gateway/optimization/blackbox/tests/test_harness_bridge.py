@@ -1719,3 +1719,36 @@ def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path)
         process.kill()
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     assert record["exit_code"] == 128 + signal.SIGTERM
+
+
+@pytest.mark.parametrize("logged", [True, False])
+def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, logged: bool) -> None:
+    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
+    bin_dir.mkdir()
+    (bin_dir / "plain").write_text('echo "plain $1"\nexit 3\n')
+    (bin_dir / "plain").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["plain"], log if logged else None)
+    done = subprocess.run(["plain", "a"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout) == (3, b"plain a\n")
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"], record["stdout"]) == ("plain a", 3, "plain a\n")
+
+
+def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> None:
+    """A command whose interpreter is missing exits 126, and its record is still written."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
+    bin_dir.mkdir()
+    (bin_dir / "broken").write_text("#!/no/such/interpreter\n")
+    (bin_dir / "broken").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["broken"], log)
+    done = subprocess.run(["broken"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert done.returncode == 126
+    assert done.stderr.startswith(b"broken: ")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["command"], record["exit_code"]) == ("broken", 126)

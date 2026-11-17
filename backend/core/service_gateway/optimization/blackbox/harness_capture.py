@@ -40,6 +40,7 @@ from typing import Any
 
 from ....storage.step_log_store import StepLogStore
 from ....storage.tree_store import TreeEntry, TreeStore
+from .exec_shim import OUTPUT_LIMIT
 from .harness_bridge import EXEC_LOG, EXEC_SHIM_DIR, KEY_TOKEN, SESSIONS_DIR, workspace_files
 
 # Session-folder files that are only logs of this box: the raw harness output
@@ -110,11 +111,11 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
-        records, offset = self._exec_records()
-        pairs = [body for body in _tool_pairs(request) if body["tool_use_id"] not in self._committed]
-        step_ids = self._commit(pairs or records)
-        self._exec_offset = offset
-        self._committed.update(body["tool_use_id"] for body in pairs)
+        pairs = [(body, None) for body in _tool_pairs(request) if body["tool_use_id"] not in self._committed]
+        if not pairs:
+            return self._drain(commit=True)
+        step_ids = self._commit(pairs)
+        self._drain(commit=False)
         return step_ids
 
     def finish(self) -> list[str]:
@@ -123,41 +124,72 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
-        records, offset = self._exec_records()
-        step_ids = self._commit(records)
-        self._exec_offset = offset
-        return step_ids
+        return self._drain(commit=True)
 
-    def _commit(self, bodies: list[dict[str, Any]]) -> list[str]:
-        """Commit each body as a command step, all with one tree.
+    def _drain(self, *, commit: bool) -> list[str]:
+        """Read the exec log to its end, one limited read at a time, and commit or drop its records.
 
         Args:
-            bodies: Step bodies, in the order the commands ran.
+            commit: Commit the records; ``False`` drops them (a tool call interval).
+
+        Returns:
+            The new step ids, in commit order.
+        """
+        step_ids: list[str] = []
+        while True:
+            start = self._exec_offset
+            records, offset = self._exec_records()
+            if commit:
+                step_ids += self._commit(records)
+            self._exec_offset = offset
+            if offset == start:
+                return step_ids
+
+    def _commit(self, items: list[tuple[dict[str, Any], int | None]]) -> list[str]:
+        """Commit each body as a command step, all with one tree.
+
+        The capture records each step right after its commit (its tool call
+        id, or its exec log position), so a retry after a failed commit does
+        not commit the earlier ones again.
+
+        Args:
+            items: Step bodies, in the order the commands ran, each with the
+                exec log position after its line (``None`` for a tool call).
 
         Returns:
             The step ids.
         """
-        if not bodies:
+        if not items:
             return []
         tree_id = self._snapshot()
         step_ids = []
-        for body in bodies:
-            step_ids.append(
-                self._step_log.commit(
-                    run_id=self._run_id,
-                    agent_id=self._agent_id,
-                    seq=self._seq,
-                    kind="command",
-                    execution_generation=self._generation,
-                    grant_list_id=self._grant_list_id,
-                    body=_redact(body, self._route_key),
-                    tree_id=tree_id,
+        for body, end in items:
+            try:
+                redacted = _redact(body, self._route_key)
+            # The model request is agent-controlled; a deeply nested input cannot be stored as a step.
+            except RecursionError:
+                redacted = None
+            if redacted is not None:
+                step_ids.append(
+                    self._step_log.commit(
+                        run_id=self._run_id,
+                        agent_id=self._agent_id,
+                        seq=self._seq,
+                        kind="command",
+                        execution_generation=self._generation,
+                        grant_list_id=self._grant_list_id,
+                        body=redacted,
+                        tree_id=tree_id,
+                    )
                 )
-            )
-            self._seq += 1
+                self._seq += 1
+            if end is None:
+                self._committed.add(body["tool_use_id"])
+            else:
+                self._exec_offset = end
         return step_ids
 
-    def _exec_records(self) -> tuple[list[dict[str, Any]], int]:
+    def _exec_records(self) -> tuple[list[tuple[dict[str, Any], int]], int]:
         """Read the exec log's complete new lines as step bodies.
 
         The agent can write the log, so a line that is not a well-formed
@@ -168,7 +200,8 @@ class HarnessCapture:
         whole, so one huge line cannot stop the log.
 
         Returns:
-            One body for each well-formed new record, and the log position after them.
+            One body for each well-formed new record, with the log position
+            after its line, and the log position after all read lines.
         """
         opened = self._open_exec_log()
         if opened is None:
@@ -189,7 +222,9 @@ class HarnessCapture:
             return [], self._exec_offset + size
         offset = self._exec_offset + len(complete)
         bodies = []
-        for line in complete.splitlines():
+        end = self._exec_offset
+        for line in complete.splitlines(keepends=True):
+            end += len(line)
             try:
                 record = json.loads(line)
             # Deeply nested brackets make the parser raise RecursionError, not ValueError.
@@ -202,12 +237,10 @@ class HarnessCapture:
                 and isinstance(record.get("stdout"), str)
                 and isinstance(record.get("stderr"), str)
             ):
-                bodies.append(
-                    {
-                        "source": "exec_shim",
-                        **{key: record[key] for key in ("command", "exit_code", "stdout", "stderr")},
-                    }
-                )
+                body = {"source": "exec_shim", "command": record["command"], "exit_code": record["exit_code"]}
+                for stream in ("stdout", "stderr"):
+                    body[stream] = _drop_cut_key(record[stream], self._route_key)
+                bodies.append((body, end))
         return bodies, offset
 
     def _open_exec_log(self) -> tuple[int, int] | None:
@@ -231,6 +264,26 @@ class HarnessCapture:
             os.close(fd)
             return None
         return fd, info.st_size
+
+
+def _drop_cut_key(text: str, route_key: str) -> str:
+    """Remove the start of an exec log stream that the shim cut to its tail.
+
+    The shim keeps only the last ``OUTPUT_LIMIT`` bytes, so the cut can split
+    a copy of the route key, and ``_redact`` replaces only whole copies. A
+    split copy leaves fewer than ``len(route_key)`` characters at the start of
+    the tail, so those are removed. A stream shorter than the limit is whole.
+
+    Args:
+        text: The decoded stream tail.
+        route_key: The key; an empty key removes nothing.
+
+    Returns:
+        The tail, without its first ``len(route_key) - 1`` characters when it may be cut.
+    """
+    if not route_key or len(text.encode("utf-8")) < OUTPUT_LIMIT:
+        return text
+    return text[len(route_key) - 1 :]
 
 
 def _redact(value: Any, route_key: str) -> Any:
@@ -261,27 +314,31 @@ def _tool_pairs(request: dict[str, Any]) -> list[dict[str, Any]]:
         request: An Anthropic Messages request body.
 
     Returns:
-        One step body for each answered call, in result order.
+        One step body for each answered call, in result order. The request is
+        agent-controlled, so a call or result whose id is not a non-empty
+        string is left out.
     """
     messages = request.get("messages")
     if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
         return []
     uses = {
-        block.get("id"): block
+        block["id"]: block
         for message in messages
         if isinstance(message, dict) and message.get("role") == "assistant"
         for block in _blocks(message)
-        if block.get("type") == "tool_use"
+        if block.get("type") == "tool_use" and _is_id(block.get("id"))
     }
     pairs = []
     for block in _blocks(messages[-1]):
-        use = uses.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
+        if block.get("type") != "tool_result" or not _is_id(block.get("tool_use_id")):
+            continue
+        use = uses.get(block["tool_use_id"])
         if use is None:
             continue
         pairs.append(
             {
                 "source": "tool_use",
-                "tool_use_id": str(use["id"]),
+                "tool_use_id": use["id"],
                 "tool": str(use.get("name") or ""),
                 "command": use.get("input"),
                 "output": _result_text(block.get("content")),
@@ -289,6 +346,18 @@ def _tool_pairs(request: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return pairs
+
+
+def _is_id(value: Any) -> bool:
+    """Tell whether a block id is a non-empty string.
+
+    Args:
+        value: The ``id`` or ``tool_use_id`` value.
+
+    Returns:
+        Whether it can pair a call with its result.
+    """
+    return isinstance(value, str) and bool(value)
 
 
 def _blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -421,7 +490,7 @@ def _put_directory(
     """
     entries = []
     for name in sorted(os.listdir(folder_fd)):
-        if skip(prefix + name) or (route_key and route_key in name):
+        if skip(prefix + name) or (route_key and route_key in name) or not _is_utf8(name):
             continue
         # A background job can delete a file during the walk, and the agent can
         # make a file unreadable; the tree then holds what can still be read.
@@ -438,6 +507,25 @@ def _put_directory(
         except OSError:
             continue
     return entries
+
+
+def _is_utf8(name: str) -> bool:
+    """Tell whether a file name can be stored in a tree.
+
+    ``os.listdir`` returns a name that is not valid UTF-8 with surrogate
+    escapes, and ``encode_tree`` cannot encode it.
+
+    Args:
+        name: The entry name.
+
+    Returns:
+        Whether the name encodes as UTF-8.
+    """
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _put_opened(

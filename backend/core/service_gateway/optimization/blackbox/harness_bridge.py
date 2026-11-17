@@ -1392,7 +1392,10 @@ def run_session(
             tool calls than this; its workspace edits so far stand),
             ``hidden_hashes`` (the parent's :func:`hidden_hashes` of the
             scoring-side paths; every tool call that names one is refused),
-            and ``exec_commands`` (command names the exec shim records).
+            ``exec_commands`` (command names the exec shim records), and
+            ``resume_command`` (:func:`main` runs it in place of
+            ``run_command`` for a ``--resume`` of a known session, so a
+            harness with native resume continues its own session state).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1735,7 +1738,9 @@ def install_exec_shim(shim_dir: Path, names: Iterable[str], python: str) -> Path
             raise ValueError(f"exec shim command must be a plain name: {name!r}")
         wrapper = shim_dir / name
         wrapper.write_text(
-            f'#!/bin/sh\nexec {shlex.join([python, str(shim_file), str(shim_dir), name])} "$@"\n', encoding="utf-8"
+            # -I: a PYTHONPATH or a json.py in the agent's folder must not shadow the shim's stdlib imports.
+            f'#!/bin/sh\nexec {shlex.join([python, "-I", str(shim_file), str(shim_dir), name])} "$@"\n',
+            encoding="utf-8",
         )
         wrapper.chmod(0o755)
     return shim_dir
