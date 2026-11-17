@@ -284,6 +284,34 @@ def test_data_newer_than_this_code_raises(engine) -> None:
     assert caught.value.stored_version == 2
 
 
+def test_a_locked_read_newer_than_this_code_raises(engine, monkeypatch) -> None:
+    """Newer code upgrades the data between the unlocked and the locked read: no step runs, and the call raises."""
+    calls: list[str] = []
+    monkeypatch.setattr(storage_version, "UPGRADES", (_recording_step(calls, "to2"),))
+    _add_workspace(engine)
+
+    def stored_version(session: Session, workspace_id: str, *, lock: bool) -> int:
+        """Return version 1 to the unlocked read and version 3 to the locked read.
+
+        Args:
+            session: The open session.
+            workspace_id: The workspace.
+            lock: Whether the caller asks for the row lock.
+
+        Returns:
+            The version that the read sees.
+        """
+        return 3 if lock else 1
+
+    monkeypatch.setattr(storage_version, "_stored_version", stored_version)
+
+    with pytest.raises(StorageVersionAheadError) as caught:
+        ensure_current(engine, "ws-1")
+
+    assert caught.value.stored_version == 3
+    assert calls == []
+
+
 def test_an_unknown_workspace_raises_lookup_error(engine) -> None:
     """A missing workspace row is an error, not a silent no-op."""
     with pytest.raises(LookupError, match="ws-missing"):

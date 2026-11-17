@@ -17,6 +17,9 @@ two workers that wake the same workspace run each step once. A step's
 database writes roll back with a failed step. Writes outside the database
 (for example object store PUTs) do not, so a step must be safe to run again.
 SQLite has no row locks; only PostgreSQL gives the once-only guarantee.
+
+A step must not commit or roll back the session it gets. :func:`ensure_current`
+ends that transaction, and the row lock must hold until the version update.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ from sqlalchemy.orm import Session
 from .models import WorkspaceModel
 
 BASE_VERSION = 1
+# A step gets the upgrade session and the workspace id. It must not commit or roll back the session:
+# ensure_current ends the transaction, so the row lock holds until the version update.
 UpgradeStep = Callable[[Session, str], None]
 UPGRADES: tuple[UpgradeStep, ...] = ()
 
