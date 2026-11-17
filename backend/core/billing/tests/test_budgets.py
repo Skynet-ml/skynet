@@ -336,6 +336,24 @@ def test_unconfirmed_release_keeps_partial_usage_billed_and_frees_the_rest(engin
     assert (again.state, again.budget.billed_cents) == ("released", 3)
 
 
+def test_unconfirmed_release_keeps_live_and_quarantined_work_covered(engine: Engine) -> None:
+    """Never release a call that may still run, or a known bill held for a bound problem (SKY-784)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="draft")
+    later = datetime.now(UTC) + timedelta(seconds=1)
+    live = _reserve(service, budget.id, "live-batch", max_cents=5)
+    service.mark_dispatched(live.id, "alice")
+    assert service.release_unconfirmed(live.id, "alice", dispatched_before=later, reason="no bill").state == (
+        "dispatched"
+    )
+    overrun = _reserve(service, budget.id, "overrun", max_cents=5)
+    service.mark_dispatched(overrun.id, "alice")
+    with pytest.raises(BudgetBoundExceededError):
+        service.settle(overrun.id, "alice", evidence_key="overrun", actual_cents=6, evidence={"provider_request": "x"})
+    kept = service.release_unconfirmed(overrun.id, "alice", dispatched_before=later, reason="key rotated")
+    assert (kept.state, kept.budget.reserved_cents) == ("pending", 10)
+
+
 def test_partial_failure_and_replay_settle_once(engine: Engine) -> None:
     """Keep partial failure usage charged and unknown remaining usage covered."""
     service = BudgetService(engine=engine)

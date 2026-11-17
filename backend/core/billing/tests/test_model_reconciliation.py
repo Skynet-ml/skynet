@@ -268,6 +268,7 @@ def test_sweep_releases_a_hold_whose_bill_stays_unconfirmed_for_15_minutes(datab
     with Session(database) as session:
         assert wallet_reserved_cents(session, "alice") == held
         operation = session.scalar(select(ExecutionOperationModel))
+        assert operation.state == "pending"
         operation.dispatched_at = datetime.now(UTC) - timedelta(minutes=20)
         session.commit()
 

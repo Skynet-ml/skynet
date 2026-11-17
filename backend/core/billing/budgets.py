@@ -1297,21 +1297,33 @@ class BudgetService:
         the hold is released, and Skynet absorbs the unknown cost.
 
         Args:
-            operation_id: Dispatched or pending attempt still waiting for its final usage.
+            operation_id: Pending attempt that returned and still waits for its final usage.
             username: Authenticated owner.
             dispatched_before: Only work dispatched before this time is released.
             reason: Why the final usage is still unknown; recorded as evidence.
 
         Returns:
             The released operation, or the unchanged one when it is not
-            unconfirmed started work older than ``dispatched_before``.
+            unconfirmed pending work older than ``dispatched_before``.
         """
         with self._transaction() as session:
             wallet, budget, operation = self._operation(session, operation_id, username)
             started = operation.dispatched_at or operation.created_at
             # SQLite returns naive datetimes; every stored time is UTC.
             started = started if started.tzinfo else started.replace(tzinfo=UTC)
-            if operation.state not in _DISPATCHED_STATES or started >= dispatched_before:
+            # A known bill held for a funding or bound problem is not unconfirmed.
+            quarantined = session.scalar(
+                select(ExecutionUsageEvidenceModel.id)
+                .where(
+                    ExecutionUsageEvidenceModel.operation_id == operation_id,
+                    ExecutionUsageEvidenceModel.issue.is_not(None),
+                    ExecutionUsageEvidenceModel.issue != "usage_pending",
+                )
+                .limit(1)
+            )
+            # Only "pending" work has returned; "dispatched" work may still be a
+            # live stream or batch that outlasts the release window.
+            if operation.state != "pending" or started >= dispatched_before or quarantined is not None:
                 return self._operation_snapshot(session, operation, budget, wallet)
             now = datetime.now(UTC)
             document = {"reason": reason[:500], "dispatched_at": started.isoformat()}
