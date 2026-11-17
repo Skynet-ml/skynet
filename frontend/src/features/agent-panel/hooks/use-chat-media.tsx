@@ -4,7 +4,8 @@ import * as React from "react";
 import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
-import { fitOriginals, keptOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
+import { MAX_ATTACHMENT_MB } from "@/shared/ui/agent/file-attachments";
+import { fitOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
   type MediaAttachment,
@@ -34,10 +35,12 @@ interface DraftMedia {
   failed: boolean;
 }
 
-/** The stored original of a PDF, DOCX or XLSX in the draft (SKY-735). It has no tile. */
+/** The stored original of an attached file in the draft (SKY-735, SKY-782). It has no tile. */
 interface DraftOriginal {
   localId: string;
   name: string;
+  /** The id of the draft file card this original belongs to. */
+  card: string;
   /** What the draft's viewer shows: the local file, by its object URL. One
    *  object for the original's life, so an upload that ends does not reload it. */
   shown: MediaAttachment;
@@ -45,25 +48,29 @@ interface DraftOriginal {
   serverId: string | null;
 }
 
+/** The draft's file cards; each card's ``id`` links its original. */
+type DraftFiles = ReadonlyArray<{ id?: string }>;
+
 export interface ChatMediaDraft {
   /** The tiles to show in the composer, keyed by local id. */
   tiles: readonly MediaAttachment[];
   /** The originals that go with ``files`` on Send, keyed by local id, which the draft's viewer shows. */
-  shownOriginals: (files: ReadonlyArray<{ name: string }>) => readonly MediaAttachment[];
+  shownOriginals: (files: DraftFiles) => readonly MediaAttachment[];
   /** Upload picked, pasted or dropped media files. */
   addFiles: (files: File[]) => void;
-  /** Keep the originals of attached PDF, DOCX and XLSX files, which the viewer shows. */
-  addOriginals: (files: File[]) => void;
-  /** Drop the originals whose files left the draft; ``files`` are the draft's files. */
-  keepOriginals: (files: ReadonlyArray<{ name: string }>) => void;
+  /** Store the original of each attached file, linked to its file card; the viewer draws a PDF, DOCX or XLSX one. */
+  addOriginals: (files: ReadonlyArray<{ file: File; card: string }>) => void;
   /** Take a tile out of the draft, with Undo; the stored file goes when the toast closes. */
   remove: (localId: string) => void;
-  /** The files to send, by stored id, originals last; null while an upload still runs. */
-  ready: () => MediaAttachment[] | null;
-  /** Why Send must wait: an upload runs or failed. Null when the files can go. */
-  blocked: string | null;
-  /** Empty the draft after a send. The sent files stay stored; their URLs go on a chat switch. */
-  clear: () => void;
+  /** The files to send with ``files``, by stored id, originals last; null while an upload still runs. */
+  ready: (files: DraftFiles) => MediaAttachment[] | null;
+  /** Why Send must wait for ``files``: an upload runs or failed. Null when the files can go. */
+  blocked: (files: DraftFiles) => string | null;
+  /**
+   * Empty the draft after ``files`` went. The sent files stay stored; their
+   * URLs go on a chat switch. An original that did not go is deleted.
+   */
+  clear: (files: DraftFiles) => void;
   /** Upload a sent message's files again into an empty draft, as a fork puts back its text. */
   restore: (media: readonly MediaAttachment[]) => void;
 }
@@ -89,6 +96,25 @@ function freeUnshown(
   const held = new Set(shown.map((o) => o.shown.url));
   for (const url of queued) if (!held.has(url)) freeMediaUrl(url);
   return queued.filter((url) => held.has(url));
+}
+
+/**
+ * The originals that go with ``files``: one for each card still in the draft,
+ * in their order, within ``room`` places. An original whose card left stays
+ * out, so a card that leaves takes its original with it (SKY-782).
+ */
+function sendable(
+  files: DraftFiles,
+  originals: readonly DraftOriginal[],
+  room: number,
+): DraftOriginal[] {
+  const cards = new Set(files.flatMap((f) => (f.id ? [f.id] : [])));
+  const linked = originals.filter((o) => {
+    if (!cards.has(o.card)) return false;
+    cards.delete(o.card);
+    return true;
+  });
+  return fitOriginals(linked, room);
 }
 
 /** The image, video and audio files in the composer draft (SKY-707). */
@@ -196,9 +222,12 @@ export function useChatMedia(): ChatMediaDraft {
   );
 
   const addOriginals = React.useCallback(
-    (files: File[]) => {
+    (files: ReadonlyArray<{ file: File; card: string }>) => {
       if (closedRef.current) return;
-      const added = files.map((file): DraftOriginal => {
+      // The server takes no original over the file limit, so a larger file
+      // keeps only its text and is not uploaded for nothing.
+      const fits = files.filter(({ file }) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
+      const added = fits.map(({ file, card }): DraftOriginal => {
         const localId = crypto.randomUUID();
         // The viewer shows a PDF in an unsandboxed frame before the server checks
         // the bytes, so the blob's type is PDF whatever type the file claims.
@@ -209,7 +238,8 @@ export function useChatMedia(): ChatMediaDraft {
         return {
           localId,
           name: file.name,
-          shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob) },
+          card,
+          shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob), card },
           serverId: null,
         };
       });
@@ -221,7 +251,7 @@ export function useChatMedia(): ChatMediaDraft {
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
-        uploadChatMedia(files[i]!).then((stored) => {
+        uploadChatMedia(fits[i]!.file, { original: true }).then((stored) => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) {
             void deleteChatMedia(stored.id);
             return;
@@ -238,20 +268,6 @@ export function useChatMedia(): ChatMediaDraft {
           );
         }, drop);
       });
-    },
-    [syncOriginals],
-  );
-
-  const keepOriginals = React.useCallback(
-    (files: ReadonlyArray<{ name: string }>) => {
-      const kept = new Set(keptOriginals(files, originalsRef.current));
-      if (kept.size === originalsRef.current.length) return;
-      const gone = originalsRef.current.filter((o) => !kept.has(o));
-      syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
-      for (const o of gone) {
-        unshownRef.current.push(o.shown.url);
-        if (o.serverId) void deleteChatMedia(o.serverId);
-      }
     },
     [syncOriginals],
   );
@@ -309,54 +325,68 @@ export function useChatMedia(): ChatMediaDraft {
     [update],
   );
 
-  const ready = React.useCallback((): MediaAttachment[] | null => {
+  const ready = React.useCallback((files: DraftFiles): MediaAttachment[] | null => {
     const current = itemsRef.current;
-    if (current.some((m) => !m.serverId) || originalsRef.current.some((o) => !o.serverId))
-      return null;
-    const media = current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
     // Past the message limit an original stays out; its file still goes as text.
-    const originals = fitOriginals(originalsRef.current, MAX_MEDIA_PER_MESSAGE - media.length).map(
-      (o) => ({ id: o.serverId!, name: o.name, kind: "document" as const, url: "" }),
-    );
-    return [...media, ...originals];
+    const originals = sendable(files, originalsRef.current, MAX_MEDIA_PER_MESSAGE - current.length);
+    if (current.some((m) => !m.serverId) || originals.some((o) => !o.serverId)) return null;
+    const media = current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
+    return [
+      ...media,
+      ...originals.map((o) => ({
+        id: o.serverId!,
+        name: o.name,
+        kind: "document" as const,
+        url: "",
+        card: o.card,
+      })),
+    ];
   }, []);
 
-  const clear = React.useCallback(() => {
-    // The originals past the limit did not go with the message, so they go now.
-    const sent = new Set(
-      fitOriginals(originalsRef.current, MAX_MEDIA_PER_MESSAGE - itemsRef.current.length),
-    );
-    markMediaSent(itemsRef.current.map((m) => m.url));
-    update(() => []);
-    const gone = originalsRef.current;
-    syncOriginals([]);
-    // A sent original shows from its stored copy, so no local URL outlives the draft.
-    for (const o of gone) {
-      unshownRef.current.push(o.shown.url);
-      if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
-    }
-  }, [update, syncOriginals]);
+  const clear = React.useCallback(
+    (files: DraftFiles) => {
+      // The originals whose card left, or past the limit, did not go with the message, so they go now.
+      const sent = new Set(
+        sendable(files, originalsRef.current, MAX_MEDIA_PER_MESSAGE - itemsRef.current.length),
+      );
+      markMediaSent(itemsRef.current.map((m) => m.url));
+      update(() => []);
+      const gone = originalsRef.current;
+      syncOriginals([]);
+      // A sent original shows from its stored copy, so no local URL outlives the draft.
+      for (const o of gone) {
+        unshownRef.current.push(o.shown.url);
+        if (!sent.has(o) && o.serverId) void deleteChatMedia(o.serverId);
+      }
+    },
+    [update, syncOriginals],
+  );
 
   const restore = React.useCallback(
     (media: readonly MediaAttachment[]) => {
       if (!media.length || itemsRef.current.length) return;
       const run = ++restoreRef.current;
+      // An original sent before SKY-782 has no card to link, so its file
+      // comes back as text only.
+      const wanted = media.filter((m) => m.kind !== "document" || m.card);
+      if (!wanted.length) return;
       setRestoring((n) => n + 1);
       // Each file uploads again as a new draft file. A sent id is the source
       // chat's: the server stores a copy under a new id that the client never learns.
-      void Promise.allSettled(media.map((m) => fetchChatMedia(m.id))).then((blobs) => {
+      void Promise.allSettled(wanted.map((m) => fetchChatMedia(m.id))).then((blobs) => {
         setRestoring((n) => n - 1);
         // The user added files while these loaded, or the panel closed: the draft is theirs now.
         if (run !== restoreRef.current || itemsRef.current.length) return;
-        // A document is a file's stored original (SKY-735), not a tile. One that
-        // does not load stays out: its file still goes as text.
-        const originals = media.flatMap((m, i) => {
+        // A document is a file's stored original (SKY-735), not a tile. It keeps
+        // its card, which the restored text keeps too. One that does not load
+        // stays out: its file still goes as text.
+        const originals = wanted.flatMap((m, i) => {
           const got = blobs[i]!;
-          return m.kind === "document" && got.status === "fulfilled"
-            ? [new File([got.value], m.name, { type: got.value.type })]
+          return m.kind === "document" && m.card && got.status === "fulfilled"
+            ? [{ file: new File([got.value], m.name, { type: got.value.type }), card: m.card }]
             : [];
         });
-        const added = media.flatMap((m, i): Array<{ item: DraftMedia; file: File | null }> => {
+        const added = wanted.flatMap((m, i): Array<{ item: DraftMedia; file: File | null }> => {
           const got = blobs[i]!;
           if (m.kind === "document") return [];
           if (got.status === "rejected") {
@@ -418,28 +448,33 @@ export function useChatMedia(): ChatMediaDraft {
       })),
     [items],
   );
-  // The same originals that ``ready`` sends after Send's ``keepOriginals``, so a
-  // tile never shows an original that stays out of the message.
+  // The same originals that ``ready`` sends, so a tile never shows an original
+  // that stays out of the message.
   const shownOriginals = React.useCallback(
-    (files: ReadonlyArray<{ name: string }>) =>
-      fitOriginals(keptOriginals(files, draftOriginals), MAX_MEDIA_PER_MESSAGE - items.length).map(
-        (o) => o.shown,
-      ),
+    (files: DraftFiles) =>
+      sendable(files, draftOriginals, MAX_MEDIA_PER_MESSAGE - items.length).map((o) => o.shown),
     [draftOriginals, items.length],
   );
-  const originalsUploading = draftOriginals.some((o) => !o.serverId);
-  const blocked = items.some((m) => m.failed)
-    ? msg("agent.media.remove_failed")
-    : restoring || items.some((m) => !m.serverId) || originalsUploading
-      ? msg("agent.media.uploading")
-      : null;
+  // An original whose card left does not go, so its upload does not hold Send.
+  const blocked = React.useCallback(
+    (files: DraftFiles) =>
+      items.some((m) => m.failed)
+        ? msg("agent.media.remove_failed")
+        : restoring ||
+            items.some((m) => !m.serverId) ||
+            sendable(files, draftOriginals, MAX_MEDIA_PER_MESSAGE - items.length).some(
+              (o) => !o.serverId,
+            )
+          ? msg("agent.media.uploading")
+          : null,
+    [items, restoring, draftOriginals],
+  );
 
   return {
     tiles,
     shownOriginals,
     addFiles,
     addOriginals,
-    keepOriginals,
     remove,
     ready,
     blocked,

@@ -235,6 +235,8 @@ interface PendingRun {
   editUserTurn: { text: string; occurrence: number } | null;
   /** Ids of the stored images, video and audio sent with the message. */
   mediaIds: string[];
+  /** For each sent original, the id of the file card it belongs to (SKY-782). */
+  mediaCards: Record<string, string>;
 }
 
 /** Per-session mutable machinery that must never trigger a render. */
@@ -264,12 +266,22 @@ interface SessionRuntime {
 
 /**
  * The media a turn sends: all of it, but only the originals (SKY-735) whose
- * files are in the turn's text.
+ * file cards are in the turn's text. A card's id links its original
+ * (SKY-782); a card sent before SKY-782 has none and keeps its original
+ * only when its name's counts match.
  */
 function messageMedia(media: AgentMessage["media"], content: string): AgentMessage["media"] {
   if (!media) return media;
   const files = splitPastes(content).files;
-  const kept = new Set(keptOriginals(files, media.filter((m) => m.kind === "document")));
+  const cards = new Set(files.flatMap((f) => (f.id ? [f.id] : [])));
+  const legacy = keptOriginals(
+    files.filter((f) => !f.id),
+    media.filter((m) => m.kind === "document" && !m.card),
+  );
+  const kept = new Set([
+    ...media.filter((m) => m.kind === "document" && m.card && cards.has(m.card)),
+    ...legacy,
+  ]);
   const next = media.filter((m) => m.kind !== "document" || kept.has(m));
   return next.length ? next : undefined;
 }
@@ -725,6 +737,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             compaction_summary: run.compactionSummary,
             chat_allowed_tools: [...rt.chatAllowedTools],
             ...(run.mediaIds.length ? { media_ids: run.mediaIds } : {}),
+            ...(Object.keys(run.mediaCards).length ? { media_cards: run.mediaCards } : {}),
           },
           {
             signal: controller.signal,
@@ -1162,6 +1175,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         regenerate,
         editUserTurn,
         mediaIds: media?.map((m) => m.id) ?? [],
+        mediaCards: Object.fromEntries(
+          (media ?? []).flatMap((m) => (m.kind === "document" && m.card ? [[m.id, m.card]] : [])),
+        ),
       };
 
       commit((draft) => {

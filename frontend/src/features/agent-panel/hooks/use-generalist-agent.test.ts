@@ -315,6 +315,59 @@ test("a capacity error after a tool call gets no automatic retry", async () => {
   }
 });
 
+test("a turn sends each original's card id, and an edit keeps the original of each card left (SKY-782)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  const block = (id: string) =>
+    `<attached_file name="a.pdf" id="${id}">\ntext\n</attached_file>\n\n`;
+  const doc = (id: string, card: string) => ({
+    id,
+    name: "a.pdf",
+    kind: "document" as const,
+    url: "",
+    card,
+  });
+  try {
+    await act(() =>
+      agent().send(`${block("c-1")}${block("c-2")}look`, undefined, {
+        media: [doc("m-1", "c-1"), doc("m-2", "c-2"), doc("m-3", "c-3")],
+      }),
+    );
+    // The original of a card that is not in the text stays out.
+    assert.deepEqual(calls[0]!.req.media_ids, ["m-1", "m-2"]);
+    assert.deepEqual(calls[0]!.req.media_cards, { "m-1": "c-1", "m-2": "c-2" });
+    await act(() => {
+      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "look" });
+      calls[0]!.handlers.onDone!(done);
+    });
+    await act(() => agent().editAndResend(0, `${block("c-2")}look`));
+    assert.deepEqual(calls[1]!.req.media_ids, ["m-2"]);
+    assert.deepEqual(calls[1]!.req.media_cards, { "m-2": "c-2" });
+  } finally {
+    await unmount();
+  }
+});
+
+test("an edit of a message from before card ids keeps no original of a name whose counts differ (SKY-782)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  const block = `<attached_file name="report.pdf">\ntext\n</attached_file>\n\n`;
+  const doc = (id: string) => ({ id, name: "report.pdf", kind: "document" as const, url: "" });
+  try {
+    await act(() =>
+      agent().send(`${block}${block}look`, undefined, { media: [doc("m-a"), doc("m-b")] }),
+    );
+    assert.deepEqual(calls[0]!.req.media_ids, ["m-a", "m-b"]);
+    await act(() => {
+      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "look" });
+      calls[0]!.handlers.onDone!(done);
+    });
+    // One of two same-name blocks left: no one can tell whose original stays.
+    await act(() => agent().editAndResend(0, `${block}look`));
+    assert.equal(calls[1]!.req.media_ids, undefined, "no original goes");
+  } finally {
+    await unmount();
+  }
+});
+
 test("an edit that drops a file's block also drops that file's original, and a retry keeps it out", async () => {
   const { agent, calls, act, unmount } = await mount();
   const block = (name: string) => `<attached_file name="${name}">\ntext\n</attached_file>\n\n`;

@@ -30,16 +30,15 @@ test("any file type is sent for reading, in the order picked", async () => {
 test("oversized files are skipped and failed reads are reported", async () => {
   const big = new File(["x"], "huge.bin");
   Object.defineProperty(big, "size", { value: MAX_ATTACHMENT_MB * 1024 * 1024 + 1 });
-  const result = await readAttachments(
-    [big, new File(["a"], "bad.docx"), new File(["b"], "ok.txt")],
-    async (file) => {
-      if (file.name === "bad.docx") throw new Error("500");
-      return "ok";
-    },
-  );
+  const ok = new File(["b"], "ok.txt");
+  const result = await readAttachments([big, new File(["a"], "bad.docx"), ok], async (file) => {
+    if (file.name === "bad.docx") throw new Error("500");
+    return "ok";
+  });
   assert.deepEqual(result.tooLarge, ["huge.bin"]);
   assert.deepEqual(result.failed, ["bad.docx"]);
-  assert.deepEqual(result.attached, [{ name: "ok.txt", text: "ok" }]);
+  // Each read file keeps its picked file, so its original can be stored (SKY-782).
+  assert.deepEqual(result.attached, [{ name: "ok.txt", text: "ok", file: ok }]);
 });
 
 test("files are read one at a time", async () => {

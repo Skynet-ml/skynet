@@ -5,7 +5,7 @@ import * as React from "react";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
-import { pairOriginals } from "./file-originals";
+import { originalFormat, pairOriginals } from "./file-originals";
 import { filePreview, type FilePreview } from "./file-preview";
 import { FilePreviewBody } from "./file-preview-body";
 import {
@@ -160,18 +160,28 @@ export function FileTile({
 }
 
 /**
- * The viewer slide of each attached file, in order, paired with its original;
- * null for a file with nothing to show. A sent message and the draft page the same way.
+ * The viewer slide of each attached file, in order, with its original; null
+ * for a file with nothing to show. A file card's id links its original. A file
+ * sent before SKY-782 has no id; it pairs by name with an original that has no
+ * card. A sent message and the draft page the same way.
  */
 export function fileSlides(
   files: readonly AttachedFile[],
   originals: readonly MediaAttachment[],
   previews: ReadonlyArray<FilePreview | null> = files.map((f) => fileTilePreview(f.name, f.text)),
 ): Array<ViewerFile | null> {
-  const paired = pairOriginals(files, originals);
+  const legacy = pairOriginals(
+    files.filter((f) => !f.id),
+    originals.filter((o) => !o.card),
+  );
+  let j = 0;
   return files.map((file, i) => {
     const preview = previews[i] ?? null;
-    const original = paired[i] ?? undefined;
+    const original = file.id
+      ? originalFormat(file.name)
+        ? originals.find((o) => o.card === file.id)
+        : undefined
+      : (legacy[j++] ?? undefined);
     return preview || original
       ? { kind: "file", id: `file-${i}-${file.name}`, name: file.name, preview, original }
       : null;

@@ -3,15 +3,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  fitOriginals,
-  keptOriginals,
-  originalFormat,
-  originalsToKeep,
-  pairOriginals,
-} from "./file-originals.ts";
+import { fitOriginals, keptOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
 
-test("only pdf, docx and xlsx keep an original", () => {
+test("the viewer draws only a pdf, docx or xlsx original", () => {
   assert.equal(originalFormat("Brief.PDF"), "pdf");
   assert.equal(originalFormat("plan.docx"), "docx");
   assert.equal(originalFormat("data.xlsx"), "xlsx");
@@ -19,6 +13,9 @@ test("only pdf, docx and xlsx keep an original", () => {
   assert.equal(originalFormat("notes.txt"), null);
   assert.equal(originalFormat(".pdf"), null);
   assert.equal(originalFormat("README"), null);
+  // The server cleans these names to ".pdf" and stores opaque bytes.
+  assert.equal(originalFormat(" .pdf"), null);
+  assert.equal(originalFormat('".pdf'), null);
 });
 
 test("each file gets the first unused original with its name", () => {
@@ -54,12 +51,26 @@ test("a file with no original falls back to its text", () => {
   assert.deepEqual(pairOriginals([{ name: "deck.pptx" }], [{ name: "deck.pptx" }]), [null]);
 });
 
-test("an original whose file left the message is dropped", () => {
-  const kept = { name: "keep.docx" };
-  assert.deepEqual(keptOriginals([{ name: "keep.docx" }], [{ name: "gone.pdf" }, kept]), [kept]);
+test("only the originals that fit in the message stay, in their order (SKY-782)", () => {
+  const a1 = { name: "a.pdf" };
+  const a2 = { name: "a.pdf" };
+  const c = { name: "c.pdf" };
+  assert.deepEqual(fitOriginals([a1, a2, c], 3), [a1, a2, c]);
+  assert.deepEqual(fitOriginals([a1, a2, c], 2), [a1, a2]);
+  assert.deepEqual(fitOriginals([a1, c, a2], 1), [a1]);
+  assert.deepEqual(fitOriginals([a1, a2, c], 0), []);
+  assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
 });
 
-test("a name whose file and original counts differ keeps no original", () => {
+test("an original the viewer draws fits before one it does not draw (SKY-782)", () => {
+  const csv = { name: "rows.csv" };
+  const txt = { name: "notes.txt" };
+  const pdf = { name: "brief.pdf" };
+  assert.deepEqual(fitOriginals([csv, txt, pdf], 1), [pdf]);
+  assert.deepEqual(fitOriginals([csv, txt, pdf], 2), [csv, pdf]);
+});
+
+test("a legacy name whose file and original counts differ keeps no original", () => {
   const first = { name: "report.pdf", id: "1" };
   const second = { name: "report.pdf", id: "2" };
   const other = { name: "plan.docx", id: "3" };
@@ -68,29 +79,8 @@ test("a name whose file and original counts differ keeps no original", () => {
     keptOriginals([{ name: "report.pdf" }, { name: "plan.docx" }], [first, second, other]),
     [other],
   );
-  // The first file's upload failed: the second original must not pair with the first file.
-  assert.deepEqual(keptOriginals([{ name: "report.pdf" }, { name: "report.pdf" }], [second]), []);
   assert.deepEqual(
     keptOriginals([{ name: "report.pdf" }, { name: "report.pdf" }], [first, second]),
     [first, second],
-  );
-});
-
-test("a name's originals fit in a message together or not at all", () => {
-  const a1 = { name: "a.pdf" };
-  const a2 = { name: "a.pdf" };
-  const c = { name: "c.pdf" };
-  assert.deepEqual(fitOriginals([a1, a2, c], 3), [a1, a2, c]);
-  assert.deepEqual(fitOriginals([a1, a2, c], 2), [a1, a2]);
-  assert.deepEqual(fitOriginals([a1, c, a2], 1), [c]);
-  assert.deepEqual(fitOriginals([a1, a2, c], 0), []);
-  assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
-});
-
-test("a read file keeps its original only in a kept format and when its text went in", () => {
-  const files = [{ name: "a.pdf" }, { name: "b.csv" }, { name: "big.xlsx" }, { name: "bad.docx" }, { name: "c.docx" }];
-  assert.deepEqual(
-    originalsToKeep(files, ["big.xlsx", "bad.docx"]).map((f) => f.name),
-    ["a.pdf", "c.docx"],
   );
 });

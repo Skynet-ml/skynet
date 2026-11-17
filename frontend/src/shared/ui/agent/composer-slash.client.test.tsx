@@ -6,12 +6,13 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import * as React from "react";
+import { File as NodeFile } from "node:buffer";
 import { JSDOM } from "jsdom";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { saveSuggestion, suggestSignature } from "./next-prompt";
 import { midTurnOf, SteerQueue } from "./steer-queue";
 import { labelsOnlyValue, type SlashCommand, type SlashOption } from "./slash-commands";
-import { attachedFile, joinPastes } from "./pasted-text";
+import { attachedFile, joinPastes, splitPastes } from "./pasted-text";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://example.test/",
@@ -886,17 +887,16 @@ void test("Enter on a labels-only command with no matching label runs nothing", 
 });
 
 void test("the composer's image tile opens one viewer that pages to the draft PDF's original (SKY-736)", async () => {
-  const draft = joinPastes({
-    text: "",
-    pastes: [],
-    files: [attachedFile("scan.pdf", "Page 1\nHello")],
-  });
+  const scan = attachedFile("scan.pdf", "Page 1\nHello");
+  const draft = joinPastes({ text: "", pastes: [], files: [scan] });
   const composer = await mount(draft, false, undefined, undefined, {
     media: {
       items: [{ id: "m-1", name: "photo.png", kind: "image", url: "https://example.test/1.png" }],
       onRemove: () => {},
     },
-    originals: [{ id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan" }],
+    originals: [
+      { id: "o-1", name: "scan.pdf", kind: "document", url: "blob:local-scan", card: scan.id },
+    ],
   });
   const open = document.querySelector<HTMLElement>('button[aria-label="Open photo.png"]');
   assert.ok(open, "the image tile");
@@ -914,4 +914,52 @@ void test("the composer's image tile opens one viewer that pages to the draft PD
   );
   assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "one viewer");
   await composer.unmount();
+});
+
+void test("each attached file's original gets the id of its own draft card (SKY-782)", async () => {
+  const fetchAll = globalThis.fetch;
+  // The text reader: one file fails, the others read.
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    const file = (init?.body as FormData).get("file") as File;
+    return file.name === "bad.docx"
+      ? new Response(null, { status: 500 })
+      : Response.json({ text: `text of ${file.name}` });
+  }) as typeof fetch;
+  const got: Array<{ file: File; card: string }> = [];
+  const composer = await mount("", false, undefined, undefined, {
+    onOriginalFiles: (files) => void got.push(...files),
+  });
+  try {
+    const big = new NodeFile(["x"], "big.pdf", { type: "application/pdf" });
+    Object.defineProperty(big, "size", { value: 20 * 1024 * 1024 + 1 });
+    const files = [
+      new NodeFile(["a"], "a.pdf", { type: "application/pdf" }),
+      new NodeFile(["b"], "bad.docx", { type: "application/x-test" }),
+      big,
+      new NodeFile(["a,b\n"], "a.pdf", { type: "application/pdf" }),
+    ];
+    const paste = new dom.window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => "", files } });
+    await React.act(async () => {
+      composer.textarea.dispatchEvent(paste);
+    });
+    await React.act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
+    const cards = splitPastes(composer.drafts.at(-1) ?? "").files;
+    assert.deepEqual(
+      cards.map((c) => c.name),
+      ["a.pdf", "a.pdf"],
+    );
+    // A failed or too large file has no card, so it gets no original.
+    assert.deepEqual(
+      got.map((g) => [g.file, g.card]),
+      [
+        [files[0], cards[0]!.id],
+        [files[3], cards[1]!.id],
+      ],
+    );
+    assert.notEqual(cards[0]!.id, cards[1]!.id);
+  } finally {
+    globalThis.fetch = fetchAll;
+    await composer.unmount();
+  }
 });

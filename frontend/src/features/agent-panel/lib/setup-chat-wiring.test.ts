@@ -812,20 +812,45 @@ test("leaving /submit before the wizard mounts drops the setup mark", () => {
   assert.equal(run("/runs"), null);
 });
 
-test("Send drops file originals before it reads the ready media (SKY-735)", () => {
+test("Send reads the ready media and the wait reason for the draft's own file cards (SKY-782)", () => {
   const calls: string[] = [];
+  const cards = (files: { id: string }[]) => files.map((f) => f.id).join();
   const submit = expression(panel, "handleSubmit", {
     draft: "see report.pdf",
     lineComments: [],
-    splitPastes: () => ({ files: [{ name: "report.pdf" }] }),
-    keepOriginals: (files: { name: string }[]) =>
-      calls.push(`keep ${files.map((f) => f.name).join()}`),
-    chatMedia: { ready: () => (calls.push("ready"), null), blocked: "wait" },
-    toast: { info: () => calls.push("toast") },
+    splitPastes: () => ({ files: [{ name: "report.pdf", id: "c-1" }] }),
+    chatMedia: {
+      ready: (files: { id: string }[]) => (calls.push(`ready ${cards(files)}`), null),
+      blocked: (files: { id: string }[]) => (calls.push(`blocked ${cards(files)}`), "wait"),
+    },
+    toast: { info: (text: string) => calls.push(`toast ${text}`) },
     msg: (key: string) => key,
   });
   submit();
-  assert.deepEqual(calls, ["keep report.pdf", "ready", "toast"]);
+  assert.deepEqual(calls, ["ready c-1", "blocked c-1", "toast wait"]);
+});
+
+test("a confirmed dataset card stores its file's original under the card's id (SKY-782)", () => {
+  for (const webChat of [false, true]) {
+    const calls: unknown[][] = [];
+    const file = { name: "qa.xlsx" };
+    const confirm = expression(panel, "handleDatasetConfirm", {
+      webChat,
+      confirmedDatasetCallsRef: { current: new Set<string>() },
+      datasetDraft: { attach: (...args: unknown[]) => (calls.push(["attach", ...args]), "card-1") },
+      addOriginals: (files: unknown) => calls.push(["addOriginals", files]),
+    });
+    confirm("call-1", { fileName: "qa.xlsx" }, file);
+    assert.deepEqual(
+      calls,
+      webChat
+        ? []
+        : [
+            ["attach", { fileName: "qa.xlsx" }, "call-1"],
+            ["addOriginals", [{ file, card: "card-1" }]],
+          ],
+    );
+  }
 });
 
 // Run the panel's handleSubmit with a pending dataset card (SKY-780).
@@ -841,8 +866,7 @@ function datasetSubmit(options: {
     draft: "use it <card>",
     lineComments: [],
     splitPastes: () => ({ files: [] }),
-    keepOriginals: () => {},
-    chatMedia: { ready: () => options.media ?? [], blocked: null, clear: () => calls.push(["clear media"]) },
+    chatMedia: { ready: () => options.media ?? [], blocked: () => null, clear: () => calls.push(["clear media"]) },
     toast: { info: (text: string) => calls.push(["toast", text]) },
     msg: (key: string) => key,
     joinLineComments: (text: string) => text,

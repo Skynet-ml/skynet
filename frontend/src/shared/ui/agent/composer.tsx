@@ -18,7 +18,6 @@ import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
-import { originalsToKeep } from "./file-originals";
 import { isUnsupportedImage, type MediaAttachment, mediaKind, TileRow } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
@@ -86,9 +85,9 @@ interface ComposerProps {
   /** Receives picked, pasted or dropped image, video and audio files, which
    *  then go with the message as files, not as text. */
   onMediaFiles?: (files: File[]) => void;
-  /** Receives the attached PDF, DOCX and XLSX files whose text was read, so
-   *  their originals can show in the viewer. */
-  onOriginalFiles?: (files: File[]) => void;
+  /** Receives every attached file whose text was read, with the id of its
+   *  draft file card, so its original is stored and linked to that card. */
+  onOriginalFiles?: (files: Array<{ file: File; card: string }>) => void;
   /** The originals `onOriginalFiles` keeps, as they stand; a draft file then
    *  opens its original in the viewer, as a sent one does. */
   originals?: readonly MediaAttachment[];
@@ -472,8 +471,7 @@ export function Composer({
         const latest = splitPastes(valueRef.current);
         const added = read.attached.map((file) => attachedFile(file.name, file.text));
         onChange(joinPastes({ ...latest, files: [...latest.files, ...added] }));
-        const originals = originalsToKeep(files, [...read.failed, ...read.tooLarge]);
-        if (originals.length) onOriginalFiles?.(originals);
+        onOriginalFiles?.(read.attached.map((a, i) => ({ file: a.file, card: added[i]!.id })));
       }
     } finally {
       setAttaching((n) => n - 1);

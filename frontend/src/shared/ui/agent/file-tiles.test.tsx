@@ -122,3 +122,67 @@ void describe("draft file previews", () => {
     assert.deepEqual(fileSlides(files, [], previewCache()(files)), fileSlides(files, []));
   });
 });
+
+void describe("file slides with originals (SKY-782)", () => {
+  const doc = (id: string, name: string, card?: string) => ({
+    id,
+    name,
+    kind: "document" as const,
+    url: "",
+    ...(card ? { card } : {}),
+  });
+
+  void it("link each card to its own original by id, also for two files with one name", () => {
+    const files = [
+      { name: "report.pdf", text: "first", id: "c-1" },
+      { name: "report.pdf", text: "second", id: "c-2" },
+    ];
+    // The second card's original comes first: the order does not matter.
+    const slides = fileSlides(files, [
+      doc("m-2", "report.pdf", "c-2"),
+      doc("m-1", "report.pdf", "c-1"),
+    ]);
+    assert.equal(slides[0]?.original?.id, "m-1");
+    assert.equal(slides[1]?.original?.id, "m-2");
+    // A card that left takes its original with it; the other keeps its own.
+    const left = fileSlides(
+      [files[1]!],
+      [doc("m-2", "report.pdf", "c-2"), doc("m-1", "report.pdf", "c-1")],
+    );
+    assert.equal(left[0]?.original?.id, "m-2");
+  });
+
+  void it("show the text page for a card with no original, or one the viewer does not draw", () => {
+    const slides = fileSlides(
+      [
+        { name: "report.pdf", text: "first", id: "c-1" },
+        { name: "rows.csv", text: "a,b\n1,2", id: "c-2" },
+      ],
+      [doc("m-1", "report.pdf", "c-9"), doc("m-2", "rows.csv", "c-2")],
+    );
+    assert.equal(slides[0]?.original, undefined);
+    assert.equal(slides[1]?.original, undefined);
+    assert.ok(slides[1]?.preview);
+  });
+
+  void it("link a card whose stored name the server cut", () => {
+    const long = `${"a".repeat(300)}.pdf`;
+    const slides = fileSlides(
+      [{ name: long, text: "t", id: "c-1" }],
+      [doc("m-1", `${"a".repeat(251)}.pdf`, "c-1")],
+    );
+    assert.equal(slides[0]?.original?.id, "m-1");
+  });
+
+  void it("pair a file sent before SKY-782 by name with an original that has no card", () => {
+    const slides = fileSlides(
+      [
+        { name: "old.pdf", text: "old" },
+        { name: "new.pdf", text: "new", id: "c-1" },
+      ],
+      [doc("m-1", "new.pdf", "c-1"), doc("m-0", "old.pdf")],
+    );
+    assert.equal(slides[0]?.original?.id, "m-0");
+    assert.equal(slides[1]?.original?.id, "m-1");
+  });
+});

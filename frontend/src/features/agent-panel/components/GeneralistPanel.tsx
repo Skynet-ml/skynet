@@ -1016,16 +1016,20 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     wizard: wizardCtx,
     onRelease: reopenDatasetCard,
   });
+  const addOriginals = chatMedia.addOriginals;
   const handleDatasetConfirm = React.useCallback(
-    (callId: string | undefined, confirmed: ConfirmedDataset) => {
+    (callId: string | undefined, confirmed: ConfirmedDataset, file: File) => {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
       if (callId) confirmedDatasetCallsRef.current.add(callId);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
-      datasetDraft.attach(confirmed, callId);
+      const card = datasetDraft.attach(confirmed, callId);
+      // The card keeps its original as every attached file does (SKY-782),
+      // so the viewer shows the real workbook of an XLSX.
+      addOriginals([{ file, card }]);
     },
-    [webChat, datasetDraft],
+    [webChat, datasetDraft, addOriginals],
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1039,10 +1043,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
-  // A file taken out of the draft takes its stored original with it.
-  const keepOriginals = chatMedia.keepOriginals;
+  // A file card's id links its stored original, so a card that leaves the
+  // draft takes its original out of the message (SKY-782).
   const draftFiles = React.useMemo(() => splitPastes(draft).files, [draft]);
-  React.useEffect(() => keepOriginals(draftFiles), [draftFiles, keepOriginals]);
   const shownOriginals = chatMedia.shownOriginals;
   const draftOriginals = React.useMemo(
     () => shownOriginals(draftFiles),
@@ -1050,12 +1053,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
-    // An upload that failed since the last edit can leave a name with fewer
-    // originals than files; this drops them before they go.
-    keepOriginals(splitPastes(draft).files);
-    const media = chatMedia.ready();
+    const files = splitPastes(draft).files;
+    const media = chatMedia.ready(files);
     if (media === null) {
-      toast.info(chatMedia.blocked ?? msg("agent.media.uploading"));
+      toast.info(chatMedia.blocked(files) ?? msg("agent.media.uploading"));
       return;
     }
     if (datasetDraft.staging(draft)) {
@@ -1084,7 +1085,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
     }
     setDraft("");
-    chatMedia.clear();
+    chatMedia.clear(files);
     clearLineComments?.();
   }, [
     agent,
@@ -1092,7 +1093,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     lineComments,
     clearLineComments,
     chatMedia,
-    keepOriginals,
     datasetDraft,
     compacting,
     sendAfterRender,
@@ -1178,7 +1178,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             call={call}
             disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
-            onConfirm={(confirmed) => handleDatasetConfirm(call.id, confirmed)}
+            onConfirm={(confirmed, file) => handleDatasetConfirm(call.id, confirmed, file)}
           />
         );
       }
@@ -1941,7 +1941,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
         originals={webChat ? undefined : draftOriginals}
         mediaWaiting={chatMedia.tiles.length > 0}
-        sendBlocked={chatMedia.blocked}
+        sendBlocked={chatMedia.blocked(draftFiles)}
         onAttachFile={(file) => {
           setAttachFile(file);
           setAttachOpen(true);
@@ -1967,10 +1967,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               >
                 <DatasetUploadCard
                   initialFile={attachFile}
-                  onConfirm={(confirmed) => {
+                  onConfirm={(confirmed, file) => {
                     setAttachOpen(false);
                     setAttachFile(null);
-                    handleDatasetConfirm(undefined, confirmed);
+                    handleDatasetConfirm(undefined, confirmed, file);
                   }}
                 />
               </PopoverContent>

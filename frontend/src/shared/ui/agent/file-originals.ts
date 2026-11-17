@@ -1,12 +1,13 @@
 /**
  * The original bytes of an attached file (SKY-735). The agent reads a file's
- * text, which travels in the message as an `<attached_file>` block. A PDF,
- * DOCX or XLSX also keeps its original as a stored `document`, so the viewer
- * can show the real file. The message names a file only by its name, so an
- * original pairs with its block by name, in order.
+ * text, which travels in the message as an `<attached_file>` block. Every file
+ * also keeps its original as a stored `document` (SKY-782). The viewer draws a
+ * PDF, DOCX or XLSX original; any other file shows its text page. A block's
+ * card id links its original. A block sent before SKY-782 has no id, so its
+ * original pairs with it by name, in order.
  */
 
-/** The formats whose original the chat keeps and the viewer draws. */
+/** The formats whose original the viewer draws. */
 export type OriginalFormat = "pdf" | "docx" | "xlsx";
 
 const FORMATS: readonly string[] = ["pdf", "docx", "xlsx"];
@@ -15,23 +16,18 @@ const FORMATS: readonly string[] = ["pdf", "docx", "xlsx"];
 // that either one may change gives one key for both.
 const CHANGED = new Set(['"', "<", ">", "_"]);
 
-/** The format of a file whose original the chat keeps, from its name, or null. */
+/** The format of a file whose original the viewer draws, from its name, or null. */
 export function originalFormat(name: string): OriginalFormat | null {
-  const dot = name.lastIndexOf(".");
-  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  // The key decides, here and on the server (chat_media._draw_key), so the
+  // raw name, the block's name and the stored name all give one answer.
+  const key = nameKey(name);
+  const dot = key.lastIndexOf(".");
+  const ext = dot > 0 ? key.slice(dot + 1).toLowerCase() : "";
   return FORMATS.includes(ext) ? (ext as OriginalFormat) : null;
 }
 
-/** The read files whose originals the chat keeps: a skipped file sends no text, so no original. */
-export function originalsToKeep<T extends { name: string }>(
-  files: readonly T[],
-  skipped: Iterable<string>,
-): T[] {
-  const names = new Set(skipped);
-  return files.filter((f) => originalFormat(f.name) && !names.has(f.name));
-}
-
-function nameKey(name: string): string {
+/** One key for a file name and its cleaned forms; the server types an original by the same key. */
+export function nameKey(name: string): string {
   return Array.from(name.normalize("NFC").split(/[\\/]/).pop()!)
     .filter((c) => c > "\u001f" && c !== "\u007f" && !CHANGED.has(c))
     .join("")
@@ -39,9 +35,9 @@ function nameKey(name: string): string {
 }
 
 /**
- * The original of each file, in the files' order: the first unpaired original
- * with the same name, or null. A file in a format the viewer does not draw
- * gets no original.
+ * The original of each file of a message sent before SKY-782, in the files'
+ * order: the first unpaired original with the same name, or null. A file in
+ * a format the viewer does not draw gets no original.
  */
 export function pairOriginals<T extends { name: string }>(
   files: ReadonlyArray<{ name: string }>,
@@ -59,10 +55,11 @@ export function pairOriginals<T extends { name: string }>(
 }
 
 /**
- * The originals that can go out with ``files``. Pairing by name is sure only
- * when a name has one original for each of its files. When the counts differ
- * (a file left, or an upload failed), no one can tell which file lost its
- * original, so all the files with that name fall back to their text.
+ * The originals that can go out with the ``files`` of a message sent before
+ * SKY-782. Pairing by name is sure only when a name has one original for each
+ * of its files. When the counts differ (an edit took a file out), no one can
+ * tell which file lost its original, so all the files with that name fall
+ * back to their text.
  */
 export function keptOriginals<T extends { name: string }>(
   files: ReadonlyArray<{ name: string }>,
@@ -82,22 +79,15 @@ export function keptOriginals<T extends { name: string }>(
 }
 
 /**
- * The originals that fit in ``room`` places of a message. A name's originals
- * go together or not at all: half a group would leave its counts unequal, so
- * keptOriginals would drop the half that went too.
+ * The originals that fit in ``room`` places of a message, in their order. The
+ * viewer draws only a PDF, DOCX or XLSX original, so those fit first.
  */
 export function fitOriginals<T extends { name: string }>(
   originals: readonly T[],
   room: number,
 ): T[] {
-  const groups = new Map<string, number>();
-  for (const o of originals) groups.set(nameKey(o.name), (groups.get(nameKey(o.name)) ?? 0) + 1);
-  const fits = new Set<string>();
-  let left = room;
-  for (const [key, size] of groups)
-    if (size <= left) {
-      fits.add(key);
-      left -= size;
-    }
-  return originals.filter((o) => fits.has(nameKey(o.name)));
+  const drawn = originals.filter((o) => originalFormat(o.name));
+  const rest = originals.filter((o) => !originalFormat(o.name));
+  const fits = new Set([...drawn, ...rest].slice(0, Math.max(0, room)));
+  return originals.filter((o) => fits.has(o));
 }

@@ -24,7 +24,7 @@ from ...storage.models import AgentConversationModel, AgentMessageModel, Base, C
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..routers.agent_history import create_agent_history_router
+from ..routers.agent_history import _fork_metadata, create_agent_history_router
 
 _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
 
@@ -363,3 +363,12 @@ def test_fork_checks_the_owner() -> None:
     assert client.post("/agent/conversations/c-bob/fork", json={"user_turns": 0}).status_code == 403
     assert client.post("/agent/conversations/nope/fork", json={"user_turns": 0}).status_code == 404
     assert _ids(store) == {"c-bob"}
+
+
+def test_fork_metadata_keeps_each_document_original_card() -> None:
+    """A fork's copy of a file has a new id, and keeps the file block id that links it in the viewer."""
+    meta = {"media": [{"id": "doc-1", "name": "a.pdf", "kind": "document", "card": "card-a"}], "stats": {"x": 1}}
+
+    copy = _fork_metadata(meta, {"doc-1": "doc-9"})
+
+    assert copy == {"media": [{"id": "doc-9", "name": "a.pdf", "kind": "document", "card": "card-a"}]}
