@@ -64,6 +64,9 @@ def _pump(source: io.BufferedReader, sink: int, tail: bytearray) -> None:
     When the reader closes early (``cmd | head``), the shim closes its end of
     the child's pipe, so the child's next write gets SIGPIPE or EPIPE, as it
     would with no shim. Without that, a command that writes forever never ends.
+    Any other write error (a sink closed at start, ``cmd 2>&-``) only stops
+    the copy: with no shim the command's writes fail and it goes on, so the
+    shim keeps reading the pipe and its tail, and the command does not die.
 
     The chunk goes to the raw descriptor, not ``sys.stdout.buffer``: a failed
     flush keeps the bytes in that buffer, and Python's flush at exit then
@@ -74,16 +77,21 @@ def _pump(source: io.BufferedReader, sink: int, tail: bytearray) -> None:
         sink: The shim's own stdout or stderr descriptor.
         tail: Holds the last ``OUTPUT_LIMIT`` bytes of the stream.
     """
+    copy = True
     while chunk := source.read1(OUTPUT_LIMIT):
         tail += chunk
         del tail[:-OUTPUT_LIMIT]
+        if not copy:
+            continue
         try:
             view = memoryview(chunk)
             while view:
                 view = view[os.write(sink, view) :]
-        except OSError:
-            source.close()
-            return
+        except OSError as error:
+            if error.errno == errno.EPIPE:
+                source.close()
+                return
+            copy = False
 
 
 def _write_stderr(message: bytes) -> None:
@@ -139,7 +147,8 @@ def _exec(real: str, name: str, args: list[str]) -> int:
     """
     # Python ignores SIGPIPE and SIGXFSZ at startup, and an exec keeps an
     # ignore; the shell would start the command with them at their defaults.
-    # This is Python's own ignore, not one the caller set, so it is not kept.
+    # Python cannot tell its own ignore from one the caller set, so the shim
+    # resets both, as Popen's ``restore_signals`` does on the logged path.
     for number in (signal.SIGPIPE, signal.SIGXFSZ):
         signal.signal(number, signal.SIG_DFL)
     try:
@@ -162,7 +171,8 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     SIGINT). The child is in the shim's process group, so a SIGINT from the
     terminal already reaches it: the shim only stays alive for it and does
     not send it a second time. A SIGINT sent to the shim alone does not reach
-    the child, except one that comes before the child starts.
+    the child, except one that comes before the child starts. When a signal
+    ends the child, ``main`` then ends the shim with the same signal.
 
     Args:
         real: The command's path.
@@ -170,8 +180,8 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
         args: Its arguments.
 
     Returns:
-        The stdout tail, the stderr tail and the exit code (128 plus the
-        signal number when a signal ended it, 126 when it cannot run).
+        The stdout tail, the stderr tail and the exit code (minus the signal
+        number when a signal ended it, 126 when it cannot run).
     """
     # The handlers go in before the child starts: a signal that comes before
     # the child exists waits in ``pending``, so the shim does not die and orphan it.
@@ -219,7 +229,7 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     code = process.wait()
     for pump in pumps:
         pump.join()
-    return bytes(tails[0]), bytes(tails[1]), code if code >= 0 else 128 - code
+    return bytes(tails[0]), bytes(tails[1]), code
 
 
 def _tail(data: bytes) -> str:
@@ -274,7 +284,8 @@ def main(argv: list[str]) -> int:
 
     Returns:
         The command's exit code: 127 when it is not installed, 126 when it
-        cannot run, 128 plus the signal number when a signal ended it.
+        cannot run. When a signal ended it, the shim dies from that signal;
+        128 plus the signal number is only the fallback.
     """
     shim_dir, name, args = argv[0], argv[1], argv[2:]
     real = _real_command(shim_dir, name)
@@ -289,13 +300,19 @@ def main(argv: list[str]) -> int:
         _write_stderr(stderr)
     else:
         stdout, stderr, code = _run(real, name, args)
-    record = {"command": _command(name, args), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
+    exit_code = code if code >= 0 else 128 - code
+    record = {"command": _command(name, args), "exit_code": exit_code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
     # The command already ran. A log that cannot be written (a read-only
     # folder, a full disk, a folder at the path) loses the record, but the
     # caller still gets the real exit code, and no extra stderr text.
     with contextlib.suppress(OSError):
         _append(log, record)
-    return code
+    if code < 0:
+        # The caller must see the shim die from the child's signal, not exit
+        # 128 plus it: bash ends a script only when its child dies from SIGINT.
+        signal.signal(-code, signal.SIG_DFL)
+        os.kill(os.getpid(), -code)
+    return exit_code
 
 
 if __name__ == "__main__":

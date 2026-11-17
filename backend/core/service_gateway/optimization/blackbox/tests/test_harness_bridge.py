@@ -1702,7 +1702,7 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
 
 
 def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path) -> None:
-    """A SIGTERM to the shim ends the real command; the shim exits and logs 128 plus the signal number."""
+    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it."""
     _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
@@ -1713,7 +1713,7 @@ def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path)
         assert process.stdout is not None
         assert process.stdout.readline() == b"ready\n"
         process.send_signal(signal.SIGTERM)
-        assert process.wait(timeout=10) == 128 + signal.SIGTERM
+        assert process.wait(timeout=10) == -signal.SIGTERM
     finally:
         killer.cancel()
         process.kill()
@@ -1912,6 +1912,40 @@ def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_com
         assert (record["command"], record["exit_code"], record["stdout"]) == (command, code, stdout.decode())
     else:
         assert not log.exists()
+
+
+@pytest.mark.parametrize("logged", [True, False])
+@pytest.mark.parametrize(("closed", "kept"), [("2>&-", "stdout"), (">&-", "stderr")])
+def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_go_on(
+    tmp_path: Path, logged: bool, closed: str, kept: str
+) -> None:
+    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE."""
+    lost = "1" if kept == "stderr" else "2"
+    shown = "2" if kept == "stderr" else "1"
+    _fake_tool(tmp_path / "bin", "tw", f"echo a >&{lost}; sleep 0.2; echo b >&{lost}; echo kept >&{shown}; exit 0")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["tw"], log if logged else None)
+    done = subprocess.run(["/bin/sh", "-c", f"tw {closed}"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert done.returncode == 0, done
+    assert getattr(done, kept).endswith(b"kept\n")
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        lost_stream = "stdout" if kept == "stderr" else "stderr"
+        assert (record["exit_code"], record[lost_stream], record[kept]) == (0, "a\nb\n", "kept\n")
+
+
+def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path) -> None:
+    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal."""
+    _fake_tool(tmp_path / "bin", "zz", "echo out; kill -TERM $$")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["zz"], env=_shim_env(tmp_path, ["zz"], log), capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (-signal.SIGTERM, b"out\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["exit_code"], record["stdout"]) == (128 + signal.SIGTERM, "out\n")
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
