@@ -848,8 +848,7 @@ def test_a_tree_over_the_box_size_limit_is_refused_in_the_box(
 ) -> None:
     """An archive just over the byte limit stops in the box, so the worker never reads it; the step does not retry.
 
-    Random bytes do not compress, so the archive is a little larger than the file, and its base64 text
-    is well under twice the limit.
+    Random bytes do not compress, so the archive is a little larger than the file.
 
     Args:
         trees: The tree store.

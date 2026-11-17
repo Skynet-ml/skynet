@@ -411,7 +411,7 @@ class TreeSandbox:
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
-            # The box checks the archive bytes against the tree limit, so the worker never reads an oversized archive.
+            # The box checks the archive bytes against the archive limit first, so a normal oversized tree stops in the box.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
             f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
             f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
