@@ -993,7 +993,6 @@
   "agent.kickoff.oversized_data": "你加入嘅資料太大，我冇辦法掃描。你想做咩？",
   "agent.kickoff.oversized_repo": "{name} 係個大型儲存庫，所以我冇辦法掃描。你想做咩？",
   "agent.composer.attach": "附加檔案",
-  "agent.composer.attach_failed": "附加唔到 {name}。",
   "agent.composer.attach_one_dataset": "{name} 冇附加到：每次只可以附加一個數據集。",
   "agent.composer.attach_too_large": "{name} 大過 {max_mb} MB。",
   "agent.composer.mic_unavailable": "無法使用咪高峰",

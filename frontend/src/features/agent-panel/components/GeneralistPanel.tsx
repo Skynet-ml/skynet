@@ -43,7 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
-import { splitPastes } from "@/shared/ui/agent/pasted-text";
+import { splitPastes, withFilePaths } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
@@ -1064,7 +1064,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       return;
     }
     if (!trimmed && lineComments.length === 0 && media.length === 0) return;
-    const message = joinLineComments(trimmed, lineComments);
+    // Each file card names its stored file's path, where the agent reads it (SKY-781).
+    const paths = chatMedia.filePaths(splitPastes(trimmed).files);
+    const message = joinLineComments(withFilePaths(trimmed, paths), lineComments);
     const options = media.length ? { media } : undefined;
     // A manual /compact holds text only, so a turn with files waits in the
     // composer; check it here, as the dataset's send goes after a render.
@@ -1933,8 +1935,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             {!inSetup && modelMenuNode}
           </>
         }
-        // Dataset files go to the dataset upload card; any other file is
-        // read as text by the composer.
+        // Dataset files go to the dataset upload card; any other file
+        // becomes a file card in the composer.
         claimsFile={isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}

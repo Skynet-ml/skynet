@@ -35,7 +35,6 @@
   "agent.kickoff.oversized_data": "הנתונים שהעליתם גדולים מדי, אז לא סרקתי אותם. מה תרצו לעשות?",
   "agent.kickoff.oversized_repo": "המאגר {name} גדול מדי, אז לא סרקתי אותו. מה תרצו לעשות?",
   "agent.composer.attach": "צירוף קובץ",
-  "agent.composer.attach_failed": "לא ניתן לצרף את {name}.",
   "agent.composer.attach_one_dataset": "הקובץ {name} לא צורף: אפשר לצרף מאגר נתונים אחד בכל פעם.",
   "agent.composer.attach_too_large": "{name} גדול מ-{max_mb} MB.",
   "agent.composer.mic_unavailable": "אין גישה למיקרופון",

@@ -4,7 +4,6 @@ import * as React from "react";
 import { toast } from "react-toastify";
 import { CaretRight, Check, CircleNotch, Microphone, Plus, Square, X } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
-import { extractAttachmentText } from "@/shared/lib/api";
 
 import { useLocale } from "@/shared/providers";
 import { Button } from "@/shared/ui/primitives/button";
@@ -17,7 +16,7 @@ import { autoResizeTextarea } from "./auto-resize";
 import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
-import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
+import { MAX_ATTACHMENT_MB, describeAttachments, splitClaimed } from "./file-attachments";
 import { isUnsupportedImage, type MediaAttachment, mediaKind, TileRow } from "./media-attachments";
 import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
@@ -85,8 +84,9 @@ interface ComposerProps {
   /** Receives picked, pasted or dropped image, video and audio files, which
    *  then go with the message as files, not as text. */
   onMediaFiles?: (files: File[]) => void;
-  /** Receives every attached file whose text was read, with the id of its
-   *  draft file card, so its original is stored and linked to that card. */
+  /** Receives every attached file, with the id of its draft file card, so its
+   *  original is stored and linked to that card: the agent reads it there, and
+   *  the viewer shows it. */
   onOriginalFiles?: (files: Array<{ file: File; card: string }>) => void;
   /** The originals `onOriginalFiles` keeps, as they stand; a draft file then
    *  opens its original in the viewer, as a sent one does. */
@@ -427,7 +427,6 @@ export function Composer({
   }, [slashActiveId]);
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-  const [attaching, setAttaching] = React.useState(0);
   const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
   const maxLength = midTurn?.maxLength ?? 20_000;
   const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
@@ -443,7 +442,8 @@ export function Composer({
     setDropping(false);
   }, [canDrop]);
 
-  const attachFiles = async (picked: File[]) => {
+  // A paste that clears the draft passes "": `valueRef` updates only after the next render.
+  const attachFiles = (picked: File[], base = valueRef.current) => {
     const {
       claimed,
       extra,
@@ -460,22 +460,14 @@ export function Composer({
     if (media.length) onMediaFiles?.(media);
     const files = rest.filter((file) => !media.includes(file));
     if (!files.length) return;
-    setAttaching((n) => n + 1);
-    try {
-      const read = await readAttachments(files, extractAttachmentText);
-      for (const name of read.failed) toast.error(msg("agent.composer.attach_failed", { name }));
-      for (const name of read.tooLarge)
-        toast.error(msg("agent.composer.attach_too_large", { name, max_mb: MAX_ATTACHMENT_MB }));
-      if (read.attached.length) {
-        // The draft may have changed while the files uploaded; add to its latest value.
-        const latest = splitPastes(valueRef.current);
-        const added = read.attached.map((file) => attachedFile(file.name, file.text));
-        onChange(joinPastes({ ...latest, files: [...latest.files, ...added] }));
-        onOriginalFiles?.(read.attached.map((a, i) => ({ file: a.file, card: added[i]!.id })));
-      }
-    } finally {
-      setAttaching((n) => n - 1);
-    }
+    const read = describeAttachments(files);
+    for (const name of read.tooLarge)
+      toast.error(msg("agent.composer.attach_too_large", { name, max_mb: MAX_ATTACHMENT_MB }));
+    if (!read.attached.length) return;
+    const latest = splitPastes(base);
+    const added = read.attached.map((file) => attachedFile(file.name, file.text));
+    onChange(joinPastes({ ...latest, files: [...latest.files, ...added] }));
+    onOriginalFiles?.(read.attached.map((a, i) => ({ file: a.file, card: added[i]!.id })));
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -491,7 +483,7 @@ export function Composer({
     if (picking) setPicking(null);
     if (attachesFiles) {
       if (picking) onChange("");
-      void attachFiles(pastedFiles);
+      attachFiles(pastedFiles, picking ? "" : undefined);
       return;
     }
     setPastes([...draft.pastes, pasted], picking ? "" : draft.text);
@@ -585,7 +577,7 @@ export function Composer({
   };
 
   const sendMidTurn = (mode: "steer" | "queue") => {
-    if (!midTurn || disabled || dictating || attaching > 0) return;
+    if (!midTurn || disabled || dictating) return;
     if (mediaWaiting) {
       toast.info(msg("agent.media.wait_reply"));
       return;
@@ -615,7 +607,7 @@ export function Composer({
       sendMidTurn("queue");
       return;
     }
-    if (disabled || dictating || attaching > 0 || !canSend) return;
+    if (disabled || dictating || !canSend) return;
     if (sendBlocked) {
       toast.info(sendBlocked);
       return;
@@ -825,7 +817,7 @@ export function Composer({
               .filter((item) => item.kind === "file" && !item.webkitGetAsEntry?.()?.isDirectory)
               .map((item) => item.getAsFile())
               .filter((f): f is File => f !== null);
-            if (files.length) void attachFiles(files);
+            if (files.length) attachFiles(files);
           }}
         >
           {dropping && (
@@ -1186,7 +1178,7 @@ export function Composer({
                   onChange={(e) => {
                     const picked = Array.from(e.target.files ?? []);
                     e.target.value = "";
-                    void attachFiles(picked);
+                    attachFiles(picked);
                   }}
                 />
                 <TooltipButton tooltip={msg("agent.composer.attach")} side="top">
@@ -1199,11 +1191,7 @@ export function Composer({
                     className="shrink-0 rounded-full text-muted-foreground hover:text-foreground [@media(hover:none)_and_(pointer:coarse)]:size-11"
                     aria-label={msg("agent.composer.attach")}
                   >
-                    {attaching > 0 ? (
-                      <CircleNotch className="size-4 animate-spin" />
-                    ) : (
-                      <Plus className="size-4" />
-                    )}
+                    <Plus className="size-4" />
                   </Button>
                 </TooltipButton>
               </>
@@ -1275,7 +1263,7 @@ export function Composer({
                     // A blocked Send stays hoverable and focusable, so its tooltip can say why.
                     className="shrink-0 rounded-full aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                     aria-disabled={(!streaming && !!sendBlocked) || undefined}
-                    disabled={disabled || dictating || attaching > 0 || !canSend}
+                    disabled={disabled || dictating || !canSend}
                     aria-label={streaming && midTurn ? msg("agent.composer.queue") : sendAriaLabel}
                   >
                     <svg viewBox="0 0 24 24" fill="none" className="size-4">

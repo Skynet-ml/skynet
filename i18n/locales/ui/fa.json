@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "داده‌هایی که افزودید برای بررسی من بیش از حد بزرگ است. می‌خواهید چه کار کنید؟",
   "agent.kickoff.oversized_repo": "مخزن {name} بزرگ است، بنابراین نتوانستم آن را بررسی کنم. می‌خواهید چه کار کنید؟",
   "agent.composer.attach": "پیوست کردن فایل",
-  "agent.composer.attach_failed": "پیوست کردن {name} ممکن نشد.",
   "agent.composer.attach_one_dataset": "{name} پیوست نشد: هر بار فقط یک مجموعه داده پیوست کنید.",
   "agent.composer.attach_too_large": "{name} بزرگ‌تر از {max_mb} مگابایت است.",
   "agent.composer.mic_unavailable": "میکروفون در دسترس نیست",

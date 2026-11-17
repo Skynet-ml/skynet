@@ -75,6 +75,7 @@ from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
 from .approval_choices import declined_result, take_approval_choice
+from .attachment_sandbox import FILE_TOOLS_PROMPT
 from .auto_review import AutoReviewer
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
@@ -3700,6 +3701,7 @@ async def _drive_generalist_agent(
     images: list[str] | None = None,
     chat_allowed_tools: list[str] | None = None,
     auto_review: AutoReviewer | None = None,
+    file_tools: list[dspy.Tool] | None = None,
 ) -> str:
     """Open the MCP session, run the turn on Pi, and return the final assistant message.
 
@@ -3739,6 +3741,8 @@ async def _drive_generalist_agent(
             :func:`chat_rules` drops every name a rule may not cover.
         auto_review: Reviews the safe mutations that auto-safe mode would run
             without a prompt, or ``None``.
+        file_tools: The chat's ``exec_command`` and ``write_stdin`` tools,
+            which read its attached files; ``None`` leaves them out.
 
     Returns:
         The full assistant reply text after the loop completes.
@@ -3792,7 +3796,13 @@ async def _drive_generalist_agent(
                 authoring_flag=authoring_flag,
                 approval_owner=approval_owner,
             )
-            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools, secret_request_tool()]
+            for tool in [
+                *build_web_tools(),
+                *build_docs_tools(),
+                *github_tools,
+                secret_request_tool(),
+                *(file_tools or []),
+            ]
         ]
         if feedback_target is not None:
             dspy_tools.append(
@@ -3849,6 +3859,8 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
+        if file_tools:
+            signature = signature.with_instructions(f"{signature.instructions}\n\n{FILE_TOOLS_PROMPT}")
         if images:
             signature = signature.append(
                 _IMAGES_FIELD,
@@ -4016,6 +4028,7 @@ async def run_generalist_agent(
     images: list[str] | None = None,
     chat_allowed_tools: list[str] | None = None,
     auto_review_send: Callable[[dict[str, Any]], bytes] | None = None,
+    file_tools: list[dspy.Tool] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
@@ -4080,6 +4093,7 @@ async def run_generalist_agent(
             protected dispatch of a managed turn. When set in auto-safe mode,
             Jev reviews each safe mutation before it runs. ``None`` turns the
             review off.
+        file_tools: The chat's tools that read its attached files, or ``None``.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -4132,6 +4146,7 @@ async def run_generalist_agent(
             images=images,
             chat_allowed_tools=chat_allowed_tools,
             auto_review=reviewer,
+            file_tools=file_tools,
         )
     )
     try:

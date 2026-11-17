@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "आपके जोड़े गए डेटा को स्कैन करना मेरे लिए बहुत बड़ा है। आप क्या करना चाहेंगे?",
   "agent.kickoff.oversized_repo": "{name} एक बड़ी रिपॉज़िटरी है, इसलिए मैं इसे स्कैन नहीं कर सका। आप क्या करना चाहेंगे?",
   "agent.composer.attach": "फ़ाइल संलग्न करें",
-  "agent.composer.attach_failed": "{name} संलग्न नहीं हो सका।",
   "agent.composer.attach_one_dataset": "{name} संलग्न नहीं हुई: एक बार में एक ही डेटासेट संलग्न करें।",
   "agent.composer.attach_too_large": "{name} {max_mb} MB से बड़ी है।",
   "agent.composer.mic_unavailable": "माइक्रोफ़ोन उपलब्ध नहीं",

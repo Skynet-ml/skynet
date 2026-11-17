@@ -80,6 +80,23 @@ export function attachedFile(name: string, text: string): AttachedFile & { id: s
   };
 }
 
+/**
+ * Put a workspace path at the top of each file card (SKY-781): ``paths`` holds
+ * one path, or null, for each card in order. A card that a fork put back
+ * names the source chat's copy, so its old path goes first.
+ */
+export function withFilePaths(value: string, paths: ReadonlyArray<string | null>): string {
+  const draft = splitPastes(value);
+  if (!draft.files.length) return value;
+  const files = draft.files.map((file, i) => {
+    const text = file.text.replace(/^path: .*\n/, "");
+    const path = paths[i];
+    // The card keeps its id, which links its stored original (SKY-782).
+    return { ...file, text: path ? attachedFile(file.name, `path: ${path}\n${text}`).text : text };
+  });
+  return joinPastes({ ...draft, files });
+}
+
 /** Whether a paste is long enough to become a card instead of draft text. */
 export function shouldAttachPaste(pasted: string): boolean {
   return pasted.length >= PASTE_ATTACHMENT_MIN_CHARS;

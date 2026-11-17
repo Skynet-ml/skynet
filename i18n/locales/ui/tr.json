@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "Eklediğiniz veriler taramam için çok büyük. Ne yapmak istersiniz?",
   "agent.kickoff.oversized_repo": "{name} büyük bir depo, bu yüzden tarayamadım. Ne yapmak istersiniz?",
   "agent.composer.attach": "Dosya ekle",
-  "agent.composer.attach_failed": "{name} eklenemedi.",
   "agent.composer.attach_one_dataset": "{name} eklenmedi: her seferinde bir veri kümesi ekleyin.",
   "agent.composer.attach_too_large": "{name}, {max_mb} MB sınırını aşıyor.",
   "agent.composer.mic_unavailable": "Mikrofon kullanılamıyor",

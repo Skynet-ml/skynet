@@ -81,8 +81,10 @@ dependencies = [
     "sentry-sdk>=2.67,<3",
     "pip==26.2.1",
     "pyarrow>=17",
-    # Text extraction for files attached in agent chats (core.service_gateway.agents.attachments):
-    # PDF and legacy .xls. Both are pure Python with no dependencies.
+    # Readers that the agent chat's commands use on attached files
+    # (core.service_gateway.agents.attachment_sandbox): PDF, legacy .xls and
+    # Avro. The Mac app's commands run on this Python.
+    "fastavro>=1.9",
     "pypdf>=6.20.0",
     "xlrd>=2",
     "pymysql>=1.1",

@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "你添加的数据太大，我无法扫描。你想做什么？",
   "agent.kickoff.oversized_repo": "{name} 是一个大型仓库，所以我无法扫描它。你想做什么？",
   "agent.composer.attach": "附加文件",
-  "agent.composer.attach_failed": "无法附加 {name}。",
   "agent.composer.attach_one_dataset": "{name} 未附加：每次只能附加一个数据集。",
   "agent.composer.attach_too_large": "{name} 超过 {max_mb} MB。",
   "agent.composer.mic_unavailable": "麦克风不可用",

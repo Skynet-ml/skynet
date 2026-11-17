@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "I dati che hai aggiunto sono troppo grandi per essere esaminati. Cosa vuoi fare?",
   "agent.kickoff.oversized_repo": "{name} è un repository grande, quindi non sono riuscito a esaminarlo. Cosa vuoi fare?",
   "agent.composer.attach": "Allega un file",
-  "agent.composer.attach_failed": "Impossibile allegare {name}.",
   "agent.composer.attach_one_dataset": "{name} non è stato allegato: allega un dataset alla volta.",
   "agent.composer.attach_too_large": "{name} supera i {max_mb} MB.",
   "agent.composer.mic_unavailable": "Microfono non disponibile",

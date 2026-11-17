@@ -27,7 +27,6 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import AgentConversationModel, AgentMessageModel, Base, ChatMediaModel
 from ...storage.remote import RemoteDBJobStore
 from ...storage.usage import UNSENT_MEDIA_RETENTION
@@ -35,6 +34,7 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers import chat_media
 from ..routers.chat_media import (
+    MAX_ATTACHMENT_BYTES,
     attach_media_to_chat,
     create_chat_media_router,
     load_media_data,
@@ -452,9 +452,9 @@ def test_a_media_upload_keeps_the_allow_list(harness: SimpleNamespace) -> None:
     assert _upload(harness.client, b"<svg/>", name="logo.svg", content_type="image/svg+xml").status_code == 415
 
 
-def test_document_limit_matches_the_file_text_limit() -> None:
-    """Every file whose text the chat can read can keep its original."""
-    assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES
+def test_document_limit_is_the_attachment_limit() -> None:
+    """Every file the composer attaches, up to 20 MB, can keep its original."""
+    assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES == 20 * 1024 * 1024
 
 
 def test_safe_filename_drops_paths_quotes_and_control_characters() -> None:
@@ -750,6 +750,23 @@ def test_send_with_a_file_deleted_after_the_load_is_a_404(harness: SimpleNamespa
     assert caught.value.status_code == 404
     with Session(engine) as session:
         assert session.scalars(select(AgentMessageModel)).all() == []
+
+
+def test_send_points_a_file_path_at_the_chats_copy(harness: SimpleNamespace) -> None:
+    """A file that another chat holds gets a copy, so the stored message names the copy's path."""
+    now = datetime.now(UTC)
+    with Session(harness.store.engine) as session:
+        session.add_all([_conversation("chat-a", _ALICE), _conversation("chat-b", _ALICE)])
+        session.flush()
+        session.add(_media_row("m-b", _ALICE, now, "chat-b"))
+        session.commit()
+    rows = load_owned_media(harness.store.engine, _ALICE, ["m-b"])
+    message_id = _persist_user_turn(harness.store, "chat-a", "path: attachments/m-b/f.png", media=rows)
+    with Session(harness.store.engine) as session:
+        message = session.get(AgentMessageModel, message_id)
+        copy = message.router_metadata["media"][0]["id"]
+        assert copy != "m-b"
+        assert message.content == f"path: attachments/{copy}/f.png"
 
 
 def test_the_content_type_column_holds_every_office_type() -> None:

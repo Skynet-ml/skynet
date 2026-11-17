@@ -11,8 +11,8 @@ every type that is not on the allow-list get a 415, because a browser can run
 script in SVG and a model provider cannot read HEIC.
 
 A ``document`` is the original bytes of an attached file (SKY-735). The agent
-reads the file's extracted text, which travels in the message; the original
-exists only so the chat viewer can show the real file. An upload marked
+reads it with shell commands in the chat's workspace (SKY-781), and the chat
+viewer shows it. An upload marked
 ``original`` keeps any file (SKY-782): a PDF, DOCX or XLSX keeps its real
 type, which the viewer draws, and every other file is stored as opaque bytes.
 """
@@ -36,7 +36,6 @@ from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.orm import Session, defer
 
 from ...config import settings
-from ...service_gateway.agents.attachments import MAX_ATTACHMENT_BYTES
 from ...storage.models import ChatMediaModel
 from ...storage.usage import sweep_unsent_chat_media
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -44,14 +43,14 @@ from ..errors import DomainError
 from ..rate_limit import RateLimiter, shared_redis_client
 from ._helpers import enforce_storage_quota
 
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
 # Anthropic refuses an image whose base64 form passes 5 MiB, and base64 adds
 # a third, so 3 MiB keeps every image under that limit with margin.
 MAX_MEDIA_BYTES: dict[str, int] = {
     "image": 3 * 1024 * 1024,
     "audio": 20 * 1024 * 1024,
     "video": 50 * 1024 * 1024,
-    # The same limit as the text read of an attached file, so every file
-    # whose text the chat holds can keep its original too.
     "document": MAX_ATTACHMENT_BYTES,
 }
 MAX_MEDIA_PER_MESSAGE = 10
@@ -536,10 +535,9 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         engine = _engine(job_store)
         head = file.file.read(_SNIFF_BYTES)
         sniffed = SniffedMedia("document", _OPAQUE_DOCUMENT) if original else sniff_media(head, file.content_type or "")
-        # Media shares the file text route's hourly cap. A document original
-        # (SKY-735) gets its own: its file's text read already counted there.
-        # So a direct caller can store more files an hour, but the storage quota
-        # still caps the total bytes.
+        # Media and document originals (SKY-735) have separate hourly caps, so
+        # a chat's files never use up its images' cap. The storage quota still
+        # caps the total bytes.
         bucket = "chat-originals" if sniffed and sniffed.kind == "document" else "attachments"
         RateLimiter(shared_redis_client()).enforce(
             f"{bucket}:{user.username}",

@@ -35,7 +35,6 @@
   "agent.kickoff.oversized_data": "The data you added is too large for me to scan. What would you like to do?",
   "agent.kickoff.oversized_repo": "{name} is a large repository, so I couldn't scan it. What would you like to do?",
   "agent.composer.attach": "Attach a file",
-  "agent.composer.attach_failed": "Could not attach {name}.",
   "agent.composer.attach_one_dataset": "{name} was not attached: attach one dataset at a time.",
   "agent.composer.attach_too_large": "{name} is larger than {max_mb} MB.",
   "agent.composer.mic_unavailable": "Microphone unavailable",

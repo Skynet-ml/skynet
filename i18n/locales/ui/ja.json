@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "追加されたデータが大きすぎてスキャンできませんでした。何をしたいですか?",
   "agent.kickoff.oversized_repo": "{name} は大きなリポジトリのため、スキャンできませんでした。何をしたいですか?",
   "agent.composer.attach": "ファイルを添付",
-  "agent.composer.attach_failed": "{name} を添付できませんでした。",
   "agent.composer.attach_one_dataset": "{name} は添付されませんでした。データセットは一度に 1 つずつ添付してください。",
   "agent.composer.attach_too_large": "{name} は {max_mb} MB を超えています。",
   "agent.composer.mic_unavailable": "マイクを利用できません",

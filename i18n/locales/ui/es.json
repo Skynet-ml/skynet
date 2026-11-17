@@ -1739,7 +1739,6 @@
   "agent.kickoff.oversized_data": "Los datos que agregaste son demasiado grandes para revisarlos. ¿Qué quieres hacer?",
   "agent.kickoff.oversized_repo": "{name} es un repositorio grande, así que no pude revisarlo. ¿Qué quieres hacer?",
   "agent.composer.attach": "Adjuntar un archivo",
-  "agent.composer.attach_failed": "No se pudo adjuntar {name}.",
   "agent.composer.attach_one_dataset": "{name} no se adjuntó: adjunta un conjunto de datos cada vez.",
   "agent.composer.attach_too_large": "{name} supera los {max_mb} MB.",
   "agent.composer.mic_unavailable": "Micrófono no disponible",

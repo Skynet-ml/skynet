@@ -3342,18 +3342,6 @@ export async function claimSharedTaggerSession(token: string) {
   return res;
 }
 
-/** The text an agent reads for a file attached in a chat: the extracted
- *  contents, or a short note when the file cannot be read. */
-export async function extractAttachmentText(file: File): Promise<string> {
-  const form = new FormData();
-  form.append("file", file, file.name);
-  const res = await request<{ text: string }>("/agent/attachments/extract", {
-    method: "POST",
-    body: form,
-  });
-  return res.text;
-}
-
 /** Transcript of one dictated clip plus which STT provider produced it. */
 export interface TranscriptionResult {
   text: string;
