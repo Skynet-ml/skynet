@@ -18,12 +18,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import APIRouter, FastAPI
+from fastapi.testclient import TestClient
 from gepa.core.state import GEPAState, ValsetEvaluation
 from sqlalchemy import create_engine, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.storage.remote as remote_mod
+from core.api.auth import AuthenticatedUser, get_authenticated_user
+from core.api.routers.optimizations.lifecycle import cancel_optimization, register_lifecycle_routes
 from core.billing.budgets import BudgetService
 from core.config import app_env
 from core.constants import WORKER_RESTART_CAUSE
@@ -38,6 +42,7 @@ TEST_DB_URL = app_env("APP_TEST_DB_URL")
 TREE = "c" * 64
 AGENT = "agent"
 RUN = "run-1"
+OWNER = AuthenticatedUser(username="owner", role="user", groups=())
 
 
 class StepJobStore(RemoteDBJobStore):
@@ -829,3 +834,281 @@ def test_a_failed_wake_does_not_stop_the_orphan_recovery(
 
     assert store.recover_orphaned_jobs() == 1
     assert store.get_job(RUN)["status"] == "pending"
+
+
+def _hold(store: StepJobStore, key: str, generation: int = 0) -> None:
+    """Reserve one run-phase model call that never starts, so the budget holds its money.
+
+    Args:
+        store: The job store.
+        key: The operation identity.
+        generation: The budget generation the reservation belongs to.
+    """
+    BudgetService(engine=store.engine).reserve(
+        store.get_job(RUN)["execution_budget_id"],
+        "owner",
+        operation_key=key,
+        generation=generation,
+        phase="run",
+        cost_kind="model",
+        request_fingerprint=key,
+        price_snapshot={"version": "fixture-v1"},
+        max_cents=5,
+    )
+
+
+def _cancel(store: StepJobStore) -> Any:
+    """Cancel the run as its owner, through the path the cancel route and ``stop_run`` share.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The cancel response.
+    """
+    # The API reads the owner from the payload.
+    store.update_job(RUN, payload={**store.get_job(RUN)["payload"], "username": "owner"})
+    return cancel_optimization(store, RUN, OWNER, None)
+
+
+def _budget(store: StepJobStore) -> Any:
+    """Return the run's budget.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The budget snapshot.
+    """
+    return BudgetService(engine=store.engine).get(store.get_job(RUN)["execution_budget_id"], "owner")
+
+
+def test_a_cancel_of_a_waiting_run_clears_wake_at_and_frees_its_budget(store: StepJobStore) -> None:
+    """A user cancels a parked run at once; the wake sweep never claims it, and its unstarted holds go back."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    assert _budget(store).reserved_cents == 5
+
+    response = _cancel(store)
+
+    assert response.status == "cancelled"
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    budget = _budget(store)
+    assert budget.reserved_cents == 0
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+    store.recover_orphaned_jobs()
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == generation + 1
+
+
+def test_a_bulk_cancel_of_a_waiting_run_clears_wake_at_and_frees_its_budget(store: StepJobStore) -> None:
+    """The bulk cancel route also cancels a parked run and gives back its unstarted holds."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) + timedelta(hours=1))
+    # The bulk route reads the row without its payload, so the owner must be in the overview.
+    store.update_job(
+        RUN,
+        payload={**store.get_job(RUN)["payload"], "username": "owner"},
+        payload_overview={"username": "owner"},
+    )
+    router = APIRouter()
+    register_lifecycle_routes(router, job_store=store, get_worker_ref=lambda: None)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_authenticated_user] = lambda: OWNER
+
+    response = TestClient(app).post("/optimizations/bulk-cancel", json={"optimization_ids": [RUN]})
+
+    assert response.status_code == 200
+    assert response.json()["cancelled"] == [RUN]
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_cancel_of_a_manually_paused_run_frees_its_budget(store: StepJobStore) -> None:
+    """A run the user paused can be cancelled too, and its unstarted holds go back."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    _set_job(store, status="paused", recovery=None)
+
+    _cancel(store)
+
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_cancel_keeps_the_holds_of_a_newer_budget_generation(store: StepJobStore) -> None:
+    """When the budget moved to a newer generation than the run's, the cancel does not release that generation's holds."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) + timedelta(hours=1))
+    service = BudgetService(engine=store.engine)
+    service.fence_generation(store.get_job(RUN)["execution_budget_id"], "owner", expected_generation=0)
+    _hold(store, "newer", generation=1)
+
+    _cancel(store)
+
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert _budget(store).reserved_cents == 5
+
+
+def test_a_cancel_that_loses_the_race_to_the_wake_cancels_the_woken_run(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the wake moves the run to pending between the cancel's read and its write, the run still ends cancelled."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    write = store.update_job_if_status
+
+    def wake_first(*args: Any, **kwargs: Any) -> bool:
+        """Let the wake sweep run once, then do the cancel's write.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        monkeypatch.setattr(store, "update_job_if_status", write)
+        assert store._wake_waiting_runs() == 1
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", wake_first)
+
+    _cancel(store)
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == generation + 2
+    assert store.claim_next_job("pod-b", 60.0) is None
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_cancel_that_loses_the_race_to_a_park_cancels_the_parked_run(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the worker parks the run between the cancel's read and its write, the parked run ends cancelled."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    write = store.update_job_if_status
+
+    def park_first(*args: Any, **kwargs: Any) -> bool:
+        """Let the worker park the run once, then do the cancel's write.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        monkeypatch.setattr(store, "update_job_if_status", write)
+        assert park_run(
+            store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1)
+        )
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", park_first)
+
+    response = _cancel(store)
+
+    assert response.status == "cancelled"
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    assert _budget(store).reserved_cents == 0
+    store.recover_orphaned_jobs()
+    assert store.get_job(RUN)["status"] == "cancelled"
+
+
+def test_a_cancel_of_a_woken_run_frees_the_parked_leg_holds(store: StepJobStore) -> None:
+    """A run that woke and waits for a claim keeps its parked leg's holds until the cancel frees them."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    assert store._wake_waiting_runs() == 1
+    assert store.get_job(RUN)["status"] == "pending"
+
+    _cancel(store)
+
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_cancel_that_races_a_park_and_a_wake_frees_the_parked_leg_holds(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the worker parks the run and the wake moves it to pending before the cancel's write, the holds go back."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    write = store.update_job_if_status
+
+    def park_and_wake_first(*args: Any, **kwargs: Any) -> bool:
+        """Let the worker park the run and the wake sweep move it once, then do the cancel's write.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        monkeypatch.setattr(store, "update_job_if_status", write)
+        assert park_run(
+            store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1)
+        )
+        assert store._wake_waiting_runs() == 1
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", park_and_wake_first)
+
+    _cancel(store)
+
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_wake_that_loses_the_race_to_the_cancel_leaves_the_run_cancelled(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the cancel lands between the wake's read and its write, the wake changes nothing."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    read = store._due_waiting_runs
+
+    def cancel_first(now: datetime) -> list[tuple[str, int]]:
+        """Read the due runs, then let the user cancel the run.
+
+        Args:
+            now: The sweep time.
+
+        Returns:
+            The due runs as the read saw them.
+        """
+        due = read(now)
+        _cancel(store)
+        return due
+
+    monkeypatch.setattr(store, "_due_waiting_runs", cancel_first)
+
+    assert store._wake_waiting_runs() == 0
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == generation + 1

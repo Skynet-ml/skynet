@@ -99,6 +99,51 @@ def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> 
         )
 
 
+def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: str) -> bool:
+    """Set a run to ``cancelled`` with a compare-and-set on its current status.
+
+    A ``paused`` run has no worker. Its cancel clears ``recovery``, which
+    holds ``wake_at``, so the wake sweep never claims the run again (SKY-800).
+    The wake sweep also moves only a ``paused`` row, so one of the two writes
+    wins. When the wake wins, the run is active again and gets the active-run
+    cancel. A park can also commit after the read, so when the first write
+    misses, the other write runs.
+
+    Every cancel that applies frees the budget holds of work that never
+    started. A parked leg leaves such holds, and neither the wake nor a later
+    path frees them, so the cancel does it whatever status it read.
+
+    Args:
+        job_store: The active job store.
+        optimization_id: ID of the run to cancel.
+        job: The run's job record, read before the cancel.
+        now: Completion time as an ISO string.
+
+    Returns:
+        ``True`` when the cancel applied; ``False`` when the run already
+        reached a terminal state.
+    """
+    fields: dict[str, Any] = {"status": "cancelled", "message": CANCELLATION_REASON, "completed_at": now}
+    writes: list[tuple[tuple[str, ...], dict[str, Any]]] = [
+        (("pending", "validating", "running"), {}),
+        (("paused",), {"recovery": None}),
+    ]
+    if job.get("status") == OptimizationStatus.paused.value:
+        writes.reverse()
+    cancelled = any(
+        _set_terminal_if_active(job_store, optimization_id, expected, **extra, **fields) for expected, extra in writes
+    )
+    if cancelled and job.get("execution_budget_id") is not None:
+        # The generation guard leaves the holds of a newer epoch alone, for
+        # example when a resume fenced the budget before this cancel.
+        BudgetService(engine=job_store.engine).close_for_failed_job(
+            job["execution_budget_id"],
+            job["username"],
+            expected_generation=int(job.get("execution_budget_generation") or 0),
+        )
+    return cancelled
+
+
 def _is_judge_session(job_store: Any, optimization_id: str, job: dict[str, Any]) -> bool:
     """Tell whether a run row is a judge session (SKY-696).
 
@@ -160,6 +205,7 @@ def cancel_optimization(
     """Cooperatively cancel an active optimization for a caller with editor access.
 
     The cancel route and the remote MCP ``stop_run`` tool share this path.
+    A ``paused`` run, manual or waiting for its ``wake_at``, can be cancelled too.
 
     Args:
         job_store: The active job store.
@@ -172,12 +218,13 @@ def cancel_optimization(
 
     Raises:
         DomainError: 404 if unknown or inaccessible, 403 if the caller's
-            share role is below ``editor``, 409 if already terminal.
+            share role is below ``editor``, 409 if already terminal. A
+            ``paused`` run is not terminal here and can be cancelled.
     """
     job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
 
     status = status_to_job_status(job_data.get("status", "pending"))
-    if status in TERMINAL_STATUSES:
+    if status in TERMINAL_STATUSES and status != OptimizationStatus.paused:
         raise DomainError(
             "optimization.already_terminal",
             status=409,
@@ -191,15 +238,7 @@ def cancel_optimization(
     if worker:
         worker.cancel_job(optimization_id)
 
-    now = datetime.now(UTC).isoformat()
-    if not _set_terminal_if_active(
-        job_store,
-        optimization_id,
-        ("pending", "validating", "running"),
-        status="cancelled",
-        message=CANCELLATION_REASON,
-        completed_at=now,
-    ):
+    if not _cancel_run(job_store, optimization_id, job_data, datetime.now(UTC).isoformat()):
         # The worker reached a terminal status in the window after the
         # pre-check above; reflect the row's actual status.
         current = status_to_job_status(job_store.get_job(optimization_id).get("status", "pending"))
@@ -227,7 +266,7 @@ def register_lifecycle_routes(
         "/optimizations/{optimization_id}/cancel",
         response_model=JobCancelResponse,
         status_code=200,
-        summary="Cancel a pending or running optimization",
+        summary="Cancel a pending, running or paused optimization",
         tags=["agent"],
     )
     def cancel_job(optimization_id: str, current_user: AuthenticatedUserDep) -> JobCancelResponse:
@@ -245,7 +284,8 @@ def register_lifecycle_routes(
 
         Raises:
             DomainError: 404 if unknown or inaccessible, 403 if the caller's
-                share role is below ``editor``, 409 if already terminal.
+                share role is below ``editor``, 409 if already terminal. A
+                ``paused`` run is not terminal here and can be cancelled.
         """
         return cancel_optimization(job_store, optimization_id, current_user, get_worker_ref())
 
@@ -311,11 +351,11 @@ def register_lifecycle_routes(
         "/optimizations/bulk-cancel",
         response_model=BulkCancelResponse,
         status_code=200,
-        summary="Cancel many running or pending optimizations in a single request",
+        summary="Cancel many pending, running or paused optimizations in a single request",
         tags=["agent"],
     )
     def bulk_cancel_jobs(body: BulkCancelRequest, current_user: AuthenticatedUserDep) -> BulkCancelResponse:
-        """Cancel a batch of non-terminal optimizations and report per-id outcomes.
+        """Cancel a batch of non-terminal or paused optimizations and report per-id outcomes.
 
         Same semantics as single-ID ``POST /optimizations/{id}/cancel``: flips
         status to ``cancelled`` immediately, worker stops at its next check,
@@ -360,7 +400,7 @@ def register_lifecycle_routes(
                 skipped.append(BulkCancelSkipped(optimization_id=optimization_id, reason="not_found"))
                 continue
             status = status_to_job_status(raw_status)
-            if status in TERMINAL_STATUSES:
+            if status in TERMINAL_STATUSES and status != OptimizationStatus.paused:
                 skipped.append(BulkCancelSkipped(optimization_id=optimization_id, reason=status.value))
                 continue
             cancellable.append(optimization_id)
@@ -383,14 +423,7 @@ def register_lifecycle_routes(
                     _stop_budget_admission(job_store, job, "user_cancelled")
                     if worker:
                         worker.cancel_job(optimization_id)
-                    if not _set_terminal_if_active(
-                        job_store,
-                        optimization_id,
-                        ("pending", "validating", "running"),
-                        status="cancelled",
-                        message=CANCELLATION_REASON,
-                        completed_at=now,
-                    ):
+                    if not _cancel_run(job_store, optimization_id, job, now):
                         raise ValueError("The run has already reached a terminal state.")
                 except Exception as exc:
                     logger.exception("Bulk cancel failed for %s", optimization_id)

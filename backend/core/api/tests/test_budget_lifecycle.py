@@ -19,6 +19,7 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     store.update_job("protected-cancel", execution_budget_id="budget")
     store.engine = object()
     calls = []
+    releases = []
 
     class Budgets:
         """Capture the trusted admission closure without creating any paid work."""
@@ -28,6 +29,16 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
             assert store.get_job("protected-cancel")["status"] == "running"
             calls.append((identity, username, reason))
 
+        def close_for_failed_job(self, identity: str, username: str, *, expected_generation: int) -> None:
+            """Record the release of the cancelled run's unstarted holds.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                expected_generation: The budget generation the cancel read.
+            """
+            releases.append((identity, username, expected_generation))
+
     monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
     app = FastAPI()
     app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
@@ -35,6 +46,7 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     response = TestClient(app).post("/optimizations/protected-cancel/cancel")
     assert response.status_code == 200
     assert calls == [("budget", "alice", "user_cancelled")]
+    assert releases == [("budget", "alice", 0)]
     assert store.get_job("protected-cancel")["status"] == "cancelled"
 
 
@@ -99,6 +111,7 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     store.update_job("normal-run", execution_budget_id="run-budget")
     store.engine = object()
     stops = []
+    releases = []
     ends = []
 
     class Budgets:
@@ -114,6 +127,16 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
             """
             stops.append((identity, reason))
 
+        def close_for_failed_job(self, identity: str, username: str, *, expected_generation: int) -> None:
+            """Record the release of the cancelled run's unstarted holds.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                expected_generation: The budget generation the cancel read.
+            """
+            releases.append(identity)
+
     monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
     monkeypatch.setattr(lifecycle.repo_judge, "end_session", lambda *args, **kwargs: ends.append(args))
     app = FastAPI()
@@ -128,6 +151,7 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     assert [entry["optimization_id"] for entry in body["skipped"]] == ["judge-session"]
     assert "stop_run" in body["skipped"][0]["reason"]
     assert stops == [("run-budget", "user_cancelled")]
+    assert releases == ["run-budget"]
     assert ends == []
     assert store.get_job("judge-session")["status"] == "running"
     assert store.get_job("normal-run")["status"] == "cancelled"
