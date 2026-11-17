@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "Chaque version distincte notée pendant l'exécution, par ordre d'apparition — parcourez-les ou choisissez-en une dans le rail",
   "agent.error.context_too_long": "La conversation est trop longue pour la fenêtre de contexte du modèle — démarrez un nouveau chat ou raccourcissez votre message",
   "agent.error.capacity": "Le modèle est occupé pour le moment.",
-  "agent.error.insufficient_funds": "Votre solde est vide. Ajoutez des fonds pour continuer à discuter avec l'agent.",
+  "agent.error.insufficient_funds": "Votre solde disponible est trop bas. Les exécutions en cours peuvent réserver une partie de votre solde.",
   "agent.parallel.background_count": "Chats en cours d'exécution en arrière-plan : {p1}",
   "agent.parallel.busy_indicator": "Chat en cours en arrière-plan",
   "agent.web_chat.tag": "Web",

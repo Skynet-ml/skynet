@@ -109,7 +109,7 @@ Para fijar un modelo predeterminado para los chats nuevos, abre **Ajustes** > **
 
 ### Coste
 
-Los chats con el agente que usan créditos de Skynet consumen tu saldo. Si tu saldo está vacío, el panel muestra «Tu saldo está vacío. Añade fondos para seguir chateando con el agente.» Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
+Los chats con el agente que usan créditos de Skynet consumen tu saldo. Las ejecuciones activas pueden reservar parte de tu saldo. Si tu saldo disponible es demasiado bajo, el panel muestra «Tu saldo disponible es demasiado bajo. Las ejecuciones activas pueden reservar parte de tu saldo.» Para conocer los precios, lee [Presupuestos y facturación](/docs/concepts/billing).
 
 ## Consejos
 

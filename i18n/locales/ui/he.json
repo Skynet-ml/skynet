@@ -150,7 +150,7 @@
   "agent.pending.drag": "גרירה לשינוי הסדר",
   "agent.error.context_too_long": "השיחה ארוכה מדי עבור חלון ההקשר של המודל — התחילו שיחה חדשה או קצרו את ההודעה",
   "agent.error.capacity": "המודל עמוס כרגע.",
-  "agent.error.insufficient_funds": "היתרה שלכם ריקה. הוסיפו כסף כדי להמשיך לשוחח עם הסוכן.",
+  "agent.error.insufficient_funds": "היתרה הזמינה שלכם נמוכה מדי. ריצות פעילות יכולות לשריין חלק מהיתרה.",
   "agent.model_menu.auto": "אוטומטי",
   "agent.model_menu.effort_default": "ברירת מחדל",
   "agent.model_menu.effort_default_hint": "רמת ברירת המחדל של המודל",

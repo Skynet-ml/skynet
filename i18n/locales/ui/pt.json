@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "Cada versão distinta pontuada na execução, em ordem de aparição — percorra-as ou escolha uma no trilho",
   "agent.error.context_too_long": "A conversa é demasiado longa para a janela de contexto do modelo — inicie uma nova conversa ou encurte a sua mensagem",
   "agent.error.capacity": "O modelo está ocupado no momento.",
-  "agent.error.insufficient_funds": "O seu saldo está vazio. Adicione fundos para continuar a conversar com o agente.",
+  "agent.error.insufficient_funds": "O seu saldo disponível é demasiado baixo. As execuções ativas podem reservar parte do seu saldo.",
   "agent.parallel.background_count": "Conversas em segundo plano: {p1}",
   "agent.parallel.busy_indicator": "Conversa em segundo plano",
   "agent.web_chat.tag": "Web",

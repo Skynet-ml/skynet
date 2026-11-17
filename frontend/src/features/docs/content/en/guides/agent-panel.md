@@ -109,7 +109,7 @@ To set a default model for new chats, open **Settings** > **Agent panel** > **De
 
 ### Cost
 
-Agent chats on Skynet credits use your balance. If your balance is empty, the panel shows "Your balance is empty. Add funds to keep chatting with the agent." For prices, read [Billing](/docs/concepts/billing).
+Agent chats on Skynet credits use your balance. Active runs can hold part of your balance. If your available balance is too low, the panel shows "Your available balance is too low. Active runs can hold part of your balance." For prices, read [Billing](/docs/concepts/billing).
 
 ## Tips
 

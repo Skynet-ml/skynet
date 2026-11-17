@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "Jede eigenständige Version, die der Lauf bewertet hat, in Reihenfolge ihres Auftretens — blättern Sie durch oder wählen Sie eine aus der Leiste",
   "agent.error.context_too_long": "Die Unterhaltung ist zu lang für das Kontextfenster des Modells — starten Sie einen neuen Chat oder kürzen Sie Ihre Nachricht",
   "agent.error.capacity": "Das Modell ist gerade ausgelastet.",
-  "agent.error.insufficient_funds": "Ihr Guthaben ist aufgebraucht. Laden Sie Guthaben auf, um weiter mit dem Agenten zu chatten.",
+  "agent.error.insufficient_funds": "Ihr verfügbares Guthaben ist zu niedrig. Aktive Läufe können einen Teil Ihres Guthabens reservieren.",
   "agent.parallel.background_count": "Im Hintergrund laufende Chats: {p1}",
   "agent.parallel.busy_indicator": "Chat läuft im Hintergrund",
   "agent.web_chat.tag": "Web",

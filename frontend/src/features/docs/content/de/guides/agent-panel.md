@@ -109,7 +109,7 @@ Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen**
 
 ### Kosten
 
-Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Ist Ihr Guthaben leer, zeigt der Bereich „Ihr Guthaben ist aufgebraucht. Laden Sie Guthaben auf, um weiter mit dem Agenten zu chatten.“ Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
+Agenten-Chats mit Skynet-Credits belasten Ihr Guthaben. Aktive Läufe können einen Teil Ihres Guthabens reservieren. Ist Ihr verfügbares Guthaben zu niedrig, zeigt der Bereich „Ihr verfügbares Guthaben ist zu niedrig. Aktive Läufe können einen Teil Ihres Guthabens reservieren.“ Die Preise finden Sie unter [Abrechnung](/docs/concepts/billing).
 
 ## Tipps
 

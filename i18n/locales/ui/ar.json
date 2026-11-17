@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "كل إصدار مميّز مُنح درجة في التشغيل، بترتيب ظهوره — تنقّل بينها أو اختر واحدًا من الشريط",
   "agent.error.context_too_long": "المحادثة طويلة جدًا بالنسبة لنافذة سياق النموذج — ابدأ محادثة جديدة أو اختصر رسالتك",
   "agent.error.capacity": "النموذج مشغول الآن.",
-  "agent.error.insufficient_funds": "رصيدك فارغ. أضف رصيدًا لمواصلة الدردشة مع الوكيل.",
+  "agent.error.insufficient_funds": "رصيدك المتاح منخفض جدًا. قد تحجز التشغيلات النشطة جزءًا من رصيدك.",
   "agent.parallel.background_count": "المحادثات قيد التشغيل في الخلفية: {p1}",
   "agent.parallel.busy_indicator": "محادثة قيد التشغيل في الخلفية",
   "agent.web_chat.tag": "الويب",

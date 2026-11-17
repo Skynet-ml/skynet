@@ -109,7 +109,7 @@ Per impostare un modello predefinito per le nuove chat, apri **Impostazioni** > 
 
 ### Costo
 
-Le chat con l'agente sui crediti Skynet usano il tuo saldo. Se il saldo è esaurito, il pannello mostra «Il tuo saldo è esaurito. Aggiungi fondi per continuare a chattare con l'agente.» Per i prezzi, leggi [Budget e fatturazione](/docs/concepts/billing).
+Le chat con l'agente sui crediti Skynet usano il tuo saldo. Le esecuzioni attive possono riservare parte del tuo saldo. Se il saldo disponibile è troppo basso, il pannello mostra «Il tuo saldo disponibile è troppo basso. Le esecuzioni attive possono riservare parte del tuo saldo.» Per i prezzi, leggi [Budget e fatturazione](/docs/concepts/billing).
 
 ## Suggerimenti
 

@@ -150,7 +150,7 @@
   "agent.pending.drag": "Drag to reorder",
   "agent.error.context_too_long": "The conversation is too long for the model's context window — start a new chat or shorten your message",
   "agent.error.capacity": "The model is busy right now.",
-  "agent.error.insufficient_funds": "Your balance is empty. Add funds to keep chatting with the agent.",
+  "agent.error.insufficient_funds": "Your available balance is too low. Active runs can hold part of your balance.",
   "agent.model_menu.auto": "Auto",
   "agent.model_menu.effort_default": "Default",
   "agent.model_menu.effort_default_hint": "The model's default level",

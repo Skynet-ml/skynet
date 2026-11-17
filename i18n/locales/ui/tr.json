@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "Çalıştırmada puanlanan her farklı sürüm, görünme sırasına göre — aralarında gezinin ya da raydan birini seçin",
   "agent.error.context_too_long": "Konuşma, modelin bağlam penceresi için çok uzun — yeni bir sohbet başlatın veya mesajınızı kısaltın",
   "agent.error.capacity": "Model şu anda meşgul.",
-  "agent.error.insufficient_funds": "Bakiyeniz boş. Ajanla sohbete devam etmek için bakiye ekleyin.",
+  "agent.error.insufficient_funds": "Kullanılabilir bakiyeniz çok düşük. Etkin çalıştırmalar bakiyenizin bir kısmını ayırabilir.",
   "agent.parallel.background_count": "Arka planda çalışan sohbetler: {p1}",
   "agent.parallel.busy_indicator": "Sohbet arka planda çalışıyor",
   "agent.web_chat.tag": "Web",

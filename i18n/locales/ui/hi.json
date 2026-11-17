@@ -991,7 +991,7 @@
   "tooltip.blackbox.versions.section": "रन में अंक पाने वाला हर अलग संस्करण, आने के क्रम में — उनमें आगे-पीछे जाएँ या रेल से कोई चुनें",
   "agent.error.context_too_long": "बातचीत मॉडल के कॉन्टेक्स्ट विंडो के लिए बहुत लंबी है — नई चैट शुरू करें या अपना संदेश छोटा करें",
   "agent.error.capacity": "मॉडल अभी व्यस्त है।",
-  "agent.error.insufficient_funds": "आपका बैलेंस खाली है। एजेंट से बातचीत जारी रखने के लिए बैलेंस जोड़ें।",
+  "agent.error.insufficient_funds": "आपका उपलब्ध बैलेंस बहुत कम है। सक्रिय रन आपके बैलेंस का कुछ हिस्सा रोक सकते हैं।",
   "agent.parallel.background_count": "बैकग्राउंड में चल रही चैट: {p1}",
   "agent.parallel.busy_indicator": "बैकग्राउंड में चैट चल रही है",
   "agent.web_chat.tag": "वेब",
