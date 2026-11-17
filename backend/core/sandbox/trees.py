@@ -31,6 +31,8 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_TREE_BYTES = 1024 * 1024 * 1024
 MAX_TREE_MEMBERS = 100_000
 MAX_NAME_BYTES = 4096
+# Storing a tree recurses once per folder level, so a deep path must stop as a bad archive, not a RecursionError.
+MAX_TREE_DEPTH = 256
 # tarfile reads a long-name or pax header in one read, so a cap on each read
 # stops a huge header before it is in memory. File data is read in smaller chunks.
 _MAX_READ_BYTES = 4 * 1024 * 1024
@@ -164,7 +166,8 @@ class _CountingReader:
         Raises:
             BadArchiveError: When the position is past the limit.
         """
-        # Headers and block padding add up to 1 KiB to each member.
+        # Each member gets 1 KiB for its header and block padding. A long-name or pax header
+        # can be larger, so long names count against the size limit.
         if (self._raw.tell() if position is None else position) > MAX_TREE_BYTES + MAX_TREE_MEMBERS * 1024:
             raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
 
@@ -236,9 +239,9 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
 
     Raises:
         BadArchiveError: When the archive is over a size limit, does not
-            read, a member path leaves the top level, a name is both a file
-            and a folder, a name is too long or not UTF-8, or a hard link
-            names no earlier file.
+            read, a member path leaves the top level or is too deep, a name
+            is both a file and a folder, a name is too long or not UTF-8, or
+            a hard link names no earlier file.
     """
     if len(data) > MAX_ARCHIVE_BYTES:
         raise BadArchiveError(f"The archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
@@ -256,6 +259,8 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
                 parts = _parts(member.name)
                 if not parts:
                     continue
+                if len(parts) > MAX_TREE_DEPTH:
+                    raise BadArchiveError(f"An archive member path is deeper than {MAX_TREE_DEPTH} levels.")
                 folder = root
                 for part in parts[:-1]:
                     folder = folder.setdefault(part, {})  # type: ignore[assignment]

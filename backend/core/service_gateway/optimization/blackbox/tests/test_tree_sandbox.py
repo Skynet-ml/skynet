@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import tarfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -911,6 +914,20 @@ def test_a_tree_over_the_box_size_limit_is_refused_in_the_box(
     assert reads == []
     assert source.released == [False]
     assert step_log.get_step(f"{RUN}:agent-1:1") is None
+
+
+def test_a_box_tree_too_deep_to_store_is_refused_not_retried(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A path deeper than the depth limit is a tree rejection, not a retryable box failure."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        archive.addfile(tarfile.TarInfo("a/" * 1500 + "f"), io.BytesIO(b""))
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(read_back=base64.b64encode(buffer.getvalue()).decode()))
+
+    with pytest.raises(TreeRejectedError) as raised:
+        sandbox.run(_step(), _tree(trees, {}), "true", [])
+
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
+    assert source.released == [False]
 
 
 def test_an_archive_that_grows_after_the_box_check_is_refused_by_the_worker(

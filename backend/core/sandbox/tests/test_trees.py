@@ -290,6 +290,22 @@ def test_a_member_name_or_link_target_over_the_name_limit_is_refused(trees: Tree
         tar_to_tree(trees, RUN, _archive((info, b"")))
 
 
+def test_a_member_path_over_the_depth_limit_is_a_bad_archive(trees: TreeStore) -> None:
+    """A path of 1500 short folders is under the name limit but would overflow the stack as it is stored."""
+    deep = "a/" * 1500 + "f"
+    assert len(deep.encode()) <= tree_helpers.MAX_NAME_BYTES
+
+    with pytest.raises(BadArchiveError, match="deeper than"):
+        tar_to_tree(trees, RUN, _archive((_info(deep), b"")))
+
+
+def test_a_member_path_at_the_depth_limit_is_stored(trees: TreeStore) -> None:
+    """A path of exactly the depth limit stores as a tree."""
+    path = "a/" * (tree_helpers.MAX_TREE_DEPTH - 1) + "f"
+
+    tar_to_tree(trees, RUN, _archive((_info(path), b"x")))
+
+
 def test_a_file_larger_than_one_read_chunk_comes_back_whole(trees: TreeStore) -> None:
     """A file of several read chunks and a partial last chunk keeps every byte."""
     content = bytes(range(256)) * (tree_helpers._CHUNK_BYTES * 5 // 512) + b"tail"

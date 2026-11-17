@@ -154,7 +154,7 @@ class TreeSandbox:
             trees: Reads the input trees and stores the new ones.
             step_log: Gets one step for each finished call.
             candidates: Gives the boxes that run candidate commands.
-            metrics: Gives the metric boxes; never the same as ``candidates``.
+            metrics: Gives the metric boxes; it must never give a box that a candidate step used.
             registry: The capability registry that the grant lists resolve against.
             timeout_seconds: The limit of one command or metric.
 
