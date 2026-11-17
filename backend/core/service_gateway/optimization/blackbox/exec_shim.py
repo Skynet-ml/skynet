@@ -14,6 +14,7 @@ maps do not ship it yet.
 from __future__ import annotations
 
 import errno
+import io
 import json
 import os
 import shlex
@@ -22,7 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
-from typing import Any, BinaryIO
+from typing import BinaryIO
 
 LOG_ENV = "APP_EXEC_LOG"
 # Set for the children of a recorded command, so a nested listed command is
@@ -52,7 +53,7 @@ def _real_command(shim_dir: str, name: str) -> str | None:
     return shutil.which(name, path=path)
 
 
-def _pump(source: BinaryIO, sink: BinaryIO, tail: bytearray) -> None:
+def _pump(source: io.BufferedReader, sink: BinaryIO, tail: bytearray) -> None:
     """Copy each chunk of one child stream to the shim's stream at once, keeping its tail.
 
     Args:
@@ -87,18 +88,14 @@ def _spawn(real: str, name: str, args: list[str]) -> subprocess.Popen[bytes]:
     Raises:
         OSError: When the command cannot run.
     """
-    options: dict[str, Any] = {
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "env": {**os.environ, ACTIVE_ENV: "1"},
-    }
+    env = {**os.environ, ACTIVE_ENV: "1"}
     try:
-        return subprocess.Popen([name, *args], executable=real, **options)
+        return subprocess.Popen([name, *args], executable=real, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     except OSError as error:
         if error.errno != errno.ENOEXEC:
             raise
     # A script with no shebang line: the shell runs it with sh, so the shim does too.
-    return subprocess.Popen(["/bin/sh", real, *args], **options)
+    return subprocess.Popen(["/bin/sh", real, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 
 
 def _exec(real: str, name: str, args: list[str]) -> int:

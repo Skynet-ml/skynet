@@ -497,6 +497,36 @@ def test_one_finish_reads_a_log_larger_than_the_read_limit(step_log, tmp_path, m
     assert capture.finish() == []
 
 
+def test_a_drain_ends_while_a_writer_keeps_appending_to_the_exec_log(step_log, tmp_path, monkeypatch) -> None:
+    """One finish reads up to the log size at its start; lines a child adds during it wait for the next call."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    make = _record("make")
+    monkeypatch.setattr(harness_capture, "_EXEC_READ_LIMIT", len(make) + 5)
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(make * 2)
+    real_read, reads = capture._exec_records, []
+
+    def read_while_a_writer_appends() -> tuple[list[tuple[dict[str, Any], int]], int]:
+        """Append one record before each read, as a child that never stops; fail instead of looping without end.
+
+        Returns:
+            The real read's records and position.
+        """
+        reads.append(1)
+        assert len(reads) < 50, "the drain does not end"
+        with log.open("a") as handle:
+            handle.write(make)
+        return real_read()
+
+    monkeypatch.setattr(capture, "_exec_records", read_while_a_writer_appends)
+
+    assert len(capture.finish()) == 2
+    assert len(reads) == 2
+
+
 def test_a_tool_round_skips_every_exec_record_of_a_log_larger_than_the_read_limit(
     step_log, tmp_path, monkeypatch
 ) -> None:
@@ -612,8 +642,8 @@ def test_a_tool_call_with_a_bad_id_is_skipped(step_log, tmp_path, use) -> None:
     assert step_log.get_step(step)["body"]["command"] == {"command": "ls"}
 
 
-def test_a_deeply_nested_tool_input_is_skipped(step_log, tmp_path) -> None:
-    """An input too deep to redact is not stored, and the capture goes on."""
+def test_a_tool_call_with_an_input_too_deep_to_redact_commits_with_no_input(step_log, tmp_path) -> None:
+    """The call still ran, so it commits a step with its id and tool and no input, and the capture goes on."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -625,9 +655,19 @@ def test_a_deeply_nested_tool_input_is_skipped(step_log, tmp_path) -> None:
     request["messages"][1]["content"].append({"type": "tool_use", "id": "t1", "name": "bash", "input": deep})
     request["messages"][2]["content"].append({"type": "tool_result", "tool_use_id": "t1", "content": "x"})
 
-    [step] = capture.observe(request)
+    steps = capture.observe(request)
 
-    assert step_log.get_step(step)["body"]["command"] == {"command": "ls"}
+    assert [step_log.get_step(step)["body"] for step in steps] == [
+        {
+            "source": "tool_use",
+            "tool_use_id": "t2",
+            "tool": "bash",
+            "command": {"command": "ls"},
+            "output": "a",
+            "is_error": False,
+        },
+        {"source": "tool_use", "tool_use_id": "t1", "tool": "bash", "input_too_deep": True},
+    ]
     assert capture.observe(request) == []
 
 

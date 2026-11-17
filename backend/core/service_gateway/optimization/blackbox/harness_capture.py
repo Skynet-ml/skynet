@@ -33,7 +33,7 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -127,7 +127,10 @@ class HarnessCapture:
         return self._drain(commit=True)
 
     def _drain(self, *, commit: bool) -> list[str]:
-        """Read the exec log to its end, one limited read at a time, and commit or drop its records.
+        """Read the exec log up to its size at the start, one limited read at a time, and commit or drop its records.
+
+        A child can keep appending to the log, so lines written during the
+        drain wait for the next call; otherwise the drain might never end.
 
         Args:
             commit: Commit the records; ``False`` drops them (a tool call interval).
@@ -135,6 +138,11 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
+        opened = self._open_exec_log()
+        if opened is None:
+            return []
+        os.close(opened[0])
+        stop = opened[1]
         step_ids: list[str] = []
         while True:
             start = self._exec_offset
@@ -142,10 +150,10 @@ class HarnessCapture:
             if commit:
                 step_ids += self._commit(records)
             self._exec_offset = offset
-            if offset == start:
+            if offset == start or offset >= stop:
                 return step_ids
 
-    def _commit(self, items: list[tuple[dict[str, Any], int | None]]) -> list[str]:
+    def _commit(self, items: Sequence[tuple[dict[str, Any], int | None]]) -> list[str]:
         """Commit each body as a command step, all with one tree.
 
         The capture records each step right after its commit (its tool call
@@ -166,23 +174,31 @@ class HarnessCapture:
         for body, end in items:
             try:
                 redacted = _redact(body, self._route_key)
-            # The model request is agent-controlled; a deeply nested input cannot be stored as a step.
+            # The model request is agent-controlled. A call whose input is too
+            # deep to redact still ran, so it commits with no input.
             except RecursionError:
-                redacted = None
-            if redacted is not None:
-                step_ids.append(
-                    self._step_log.commit(
-                        run_id=self._run_id,
-                        agent_id=self._agent_id,
-                        seq=self._seq,
-                        kind="command",
-                        execution_generation=self._generation,
-                        grant_list_id=self._grant_list_id,
-                        body=redacted,
-                        tree_id=tree_id,
-                    )
+                redacted = _redact(
+                    {
+                        "source": body["source"],
+                        "tool_use_id": body["tool_use_id"],
+                        "tool": body["tool"],
+                        "input_too_deep": True,
+                    },
+                    self._route_key,
                 )
-                self._seq += 1
+            step_ids.append(
+                self._step_log.commit(
+                    run_id=self._run_id,
+                    agent_id=self._agent_id,
+                    seq=self._seq,
+                    kind="command",
+                    execution_generation=self._generation,
+                    grant_list_id=self._grant_list_id,
+                    body=redacted,
+                    tree_id=tree_id,
+                )
+            )
+            self._seq += 1
             if end is None:
                 self._committed.add(body["tool_use_id"])
             else:
