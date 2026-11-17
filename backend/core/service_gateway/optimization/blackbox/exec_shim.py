@@ -24,7 +24,6 @@ import signal
 import subprocess
 import sys
 import threading
-from typing import BinaryIO
 
 LOG_ENV = "APP_EXEC_LOG"
 # Set for the children of a recorded command, so a nested listed command is
@@ -32,6 +31,11 @@ LOG_ENV = "APP_EXEC_LOG"
 ACTIVE_ENV = "APP_EXEC_SHIM_ACTIVE"
 # The log keeps only the tail of each stream: a command can print without limit.
 OUTPUT_LIMIT = 64 * 1024
+# The log keeps only the head of a longer command line, and ends it with this
+# marker. Each argv byte that is not UTF-8 is six bytes in the JSON line, so
+# with no cut a big argv makes a line the reader skips.
+COMMAND_LIMIT = OUTPUT_LIMIT
+COMMAND_CUT = " [cut]"
 _NOT_FOUND = 127
 _CANNOT_RUN = 126
 
@@ -54,24 +58,29 @@ def _real_command(shim_dir: str, name: str) -> str | None:
     return shutil.which(name, path=path)
 
 
-def _pump(source: io.BufferedReader, sink: BinaryIO, tail: bytearray) -> None:
+def _pump(source: io.BufferedReader, sink: int, tail: bytearray) -> None:
     """Copy each chunk of one child stream to the shim's stream at once, keeping its tail.
 
     When the reader closes early (``cmd | head``), the shim closes its end of
     the child's pipe, so the child's next write gets SIGPIPE or EPIPE, as it
     would with no shim. Without that, a command that writes forever never ends.
 
+    The chunk goes to the raw descriptor, not ``sys.stdout.buffer``: a failed
+    flush keeps the bytes in that buffer, and Python's flush at exit then
+    prints a BrokenPipeError and exits 120 instead of the command's code.
+
     Args:
         source: The child's pipe.
-        sink: The shim's own stdout or stderr.
+        sink: The shim's own stdout or stderr descriptor.
         tail: Holds the last ``OUTPUT_LIMIT`` bytes of the stream.
     """
     while chunk := source.read1(OUTPUT_LIMIT):
         tail += chunk
         del tail[:-OUTPUT_LIMIT]
         try:
-            sink.write(chunk)
-            sink.flush()
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(sink, view) :]
         except OSError:
             source.close()
             return
@@ -182,8 +191,8 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     pumps = [
         threading.Thread(target=_pump, args=(stream, sink, tail), daemon=True)
         for stream, sink, tail in (
-            (process.stdout, sys.stdout.buffer, tails[0]),
-            (process.stderr, sys.stderr.buffer, tails[1]),
+            (process.stdout, sys.stdout.fileno(), tails[0]),
+            (process.stderr, sys.stderr.fileno(), tails[1]),
         )
     ]
     for pump in pumps:
@@ -204,6 +213,22 @@ def _tail(data: bytes) -> str:
         The bytes, decoded with replacement.
     """
     return data.decode("utf-8", errors="replace")
+
+
+def _command(name: str, args: list[str]) -> str:
+    """Quote the command line for the log, cut to its first ``COMMAND_LIMIT`` argv bytes.
+
+    Args:
+        name: The command name.
+        args: Its arguments; a byte that is not UTF-8 is a surrogate escape.
+
+    Returns:
+        The quoted line, with ``COMMAND_CUT`` at the end when it is cut.
+    """
+    line = shlex.join([name, *args]).encode("utf-8", "surrogateescape")
+    if len(line) <= COMMAND_LIMIT:
+        return line.decode("utf-8", "surrogateescape")
+    return line[:COMMAND_LIMIT].decode("utf-8", "surrogateescape") + COMMAND_CUT
 
 
 def _append(log: str, record: dict[str, object]) -> None:
@@ -246,7 +271,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.buffer.flush()
     else:
         stdout, stderr, code = _run(real, name, args)
-    record = {"command": shlex.join([name, *args]), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
+    record = {"command": _command(name, args), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
     # The command already ran. A log that cannot be written (a read-only
     # folder, a full disk, a folder at the path) loses the record, but the
     # caller still gets the real exit code, and no extra stderr text.

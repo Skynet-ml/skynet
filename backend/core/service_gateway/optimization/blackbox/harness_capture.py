@@ -41,7 +41,7 @@ from typing import Any, NamedTuple
 
 from ....storage.step_log_store import StepLogStore
 from ....storage.tree_store import TreeEntry, TreeStore
-from .exec_shim import OUTPUT_LIMIT
+from .exec_shim import COMMAND_CUT, COMMAND_LIMIT, OUTPUT_LIMIT
 from .harness_bridge import EXEC_LOG, EXEC_SHIM_DIR, KEY_TOKEN, SESSIONS_DIR, workspace_files
 
 # Session-folder files that are only logs of this box: the raw harness output
@@ -60,6 +60,10 @@ _TOTAL_SIZE_LIMIT = 64 << 20
 _ENTRY_COUNT_LIMIT = 5000
 # A step names at most this many left-out paths, and counts all of them.
 _SKIPPED_LISTED = 100
+# A file entry in a snapshot's ``SESSIONS_DIR`` tree, next to the session
+# folder, when the snapshot left out a recorded path. The restore reads only
+# tree entries there as session folders, and the marker is a file entry.
+_INCOMPLETE = ".snapshot-incomplete"
 
 
 class Snapshot(NamedTuple):
@@ -307,7 +311,8 @@ class HarnessCapture:
                 and isinstance(record.get("stdout"), str)
                 and isinstance(record.get("stderr"), str)
             ):
-                body = {"source": "exec_shim", "command": record["command"], "exit_code": record["exit_code"]}
+                command = _drop_cut_command_key(record["command"], self._route_key)
+                body = {"source": "exec_shim", "command": command, "exit_code": record["exit_code"]}
                 for stream in ("stdout", "stderr"):
                     body[stream] = _drop_cut_key(record[stream], self._route_key)
                 bodies.append((body, end))
@@ -355,6 +360,31 @@ def _drop_cut_key(text: str, route_key: str) -> str:
     if not route_key or len(text.encode("utf-8", "surrogatepass")) < OUTPUT_LIMIT:
         return text
     return text[len(route_key) - 1 :]
+
+
+def _drop_cut_command_key(command: str, route_key: str) -> str:
+    """Remove the end of an exec log command line that the shim cut to its head.
+
+    The shim keeps only the first ``COMMAND_LIMIT`` bytes and adds
+    ``COMMAND_CUT``, so the cut can split a copy of the route key at the end.
+    The last ``len(route_key) - 1`` characters before the marker are removed.
+    A line shorter than the limit is whole, also when it ends with the marker.
+
+    Args:
+        command: The logged command line.
+        route_key: The key; an empty key removes nothing.
+
+    Returns:
+        The command line, cut before its marker when it may hold a split key.
+    """
+    if (
+        not route_key
+        or not command.endswith(COMMAND_CUT)
+        or len(command.encode("utf-8", "surrogatepass")) <= COMMAND_LIMIT
+    ):
+        return command
+    head = command[: -len(COMMAND_CUT)]
+    return head[: len(head) - len(route_key) + 1] + COMMAND_CUT
 
 
 def _redact(value: Any, route_key: str) -> Any:
@@ -410,11 +440,13 @@ def _tool_pairs(request: dict[str, Any]) -> list[dict[str, Any]]:
         use = uses.get(block["tool_use_id"])
         if use is None:
             continue
+        # Only a string is kept: ``str()`` of a deeply nested list raises RecursionError.
+        tool = use.get("name")
         pairs.append(
             {
                 "source": "tool_use",
                 "tool_use_id": use["id"],
-                "tool": str(use.get("name") or ""),
+                "tool": tool if isinstance(tool, str) else "",
                 "command": use.get("input"),
                 "output": _result_text(block.get("content")),
                 "is_error": bool(block.get("is_error")),
@@ -455,15 +487,15 @@ def _result_text(content: Any) -> str:
         content: A string or a list of content blocks.
 
     Returns:
-        The text, with the text blocks joined by newlines.
+        The text, with the text blocks joined by newlines. A block whose
+        text is not a string adds an empty line.
     """
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return ""
-    return "\n".join(
-        str(block.get("text") or "") for block in content if isinstance(block, dict) and block.get("type") == "text"
-    )
+    texts = [block.get("text") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+    return "\n".join(text if isinstance(text, str) else "" for text in texts)
 
 
 def snapshot_session(
@@ -477,11 +509,18 @@ def snapshot_session(
 ) -> Snapshot:
     """Store the workspace and the session folder as one tree, with no copy of the route key.
 
-    Left out: the launch files (``harness_bridge.workspace_files``), which hold
-    the key; a workspace entry named ``SESSIONS_DIR``, whose slot holds the
-    real session folder; the session folder's logs (``_SESSION_LOGS``); files
-    that cannot be read; and files past the size caps and entries past the
-    count cap, which the result names.
+    Left out with no record: the launch files (``harness_bridge.workspace_files``),
+    which hold the key; a workspace entry named ``SESSIONS_DIR``, whose slot
+    holds the real session folder; and the session folder's logs
+    (``_SESSION_LOGS``). Left out and recorded: entries that cannot be read or
+    stored (a failed open, a name that holds the key or is not UTF-8, a pipe
+    or socket, a linked session folder), folders at ``_MAX_DEPTH``, files past
+    the size caps and entries past the count cap.
+
+    The session folder is walked first, so a full workspace cannot use up the
+    caps before it: a resume needs the harness's own state more than any file.
+    When anything was recorded, the ``SESSIONS_DIR`` tree also holds the
+    ``_INCOMPLETE`` marker, and :func:`restore_session` then deletes nothing.
 
     Args:
         trees: The worker's tree store.
@@ -492,12 +531,11 @@ def snapshot_session(
         route_key: The key the harness routes with.
 
     Returns:
-        The root tree id, and the paths the caps left out. A session-folder
+        The root tree id, and the recorded left-out paths. A session-folder
         path starts with ``SESSIONS_DIR/<session id>/``.
     """
     launch_files = {*workspace_files(proposer), SESSIONS_DIR}
     budget = _Budget()
-    entries = _put_root(trees, run_id, workspace, "", launch_files.__contains__, route_key, budget)
 
     def is_log(relative: str) -> bool:
         """Tell whether a session-folder path is a log of this box.
@@ -512,7 +550,11 @@ def snapshot_session(
 
     session_prefix = f"{SESSIONS_DIR}/{session_dir.name}/"
     session = trees.put_tree(run_id, _put_root(trees, run_id, session_dir, session_prefix, is_log, route_key, budget))
-    sessions = trees.put_tree(run_id, [TreeEntry(session_dir.name, "tree", session)])
+    entries = _put_root(trees, run_id, workspace, "", launch_files.__contains__, route_key, budget)
+    session_entries = [TreeEntry(session_dir.name, "tree", session)]
+    if budget.skipped_count:
+        session_entries.append(TreeEntry(_INCOMPLETE, "file", trees.put_blob(run_id, b"")))
+    sessions = trees.put_tree(run_id, session_entries)
     tree_id = trees.put_tree(run_id, [*entries, TreeEntry(SESSIONS_DIR, "tree", sessions)])
     return Snapshot(tree_id, budget.skipped, budget.skipped_count)
 
@@ -526,7 +568,10 @@ def _put_root(
     route_key: str,
     budget: _Budget,
 ) -> list[TreeEntry]:
-    """Store everything below one root folder, which must not be a link.
+    """Store everything below one root folder.
+
+    A missing root is empty. A root that cannot be opened as a folder (a
+    link, a file, no access) is empty too, and recorded as left out.
 
     Args:
         trees: The tree store.
@@ -541,8 +586,15 @@ def _put_root(
     Returns:
         The folder's tree entries.
     """
+    budget.label = ""
+    try:
+        folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        budget.skip(label or ".")
+        return []
     budget.label = label
-    folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         return _put_directory(trees, run_id, folder_fd, "", skip, route_key, 0, budget)
     finally:
@@ -566,6 +618,12 @@ def _put_directory(
     ``O_NONBLOCK`` keeps a pipe from hanging the open. An entry whose open
     fails, or whose opened file is not the one ``lstat`` saw, is left out.
 
+    Every name read counts toward ``_ENTRY_COUNT_LIMIT``, also a filtered one.
+    The first name past the cap is recorded and the rest of the folder is not
+    read, so a folder with a million names costs one. The kept names are
+    walked in sorted order; past the cap, which names are kept follows the
+    folder's read order.
+
     Args:
         trees: The tree store.
         run_id: The job that owns the objects.
@@ -575,21 +633,27 @@ def _put_directory(
         route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
         depth: The folder's depth below the root; its subfolders are left
             out at ``_MAX_DEPTH``.
-        budget: The snapshot's caps; an entry past the count cap is left out.
+        budget: The snapshot's caps, and the record of what is left out.
 
     Returns:
         The folder's tree entries. Sockets, pipes and devices are left out.
     """
+    names = []
+    with os.scandir(folder_fd) as listing:
+        for found in listing:
+            name = found.name
+            if budget.entries >= _ENTRY_COUNT_LIMIT:
+                budget.skip(prefix + name)
+                break
+            budget.entries += 1
+            if skip(prefix + name):
+                continue
+            if (route_key and route_key in name) or not _is_utf8(name):
+                budget.skip(prefix + name)
+                continue
+            names.append(name)
     entries = []
-    for name in sorted(os.listdir(folder_fd)):
-        if skip(prefix + name) or (route_key and route_key in name) or not _is_utf8(name):
-            continue
-        # Past the cap no entry gets an lstat, and no folder is opened, so a
-        # million empty folders cost one name each.
-        if budget.entries >= _ENTRY_COUNT_LIMIT:
-            budget.skip(prefix + name)
-            continue
-        budget.entries += 1
+    for name in sorted(names):
         # A background job can delete a file during the walk, and the agent can
         # make a file unreadable; the tree then holds what can still be read.
         try:
@@ -598,12 +662,16 @@ def _put_directory(
                 # readlink reads the link itself and never follows it.
                 target = _redact_bytes(os.fsencode(os.readlink(name, dir_fd=folder_fd)), route_key)
                 entries.append(TreeEntry(name, "symlink", trees.put_blob(run_id, target)))
-            elif (stat.S_ISDIR(info.st_mode) and depth < _MAX_DEPTH) or stat.S_ISREG(info.st_mode):
+                continue
+            entry = None
+            if (stat.S_ISDIR(info.st_mode) and depth < _MAX_DEPTH) or stat.S_ISREG(info.st_mode):
                 entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key, depth, budget)
-                if entry is not None:
-                    entries.append(entry)
         except OSError:
-            continue
+            entry = None
+        if entry is None:
+            budget.skip(prefix + name)
+        else:
+            entries.append(entry)
     return entries
 
 
@@ -642,7 +710,7 @@ def _put_opened(
 
     A file is read in chunks and only up to ``_FILE_SIZE_LIMIT``, so a sparse
     or growing file cannot fill the memory. A file over that cap, or one that
-    would take the snapshot past ``_TOTAL_SIZE_LIMIT``, is left out and recorded.
+    would take the snapshot past ``_TOTAL_SIZE_LIMIT``, is left out; the caller records it.
 
     Args:
         trees: The tree store.
@@ -686,7 +754,6 @@ def _put_opened(
                 chunks.append(chunk)
                 size += len(chunk)
         if opened.st_size > room or size > room:
-            budget.skip(prefix + name)
             return None
         budget.size += size
         mode = "exec" if opened.st_mode & 0o111 else "file"
@@ -715,6 +782,12 @@ def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path
     names, so a file the agent deleted does not come back. ``home/SESSIONS_DIR``
     keeps its other sessions, and the workspace keeps its own ``SESSIONS_DIR``.
 
+    A tree with the ``_INCOMPLETE`` marker left out paths it could not store
+    (caps, depth, failed reads), and the tree cannot say which are still
+    there. So the restore deletes nothing: it only writes what the tree names.
+    A file the agent deleted can come back, but no file is lost because the
+    snapshot skipped it.
+
     Args:
         trees: The tree store.
         run_id: The job that reads the objects.
@@ -726,18 +799,23 @@ def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path
         ValueError: When an object is missing or an entry name is not a plain name.
     """
     entries = _entries(trees, run_id, tree_id)
+    sessions_trees = [entry for entry in entries if entry.name == SESSIONS_DIR and entry.mode == "tree"]
+    session_entries = _entries(trees, run_id, sessions_trees[0].object_id) if sessions_trees else []
+    prune = not any(entry.name == _INCOMPLETE and entry.mode != "tree" for entry in session_entries)
     workspace.mkdir(parents=True, exist_ok=True)
-    _prune(workspace, {entry.name for entry in entries})
+    if prune:
+        _prune(workspace, {entry.name for entry in entries})
     for entry in entries:
         if entry.name != SESSIONS_DIR:
-            _restore(trees, run_id, entry, workspace / entry.name)
-        elif entry.mode == "tree":
-            sessions = home / SESSIONS_DIR
-            if sessions.is_symlink() or (sessions.exists() and not sessions.is_dir()):
-                sessions.unlink()
-            sessions.mkdir(parents=True, exist_ok=True)
-            for session in _entries(trees, run_id, entry.object_id):
-                _restore(trees, run_id, session, sessions / session.name)
+            _restore(trees, run_id, entry, workspace / entry.name, prune)
+    if sessions_trees:
+        sessions = home / SESSIONS_DIR
+        if sessions.is_symlink() or (sessions.exists() and not sessions.is_dir()):
+            sessions.unlink()
+        sessions.mkdir(parents=True, exist_ok=True)
+        for session in session_entries:
+            if session.mode == "tree":
+                _restore(trees, run_id, session, sessions / session.name, prune)
 
 
 def _prune(folder: Path, keep: set[str]) -> None:
@@ -779,7 +857,7 @@ def _entries(trees: TreeStore, run_id: str, tree_id: str) -> list[TreeEntry]:
     return entries
 
 
-def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path) -> None:
+def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path, prune: bool) -> None:
     """Write one entry at ``target``, replacing what is there without following a link.
 
     Args:
@@ -787,6 +865,7 @@ def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path) -> N
         run_id: The job that reads the objects.
         entry: The tree entry.
         target: Where it goes.
+        prune: Delete what a restored folder holds and its tree does not name.
 
     Raises:
         ValueError: When an object is missing.
@@ -797,9 +876,10 @@ def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path) -> N
             target.unlink()
         target.mkdir(parents=True, exist_ok=True)
         children = _entries(trees, run_id, entry.object_id)
-        _prune(target, {child.name for child in children})
+        if prune:
+            _prune(target, {child.name for child in children})
         for child in children:
-            _restore(trees, run_id, child, target / child.name)
+            _restore(trees, run_id, child, target / child.name, prune)
         return
     data = trees.get_blob(run_id, entry.object_id)
     if data is None:

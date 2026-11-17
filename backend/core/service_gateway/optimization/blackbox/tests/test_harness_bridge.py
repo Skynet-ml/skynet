@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from .. import harness, harness_bridge
+from .. import exec_shim, harness, harness_bridge
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -1804,6 +1804,50 @@ def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp
     assert stdout == b"ok\n"
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     assert record["exit_code"] == 128 + signal.SIGPIPE
+
+
+def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_line_into_a_closed_reader(
+    tmp_path: Path,
+) -> None:
+    """Small writes stay in the shim's stdout buffer after EPIPE; the shim still exits 141 and prints nothing more."""
+    _fake_tool(tmp_path / "bin", "lines", "while true; do echo hi; sleep 0.01; done")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(
+        ["/bin/bash", "-c", 'lines | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"'],
+        env=_shim_env(tmp_path, ["lines"], log),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+    assert (stdout, stderr) == (f"status {128 + signal.SIGPIPE} 0\n".encode(), b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGPIPE
+
+
+def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(tmp_path: Path) -> None:
+    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut."""
+    _fake_tool(tmp_path / "bin", "probe", 'echo "$#"')
+    log = tmp_path / "exec.jsonl"
+    args = [b"\xff" * 60000] * 3
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run([b"probe", *args], env=env, capture_output=True, timeout=10, check=True)
+
+    assert done.stdout == b"3\n"
+    [line] = log.read_bytes().splitlines()
+    assert len(line) < 6 * exec_shim.COMMAND_LIMIT + 1024
+    command = json.loads(line)["command"]
+    assert command.endswith(exec_shim.COMMAND_CUT)
+    head = command[: -len(exec_shim.COMMAND_CUT)].encode("utf-8", "surrogateescape")
+    assert len(head) == exec_shim.COMMAND_LIMIT
+    assert head.startswith(b"probe '\xff")
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:

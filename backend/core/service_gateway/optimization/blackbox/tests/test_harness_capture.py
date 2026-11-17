@@ -11,6 +11,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -143,16 +144,33 @@ def _tree_files(trees: TreeStore, tree_id: str, prefix: str = "") -> dict[str, b
         prefix: Path prefix of this subtree.
 
     Returns:
-        Every file path below the tree and its bytes.
+        Every file path below the tree and its bytes, without the incomplete
+        marker (:func:`_is_incomplete` checks it).
     """
     files: dict[str, bytes] = {}
     for entry in trees.get_tree(RUN, tree_id) or []:
         path = prefix + entry.name
+        if path == f"{SESSIONS_DIR}/{harness_capture._INCOMPLETE}":
+            continue
         if entry.mode == "tree":
             files.update(_tree_files(trees, entry.object_id, path + "/"))
         else:
             files[path] = trees.get_blob(RUN, entry.object_id) or b""
     return files
+
+
+def _is_incomplete(trees: TreeStore, tree_id: str) -> bool:
+    """Tell whether a snapshot tree holds the incomplete marker.
+
+    Args:
+        trees: The tree store.
+        tree_id: The root tree id.
+
+    Returns:
+        Whether the snapshot left out a recorded path.
+    """
+    [sessions] = [entry for entry in trees.get_tree(RUN, tree_id) or [] if entry.name == SESSIONS_DIR]
+    return any(entry.name == harness_capture._INCOMPLETE for entry in trees.get_tree(RUN, sessions.object_id) or [])
 
 
 def test_each_tool_use_and_tool_result_pair_is_one_step_with_command_output_and_tree(step_log, tmp_path) -> None:
@@ -739,7 +757,7 @@ def test_a_route_key_cut_at_the_start_of_an_output_tail_is_not_stored(step_log, 
 
 
 def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> None:
-    """A tree deeper than the recursion limit does not break the snapshot; folders below the limit are left out."""
+    """A tree deeper than the recursion limit does not break the snapshot; the folder at the limit is recorded."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -756,10 +774,13 @@ def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> Non
         os.close(fd)
     trees = TreeStore(step_log)
 
-    files = _tree_files(trees, _snapshot(trees, workspace, session_dir).tree_id)
+    snapshot = _snapshot(trees, workspace, session_dir)
+    files = _tree_files(trees, snapshot.tree_id)
 
     assert max(path.count("/") for path in files) == harness_capture._MAX_DEPTH
     assert "f" in files
+    assert (snapshot.skipped, snapshot.skipped_count) == (["d/" * harness_capture._MAX_DEPTH + "d"], 1)
+    assert _is_incomplete(trees, snapshot.tree_id)
 
 
 def test_a_file_over_the_size_cap_is_left_out_and_named_also_when_sparse(step_log, tmp_path, monkeypatch) -> None:
@@ -795,8 +816,10 @@ def test_a_file_over_the_size_cap_is_left_out_and_named_also_when_sparse(step_lo
     snapshot = _snapshot(trees, workspace, session_dir)
 
     assert set(_tree_files(trees, snapshot.tree_id)) == {"small.txt"}
-    assert snapshot.skipped == ["big.txt", "sparse.bin", f"{SESSIONS_DIR}/s1/notes.md"]
+    # The session folder is walked first.
+    assert snapshot.skipped == [f"{SESSIONS_DIR}/s1/notes.md", "big.txt", "sparse.bin"]
     assert snapshot.skipped_count == 3
+    assert _is_incomplete(trees, snapshot.tree_id)
     # Only small.txt is read: one chunk of the cap plus one byte, then the end of the file.
     assert reads == [11, 1]
 
@@ -850,10 +873,11 @@ def test_files_past_the_total_size_cap_are_left_out_and_smaller_ones_still_fit(s
     assert (snapshot.skipped, snapshot.skipped_count) == (["b.txt"], 1)
 
 
-def test_entries_past_the_count_cap_are_left_out_with_no_lstat_and_all_counted(step_log, tmp_path, monkeypatch) -> None:
-    """Files, links and folders all count; past the cap no entry gets an lstat, and the result counts every one."""
-    monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 3)
-    monkeypatch.setattr(harness_capture, "_SKIPPED_LISTED", 2)
+def test_entries_past_the_count_cap_are_left_out_and_the_rest_of_the_folder_is_not_read(
+    step_log, tmp_path, monkeypatch
+) -> None:
+    """Files, links and folders all count; past the cap a folder stops at one recorded name, with no lstat."""
+    monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 5)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     for index in range(10):
         (workspace / "dirs" / f"d{index}").mkdir(parents=True)
@@ -862,7 +886,32 @@ def test_entries_past_the_count_cap_are_left_out_with_no_lstat_and_all_counted(s
     (workspace / "b.link").symlink_to("a.txt")
     (session_dir / "e.txt").write_text("e")
     looked_at: list[str] = []
-    real_stat = os.stat
+    read: list[str] = []
+    real_stat, real_scandir = os.stat, os.scandir
+
+    @contextlib.contextmanager
+    def counted_scandir(fd: int) -> Iterator[Iterator[os.DirEntry[str]]]:
+        """Record each name the walk reads from a folder.
+
+        Args:
+            fd: The folder descriptor.
+
+        Yields:
+            The folder's entries.
+        """
+
+        def entries() -> Iterator[os.DirEntry[str]]:
+            """Yield the real entries and record each name.
+
+            Yields:
+                Each entry.
+            """
+            for found in listing:
+                read.append(found.name)
+                yield found
+
+        with real_scandir(fd) as listing:
+            yield entries()
 
     def counted_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
         """Record each walk lstat, then run it.
@@ -880,14 +929,22 @@ def test_entries_past_the_count_cap_are_left_out_with_no_lstat_and_all_counted(s
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(harness_capture.os, "stat", counted_stat)
+    monkeypatch.setattr(harness_capture.os, "scandir", counted_scandir)
     trees = TreeStore(step_log)
 
     snapshot = _snapshot(trees, workspace, session_dir)
 
-    assert set(_tree_files(trees, snapshot.tree_id)) == {"a.txt", "b.link"}
-    assert looked_at == ["a.txt", "b.link", "dirs"]
-    assert snapshot.skipped == ["dirs/d0", "dirs/d1"]
-    assert snapshot.skipped_count == 11
+    assert set(_tree_files(trees, snapshot.tree_id)) == {"a.txt", "b.link", f"{SESSIONS_DIR}/session/e.txt"}
+    # The session folder first, then each folder's kept names in sorted order, then one of the ten folders.
+    assert looked_at[:4] == ["e.txt", "a.txt", "b.link", "dirs"]
+    [kept] = looked_at[4:]
+    # ``dirs`` gives one kept name and one past the cap, then is not read further.
+    assert len(read) == 1 + 3 + 2
+    [skipped] = snapshot.skipped
+    assert skipped.startswith("dirs/d")
+    assert skipped != f"dirs/{kept}"
+    assert snapshot.skipped_count == 1
+    assert _is_incomplete(trees, snapshot.tree_id)
 
 
 def test_each_step_names_the_files_the_snapshot_caps_left_out(step_log, tmp_path, monkeypatch) -> None:
@@ -907,7 +964,7 @@ def test_each_step_names_the_files_the_snapshot_caps_left_out(step_log, tmp_path
 
 
 def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log, tmp_path) -> None:
-    """A file or folder the agent made unreadable does not stop the snapshot."""
+    """A file or folder the agent made unreadable does not stop the snapshot, and each one is recorded."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     (workspace / "locked-dir").mkdir(parents=True)
     session_dir.mkdir()
@@ -916,12 +973,143 @@ def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log,
     (workspace / "secret.txt").chmod(0)
     (workspace / "locked-dir").chmod(0)
     try:
-        tree_id = _snapshot(TreeStore(step_log), workspace, session_dir).tree_id
+        snapshot = _snapshot(TreeStore(step_log), workspace, session_dir)
     finally:
         (workspace / "secret.txt").chmod(0o644)
         (workspace / "locked-dir").chmod(0o755)
 
+    assert set(_tree_files(TreeStore(step_log), snapshot.tree_id)) == {"main.py"}
+    assert (snapshot.skipped, snapshot.skipped_count) == (["locked-dir", "secret.txt"], 2)
+
+
+def test_a_full_workspace_does_not_push_the_session_folder_out_of_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
+    """The session folder is walked first, so the caps leave out workspace files, not the harness's own state."""
+    monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 3)
+    monkeypatch.setattr(harness_capture, "_TOTAL_SIZE_LIMIT", 10)
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    workspace.mkdir()
+    session_dir.mkdir(parents=True)
+    for index in range(5):
+        (workspace / f"w{index}.txt").write_bytes(b"w" * 4)
+    (session_dir / "native.json").write_bytes(b"s" * 4)
+    (session_dir / "turns.json").write_bytes(b"t" * 4)
+    trees = TreeStore(step_log)
+
+    snapshot = _snapshot(trees, workspace, session_dir)
+
+    files = _tree_files(trees, snapshot.tree_id)
+    assert {f"{SESSIONS_DIR}/s1/native.json", f"{SESSIONS_DIR}/s1/turns.json"} <= set(files)
+    assert len(files) == 2
+    assert snapshot.skipped_count >= 1
+    assert _is_incomplete(trees, snapshot.tree_id)
+
+
+def test_a_missing_session_folder_is_an_empty_one(step_log, tmp_path) -> None:
+    """A session folder that is not there yet does not make the snapshot, or the steps after it, fail."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("x = 1\n")
+    capture = _capture(step_log, workspace, session_dir)
+
+    [first] = capture.observe(_tool_round("t1", "ls", "main.py"))
+    [second] = capture.observe(_tool_round("t2", "ls", "main.py"))
+
+    tree_id = step_log.get_step(first)["tree_id"]
     assert set(_tree_files(TreeStore(step_log), tree_id)) == {"main.py"}
+    assert not _is_incomplete(TreeStore(step_log), tree_id)
+    assert "snapshot_skipped_count" not in step_log.get_step(second)["body"]
+
+
+def test_a_linked_session_folder_is_recorded_and_not_followed(step_log, tmp_path) -> None:
+    """The agent can swap the session folder for a link to a host folder; the walk records it and reads nothing."""
+    workspace, session_dir, host = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1", tmp_path / "host"
+    workspace.mkdir()
+    host.mkdir()
+    session_dir.parent.mkdir(parents=True)
+    (host / "secret.txt").write_text("host secret")
+    session_dir.symlink_to(host)
+    capture = _capture(step_log, workspace, session_dir)
+
+    [first] = capture.observe(_tool_round("t1", "ls", "a"))
+    [second] = capture.observe(_tool_round("t2", "ls", "a"))
+
+    body = step_log.get_step(first)["body"]
+    assert (body["snapshot_skipped"], body["snapshot_skipped_count"]) == ([f"{SESSIONS_DIR}/s1/"], 1)
+    assert _tree_files(TreeStore(step_log), step_log.get_step(first)["tree_id"]) == {}
+    assert step_log.get_step(second)["body"]["snapshot_skipped_count"] == 1
+
+
+def test_a_restore_of_an_incomplete_snapshot_deletes_no_file_the_snapshot_left_out(
+    step_log, tmp_path, monkeypatch
+) -> None:
+    """A capped snapshot cannot say which left-out files still exist, so its restore writes the tree and deletes nothing."""
+    monkeypatch.setattr(harness_capture, "_FILE_SIZE_LIMIT", 10)
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    (workspace / "src").mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (workspace / "src" / "a.py").write_text("a = 1\n")
+    (workspace / "src" / "big.bin").write_bytes(b"x" * 11)
+    (workspace / "data.bin").write_bytes(b"y" * 11)
+    (session_dir / "state.bin").write_bytes(b"z" * 11)
+    trees = TreeStore(step_log)
+    snapshot = _snapshot(trees, workspace, session_dir)
+    assert snapshot.skipped_count == 3
+
+    # The new box holds the left-out files, for example from the same repository checkout.
+    fresh, home = tmp_path / "fresh", tmp_path / "home2"
+    (fresh / "src").mkdir(parents=True)
+    (fresh / "src" / "big.bin").write_bytes(b"x" * 11)
+    (fresh / "data.bin").write_bytes(b"y" * 11)
+    (home / SESSIONS_DIR / "s1").mkdir(parents=True)
+    (home / SESSIONS_DIR / "s1" / "state.bin").write_bytes(b"z" * 11)
+    restore_session(trees, RUN, snapshot.tree_id, fresh, home)
+
+    assert (fresh / "src" / "a.py").read_text() == "a = 1\n"
+    assert (fresh / "src" / "big.bin").read_bytes() == b"x" * 11
+    assert (fresh / "data.bin").read_bytes() == b"y" * 11
+    assert (home / SESSIONS_DIR / "s1" / "state.bin").read_bytes() == b"z" * 11
+    assert not (home / SESSIONS_DIR / harness_capture._INCOMPLETE).exists()
+
+
+def test_a_tool_name_or_result_text_that_is_not_a_string_commits_as_empty_text(step_log, tmp_path) -> None:
+    """``str()`` of a deeply nested list raises RecursionError; only a string is kept, so ``observe`` goes on."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+    deep: list[Any] = []
+    for _ in range(5000):
+        deep = [deep]
+    request = _tool_round("t1", "ls", "a")
+    request["messages"][1]["content"][1]["name"] = deep
+    request["messages"][2]["content"][0]["content"] = [{"type": "text", "text": deep}, {"type": "text", "text": "ok"}]
+
+    [step] = capture.observe(request)
+
+    body = step_log.get_step(step)["body"]
+    assert (body["tool"], body["output"]) == ("", "\nok")
+    [second] = capture.observe(_tool_round("t2", "ls", "a"))
+    assert step_log.get_step(second)["body"]["tool"] == "bash"
+
+
+def test_a_route_key_cut_at_the_end_of_a_cut_command_line_is_not_stored(step_log, tmp_path) -> None:
+    """The shim keeps the head of a long command line; a key part right before the cut marker is dropped."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    head = "x" * (exec_shim.COMMAND_LIMIT - 3) + KEY[:3]
+    short = "echo" + exec_shim.COMMAND_CUT
+    records = [{"command": head + exec_shim.COMMAND_CUT}, {"command": short}]
+    log.write_text("".join(json.dumps({**r, "exit_code": 0, "stdout": "", "stderr": ""}) + "\n" for r in records))
+
+    first, second = capture.finish()
+
+    command = step_log.get_step(first)["body"]["command"]
+    assert command.endswith("x" * 100 + exec_shim.COMMAND_CUT)
+    assert KEY[:3] + exec_shim.COMMAND_CUT not in command
+    assert step_log.get_step(second)["body"]["command"] == short
 
 
 def _lstat_lies(monkeypatch: pytest.MonkeyPatch, name: str, result: os.stat_result) -> None:
@@ -982,17 +1170,31 @@ def test_a_file_swapped_for_a_link_after_lstat_is_not_read(step_log, tmp_path, m
 
 
 def test_a_name_that_is_not_utf8_is_left_out(step_log, tmp_path, monkeypatch) -> None:
-    """``os.listdir`` gives such a name with surrogate escapes; the tree cannot encode it, so the walk skips it."""
+    """``os.scandir`` gives such a name with surrogate escapes; the tree cannot encode it, so the walk records it."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
     (workspace / "main.py").write_text("x = 1\n")
     bad = "bad\udcff"
     # APFS rejects such names, so the walk sees a fake link entry.
-    real_listdir, real_readlink = os.listdir, os.readlink
-    monkeypatch.setattr(
-        os, "listdir", lambda path: [*real_listdir(path), bad] if isinstance(path, int) else real_listdir(path)
-    )
+    real_scandir, real_readlink = os.scandir, os.readlink
+
+    @contextlib.contextmanager
+    def with_bad_name(fd: int) -> Iterator[list[Any]]:
+        """List a workspace folder with one more, fake entry.
+
+        Args:
+            fd: The folder descriptor.
+
+        Yields:
+            The real entries, plus the fake one in the workspace.
+        """
+        with real_scandir(fd) as listing:
+            found = list(listing)
+        same = (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (workspace.stat().st_dev, workspace.stat().st_ino)
+        yield [*found, SimpleNamespace(name=bad)] if same else found
+
+    monkeypatch.setattr(os, "scandir", with_bad_name)
     monkeypatch.setattr(
         os, "readlink", lambda path, *, dir_fd=None: "t" if path == bad else real_readlink(path, dir_fd=dir_fd)
     )
@@ -1000,9 +1202,10 @@ def test_a_name_that_is_not_utf8_is_left_out(step_log, tmp_path, monkeypatch) ->
     link_info[0] = stat.S_IFLNK | 0o777
     _lstat_lies(monkeypatch, bad, os.stat_result(link_info))
 
-    tree_id = _snapshot(TreeStore(step_log), workspace, session_dir).tree_id
+    snapshot = _snapshot(TreeStore(step_log), workspace, session_dir)
 
-    assert set(_tree_files(TreeStore(step_log), tree_id)) == {"main.py"}
+    assert set(_tree_files(TreeStore(step_log), snapshot.tree_id)) == {"main.py"}
+    assert (snapshot.skipped, snapshot.skipped_count) == ([bad], 1)
 
 
 def test_a_pipe_that_looks_like_a_file_does_not_hang_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
