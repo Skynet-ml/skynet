@@ -44,6 +44,7 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
+from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -55,6 +56,7 @@ from .repo_tree import (
     strip_archive,
 )
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .tree_sandbox import RuntimeBoxSource
 
 logger = logging.getLogger(__name__)
 
@@ -1022,12 +1024,16 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(self, spec: SandboxSpec, state: _State | None) -> SandboxSession:
-        """Open one box from a saved state.
+    def _open_box(
+        self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]
+    ) -> SandboxSession:
+        """Open one box from a saved state through the tree-sandbox box source (SKY-718).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
+            role: ``candidate`` or ``metric``.
+            grants: The role's network grants; empty keeps the box offline.
 
         Returns:
             The open box, with a tar state unpacked.
@@ -1035,14 +1041,16 @@ class RepoWorkspace:
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
             _SnapshotLostError: When the box cannot open from its snapshot.
+            GrantError: When a role host is not a valid grant host.
         """
         if state is not None and state.snapshot_id is not None:
             spec = replace(spec, snapshot_id=state.snapshot_id)
         elif state is not None and state.archive is not None:
             spec = replace(spec, snapshot_archive=str(state.archive))
         try:
-            session = self._runtime.open(spec)
-        except _BUDGET_ERRORS:
+            session = RuntimeBoxSource(self._runtime, spec).acquire(role, grants)
+        except (*_BUDGET_ERRORS, GrantError):
+            # A refused grant list is the run's settings, not a lost snapshot.
             raise
         except Exception as error:
             if spec.snapshot_id is None:
@@ -1071,12 +1079,11 @@ class RepoWorkspace:
             raise
         return session
 
-    def _box_spec(self, kind: str, hosts: tuple[str, ...], vcpus: int | None, *, services: bool) -> SandboxSpec:
-        """Return the spec of one evaluation box.
+    def _box_spec(self, kind: str, vcpus: int | None, *, services: bool) -> SandboxSpec:
+        """Return the spec of one evaluation box; the box source sets its network from the grants.
 
         Args:
             kind: ``candidate`` or ``metric``.
-            hosts: The role's ``network`` hosts; empty keeps the box offline.
             vcpus: The role's ``vcpus``; ``None`` keeps the setup's.
             services: Whether the box runs the compose services.
 
@@ -1088,8 +1095,6 @@ class RepoWorkspace:
         return replace(
             self._spec,
             operation_key=key,
-            network_disabled=not hosts,
-            allowed_hosts=hosts,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),
             private=kind == "metric",
@@ -1150,9 +1155,9 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
         self.prepare()
-        spec = self._box_spec("candidate", self._run_hosts, self._run_vcpus, services=True)
+        spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        session = self._open_box(spec, state)
+        session = self._open_box(spec, state, "candidate", tuple(Grant(host) for host in self._run_hosts))
         try:
             if self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
@@ -1203,9 +1208,10 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the packages.
         """
         self.prepare()
-        spec = self._box_spec("metric", self._metric_hosts, self._metric_vcpus, services=False)
+        spec = self._box_spec("metric", self._metric_vcpus, services=False)
         state = self._metric_state
-        session = self._open_box(spec, state)
+        grants = tuple(Grant(host) for host in self._metric_hosts) or METRIC_BOX_GRANTS
+        session = self._open_box(spec, state, "metric", grants)
         try:
             if state is not None:
                 ready = session.run(f"test -f {_METRIC_READY}", timeout_seconds=60)

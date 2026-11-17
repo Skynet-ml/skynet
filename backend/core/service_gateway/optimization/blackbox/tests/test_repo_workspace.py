@@ -28,6 +28,7 @@ import pytest
 from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
 
@@ -50,6 +51,7 @@ from ..repo_workspace import (
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import ParentSandboxSession
 from ..sandbox_runtime import AsyncBridgeSession
+from ..tree_sandbox import RuntimeBoxSource
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -1506,6 +1508,41 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert not candidate.spec.private
     assert metric.spec.private
     assert candidate.spec.operation_key != metric.spec.operation_key
+
+
+def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each evaluation box opens through the tree-sandbox box source, with the role's hosts as grants (SKY-718)."""
+    calls: list[tuple[str, tuple[Grant, ...]]] = []
+    acquire = RuntimeBoxSource.acquire
+
+    def recorded(self: RuntimeBoxSource, agent_id: str, grants: Any) -> Any:
+        """Record the role and grants, then open the box.
+
+        Args:
+            self: The box source.
+            agent_id: The box role.
+            grants: The role's grants.
+
+        Returns:
+            The open box.
+        """
+        calls.append((agent_id, tuple(grants)))
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(RuntimeBoxSource, "acquire", recorded)
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=["api.example.com"], metric_hosts=["judge.example.com"])
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert calls == [("candidate", (Grant("api.example.com"),)), ("metric", (Grant("judge.example.com"),))]
+    _, candidate, metric = runtime.boxes
+    assert (candidate.spec.network_disabled, candidate.spec.allowed_hosts) == (False, ("api.example.com",))
+    assert (metric.spec.network_disabled, metric.spec.allowed_hosts) == (False, ("judge.example.com",))
 
 
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
