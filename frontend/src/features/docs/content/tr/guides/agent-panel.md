@@ -109,7 +109,7 @@ Yeni sohbetler için varsayılan bir model belirlemek üzere **Ayarlar** > **Ara
 
 ### Maliyet
 
-Skynet kredileriyle yapılan ajan sohbetleri bakiyenizi kullanır. Etkin çalıştırmalar bakiyenizin bir kısmını ayırabilir. Kullanılabilir bakiyeniz çok düşükse panel "Kullanılabilir bakiyeniz çok düşük. Etkin çalıştırmalar bakiyenizin bir kısmını ayırabilir." mesajını gösterir. Fiyatlar için [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
+Skynet kredileriyle yapılan ajan sohbetleri bakiyenizi kullanır. Kullanılabilir bakiyeniz çok düşükse panel "Kullanılabilir bakiyeniz çok düşük. Etkin çalıştırmalar bakiyenizin bir kısmını ayırabilir." mesajını gösterir. Faturalandırma ayarlarını açmak için cüzdan düğmesini (**Bakiye ekle**) seçin. Fiyatlar için [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
 
 ## İpuçları
 

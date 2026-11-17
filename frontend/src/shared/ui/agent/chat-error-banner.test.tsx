@@ -14,7 +14,7 @@ const { ChatErrorBanner } = await import("./chat-error-banner");
 const { RetryIconButton } = await import("@/shared/ui/retry-icon-button");
 const { Wallet } = await import("@/shared/ui/icons");
 
-const BALANCE = "Your balance is empty. Add funds to keep chatting with the agent.";
+const BALANCE = "Your available balance is too low. Active runs can hold part of your balance.";
 const ADD_FUNDS = "Add funds";
 
 function messageTag(html: string): string {

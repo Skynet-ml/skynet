@@ -109,7 +109,7 @@ Para definir um modelo padrão para novas conversas, abra **Definições** > **P
 
 ### Custo
 
-As conversas com o agente em créditos Skynet usam o seu saldo. As execuções ativas podem reservar parte do seu saldo. Se o seu saldo disponível for demasiado baixo, o painel mostra "O seu saldo disponível é demasiado baixo. As execuções ativas podem reservar parte do seu saldo." Para os preços, leia [Orçamentos e cobrança](/docs/concepts/billing).
+As conversas com o agente em créditos Skynet usam o seu saldo. Se o seu saldo disponível for demasiado baixo, o painel mostra "O seu saldo disponível é demasiado baixo. As execuções ativas podem reservar parte do seu saldo." Selecione o botão da carteira (**Adicionar fundos**) para abrir as definições de cobrança. Para os preços, leia [Orçamentos e cobrança](/docs/concepts/billing).
 
 ## Dicas
 
