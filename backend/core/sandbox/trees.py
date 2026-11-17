@@ -23,6 +23,11 @@ BoxT = TypeVar("BoxT")
 _DIR_MODE = 0o755
 _FILE_MODE = 0o644
 _EXEC_MODE = 0o755
+# A box's archive is untrusted input, so these limits keep one box from
+# filling the worker's memory with a large file or a gzip bomb.
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_TREE_BYTES = 1024 * 1024 * 1024
+MAX_TREE_MEMBERS = 100_000
 
 
 class BoxSource(Protocol[BoxT]):
@@ -78,6 +83,14 @@ class BoxFailureError(TreeSandboxError):
 
 class MetricFailedError(TreeSandboxError):
     """Signal a metric command that ran but gave no score."""
+
+
+class TreeRejectedError(TreeSandboxError):
+    """Signal a tree that the layer refuses; a retry gives the same tree, so do not retry."""
+
+
+class BadArchiveError(ValueError):
+    """Signal an archive that is not a valid tree or is over a size limit."""
 
 
 def tree_to_tar(store: TreeStore, run_id: str, tree_id: str) -> bytes:
@@ -146,37 +159,90 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
         The tree id of the archive's top level.
 
     Raises:
-        ValueError: When a member path leaves the top level, or a name is
-            both a file and a folder.
+        BadArchiveError: When the archive is over a size limit, does not
+            read, a member path leaves the top level, a name is both a file
+            and a folder, or a hard link names no earlier file.
     """
+    if len(data) > MAX_ARCHIVE_BYTES:
+        raise BadArchiveError(f"The archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
     root: dict[str, object] = {}
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
-        for member in archive:
-            parts = [part for part in member.name.split("/") if part not in {"", "."}]
-            if ".." in parts:
-                raise ValueError(f"Archive member {member.name!r} leaves the tree.")
-            if not parts:
-                continue
-            folder = root
-            for part in parts[:-1]:
-                folder = folder.setdefault(part, {})  # type: ignore[assignment]
-                # A ValueError, not a TypeError: the archive is bad, not the caller's argument.
-                if not isinstance(folder, dict):
-                    raise ValueError(f"Archive member {member.name!r} is under a file.")  # noqa: TRY004
-            name = parts[-1]
-            if member.isdir():
-                if not isinstance(folder.setdefault(name, {}), dict):
-                    raise ValueError(f"Archive member {member.name!r} is a file and a folder.")
-            elif member.issym():
-                folder[name] = ("symlink", store.put_blob(run_id, member.linkname.encode("utf-8")))
-            elif member.isreg() or member.islnk():
-                handle = archive.extractfile(member)
-                content = handle.read() if handle is not None else b""
-                mode = "exec" if member.mode & 0o111 else "file"
-                folder[name] = (mode, store.put_blob(run_id, content))
-            # The tree format has no device, pipe or socket entry, so a box's
-            # special files do not survive a step.
+    members = total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+            for member in archive:
+                members += 1
+                if members > MAX_TREE_MEMBERS:
+                    raise BadArchiveError(f"The archive has more than {MAX_TREE_MEMBERS} members.")
+                parts = _parts(member.name)
+                if not parts:
+                    continue
+                folder = root
+                for part in parts[:-1]:
+                    folder = folder.setdefault(part, {})  # type: ignore[assignment]
+                    if not isinstance(folder, dict):
+                        raise BadArchiveError(f"Archive member {member.name!r} is under a file.")
+                name = parts[-1]
+                if member.isdir():
+                    if not isinstance(folder.setdefault(name, {}), dict):
+                        raise BadArchiveError(f"Archive member {member.name!r} is a file and a folder.")
+                elif member.issym():
+                    folder[name] = ("symlink", store.put_blob(run_id, member.linkname.encode("utf-8")))
+                elif member.islnk():
+                    # The target's stored entry, so a missing target is a bad archive, not a KeyError.
+                    folder[name] = _stored_file(root, member)
+                elif member.isreg():
+                    # The header size is what the read returns, so the check comes before the read.
+                    total += member.size
+                    if total > MAX_TREE_BYTES:
+                        raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
+                    handle = archive.extractfile(member)
+                    content = handle.read() if handle is not None else b""
+                    mode = "exec" if member.mode & 0o111 else "file"
+                    folder[name] = (mode, store.put_blob(run_id, content))
+                # The tree format has no device, pipe or socket entry, so a box's
+                # special files do not survive a step.
+    except (tarfile.TarError, EOFError, OSError) as error:
+        raise BadArchiveError(f"The archive does not read ({type(error).__name__}).") from error
     return _put_folder(store, run_id, root)
+
+
+def _parts(name: str) -> list[str]:
+    """Split an archive path into its names; a leading ``/`` is dropped.
+
+    Args:
+        name: The member path.
+
+    Returns:
+        The names, without empty and ``.`` parts.
+
+    Raises:
+        BadArchiveError: When the path holds ``..``.
+    """
+    parts = [part for part in name.split("/") if part not in {"", "."}]
+    if ".." in parts:
+        raise BadArchiveError(f"Archive member {name!r} leaves the tree.")
+    return parts
+
+
+def _stored_file(root: dict[str, object], member: tarfile.TarInfo) -> tuple[str, str]:
+    """Return the stored entry that a hard link names.
+
+    Args:
+        root: The folders stored so far.
+        member: The hard-link member.
+
+    Returns:
+        The target's ``(mode, blob id)`` pair.
+
+    Raises:
+        BadArchiveError: When no earlier file has the target path.
+    """
+    value: object = root
+    for part in _parts(member.linkname):
+        value = value.get(part) if isinstance(value, dict) else None
+    if not isinstance(value, tuple) or value[0] == "symlink":
+        raise BadArchiveError(f"Hard link {member.name!r} names no earlier file.")
+    return value
 
 
 def _put_folder(store: TreeStore, run_id: str, folder: dict[str, object]) -> str:

@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import io
 import tarfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from core.sandbox.grants import Grant
+from core.sandbox import trees as tree_helpers
 from core.sandbox.trees import (
+    BadArchiveError,
     BoxFailureError,
-    BoxSource,
     FenceLostError,
     GrantDeniedError,
     TreeSandboxError,
@@ -144,40 +144,116 @@ def test_each_typed_error_names_its_step(error_type: type[TreeSandboxError]) -> 
     assert "job-ada:agent-1:3" in str(error)
 
 
-class _ListSource:
-    """Give boxes from a list and record each release."""
+def _archive(*members: tuple[tarfile.TarInfo, bytes]) -> bytes:
+    """Build a gzip archive from raw members.
 
-    def __init__(self) -> None:
-        """Start with no releases."""
-        self.released: list[tuple[str, bool]] = []
+    Args:
+        *members: Each member header and its file content.
 
-    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> str:
-        """Return a box name for the agent.
-
-        Args:
-            agent_id: The agent that runs the step.
-            grants: The step's grants.
-
-        Returns:
-            The box name.
-        """
-        return f"{agent_id}:{len(grants)}"
-
-    def release(self, box: str, healthy: bool) -> None:
-        """Record the release.
-
-        Args:
-            box: The box name.
-            healthy: Whether the box is still good.
-        """
-        self.released.append((box, healthy))
+    Returns:
+        The archive bytes.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for info, content in members:
+            if info.isreg():
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+            else:
+                archive.addfile(info)
+    return buffer.getvalue()
 
 
-def test_a_small_class_with_acquire_and_release_is_a_box_source() -> None:
-    """The protocol needs only ``acquire(agent_id, grants)`` and ``release(box, healthy)``."""
-    source: BoxSource[str] = _ListSource()
+def _info(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> tarfile.TarInfo:
+    """Return one member header.
 
-    box = source.acquire("agent-1", [Grant("api.example.com")])
-    source.release(box, healthy=False)
+    Args:
+        name: The member path.
+        kind: The tar member type.
+        linkname: The link target, for links.
 
-    assert source.released == [("agent-1:1", False)]  # type: ignore[attr-defined]
+    Returns:
+        The header.
+    """
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = kind, linkname
+    return info
+
+
+def test_an_absolute_member_name_lands_inside_the_tree(trees: TreeStore) -> None:
+    """A leading ``/`` is dropped, so the member is a normal tree path."""
+    tree_id = tar_to_tree(trees, RUN, _archive((_info("/etc/passwd"), b"x\n")))
+
+    assert _members(tree_to_tar(trees, RUN, tree_id)) == {"etc": ("dir", ""), "etc/passwd": ("file", b"x\n")}
+
+
+def test_a_member_under_a_file_is_a_bad_archive(trees: TreeStore) -> None:
+    """A path cannot pass through a name that is already a file."""
+    data = _archive((_info("a"), b"file\n"), (_info("a/b"), b"inner\n"))
+
+    with pytest.raises(BadArchiveError, match="under a file"):
+        tar_to_tree(trees, RUN, data)
+
+
+def test_a_hard_link_stores_the_target_file_again(trees: TreeStore) -> None:
+    """A hard link becomes a second entry with the target's mode and blob."""
+    data = _archive((_info("a.txt"), b"same\n"), (_info("b.txt", tarfile.LNKTYPE, "a.txt"), b""))
+
+    tree_id = tar_to_tree(trees, RUN, data)
+
+    assert _members(tree_to_tar(trees, RUN, tree_id)) == {
+        "a.txt": ("file", b"same\n"),
+        "b.txt": ("file", b"same\n"),
+    }
+
+
+@pytest.mark.parametrize("target", ["missing.txt", "folder", "link"])
+def test_a_hard_link_to_no_earlier_file_is_a_bad_archive(trees: TreeStore, target: str) -> None:
+    """A hard link to a missing path, a folder or a symlink is refused, not a crash.
+
+    Args:
+        trees: The tree store.
+        target: The hard-link target.
+    """
+    data = _archive(
+        (_info("folder", tarfile.DIRTYPE), b""),
+        (_info("link", tarfile.SYMTYPE, "folder"), b""),
+        (_info("b.txt", tarfile.LNKTYPE, target), b""),
+    )
+
+    with pytest.raises(BadArchiveError, match="names no earlier file"):
+        tar_to_tree(trees, RUN, data)
+
+
+def test_an_archive_over_the_size_limit_is_refused_before_it_opens(
+    trees: TreeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The compressed size is checked first."""
+    monkeypatch.setattr(tree_helpers, "MAX_ARCHIVE_BYTES", 10)
+
+    with pytest.raises(BadArchiveError, match="larger than"):
+        tar_to_tree(trees, RUN, _archive((_info("a.txt"), b"a\n")))
+
+
+def test_an_archive_with_too_many_members_is_refused(trees: TreeStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The member count is capped."""
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_MEMBERS", 2)
+    data = _archive(*[(_info(f"{index}.txt"), b"") for index in range(3)])
+
+    with pytest.raises(BadArchiveError, match="more than 2 members"):
+        tar_to_tree(trees, RUN, data)
+
+
+def test_an_archive_that_unpacks_too_large_is_refused(trees: TreeStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small gzip that unpacks to many bytes stops at the header sizes."""
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_BYTES", 1000)
+    data = _archive((_info("a.bin"), b"\0" * 600), (_info("b.bin"), b"\0" * 600))
+
+    with pytest.raises(BadArchiveError, match="unpacks to more than"):
+        tar_to_tree(trees, RUN, data)
+
+
+def test_data_that_is_not_an_archive_is_a_bad_archive(trees: TreeStore) -> None:
+    """A read error is a bad archive, not a raw tar error."""
+    with pytest.raises(BadArchiveError, match="does not read"):
+        tar_to_tree(trees, RUN, b"not a tar archive")

@@ -575,7 +575,7 @@ def test_a_temporary_answer_file_write_error_goes_up_raw(status: int) -> None:
 def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_reports_a_lasting_one() -> None:
     """With no protected files, a 429 on the answer write goes up raw; a 404 still gives an unchecked answer."""
     session = _RefusingSession(_write_error(429))
-    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace")  # type: ignore[arg-type]
+    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace", None)  # type: ignore[arg-type]
     with pytest.raises(SandboxFilesystemWriteError) as raised:
         box.answer("calls/000001/stages/a.json", "{}")
     assert raised.value is session.error
@@ -1545,6 +1545,52 @@ def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
     assert (metric.spec.network_disabled, metric.spec.allowed_hosts) == (False, ("judge.example.com",))
 
 
+def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing an evaluation box releases it through the box source, with its health (SKY-718)."""
+    released: list[bool] = []
+    release = RuntimeBoxSource.release
+
+    def recorded(self: RuntimeBoxSource, box: Any, healthy: bool) -> None:
+        """Record the health, then release the box.
+
+        Args:
+            self: The box source.
+            box: The box.
+            healthy: Whether the box is still good.
+        """
+        released.append(healthy)
+        release(self, box, healthy)
+
+    monkeypatch.setattr(RuntimeBoxSource, "release", recorded)
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        _open(space, "").close()
+        space.open_metric().close(healthy=False)
+    finally:
+        space.close()
+    assert released == [True, False]
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_role_host_that_is_not_a_grant_host_stops_setup_before_any_box(tmp_path: Path, role: str) -> None:
+    """A host with a port fails the grant rules, so prepare refuses it before it opens a box (SKY-718).
+
+    Args:
+        tmp_path: Scratch folder.
+        role: The role whose hosts hold the bad host.
+    """
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime, **{f"{role}_hosts": ["api.example.com:8443"]})
+    try:
+        with pytest.raises(RepoSetupError, match=rf"The \[{role}\] network hosts are not valid"):
+            space.prepare()
+    finally:
+        space.close()
+    assert runtime.boxes == []
+
+
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
     tmp_path: Path,
 ) -> None:
@@ -1723,7 +1769,7 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
-        box = CandidateBox(space, session, "/workspace")
+        box = CandidateBox(space, session, "/workspace", None)  # type: ignore[arg-type]
         assert box.stamp_before_run() is None
         assert box.answer(f"{call}/stages/x.json", '{"output": 1}') == ()
         assert session.read_file(f"{call}/stages/x.json") == '{"output": 1}'

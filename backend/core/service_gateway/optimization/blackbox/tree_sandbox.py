@@ -4,15 +4,18 @@
 tree and stores the box's tree after the command. :meth:`TreeSandbox.score`
 runs the metric in a separate box that gets only the outputs tree and the
 metric tree, so no candidate code reaches it. Each call commits one step to
-the step log. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
+the step log and returns only once that step is durable behind the run's
+fence. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
 it opens a new box for each acquire and closes it at release.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import shlex
+import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -23,11 +26,14 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
 from ....sandbox.trees import (
+    MAX_ARCHIVE_BYTES,
+    BadArchiveError,
     BoxFailureError,
     BoxSource,
     FenceLostError,
     GrantDeniedError,
     MetricFailedError,
+    TreeRejectedError,
     tar_to_tree,
     tree_to_tar,
 )
@@ -46,6 +52,10 @@ METRIC_DIR = "metric"
 _IN_DIR = ".tree-in"
 _OUT_FILE = ".tree-out.b64"
 _MOVE_TIMEOUT_SECONDS = 600
+# Base64 text is 4/3 of the archive, plus line breaks on Linux.
+_MAX_OUT_FILE_BYTES = 2 * MAX_ARCHIVE_BYTES
+# The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
+_TOO_LARGE_EXIT = 97
 
 _Result = TypeVar("_Result")
 
@@ -89,9 +99,14 @@ class RuntimeBoxSource:
         Args:
             box: A box that :meth:`acquire` gave.
             healthy: Not used: a closed box is never reused.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the close's settlement.
         """
         try:
             box.close()
+        except _BUDGET_ERRORS:
+            raise
         except Exception as error:
             # Only the type: the provider's text can name the box.
             logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
@@ -158,6 +173,8 @@ class TreeSandbox:
         Raises:
             GrantDeniedError: When the grants do not resolve.
             BoxFailureError: When the box fails or dies; retry the step.
+            TreeRejectedError: When the box's tree is over a size limit or
+                not a valid tree; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see the tree.
         """
@@ -215,11 +232,18 @@ class TreeSandbox:
             GrantDeniedError: When the grants do not resolve.
             BoxFailureError: When the box fails or dies; retry the step.
             MetricFailedError: When the metric fails or prints no number.
+            TreeRejectedError: When the outputs tree holds a link; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see a tree.
         """
         grant_list_id = self._grant_list_id(step, grants)
         outputs = tree_to_tar(self._trees, step.run_id, outputs_tree_id)
+        # A candidate link such as ``answer.txt -> ../metric/expected.txt`` or ``/proc/self/environ``
+        # would let the metric read its own hidden files as the candidate's output. A link that stays
+        # in ``outputs/`` can still leave it through another link to a folder, so no link enters.
+        with tarfile.open(fileobj=io.BytesIO(outputs), mode="r:gz") as archive:
+            if any(member.issym() or member.islnk() for member in archive):
+                raise TreeRejectedError(step.step_id, "The outputs tree holds a link.")
         metric = tree_to_tar(self._trees, step.run_id, metric_tree_id)
 
         def work(box: SandboxSession) -> CommandResult:
@@ -285,6 +309,7 @@ class TreeSandbox:
         Raises:
             GrantDeniedError: When the source refuses the grants.
             BoxFailureError: When the box does not open, fails or dies.
+            TreeRejectedError: When the box's tree is over a size limit or not a valid tree.
         """
         try:
             box = source.acquire(step.agent_id, grants)
@@ -294,15 +319,25 @@ class TreeSandbox:
             raise GrantDeniedError(step.step_id, str(error)) from error
         except Exception as error:
             raise BoxFailureError(step.step_id, f"The box did not open ({type(error).__name__}).") from error
+        healthy = False
         try:
             outcome = work(box)
+            healthy = True
         except _BUDGET_ERRORS:
-            source.release(box, healthy=False)
             raise
+        except BadArchiveError as error:
+            raise TreeRejectedError(step.step_id, str(error)) from error
         except Exception as error:
-            source.release(box, healthy=False)
             raise BoxFailureError(step.step_id, f"The box failed ({type(error).__name__}).") from error
-        source.release(box, healthy=True)
+        finally:
+            # Also on a BaseException such as a cancel, so the box always goes back.
+            try:
+                source.release(box, healthy)
+            except Exception as error:
+                if healthy:
+                    raise
+                # The step's own error is the one the caller acts on.
+                logger.warning("A failed tree sandbox box did not go back (%s)", type(error).__name__)
         return outcome
 
     def _unpack(self, box: SandboxSession, archive: bytes, folder: str) -> None:
@@ -344,19 +379,30 @@ class TreeSandbox:
 
         Raises:
             RuntimeError: When the folder cannot be read back.
+            BadArchiveError: When the folder is over a size limit or not a valid tree.
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf - -C {folder} . | base64 > {_OUT_FILE}",
+            # The size check runs in the box, so the worker never reads an oversized file.
+            f"set -e; COPYFILE_DISABLE=1 tar -czf - -C {folder} . | base64 > {_OUT_FILE};"
+            f' [ "$(wc -c < {_OUT_FILE})" -le {_MAX_OUT_FILE_BYTES} ] || exit {_TOO_LARGE_EXIT}',
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
+        if result.exit_code == _TOO_LARGE_EXIT:
+            raise BadArchiveError(f"The tree archive is larger than {_MAX_OUT_FILE_BYTES} base64 bytes.")
         text = box.read_file(_OUT_FILE) if result.ok else None
         if text is None:
             raise RuntimeError(f"The tree could not be read back (exit code {result.exit_code}).")
+        # The candidate controls the box, so the file can grow after the check.
+        if len(text) > _MAX_OUT_FILE_BYTES:
+            raise BadArchiveError(f"The tree archive is larger than {_MAX_OUT_FILE_BYTES} base64 bytes.")
         return tar_to_tree(self._trees, run_id, base64.b64decode(text))
 
-    def _commit(self, step: StepRef, grant_list_id: str, body: dict[str, Any], tree_id: str) -> str:
-        """Commit one command step.
+    def _commit(self, step: StepRef, grant_list_id: str, body: dict[str, Any], tree_id: str) -> None:
+        """Commit one command step and wait until it is durable behind the fence.
+
+        The wait means a worker whose generation is stale never gets a
+        normal result back: the fence verdict of this very step comes first.
 
         Args:
             step: The step.
@@ -364,14 +410,11 @@ class TreeSandbox:
             body: The step body.
             tree_id: The tree the step names.
 
-        Returns:
-            The step id.
-
         Raises:
-            FenceLostError: When an earlier step of the agent failed the fence.
+            FenceLostError: When this step or an earlier step of the agent failed the fence.
         """
         try:
-            return self._step_log.commit(
+            step_id = self._step_log.commit(
                 run_id=step.run_id,
                 agent_id=step.agent_id,
                 seq=step.seq,
@@ -381,5 +424,6 @@ class TreeSandbox:
                 body=body,
                 tree_id=tree_id,
             )
+            self._step_log.durable(step_id, step.execution_generation)
         except StepFenceError as error:
             raise FenceLostError(step.step_id, f"The run generation changed at step {error.step_id}.") from error
