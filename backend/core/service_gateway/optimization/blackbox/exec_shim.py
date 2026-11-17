@@ -3,11 +3,12 @@
 Some harnesses run commands that no ``tool_use`` names: a command parsed from
 the model's text, or a scripted step. The bridge puts one wrapper for each
 listed command name first on ``PATH``; the wrapper runs this file, which runs
-the real command, passes its output through, and appends one JSON line with
-the command line, exit code and output to the session's exec log. The parent
-commits each line as a step (``harness_capture``).
+the real command, passes its output through as it comes, and appends one JSON
+line with the command line, exit code and output to the session's exec log.
+The parent commits each line as a step (``harness_capture``).
 
-Stdlib only: this file ships into the sandbox next to the bridge.
+Stdlib only, so it can run in the sandbox next to the bridge. The sandbox file
+maps do not ship it yet.
 """
 
 from __future__ import annotations
@@ -16,8 +17,11 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+from typing import BinaryIO
 
 LOG_ENV = "APP_EXEC_LOG"
 SHIM_DIR_ENV = "APP_EXEC_SHIM_DIR"
@@ -43,6 +47,63 @@ def _real_command(name: str) -> str | None:
         part for part in os.environ.get("PATH", "").split(os.pathsep) if part and os.path.realpath(part) != shim_dir
     )
     return shutil.which(name, path=path)
+
+
+def _pump(source: BinaryIO, sink: BinaryIO, tail: bytearray) -> None:
+    """Copy each chunk of one child stream to the shim's stream at once, keeping its tail.
+
+    Args:
+        source: The child's pipe.
+        sink: The shim's own stdout or stderr.
+        tail: Holds the last ``OUTPUT_LIMIT`` bytes of the stream.
+    """
+    forward = True
+    while chunk := source.read1(OUTPUT_LIMIT):
+        tail += chunk
+        del tail[:-OUTPUT_LIMIT]
+        if forward:
+            try:
+                sink.write(chunk)
+                sink.flush()
+            # A reader that closed early (``cmd | head``) must not stop the drain, or the child blocks.
+            except OSError:
+                forward = False
+
+
+def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
+    """Run the real command, stream its output through and forward SIGTERM and SIGINT to it.
+
+    Args:
+        real: The command's path.
+        name: The command name, its ``argv[0]``.
+        args: Its arguments.
+
+    Returns:
+        The stdout tail, the stderr tail and the exit code (128 plus the signal number when a signal ended it).
+    """
+    process = subprocess.Popen(
+        [name, *args],
+        executable=real,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, ACTIVE_ENV: "1"},
+    )
+    for number in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(number, lambda signum, _frame: process.send_signal(signum))
+    tails = (bytearray(), bytearray())
+    pumps = [
+        threading.Thread(target=_pump, args=(stream, sink, tail), daemon=True)
+        for stream, sink, tail in (
+            (process.stdout, sys.stdout.buffer, tails[0]),
+            (process.stderr, sys.stderr.buffer, tails[1]),
+        )
+    ]
+    for pump in pumps:
+        pump.start()
+    code = process.wait()
+    for pump in pumps:
+        pump.join()
+    return bytes(tails[0]), bytes(tails[1]), code if code >= 0 else 128 - code
 
 
 def _tail(data: bytes) -> str:
@@ -93,16 +154,10 @@ def main(argv: list[str]) -> int:
         os.execv(real, [name, *args])
     if real is None:
         stdout, stderr, code = b"", f"{name}: command not found\n".encode(), _NOT_FOUND
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
     else:
-        done = subprocess.run(
-            [name, *args], executable=real, capture_output=True, check=False, env={**os.environ, ACTIVE_ENV: "1"}
-        )
-        stdout, stderr = done.stdout, done.stderr
-        code = done.returncode if done.returncode >= 0 else 128 - done.returncode
-    sys.stdout.buffer.write(stdout)
-    sys.stdout.buffer.flush()
-    sys.stderr.buffer.write(stderr)
-    sys.stderr.buffer.flush()
+        stdout, stderr, code = _run(real, name, args)
     _append(
         log, {"command": shlex.join([name, *args]), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
     )

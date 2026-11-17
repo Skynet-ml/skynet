@@ -1618,3 +1618,83 @@ def test_run_session_without_exec_commands_installs_no_exec_shim(tmp_path: Path)
     assert session_line == str(session)
     assert str(session / harness_bridge.EXEC_SHIM_DIR) not in path_line
     assert not (session / harness_bridge.EXEC_LOG).exists()
+
+
+def _shim_env(tmp_path: Path, names: list[str], log: Path | None) -> dict[str, str]:
+    """Install exec shim wrappers and return the environment that runs them.
+
+    Args:
+        tmp_path: Pytest's temporary folder; ``bin`` holds the real commands.
+        names: The command names to wrap.
+        log: The exec log, or ``None`` for a launch with no log.
+
+    Returns:
+        The process environment.
+    """
+    shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", names, sys.executable)
+    env = {key: value for key, value in os.environ.items() if key != "APP_EXEC_LOG"}
+    env.update({"PATH": f"{shim_dir}{os.pathsep}{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"})
+    env["APP_EXEC_SHIM_DIR"] = str(shim_dir)
+    if log is not None:
+        env["APP_EXEC_LOG"] = str(log)
+    return env
+
+
+def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:
+    """The caller gets the full output; the log keeps its tail."""
+    _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["big"], env=_shim_env(tmp_path, ["big"], log), capture_output=True, check=True)
+
+    assert done.stdout == b"a" * 70000 + b"END"
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["stdout"] == "a" * (64 * 1024 - 3) + "END"
+
+
+def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path) -> None:
+    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+
+    env = _shim_env(tmp_path, ["probe"], None)
+    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (4, b"out\n", b"err\n")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bin", "shim"]
+
+
+def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> None:
+    """A line the command prints reaches the caller while the command still runs."""
+    flag = tmp_path / "flag"
+    _fake_tool(tmp_path / "bin", "slow", f'echo first; while [ ! -f "{flag}" ]; do sleep 0.05; done; echo second')
+    process = subprocess.Popen(
+        ["slow"], env=_shim_env(tmp_path, ["slow"], tmp_path / "exec.jsonl"), stdout=subprocess.PIPE
+    )
+    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging.
+    timer = threading.Timer(5.0, flag.touch)
+    timer.start()
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == b"first\n"
+        assert not flag.exists()
+    finally:
+        flag.touch()
+        timer.cancel()
+        process.wait(timeout=10)
+    assert process.returncode == 0
+
+
+def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path) -> None:
+    """A SIGTERM to the shim ends the real command; the shim exits and logs 128 plus the signal number."""
+    _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == b"ready\n"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=10) == 128 + signal.SIGTERM
+    finally:
+        process.kill()
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGTERM

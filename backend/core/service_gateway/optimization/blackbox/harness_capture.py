@@ -8,8 +8,18 @@ exec log (``exec_shim``). :meth:`HarnessCapture.observe` takes each mailbox
 request, before it goes to the model, and commits the commands that ran since
 the previous one, with the tree of that moment.
 
+Step contract: a command commits once. When a request answers new tool calls,
+the exec log lines of the same interval ran inside those calls (a model's
+Bash tool that runs a listed command), so only the ``tool_use`` steps commit
+and those lines are dropped. Exec log lines commit only for an interval with
+no new tool result.
+
+The route key reaches the harness env, so tool output, exec records and
+workspace files can hold it. Every exact copy becomes ``KEY_TOKEN`` before a
+step body or blob is stored.
+
 The committed tree is the workspace with the bridge's session folder under
-``SESSIONS_DIR/<session id>``, so a resume in a new box restores the
+``SESSIONS_DIR/<session id>``, so a resume in a new box can restore the
 harness's own session state (:func:`restore_session`) before it starts.
 """
 
@@ -19,13 +29,19 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from ....storage.step_log_store import StepLogStore
 from ....storage.tree_store import TreeEntry, TreeStore
-from .harness_bridge import SESSIONS_DIR
+from .harness_bridge import EXEC_LOG, EXEC_SHIM_DIR, KEY_TOKEN, SESSIONS_DIR, workspace_files
+
+# Session-folder files that are only logs of this box: the raw harness output
+# and the exec log can hold the route key, and a restored exec log would commit
+# its old records again.
+_SESSION_LOGS = ("run-*.stdout", "run-*.stderr", EXEC_LOG, EXEC_SHIM_DIR)
 
 
 class HarnessCapture:
@@ -40,6 +56,7 @@ class HarnessCapture:
         execution_generation: int,
         grant_list_id: str,
         snapshot: Callable[[], str],
+        route_key: str,
         exec_log: Path | None = None,
         seq: int = 0,
     ) -> None:
@@ -53,6 +70,7 @@ class HarnessCapture:
             grant_list_id: The grant list the commands ran with.
             snapshot: Store the current workspace and session folder and
                 return the tree id (for example :func:`snapshot_session`).
+            route_key: The key the harness routes with; step bodies never hold it.
             exec_log: The session's exec shim log, when the launch records commands.
             seq: The agent's next step position.
         """
@@ -62,6 +80,7 @@ class HarnessCapture:
         self._generation = execution_generation
         self._grant_list_id = grant_list_id
         self._snapshot = snapshot
+        self._route_key = route_key
         self._exec_log = exec_log
         self._exec_offset = 0
         self._seq = seq
@@ -69,7 +88,7 @@ class HarnessCapture:
         self._committed: set[str] = set()
 
     def observe(self, request: dict[str, Any]) -> list[str]:
-        """Commit the exec log's new commands and the tool calls the request answers.
+        """Commit the tool calls the request answers, or else the exec log's new commands.
 
         Args:
             request: One Anthropic Messages request body from the mailbox.
@@ -77,12 +96,11 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
-        bodies = self._exec_records()
-        for body in _tool_pairs(request):
-            if body["tool_use_id"] not in self._committed:
-                bodies.append(body)
-        step_ids = self._commit(bodies)
-        self._committed.update(body["tool_use_id"] for body in bodies if body["source"] == "tool_use")
+        records, offset = self._exec_records()
+        pairs = [body for body in _tool_pairs(request) if body["tool_use_id"] not in self._committed]
+        step_ids = self._commit(pairs or records)
+        self._exec_offset = offset
+        self._committed.update(body["tool_use_id"] for body in pairs)
         return step_ids
 
     def finish(self) -> list[str]:
@@ -91,7 +109,10 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
-        return self._commit(self._exec_records())
+        records, offset = self._exec_records()
+        step_ids = self._commit(records)
+        self._exec_offset = offset
+        return step_ids
 
     def _commit(self, bodies: list[dict[str, Any]]) -> list[str]:
         """Commit each body as a command step, all with one tree.
@@ -115,29 +136,31 @@ class HarnessCapture:
                     kind="command",
                     execution_generation=self._generation,
                     grant_list_id=self._grant_list_id,
-                    body=body,
+                    body=_redact(body, self._route_key),
                     tree_id=tree_id,
                 )
             )
             self._seq += 1
         return step_ids
 
-    def _exec_records(self) -> list[dict[str, Any]]:
+    def _exec_records(self) -> tuple[list[dict[str, Any]], int]:
         """Read the exec log's complete new lines as step bodies.
 
         The agent can write the log, so a line that is not a well-formed
         record is skipped. A line with no newline yet is read next time.
+        The caller moves the read position only after the commit, so a failed
+        snapshot reads the same lines again.
 
         Returns:
-            One body for each well-formed new record.
+            One body for each well-formed new record, and the log position after them.
         """
         if self._exec_log is None or not self._exec_log.exists():
-            return []
+            return [], self._exec_offset
         with self._exec_log.open("rb") as handle:
             handle.seek(self._exec_offset)
             data = handle.read()
         complete = data[: data.rfind(b"\n") + 1]
-        self._exec_offset += len(complete)
+        offset = self._exec_offset + len(complete)
         bodies = []
         for line in complete.splitlines():
             try:
@@ -158,7 +181,28 @@ class HarnessCapture:
                         **{key: record[key] for key in ("command", "exit_code", "stdout", "stderr")},
                     }
                 )
-        return bodies
+        return bodies, offset
+
+
+def _redact(value: Any, route_key: str) -> Any:
+    """Replace every exact copy of the route key in a JSON value with ``KEY_TOKEN``.
+
+    Args:
+        value: A step body or a part of it.
+        route_key: The key; an empty key replaces nothing.
+
+    Returns:
+        The value with each string, object key included, redacted.
+    """
+    if not route_key:
+        return value
+    if isinstance(value, str):
+        return value.replace(route_key, KEY_TOKEN)
+    if isinstance(value, dict):
+        return {_redact(key, route_key): _redact(item, route_key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, route_key) for item in value]
+    return value
 
 
 def _tool_pairs(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -230,65 +274,109 @@ def _result_text(content: Any) -> str:
 
 
 def snapshot_session(
-    trees: TreeStore, run_id: str, workspace: Path, session_dir: Path, exclude: Iterable[str] = ()
+    trees: TreeStore,
+    run_id: str,
+    workspace: Path,
+    session_dir: Path,
+    *,
+    proposer: dict[str, Any],
+    route_key: str,
 ) -> str:
-    """Store the workspace and the session folder as one tree.
+    """Store the workspace and the session folder as one tree, with no copy of the route key.
+
+    Left out: the launch files (``harness_bridge.workspace_files``), which hold
+    the key; a workspace entry named ``SESSIONS_DIR``, whose slot holds the
+    real session folder; the session folder's logs (``_SESSION_LOGS``); and
+    files that cannot be read.
 
     Args:
         trees: The worker's tree store.
         run_id: The job that owns the objects.
         workspace: The agent's workspace.
         session_dir: The bridge's session folder, ``<home>/SESSIONS_DIR/<session id>``.
-        exclude: Workspace-relative paths to leave out: the launch files,
-            which hold the route key (``harness_bridge.workspace_files``).
+        proposer: The serialized launch that wrote the launch files.
+        route_key: The key the harness routes with.
 
     Returns:
         The root tree id.
-
-    Raises:
-        ValueError: When the workspace holds an entry named ``SESSIONS_DIR``.
     """
-    entries = _put_directory(trees, run_id, workspace, workspace, set(exclude))
-    session = trees.put_tree(run_id, _put_directory(trees, run_id, session_dir, session_dir, set()))
+    launch_files = {*workspace_files(proposer), SESSIONS_DIR}
+    entries = _put_directory(trees, run_id, workspace, workspace, launch_files.__contains__, route_key)
+
+    def is_log(relative: str) -> bool:
+        """Tell whether a session-folder path is a log of this box.
+
+        Args:
+            relative: The session-folder-relative POSIX path.
+
+        Returns:
+            Whether it matches ``_SESSION_LOGS``.
+        """
+        return any(fnmatchcase(relative, pattern) for pattern in _SESSION_LOGS)
+
+    session = trees.put_tree(run_id, _put_directory(trees, run_id, session_dir, session_dir, is_log, route_key))
     sessions = trees.put_tree(run_id, [TreeEntry(session_dir.name, "tree", session)])
     return trees.put_tree(run_id, [*entries, TreeEntry(SESSIONS_DIR, "tree", sessions)])
 
 
-def _put_directory(trees: TreeStore, run_id: str, root: Path, directory: Path, exclude: set[str]) -> list[TreeEntry]:
+def _put_directory(
+    trees: TreeStore, run_id: str, root: Path, directory: Path, skip: Callable[[str], bool], route_key: str
+) -> list[TreeEntry]:
     """Store every file, link and folder below ``directory`` and return its entries.
 
     Args:
         trees: The tree store.
         run_id: The job that owns the objects.
-        root: The folder that ``exclude`` paths are relative to.
+        root: The folder that ``skip`` paths are relative to.
         directory: The folder to store.
-        exclude: Root-relative POSIX paths to leave out.
+        skip: Tell whether a root-relative POSIX path is left out.
+        route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
 
     Returns:
         The folder's tree entries. Sockets, pipes and devices are left out.
     """
     entries = []
     for path in sorted(directory.iterdir()):
-        if path.relative_to(root).as_posix() in exclude:
+        if skip(path.relative_to(root).as_posix()) or (route_key and route_key in path.name):
             continue
-        # A background job can delete a file during the walk; the tree then holds what is still there.
+        # A background job can delete a file during the walk, and the agent can
+        # make a file unreadable; the tree then holds what can still be read.
         try:
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
-                entries.append(TreeEntry(path.name, "symlink", trees.put_blob(run_id, os.fsencode(path.readlink()))))
+                target = _redact_bytes(os.fsencode(path.readlink()), route_key)
+                entries.append(TreeEntry(path.name, "symlink", trees.put_blob(run_id, target)))
             elif stat.S_ISDIR(info.st_mode):
-                subtree = trees.put_tree(run_id, _put_directory(trees, run_id, root, path, exclude))
+                subtree = trees.put_tree(run_id, _put_directory(trees, run_id, root, path, skip, route_key))
                 entries.append(TreeEntry(path.name, "tree", subtree))
             elif stat.S_ISREG(info.st_mode):
                 mode = "exec" if info.st_mode & 0o111 else "file"
-                entries.append(TreeEntry(path.name, mode, trees.put_blob(run_id, path.read_bytes())))
-        except FileNotFoundError:
+                data = _redact_bytes(path.read_bytes(), route_key)
+                entries.append(TreeEntry(path.name, mode, trees.put_blob(run_id, data)))
+        except OSError:
             continue
     return entries
 
 
+def _redact_bytes(data: bytes, route_key: str) -> bytes:
+    """Replace every exact copy of the route key in file bytes with ``KEY_TOKEN``.
+
+    Args:
+        data: The bytes.
+        route_key: The key; an empty key replaces nothing.
+
+    Returns:
+        The redacted bytes.
+    """
+    return data.replace(route_key.encode(), KEY_TOKEN.encode()) if route_key else data
+
+
 def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path, home: Path) -> None:
     """Write a :func:`snapshot_session` tree back: the workspace, and the session folder under ``home``.
+
+    The workspace and each restored folder end up holding only what the tree
+    names, so a file the agent deleted does not come back. ``home/SESSIONS_DIR``
+    keeps its other sessions, and the workspace keeps its own ``SESSIONS_DIR``.
 
     Args:
         trees: The tree store.
@@ -300,9 +388,35 @@ def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path
     Raises:
         ValueError: When an object is missing or an entry name is not a plain name.
     """
-    for entry in _entries(trees, run_id, tree_id):
-        target = home / SESSIONS_DIR if entry.name == SESSIONS_DIR else workspace / entry.name
-        _restore(trees, run_id, entry, target)
+    entries = _entries(trees, run_id, tree_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    _prune(workspace, {entry.name for entry in entries})
+    for entry in entries:
+        if entry.name != SESSIONS_DIR:
+            _restore(trees, run_id, entry, workspace / entry.name)
+        elif entry.mode == "tree":
+            sessions = home / SESSIONS_DIR
+            if sessions.is_symlink() or (sessions.exists() and not sessions.is_dir()):
+                sessions.unlink()
+            sessions.mkdir(parents=True, exist_ok=True)
+            for session in _entries(trees, run_id, entry.object_id):
+                _restore(trees, run_id, session, sessions / session.name)
+
+
+def _prune(folder: Path, keep: set[str]) -> None:
+    """Delete the entries of ``folder`` that ``keep`` does not name, without following a link.
+
+    Args:
+        folder: A real folder.
+        keep: The names to keep.
+    """
+    for path in folder.iterdir():
+        if path.name in keep:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def _entries(trees: TreeStore, run_id: str, tree_id: str) -> list[TreeEntry]:
@@ -345,7 +459,9 @@ def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path) -> N
         if target.is_symlink() or (target.exists() and not is_folder):
             target.unlink()
         target.mkdir(parents=True, exist_ok=True)
-        for child in _entries(trees, run_id, entry.object_id):
+        children = _entries(trees, run_id, entry.object_id)
+        _prune(target, {child.name for child in children})
+        for child in children:
             _restore(trees, run_id, child, target / child.name)
         return
     data = trees.get_blob(run_id, entry.object_id)

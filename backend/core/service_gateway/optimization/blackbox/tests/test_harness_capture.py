@@ -25,6 +25,23 @@ from ..harness_bridge import SESSIONS_DIR, install_shim
 from ..harness_capture import HarnessCapture, restore_session, snapshot_session
 
 RUN = "job-ada"
+KEY = "fake-route-key"
+_NO_LAUNCH: dict[str, Any] = {}
+
+
+def _snapshot(trees: TreeStore, workspace: Path, session_dir: Path, proposer: dict[str, Any] | None = None) -> str:
+    """Take a session snapshot with the test route key.
+
+    Args:
+        trees: The tree store.
+        workspace: The agent's workspace.
+        session_dir: The bridge's session folder.
+        proposer: The launch; none by default.
+
+    Returns:
+        The root tree id.
+    """
+    return snapshot_session(trees, RUN, workspace, session_dir, proposer=proposer or _NO_LAUNCH, route_key=KEY)
 
 
 @pytest.fixture
@@ -68,19 +85,21 @@ def _capture(step_log: StepLogStore, workspace: Path, session_dir: Path, **kwarg
         step_log: The test step log.
         workspace: The agent's workspace.
         session_dir: The bridge's session folder.
-        **kwargs: Extra capture arguments.
+        **kwargs: Extra capture arguments, and ``proposer`` for the snapshot.
 
     Returns:
         The capture.
     """
     trees = TreeStore(step_log)
+    proposer = kwargs.pop("proposer", None)
     return HarnessCapture(
         step_log,
         run_id=RUN,
         agent_id="proposer",
         execution_generation=1,
         grant_list_id="default",
-        snapshot=lambda: snapshot_session(trees, RUN, workspace, session_dir),
+        snapshot=lambda: _snapshot(trees, workspace, session_dir, proposer),
+        route_key=KEY,
         **kwargs,
     )
 
@@ -175,7 +194,7 @@ def test_a_repeated_request_or_an_unanswered_call_commits_nothing_more(step_log,
             The tree id.
         """
         snapshots.append("taken")
-        return snapshot_session(trees, RUN, workspace, session_dir)
+        return _snapshot(trees, workspace, session_dir)
 
     capture = HarnessCapture(
         step_log,
@@ -184,6 +203,7 @@ def test_a_repeated_request_or_an_unanswered_call_commits_nothing_more(step_log,
         execution_generation=1,
         grant_list_id="default",
         snapshot=snapshot,
+        route_key=KEY,
         seq=5,
     )
     request = _tool_round("t1", "ls", "app.py")
@@ -242,18 +262,134 @@ def test_exec_shim_records_become_steps_before_the_next_model_call(step_log, tmp
     assert capture.finish() == []
 
 
-def test_the_snapshot_leaves_out_the_launch_files_that_hold_the_route_key(step_log, tmp_path) -> None:
-    """The launch writes the real key into workspace files; those never reach the tree store."""
+def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
+    """Launch files, logs, copies, tool output and exec records never put the key into the step log or tree store."""
+    workspace, session_dir, bin_dir = tmp_path / "work", tmp_path / "session", tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "probe").write_text('#!/bin/sh\necho "probe $APP_API_KEY"\n')
+    (bin_dir / "probe").chmod(0o755)
+    proposer = {
+        "run_command": 'env > env.txt; cp .codex/config.toml copy.toml; touch "name-$APP_API_KEY"; probe; echo "$APP_API_KEY"',
+        "files": {".codex/config.toml": f'key = "{harness_bridge.KEY_TOKEN}"'},
+        "instructions_file": "AGENTS.md",
+        "env": {"APP_API_KEY": harness_bridge.KEY_TOKEN, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        "exec_commands": ["probe"],
+        "output_format": "plain",
+    }
+    harness_bridge.run_session(
+        proposer, workspace=workspace, prompt="go", model="m1", session_dir=session_dir, api_key=KEY
+    )
+    assert KEY in (workspace / "copy.toml").read_text()
+    capture = _capture(
+        step_log, workspace, session_dir, proposer=proposer, exec_log=session_dir / harness_bridge.EXEC_LOG
+    )
+
+    [shim_step] = capture.observe({"model": "m1", "messages": [{"role": "user", "content": "go"}]})
+    [tool_step] = capture.observe(_tool_round("t1", f"curl -H 'x-api-key: {KEY}'", f"APP_API_KEY={KEY}"))
+
+    assert step_log.get_step(shim_step)["body"]["stdout"] == f"probe {harness_bridge.KEY_TOKEN}\n"
+    assert step_log.get_step(tool_step)["body"]["output"] == f"APP_API_KEY={harness_bridge.KEY_TOKEN}"
+    files = _tree_files(TreeStore(step_log), step_log.get_step(tool_step)["tree_id"])
+    assert files["copy.toml"] == f'key = "{harness_bridge.KEY_TOKEN}"'.encode()
+    assert ".codex/config.toml" not in files
+    assert "AGENTS.md" not in files
+    assert not [path for path in files if "/run-" in path or "exec-" in path]
+    step_log.flush()
+    stored = [path for path in (tmp_path / "objects").rglob("*") if path.is_file()]
+    stored += list(tmp_path.glob("db.sqlite*"))
+    assert len(stored) > 1
+    assert [path for path in stored if KEY.encode() in path.read_bytes()] == []
+
+
+def test_a_listed_command_inside_a_model_tool_call_commits_once(step_log, tmp_path) -> None:
+    """When a request answers tool calls, the exec records of that interval belong to them and do not commit."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
-    (workspace / ".codex").mkdir(parents=True)
+    workspace.mkdir()
     session_dir.mkdir()
-    (workspace / ".codex" / "config.toml").write_text("key = real-key")
-    (workspace / "main.py").write_text("x = 1\n")
+    log = session_dir / harness_bridge.EXEC_LOG
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "ok\n", "stderr": ""}) + "\n")
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+
+    [step] = capture.observe(_tool_round("t1", "make", "ok"))
+
+    assert step_log.get_step(step)["body"]["source"] == "tool_use"
+    assert capture.finish() == []
+
+
+def test_a_failed_snapshot_keeps_the_exec_records_for_the_next_commit(step_log, tmp_path) -> None:
+    """The log position moves only after the commit, so a snapshot error loses no command."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "", "stderr": ""}) + "\n")
     trees = TreeStore(step_log)
+    failures = [OSError("disk full")]
 
-    tree_id = snapshot_session(trees, RUN, workspace, session_dir, exclude=[".codex/config.toml"])
+    def snapshot() -> str:
+        """Fail once, then take the snapshot.
 
-    assert set(_tree_files(trees, tree_id)) == {"main.py"}
+        Returns:
+            The tree id.
+
+        Raises:
+            OSError: On the first call.
+        """
+        if failures:
+            raise failures.pop()
+        return _snapshot(trees, workspace, session_dir)
+
+    capture = HarnessCapture(
+        step_log,
+        run_id=RUN,
+        agent_id="proposer",
+        execution_generation=1,
+        grant_list_id="default",
+        snapshot=snapshot,
+        route_key=KEY,
+        exec_log=log,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        capture.finish()
+    [step] = capture.finish()
+    assert step_log.get_step(step)["body"]["command"] == "make"
+
+
+def test_a_restored_session_does_not_commit_old_exec_records_again(step_log, tmp_path) -> None:
+    """The exec log stays out of the tree, so a capture in the new box starts with nothing to commit."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    workspace.mkdir()
+    session_dir.mkdir(parents=True)
+    log = session_dir / harness_bridge.EXEC_LOG
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "", "stderr": ""}) + "\n")
+    [first] = _capture(step_log, workspace, session_dir, exec_log=log).finish()
+    tree_id = step_log.get_step(first)["tree_id"]
+
+    new_home, new_workspace = tmp_path / "home-2", tmp_path / "work-2"
+    restore_session(TreeStore(step_log), RUN, tree_id, new_workspace, new_home)
+    new_session = new_home / SESSIONS_DIR / "s1"
+    capture = _capture(step_log, new_workspace, new_session, exec_log=new_session / harness_bridge.EXEC_LOG, seq=1)
+
+    assert capture.finish() == []
+
+
+def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log, tmp_path) -> None:
+    """A file or folder the agent made unreadable does not stop the snapshot."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    (workspace / "locked-dir").mkdir(parents=True)
+    session_dir.mkdir()
+    (workspace / "main.py").write_text("x = 1\n")
+    (workspace / "secret.txt").write_text("x")
+    (workspace / "secret.txt").chmod(0)
+    (workspace / "locked-dir").chmod(0)
+    try:
+        tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
+    finally:
+        (workspace / "secret.txt").chmod(0o644)
+        (workspace / "locked-dir").chmod(0o755)
+
+    assert set(_tree_files(TreeStore(step_log), tree_id)) == {"main.py"}
 
 
 def test_restore_writes_the_workspace_and_session_folder_without_following_links(step_log, tmp_path) -> None:
@@ -267,7 +403,7 @@ def test_restore_writes_the_workspace_and_session_folder_without_following_links
     (workspace / "link").symlink_to("src/a.py")
     (session_dir / "native.json").write_text('{"turn": 3}')
     trees = TreeStore(step_log)
-    tree_id = snapshot_session(trees, RUN, workspace, session_dir)
+    tree_id = _snapshot(trees, workspace, session_dir)
 
     fresh, home = tmp_path / "fresh", tmp_path / "home2"
     outside = tmp_path / "outside"
@@ -288,15 +424,42 @@ def test_restore_writes_the_workspace_and_session_folder_without_following_links
         restore_session(trees, RUN, "f" * 64, fresh, home)
 
 
-def test_a_workspace_entry_named_like_the_session_folder_is_refused(step_log, tmp_path) -> None:
-    """A workspace that holds its own session-folder name cannot hide the real session folder."""
-    workspace, session_dir = tmp_path / "work", tmp_path / "session"
-    (workspace / SESSIONS_DIR).mkdir(parents=True)
-    session_dir.mkdir()
-    (workspace / SESSIONS_DIR / "x").write_text("x")
+def test_restore_deletes_what_the_tree_does_not_name_without_following_links(step_log, tmp_path) -> None:
+    """Files the agent deleted do not come back, and a link in the way is removed, not followed."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    (workspace / "src").mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (workspace / "src" / "a.py").write_text("a = 1\n")
+    tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
 
-    with pytest.raises(ValueError, match="same name"):
-        snapshot_session(TreeStore(step_log), RUN, workspace, session_dir)
+    fresh, home = tmp_path / "fresh", tmp_path / "home2"
+    outside = tmp_path / "outside"
+    (outside / "keep").mkdir(parents=True)
+    (fresh / "src" / "gone").mkdir(parents=True)
+    (fresh / "deleted.py").write_text("old")
+    (fresh / "src" / "old.py").write_text("old")
+    (fresh / "src" / "escape").symlink_to(outside)
+    (home / SESSIONS_DIR / "other").mkdir(parents=True)
+    restore_session(TreeStore(step_log), RUN, tree_id, fresh, home)
+
+    assert sorted(path.relative_to(fresh).as_posix() for path in fresh.rglob("*")) == ["src", "src/a.py"]
+    assert (outside / "keep").is_dir()
+    assert (home / SESSIONS_DIR / "other").is_dir()
+
+
+@pytest.mark.parametrize("inside", [False, True])
+def test_a_workspace_entry_named_like_the_session_folder_is_left_out(step_log, tmp_path, inside) -> None:
+    """The workspace's own session-folder entry does not break the snapshot; the real session folder fills the slot."""
+    workspace = tmp_path / "work"
+    session_dir = workspace / SESSIONS_DIR / "s1" if inside else tmp_path / "session"
+    (workspace / SESSIONS_DIR / "x").mkdir(parents=True)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / SESSIONS_DIR / "x" / "f").write_text("x")
+    (session_dir / "native.json").write_text("{}")
+
+    tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
+
+    assert set(_tree_files(TreeStore(step_log), tree_id)) == {f"{SESSIONS_DIR}/{session_dir.name}/native.json"}
 
 
 def _bridge_env(tmp_path: Path, home: Path, proposer: dict[str, Any]) -> dict[str, str]:
@@ -363,7 +526,7 @@ def test_a_resume_in_a_new_box_restores_the_session_folder_before_the_harness_st
     workspace.mkdir()
     _claude(_bridge_env(tmp_path, home, proposer), workspace, "first task", "--session-id", "s1")
     trees = TreeStore(step_log)
-    tree_id = snapshot_session(trees, RUN, workspace, home / SESSIONS_DIR / "s1")
+    tree_id = snapshot_session(trees, RUN, workspace, home / SESSIONS_DIR / "s1", proposer=proposer, route_key=KEY)
 
     new_home, new_workspace = tmp_path / "home-2", tmp_path / "work-2"
     new_workspace.mkdir()
