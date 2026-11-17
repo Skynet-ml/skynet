@@ -862,6 +862,10 @@ test("a confirmed dataset card stores its file's original under the card's id (S
     source(panel),
     /useComposerDatasetAttach\(\s*`\$\{agent\.sessionKey\}:\$\{webChat\}`/,
   );
+  // The composer reads a dataset file itself, except in a hosted chat, where it
+  // stays a plain file card (SKY-783).
+  assert.match(source(panel), /claimsFile=\{webChat \? undefined : isDatasetFile\}/);
+  assert.match(source(panel), /onAttachFile=\{attachComposerDataset\}/);
 });
 
 // Run the panel's handleSubmit with a pending dataset card (SKY-780).

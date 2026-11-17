@@ -24,8 +24,7 @@ export interface ConfirmedDataset {
 }
 
 interface DatasetUploadCardProps {
-  /** The agent tool call that requested the upload; absent when the user
-   *  attaches proactively from the composer's + button. */
+  /** The agent tool call that requested the upload. */
   call?: AgentToolCall;
   disabled?: boolean;
   /** The picked file goes too, so the chat can keep its original for the viewer. */

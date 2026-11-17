@@ -36,7 +36,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
 
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
-import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { CHAT_ERROR_ICON_BUTTON_CLASS, ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { CAPACITY_ERROR_CODE, capacityRetryDelay } from "@/shared/ui/agent/capacity-retry";
 import { ReconnectingNotice } from "@/shared/ui/agent/reconnecting-notice";
@@ -1033,7 +1033,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
       if (callId) {
-        confirmedDatasetCallsRef.current.add(callId);
         setConfirmedUploadCalls((calls) => new Set(calls).add(callId));
       }
       // The file waits in the composer as a card, as a PDF does (SKY-780).
@@ -1906,7 +1905,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                               label={msg("billing.action.add_funds")}
                               icon={Wallet}
                               onClick={() => openSettingsTo("billing")}
-                              className="size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
+                              className={CHAT_ERROR_ICON_BUTTON_CLASS}
                             />
                           ) : undefined
                         }

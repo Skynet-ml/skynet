@@ -21,6 +21,10 @@ interface ChatErrorBannerProps {
   className?: string;
 }
 
+/** The style of an icon button in the banner, so a caller's action matches the retry button. */
+export const CHAT_ERROR_ICON_BUTTON_CLASS =
+  "size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]";
+
 // Shared warm-toned error row for agent chat streams (auth/model/rate-limit
 // failures): one rectangular row with an icon, the message and an icon action
 // at the end (SKY-783).
@@ -54,7 +58,7 @@ export function ChatErrorBanner({
         <RetryIconButton
           label={retryLabel}
           onClick={onRetry}
-          className="size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
+          className={CHAT_ERROR_ICON_BUTTON_CLASS}
         />
       )}
       {action}
