@@ -408,8 +408,6 @@ export function useLatestDatasetRead(
   }, []);
 }
 
-const COMPOSER_DATASET_READ_TOAST = "composer-dataset-read";
-
 /**
  * Read dataset files attached from the composer, with a toast while they read.
  *
@@ -427,31 +425,36 @@ export function useComposerDatasetAttach(
   resetKey: unknown,
   onRead: (confirmed: ConfirmedDataset, file: File) => void,
 ): (file: File) => void {
+  // A dismissed toast stays in the container until its exit ends, and
+  // react-toastify drops a new toast with the same id meanwhile. So each
+  // loading toast gets its own id.
+  const toastCount = React.useRef(0);
+  const toastId = React.useRef<string | null>(null);
+  const dismiss = React.useCallback(() => {
+    if (toastId.current) toast.dismiss(toastId.current);
+    toastId.current = null;
+  }, []);
   const read = useLatestDatasetRead(
     resetKey,
     React.useCallback(
       (confirmed: ConfirmedDataset, file: File) => {
-        toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+        dismiss();
         onRead(confirmed, file);
       },
-      [onRead],
+      [dismiss, onRead],
     ),
     React.useCallback(() => {
-      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+      dismiss();
       toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
-    }, []),
+    }, [dismiss]),
   );
-  React.useEffect(
-    () => () => {
-      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
-    },
-    [resetKey],
-  );
+  React.useEffect(() => dismiss, [resetKey, dismiss]);
   return React.useCallback(
     (file: File) => {
-      if (!toast.isActive(COMPOSER_DATASET_READ_TOAST)) {
+      if (!toastId.current) {
+        toastId.current = `composer-dataset-read-${++toastCount.current}`;
         toast.loading(msg("auto.features.agent.panel.components.datasetuploadcard.parsing"), {
-          toastId: COMPOSER_DATASET_READ_TOAST,
+          toastId: toastId.current,
         });
       }
       read(file);
@@ -543,7 +546,7 @@ export function DatasetUploadCard({
     [handleFile],
   );
 
-  // The file card in the user's message shows the upload (SKY-783).
+  // The file card in the composer draft shows the upload (SKY-783).
   if (confirmed) return null;
 
   const fade = reduceMotion

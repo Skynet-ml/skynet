@@ -1942,8 +1942,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           </>
         }
         // Dataset files are read into rows first; every file then becomes
-        // a file card in the composer.
-        claimsFile={isDatasetFile}
+        // a file card in the composer. A hosted chat cannot take the rows,
+        // so there a dataset is a plain file card.
+        claimsFile={webChat ? undefined : isDatasetFile}
         // The media routes are on this Mac's backend, so a hosted chat's file card gives only its type and size.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}

@@ -244,18 +244,23 @@ void test("a composer attach keeps only the newest read", async () => {
 
 void test("a composer attach shows one loading toast until the newest read ends", async () => {
   const { toast } = await import("react-toastify");
+  // Like react-toastify, a dismissed id stays in the container until its exit
+  // ends, which never happens here, and a new toast with that id is dropped.
   const shown = new Set<string>();
+  const used = new Set<string>();
   const loading: string[] = [];
   const errors: string[] = [];
   const saved = {
     loading: toast.loading,
     dismiss: toast.dismiss,
     error: toast.error,
-    isActive: toast.isActive,
   };
   toast.loading = ((content: string, options?: { toastId?: string }) => {
+    const id = options?.toastId ?? "";
+    if (used.has(id)) return id;
+    used.add(id);
     loading.push(content);
-    shown.add(options?.toastId ?? "");
+    shown.add(id);
     return options?.toastId ?? "";
   }) as typeof toast.loading;
   toast.dismiss = ((id?: string) => {
@@ -265,7 +270,6 @@ void test("a composer attach shows one loading toast until the newest read ends"
     errors.push(content);
     return "error";
   }) as typeof toast.error;
-  toast.isActive = ((id: string) => shown.has(id)) as typeof toast.isActive;
 
   let finish: () => void = () => {};
   const slow = new File(["q\nhi\n"], "slow.csv", { type: "text/csv" });
@@ -303,6 +307,7 @@ void test("a composer attach shows one loading toast until the newest read ends"
     assert.deepEqual(attached, ["qa.csv"], "the older read does not attach late");
 
     attach(new File([""], "empty.csv", { type: "text/csv" }));
+    assert.equal(shown.size, 1, "a pick right after a closed toast shows a new toast");
     await settle();
     assert.equal(shown.size, 0, "the toast closes when the read fails");
     assert.equal(errors.length, 1, "a failed read shows the parse error");
@@ -313,6 +318,7 @@ void test("a composer attach shows one loading toast until the newest read ends"
     assert.equal(shown.size, 0, "a chat switch closes the toast");
 
     attach(slow);
+    assert.equal(shown.size, 1, "a pick in the new chat shows a toast");
     await React.act(async () => root.unmount());
     assert.equal(shown.size, 0, "an unmount closes the toast");
   } finally {
