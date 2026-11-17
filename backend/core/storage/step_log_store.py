@@ -234,9 +234,11 @@ class StepLogStore:
             flush_max_bytes: The buffer size cap; ``None`` reads the setting.
 
         Raises:
-            ValueError: When ``worker_id`` is empty, too long or has a ``/``.
+            ValueError: When ``worker_id`` is empty, too long, not printable
+                ASCII, has a ``/``, or is ``.`` or ``..``.
         """
-        if not worker_id or len(worker_id) > 64 or "/" in worker_id:
+        # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
+        if not 0 < len(worker_id) <= 64 or not _is_text_id(worker_id) or "/" in worker_id or worker_id in {".", ".."}:
             raise ValueError(f"bad worker id: {worker_id!r}")
         self._engine = engine
         self._objects = objects

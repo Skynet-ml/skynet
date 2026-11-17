@@ -788,6 +788,13 @@ def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, obj
     assert objects.list("packs/") == []
 
 
+@pytest.mark.parametrize("worker_id", ["", "w" * 65, "w/1", "w\x00", "w-é", ".", ".."])
+def test_a_worker_id_that_breaks_the_pack_path_is_refused(make_store, worker_id: str) -> None:
+    """A worker id that the database refuses, or that puts packs outside its own folder, fails at construction."""
+    with pytest.raises(ValueError, match="bad worker id"):
+        make_store(worker_id)
+
+
 def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
     """With no explicit flush, the step is durable after the window."""
     store = make_store(flush_window_seconds=0.2)
@@ -937,7 +944,8 @@ def postgres_engine() -> Iterator[Engine]:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema},public"})
     try:
-        # ``public`` is on the path only for the vector type; a check would find its tables and skip ours.
+        # ``public`` is on the path so the ``jobs.conversation_id`` foreign key finds ``agent_conversations``, which
+        # only ``public`` has; a check would find our tables there and skip creating them here.
         Base.metadata.create_all(
             engine,
             tables=[
