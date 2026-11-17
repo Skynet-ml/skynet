@@ -364,11 +364,16 @@ class StepLogStore:
         Raises:
             ValueError: When ``run_id`` is not a valid run id or
                 ``object_id`` is not 64 lowercase hex characters.
+            TypeError: When ``data`` is not exactly ``bytes``.
         """
         # As in ``commit``: an id the database refuses would fail every later flush of the batch.
         _check_run_id(run_id)
         if not OBJECT_ID.fullmatch(object_id):
             raise ValueError(f"object_id is not 64 lowercase hex characters: {object_id!r}")
+        # Data the pack cannot hold would also fail every later flush. A ``bytearray`` can change
+        # after the call, and then the buffered bytes no longer match the object id.
+        if type(data) is not bytes:
+            raise TypeError(f"data is not bytes: {type(data).__name__}")
         with self._cond:
             if self._closed:
                 raise RuntimeError("the step log is closed")

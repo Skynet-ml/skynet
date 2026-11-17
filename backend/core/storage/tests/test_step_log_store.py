@@ -789,6 +789,24 @@ def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, obj
     assert objects.list("packs/") == []
 
 
+@pytest.mark.parametrize(
+    "data",
+    [None, 7, "blob\0x", [b"blob\0x"], bytearray(b"blob\0x"), memoryview(b"blob\0x")],
+)
+def test_a_put_object_with_data_that_is_not_bytes_is_refused(make_store, engine, data: Any) -> None:
+    """Data that is not ``bytes`` is refused at the call; the same object id and a step land after it."""
+    store = make_store()
+
+    with pytest.raises(TypeError, match="data is not bytes"):
+        store.put_object("job-1", "c" * 64, data)
+    store.put_object("job-1", "c" * 64, b"blob\0x")
+    _commit(store)
+    store.flush()
+
+    assert _step_rows(engine) == 1
+    assert store.get_object("job-1", "c" * 64) == b"blob\0x"
+
+
 @pytest.mark.parametrize("worker_id", ["", "w" * 65, "w/1", "w\x00", "w-é", ".", ".."])
 def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
     """An empty, too long or not printable ASCII worker id, or one that changes the pack folder, is refused."""
