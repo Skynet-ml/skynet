@@ -32,7 +32,7 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.step_log_store import StepFenceError, StepLogStore
+from core.storage.step_log_store import StepFenceError, StepLogStore, _read_manifest
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 needs_postgres = pytest.mark.skipif(
@@ -865,6 +865,82 @@ def test_a_failed_database_write_retries_once_per_window(make_store, engine, obj
     finally:
         database_down.clear()
         event.remove(engine, "before_cursor_execute", fail_pack_insert)
+
+
+def _fail_the_next_apply(store: StepLogStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the store's next database write fail one time, as a short database outage does.
+
+    Args:
+        store: The step log.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    apply = store._apply
+
+    def fail_once(*args: Any) -> Any:
+        """Restore the real write, then fail this call.
+
+        Args:
+            *args: The pack key, size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", fail_once)
+
+
+def test_a_failed_database_write_keeps_the_written_pack_for_the_next_flush(
+    make_store, engine, objects, monkeypatch
+) -> None:
+    """After the PUT and a failed transaction, the next flush records that pack and does not PUT its steps again."""
+    store = make_store()
+    _fail_the_next_apply(store, monkeypatch)
+    first = _commit(store)
+    with pytest.raises(OperationalError):
+        store.flush()
+
+    second = _commit(store, seq=2)
+    store.flush()
+
+    holders = [
+        key
+        for key in objects.list("packs/w1/")
+        if first in [entry["step_id"] for entry in _read_manifest(objects.get(key))["steps"]]
+    ]
+    assert len(holders) == 1
+    store.durable(first, 1, timeout=0)
+    store.durable(second, 1, timeout=0)
+    assert _step_rows(engine) == 2
+
+
+def test_durable_returns_when_the_flusher_records_the_kept_pack(make_store, engine, objects, monkeypatch) -> None:
+    """With no new commit, the flusher records the kept pack after the window, and ``durable`` returns."""
+    store = make_store(flush_window_seconds=0.2)
+    _fail_the_next_apply(store, monkeypatch)
+    step_id = _commit(store)
+
+    store.durable(step_id, 1, timeout=5)
+
+    assert objects.puts == 1
+    assert _step_rows(engine) == 1
+
+
+def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
+    """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
+    store = make_store()
+    _fail_the_next_apply(store, monkeypatch)
+    step_id = _commit(store)
+    with pytest.raises(OperationalError):
+        store.flush()
+
+    assert store.recover() == 1
+    store.flush()
+
+    store.durable(step_id, 1, timeout=0)
+    assert objects.puts == 1
+    assert _step_rows(engine) == 1
 
 
 def test_run_agent_and_seq_are_unique_in_the_database(engine) -> None:

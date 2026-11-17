@@ -280,6 +280,9 @@ class StepLogStore:
         self._pending: list[tuple[_Step | _Object, bytes]] = []
         self._pending_bytes = 0
         self._first_at: float | None = None
+        # A pack in the object store whose transaction failed: its key, size, manifest and batch.
+        # Its entries stay in the memtable and its waiters stay open until a flush records it.
+        self._unapplied: tuple[str, int, dict[str, Any], list[tuple[_Step | _Object, bytes]]] | None = None
         # The memtable: buffered and in-flight entries by step id, then by generation, until their flush commits.
         self._steps: dict[str, dict[int, tuple[_Step, bytes]]] = {}
         # Keyed by run, so an unflushed object never reaches another account and each owner counts its own bytes.
@@ -525,10 +528,18 @@ class StepLogStore:
     def flush(self) -> None:
         """Write the pending batch now: one pack PUT, then one Postgres transaction.
 
-        On a failure the batch goes back to the front of the buffer, so the
-        next flush tries it again.
+        When the PUT fails, the batch goes back to the front of the buffer.
+        When the transaction fails after the PUT, the store keeps the written
+        pack, and the next flush records that pack first, with no new PUT.
+        Until then, the next flush writes no new pack.
         """
         with self._flush_lock:
+            if self._unapplied is not None:
+                key, size, manifest, batch = self._unapplied
+                _, stale = self._apply(key, size, manifest)
+                with self._cond:
+                    self._unapplied = None
+                self._settle(batch, stale)
             with self._cond:
                 batch, first_at = self._pending, self._first_at
                 self._pending, self._pending_bytes, self._first_at = [], 0, None
@@ -538,36 +549,52 @@ class StepLogStore:
                 pack, manifest = _build_pack(self._worker_id, batch)
                 key = f"{PACK_PREFIX}/{self._worker_id}/{time.time_ns():020d}-{uuid4().hex}.pack"
                 self._objects.put(key, pack)
-                _, stale = self._apply(key, len(pack), manifest)
             except Exception:
                 with self._cond:
                     self._pending = batch + self._pending
                     self._pending_bytes += sum(len(data) for _, data in batch)
                     self._first_at = first_at
                 raise
-            with self._cond:
-                # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
-                verdicts: dict[tuple[str, int], str] = {}
-                for entry in stale:
-                    step_key = (entry["step_id"], entry["execution_generation"])
-                    verdicts[step_key] = entry["step_id"]
-                    _keep_verdict(self._failures, step_key, entry["step_id"])
-                    agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
-                    _keep_verdict(self._agent_failures, agent_key, entry["step_id"])
-                for item, _ in batch:
-                    if isinstance(item, _Object):
-                        self._tree_objects.pop((item.run_id, item.object_id), None)
-                        continue
-                    versions = self._steps.get(item.step_id)
-                    if versions is not None:
-                        versions.pop(item.execution_generation, None)
-                        if not versions:
-                            del self._steps[item.step_id]
-                    step_key = (item.step_id, item.execution_generation)
-                    waiter = self._waiters.pop(step_key, None)
-                    if waiter is not None:
-                        waiter.failure = verdicts.get(step_key)
-                        waiter.set()
+            try:
+                _, stale = self._apply(key, len(pack), manifest)
+            except Exception:
+                # A new pack of the same batch on each retry makes the PUT bytes grow with each failed window.
+                with self._cond:
+                    self._unapplied = (key, len(pack), manifest, batch)
+                    self._cond.notify_all()
+                raise
+            self._settle(batch, stale)
+
+    def _settle(self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]]) -> None:
+        """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
+
+        Args:
+            batch: The entries of the recorded pack.
+            stale: The manifest entries of the batch's steps that did not land.
+        """
+        with self._cond:
+            # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
+            verdicts: dict[tuple[str, int], str] = {}
+            for entry in stale:
+                step_key = (entry["step_id"], entry["execution_generation"])
+                verdicts[step_key] = entry["step_id"]
+                _keep_verdict(self._failures, step_key, entry["step_id"])
+                agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
+                _keep_verdict(self._agent_failures, agent_key, entry["step_id"])
+            for item, _ in batch:
+                if isinstance(item, _Object):
+                    self._tree_objects.pop((item.run_id, item.object_id), None)
+                    continue
+                versions = self._steps.get(item.step_id)
+                if versions is not None:
+                    versions.pop(item.execution_generation, None)
+                    if not versions:
+                        del self._steps[item.step_id]
+                step_key = (item.step_id, item.execution_generation)
+                waiter = self._waiters.pop(step_key, None)
+                if waiter is not None:
+                    waiter.failure = verdicts.get(step_key)
+                    waiter.set()
 
     def recover(self) -> int:
         """Apply this worker's packs that a crash left without their Postgres transaction.
@@ -706,7 +733,10 @@ class StepLogStore:
         return True, stale
 
     def _due(self) -> bool:
-        """Return whether the pending batch must flush now; the caller holds the lock."""
+        """Return whether a flush must run now; the caller holds the lock."""
+        # With no new commit, the kept pack's waiters would wait for a flush that never starts.
+        if self._unapplied is not None:
+            return True
         if not self._pending or self._first_at is None:
             return False
         return self._pending_bytes >= self._max_bytes or time.monotonic() - self._first_at >= self._window
