@@ -230,13 +230,15 @@ class StepLogStore:
             objects: Where the packs go.
             worker_id: This worker's stable id; its packs go under
                 ``packs/<worker_id>/`` so a restarted worker recovers its own.
-            flush_window_seconds: The buffer window, above 0; ``None`` reads the setting.
+            flush_window_seconds: The buffer window, above 0 and at most
+                ``threading.TIMEOUT_MAX``; ``None`` reads the setting.
             flush_max_bytes: The buffer size cap, at least 1; ``None`` reads the setting.
 
         Raises:
             ValueError: When ``worker_id`` is empty, too long, not printable
                 ASCII, has a ``/``, or is ``.`` or ``..``; or when the window is
-                not above 0 or the size cap is below 1.
+                not above 0 or is above ``threading.TIMEOUT_MAX``, or the size
+                cap is below 1.
         """
         # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
         if not 0 < len(worker_id) <= 64 or not _is_text_id(worker_id) or "/" in worker_id or worker_id in {".", ".."}:
@@ -246,8 +248,9 @@ class StepLogStore:
         self._worker_id = worker_id
         window = settings.step_log_flush_window_seconds if flush_window_seconds is None else flush_window_seconds
         max_bytes = settings.step_log_flush_max_bytes if flush_max_bytes is None else flush_max_bytes
-        # A window of 0 or less makes the flusher retry a failed flush with no wait.
-        if not window > 0 or max_bytes < 1:
+        # A window of 0 or less makes the flusher retry a failed flush with no wait. A wait above
+        # ``TIMEOUT_MAX`` raises in the flusher thread and ends it, so no later commit lands.
+        if not 0 < window <= threading.TIMEOUT_MAX or max_bytes < 1:
             raise ValueError(f"bad flush window or size cap: {window!r}, {max_bytes!r}")
         self._window = window
         self._max_bytes = max_bytes
@@ -312,7 +315,7 @@ class StepLogStore:
         """
         # A row the database refuses would fail every later flush of the batch, so refuse it here.
         _check_run_id(run_id)
-        if not 0 < len(agent_id) <= AGENT_ID_MAX or len(grant_list_id) > 64:
+        if not 0 < len(agent_id) <= AGENT_ID_MAX or not 0 < len(grant_list_id) <= 64:
             raise ValueError("agent_id or grant_list_id is too long or empty")
         if not _is_text_id(agent_id) or not _is_text_id(grant_list_id):
             raise ValueError("agent_id or grant_list_id is not printable ASCII")

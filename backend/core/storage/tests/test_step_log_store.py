@@ -749,6 +749,7 @@ def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
         {"agent_id": "agent-é"},
         {"agent_id": "agent-\ud800"},
         {"grant_list_id": "grants\x001"},
+        {"grant_list_id": ""},
         {"tree_id": "a" * 65},
         {"tree_id": "A" * 64},
         {"tree_id": "g" * 64},
@@ -797,10 +798,17 @@ def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
 
 @pytest.mark.parametrize(
     "options",
-    [{"flush_window_seconds": 0.0}, {"flush_window_seconds": -1.0}, {"flush_max_bytes": 0}, {"flush_max_bytes": -1}],
+    [
+        {"flush_window_seconds": 0.0},
+        {"flush_window_seconds": -1.0},
+        {"flush_window_seconds": float("inf")},
+        {"flush_window_seconds": threading.TIMEOUT_MAX * 2},
+        {"flush_max_bytes": 0},
+        {"flush_max_bytes": -1},
+    ],
 )
-def test_a_flush_window_or_size_cap_that_is_not_positive_is_refused(make_store, options: dict[str, float]) -> None:
-    """A window or a size cap that the settings refuse fails at construction, and does not read the setting."""
+def test_a_flush_window_or_size_cap_outside_its_bounds_is_refused(make_store, options: dict[str, float]) -> None:
+    """A window that is not above 0 or that no thread can wait, or a size cap below 1, fails at construction."""
     with pytest.raises(ValueError, match="bad flush window or size cap"):
         make_store(**options)
 
