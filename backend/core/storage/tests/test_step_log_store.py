@@ -789,8 +789,8 @@ def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, obj
 
 
 @pytest.mark.parametrize("worker_id", ["", "w" * 65, "w/1", "w\x00", "w-é", ".", ".."])
-def test_a_worker_id_that_breaks_the_pack_path_is_refused(make_store, worker_id: str) -> None:
-    """A worker id that the database refuses, or that puts packs outside its own folder, fails at construction."""
+def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
+    """An empty, too long or not printable ASCII worker id, or one that changes the pack folder, is refused."""
     with pytest.raises(ValueError, match="bad worker id"):
         make_store(worker_id)
 
