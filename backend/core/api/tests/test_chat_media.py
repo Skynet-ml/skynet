@@ -295,6 +295,163 @@ def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monk
     assert _upload(harness.client, _PDF, name="b.pdf", content_type="application/pdf").status_code == 429
 
 
+def _upload_original(client: TestClient, data: bytes, name: str) -> object:
+    """POST one attached file's original to the upload route.
+
+    Args:
+        client: The test client.
+        data: The file bytes.
+        name: The upload filename.
+
+    Returns:
+        The response.
+    """
+    return client.post(
+        "/agent/media",
+        files={"file": (name, data, "application/octet-stream")},
+        data={"original": "true"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [
+        (b"a,b\n1,2\n", "rows.csv"),
+        (b'{"a": 1}\n', "rows.jsonl"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', "logo.svg"),
+        (_PNG, "shot.bin"),
+        (_zip("ppt/presentation.xml"), "deck.pptx"),
+        (_PDF, "README"),
+    ],
+)
+def test_an_original_of_any_type_is_stored_as_opaque_bytes(harness: SimpleNamespace, data: bytes, name: str) -> None:
+    """Every attached file keeps its original (SKY-782); one the viewer does not draw is served as opaque bytes."""
+    body = _upload_original(harness.client, data, name).json()
+
+    assert (body["kind"], body["mime_type"], body["name"]) == ("document", "application/octet-stream", name)
+    resp = harness.client.get(f"/agent/media/{body['id']}")
+    assert resp.content == data
+    assert resp.headers["content-type"] == "application/octet-stream"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert "sandbox" in resp.headers["content-security-policy"]
+    assert resp.headers["content-disposition"].startswith("attachment;")
+
+
+@pytest.mark.parametrize(
+    ("data", "name", "mime"),
+    [
+        (_PDF, "brief.pdf", "application/pdf"),
+        (_zip("[Content_Types].xml", "word/document.xml"), "brief.docx", _DOCX_MIME),
+        (_zip("[Content_Types].xml", "xl/workbook.xml"), "budget.xlsx", _XLSX_MIME),
+    ],
+)
+def test_an_original_the_viewer_draws_keeps_its_real_type(
+    harness: SimpleNamespace, data: bytes, name: str, mime: str
+) -> None:
+    """A PDF, DOCX or XLSX original keeps its real type, so the viewer draws it."""
+    body = _upload_original(harness.client, data, name).json()
+    assert (body["kind"], body["mime_type"]) == ("document", mime)
+    resp = harness.client.get(f"/agent/media/{body['id']}")
+    assert resp.headers["content-disposition"].startswith("inline;")
+
+
+def test_a_name_that_is_only_an_extension_claims_no_drawn_type(harness: SimpleNamespace) -> None:
+    """The viewer does not draw a file named only ".pdf", so its original is opaque bytes, as the viewer expects."""
+    body = _upload_original(harness.client, b"notes", ".pdf").json()
+    assert (body["kind"], body["mime_type"]) == ("document", "application/octet-stream")
+
+
+def test_the_drawn_type_uses_the_viewers_name_key() -> None:
+    """The server types an original by the viewer's name key, so both sides agree on every name."""
+    assert chat_media._named_document_type("_.pdf") is None
+    assert chat_media._named_document_type('"<>.pdf') is None
+    assert chat_media._named_document_type("\ufeff.pdf") is None
+    assert chat_media._named_document_type("x.p_df") == "application/pdf"
+    assert chat_media._named_document_type("dir\\Book.XLSX") == chat_media._OFFICE_PARTS["xl/workbook.xml"]
+    assert chat_media._named_document_type("a" * 300 + ".pdf") == "application/pdf"
+
+
+def test_an_original_named_x_p_df_must_be_a_real_pdf(harness: SimpleNamespace) -> None:
+    """The viewer draws "x.p_df" as a PDF, so its original must hold a real PDF."""
+    assert _upload_original(harness.client, b"notes", "x.p_df").status_code == 415
+    body = _upload_original(harness.client, _PDF, "x.p_df").json()
+    assert body["mime_type"] == "application/pdf"
+
+
+def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
+    """The name field, not the multipart filename, decides the type the viewer draws."""
+
+    def upload(data: bytes, name: str) -> object:
+        """POST an original whose multipart filename differs from its name field.
+
+        Args:
+            data: The file bytes.
+            name: The name field.
+
+        Returns:
+            The response.
+        """
+        return harness.client.post(
+            "/agent/media",
+            files={"file": ("x.p%22df", data, "application/octet-stream")},
+            data={"original": "true", "name": name},
+        )
+
+    # The browser sends 'x.p"df' as 'x.p%22df'; the viewer draws it as a PDF.
+    assert upload(b"notes", 'x.p"df').status_code == 415
+    body = upload(_PDF, 'x.p"df').json()
+    assert (body["name"], body["mime_type"]) == ("x.pdf", "application/pdf")
+    # A real 'notes.pdf%22' name is not a PDF to the viewer.
+    body = upload(b"notes", "notes.pdf%22").json()
+    assert (body["name"], body["mime_type"]) == ("notes.pdf%22", "application/octet-stream")
+
+
+def test_an_original_with_a_long_name_keeps_the_type_of_its_full_name(harness: SimpleNamespace) -> None:
+    """The draft card links its original by id, so a cut stored name still gets the full name's type."""
+    body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
+    assert len(body["name"]) == 255
+    assert body["mime_type"] == "application/pdf"
+
+
+def test_the_type_trims_only_what_the_viewer_trims(harness: SimpleNamespace) -> None:
+    """U+0085 is not JavaScript whitespace, so the viewer does not draw "a.pdf\u0085" as a PDF."""
+    assert _upload_original(harness.client, _PDF, "a.pdf\u0085").json()["mime_type"] == "application/octet-stream"
+    assert _upload_original(harness.client, _PDF, "\ufeffb.pdf\u3000").json()["mime_type"] == "application/pdf"
+
+
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [(b"a,b\n", "rows.pdf"), (_PDF, "brief.xlsx"), (_zip("ppt/presentation.xml"), "deck.docx")],
+)
+def test_an_original_named_as_a_drawn_type_must_hold_that_type(
+    harness: SimpleNamespace, data: bytes, name: str
+) -> None:
+    """The viewer draws an original by its name, so a name that claims a type the bytes are not gets a 415."""
+    assert _upload_original(harness.client, data, name).status_code == 415
+    with Session(harness.store.engine) as session:
+        assert session.scalars(select(ChatMediaModel)).all() == []
+
+
+def test_an_original_uses_the_originals_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any original counts against the originals cap, not the cap its text read already used."""
+    monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
+
+    assert _upload(harness.client, _PNG).status_code == 201
+    assert _upload_original(harness.client, b"a,b\n", "a.csv").status_code == 201
+    assert _upload_original(harness.client, b"a,b\n", "b.csv").status_code == 429
+
+
+def test_a_media_pdf_named_only_as_an_extension_is_refused(harness: SimpleNamespace) -> None:
+    """The viewer draws no file named only ".pdf", so a media upload of one gets a 415, as any unnamed PDF does."""
+    assert _upload(harness.client, _PDF, name=".pdf", content_type="application/pdf").status_code == 415
+
+
+def test_a_media_upload_keeps_the_allow_list(harness: SimpleNamespace) -> None:
+    """A media upload keeps the allow-list: a CSV or SVG not marked as an original gets a 415."""
+    assert _upload(harness.client, b"a,b\n", name="rows.csv", content_type="text/csv").status_code == 415
+    assert _upload(harness.client, b"<svg/>", name="logo.svg", content_type="image/svg+xml").status_code == 415
+
+
 def test_document_limit_matches_the_file_text_limit() -> None:
     """Every file whose text the chat can read can keep its original."""
     assert chat_media.MAX_MEDIA_BYTES["document"] == MAX_ATTACHMENT_BYTES

@@ -77,6 +77,27 @@ void test("a read file attaches at once, with no role picker and no confirm butt
   container.remove();
 });
 
+void test("the card hands back the picked file, so the chat can keep its original", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const picked: File[] = [];
+  const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
+
+  await React.act(async () =>
+    root.render(<DatasetUploadCard initialFile={file} onConfirm={(_, f) => picked.push(f)} />),
+  );
+  for (let i = 0; i < 20 && picked.length === 0; i += 1) {
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  }
+
+  assert.equal(picked.length, 1);
+  assert.equal(picked[0], file, "the same File object, so its bytes can be stored");
+
+  await React.act(async () => root.unmount());
+  container.remove();
+});
+
 void test("a Strict Mode remount attaches once, and a closed card attaches nothing", async () => {
   const csv = "question,answer\nWhat is 2+2?,4\n";
   const settle = async () => {
@@ -389,7 +410,7 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   await React.act(async () => live.api.attach(QA_DATASET));
   assert.match(
     live.draft,
-    /^my text\n\n<attached_file name="qa.csv">\nDataset `qa.csv` attached \(1 rows\)/,
+    /^my text\n\n<attached_file name="qa.csv" id="[0-9a-f-]{36}">\nDataset `qa.csv` attached \(1 rows\)/,
   );
   assert.equal(calls.length, 0, "the wizard changes only on Send");
   assert.ok(!live.api.staging(live.draft), "staging ended");
@@ -404,6 +425,25 @@ void test("a confirmed dataset waits in the draft as a card and sends nothing", 
   window.removeEventListener("wizard:dataset-staged", onStaged);
   assert.equal(live.api.take(live.draft), null, "a dataset applies once");
   assert.ok(!live.api.holds(live.draft), "a sent card is no longer pending");
+  await unmount();
+});
+
+const PASTED = '<attached_file name="qa.csv">\nmy own notes\n</attached_file>';
+
+void test("attach gives the new card a fixed id, and a new card takes out only the pending one (SKY-782)", async () => {
+  const { live, unmount } = await mountDatasetDraft(async () => "staged-l");
+  await React.act(async () => live.setDraft(`my text\n\n${PASTED}`));
+  let first = "";
+  await React.act(async () => void (first = live.api.attach(QA_DATASET)));
+  assert.match(first, /^[0-9a-f-]{36}$/);
+  assert.ok(live.draft.includes(`id="${first}"`), "the card carries its id");
+  assert.ok(live.draft.includes(PASTED), "a file with the same name and other text stays");
+  let second = "";
+  await React.act(async () => void (second = live.api.attach({ ...QA_DATASET, rowCount: 2 })));
+  assert.notEqual(second, first);
+  assert.ok(!live.draft.includes(first), "the earlier pending card left");
+  assert.ok(live.draft.includes(`id="${second}"`));
+  assert.ok(live.draft.includes(PASTED));
   await unmount();
 });
 
@@ -441,7 +481,7 @@ void test("a library pick waits in the draft and applies its override on Send", 
       columnRoles: { q: "input", a: "output" },
     } as never),
   );
-  assert.match(live.draft, /<attached_file name="Saved QA">/);
+  assert.match(live.draft, /<attached_file name="Saved QA" id="[0-9a-f-]{36}">/);
   assert.equal(calls.length, 0);
   const taken = live.api.take(live.draft);
   assert.deepEqual(taken?.override, {

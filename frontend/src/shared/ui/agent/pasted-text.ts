@@ -9,12 +9,17 @@
 const PASTE_ATTACHMENT_MIN_CHARS = 5000;
 
 const BLOCK_RE =
-  /<pasted_text>\n?([\s\S]*?)\n?<\/pasted_text>\n*|<attached_file name="([^"]*)">\n?([\s\S]*?)\n?<\/attached_file>\n*/g;
+  /<pasted_text>\n?([\s\S]*?)\n?<\/pasted_text>\n*|<attached_file name="([^"]*)"(?: id="([^"]*)")?>\n?([\s\S]*?)\n?<\/attached_file>\n*/g;
 
-/** A file attached to a message: its name and the text the agent reads. */
+/**
+ * A file attached to a message: its name, the text the agent reads, and the
+ * card id that links it to its stored original. Messages sent before SKY-782
+ * have no id.
+ */
 export interface AttachedFile {
   name: string;
   text: string;
+  id?: string;
 }
 
 export interface SplitMessage {
@@ -29,9 +34,15 @@ export function splitPastes(value: string): SplitMessage {
   const files: AttachedFile[] = [];
   const text = value.replace(
     BLOCK_RE,
-    (_, paste: string | undefined, name: string | undefined, body: string | undefined) => {
+    (
+      _,
+      paste: string | undefined,
+      name: string | undefined,
+      id: string | undefined,
+      body: string | undefined,
+    ) => {
       if (paste !== undefined) pastes.push(paste);
-      else files.push({ name: name ?? "", text: body ?? "" });
+      else files.push({ name: name ?? "", text: body ?? "", ...(id ? { id } : {}) });
       return "";
     },
   );
@@ -48,17 +59,24 @@ export function splitPastes(value: string): SplitMessage {
 export function joinPastes({ text, pastes, files }: SplitMessage): string {
   if (!pastes.length && !files.length) return text;
   const blocks = [
-    ...files.map((f) => `<attached_file name="${f.name}">\n${f.text}\n</attached_file>`),
+    ...files.map(
+      (f) =>
+        `<attached_file name="${f.name}"${f.id ? ` id="${f.id}"` : ""}>\n${f.text}\n</attached_file>`,
+    ),
     ...pastes.map((p) => `<pasted_text>\n${p}\n</pasted_text>`),
   ].join("\n\n");
   return text ? `${text}\n\n${blocks}` : blocks;
 }
 
-/** Build an attached file whose name and text cannot break out of its block. */
-export function attachedFile(name: string, text: string): AttachedFile {
+/**
+ * Build an attached file whose name and text cannot break out of its block.
+ * Its new card id links it to its stored original, also after a reload.
+ */
+export function attachedFile(name: string, text: string): AttachedFile & { id: string } {
   return {
     name: name.replace(/["<>\r\n]/g, "_"),
     text: text.replaceAll("</attached_file>", "</attached_file >"),
+    id: crypto.randomUUID(),
   };
 }
 

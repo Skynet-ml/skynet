@@ -31,10 +31,22 @@ export class ChatMediaError extends Error {
   }
 }
 
-/** Upload one file; the server finds its real type from its bytes. */
-export async function uploadChatMedia(file: File): Promise<StoredMedia> {
+/**
+ * Upload one file; the server finds a media file's type from its bytes. An
+ * ``original`` is stored whatever its type; its name decides whether it must
+ * be a real PDF, DOCX or XLSX.
+ */
+export async function uploadChatMedia(
+  file: File,
+  { original = false }: { original?: boolean } = {},
+): Promise<StoredMedia> {
   const body = new FormData();
   body.append("file", file, file.name);
+  // An attached file's original is stored whatever its type (SKY-782).
+  if (original) body.append("original", "true");
+  // The browser escapes '"', CR and LF in a multipart filename; the field
+  // keeps the name exact, so the server types the original by the viewer's key.
+  body.append("name", file.name);
   const res = await fetchWithAuthRetry(apiUrl("/agent/media"), { method: "POST", body }).catch(
     () => null,
   );

@@ -6,13 +6,15 @@ the bytes, and ``DELETE /agent/media/{media_id}`` removes them; both answer
 only to the owner. Another user's id gets the same 404 as an unknown id, so
 an id never confirms that a file exists.
 
-The upload header's content type is never trusted. SVG, HEIC and every type
-that is not on the allow-list get a 415, because a browser can run script in
-SVG and a model provider cannot read HEIC.
+The upload header's content type is never trusted. As media, SVG, HEIC and
+every type that is not on the allow-list get a 415, because a browser can run
+script in SVG and a model provider cannot read HEIC.
 
-A ``document`` is the original bytes of an attached PDF, DOCX or XLSX file
-(SKY-735). The agent reads the file's extracted text, which travels in the
-message; the original exists only so the chat viewer can show the real file.
+A ``document`` is the original bytes of an attached file (SKY-735). The agent
+reads the file's extracted text, which travels in the message; the original
+exists only so the chat viewer can show the real file. An upload marked
+``original`` keeps any file (SKY-782): a PDF, DOCX or XLSX keeps its real
+type, which the viewer draws, and every other file is stored as opaque bytes.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from typing import Annotated, Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, literal, select
@@ -59,6 +61,10 @@ MAX_MEDIA_PER_MESSAGE = 10
 MAX_MODEL_IMAGE_BYTES = 12 * 1024 * 1024
 _SNIFF_BYTES = 64
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f"\\/]')
+_KEY_DROPPED = re.compile(r'[\x00-\x1f\x7f"<>_]')
+# JavaScript's String.trim set, less the control characters that the key
+# already drops. Python's bare strip differs: it keeps U+FEFF, drops U+0085.
+_JS_TRIMMED = " \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _ZIP_MAGIC = b"PK\x03\x04"
 # The part each Office Open XML format must hold, and the type it is served as.
 _OFFICE_PARTS = {
@@ -72,6 +78,9 @@ _DOCUMENT_EXTENSIONS = {
     _OFFICE_PARTS["word/document.xml"]: ".docx",
     _OFFICE_PARTS["xl/workbook.xml"]: ".xlsx",
 }
+# An original with no drawn type. The read route serves it with nosniff and a
+# sandbox policy, so a browser never runs or renders it as a page.
+_OPAQUE_DOCUMENT = "application/octet-stream"
 _ZIP_END_MAGIC = b"PK\x05\x06"
 _ZIP64_LOCATOR_MAGIC = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
@@ -204,6 +213,65 @@ def office_document_type(data: bytes) -> str | None:
     except (zipfile.BadZipFile, ValueError):
         return None
     return next((mime for part, mime in _OFFICE_PARTS.items() if part in names), None)
+
+
+def _draw_key(raw: str | None) -> str:
+    """Return the key that decides whether the viewer draws a file.
+
+    Args:
+        raw: The filename from the upload, if any.
+
+    Returns:
+        The name with no path, no control characters and no ``"<>_``, trimmed.
+    """
+    # The same key as the viewer's ``nameKey``. The composer's block changes
+    # ``"<>`` to ``_``, so the raw name, the block's name and the stored name
+    # all give one answer.
+    name = unicodedata.normalize("NFC", re.split(r"[\\/]", raw or "")[-1])
+    return _KEY_DROPPED.sub("", name).strip(_JS_TRIMMED)
+
+
+def _named_document_type(raw: str | None) -> str | None:
+    """Return the document type that a file name's extension claims.
+
+    Args:
+        raw: The filename from the upload, if any.
+
+    Returns:
+        The PDF, DOCX or XLSX content type, or ``None`` for any other name.
+    """
+    # The same rule as the viewer's ``originalFormat``: a name that is only an
+    # extension (".pdf") claims no type, so the viewer does not draw it.
+    stem, dot, ext = _draw_key(raw).rpartition(".")
+    if not stem or not dot:
+        return None
+    return next((mime for mime, known in _DOCUMENT_EXTENSIONS.items() if known == f".{ext.lower()}"), None)
+
+
+def _original_type(head: bytes, data: bytes, raw_name: str | None) -> str:
+    """Find the stored type of an attached file's original.
+
+    Args:
+        head: The first bytes of the file.
+        data: The whole file.
+        raw_name: The filename from the upload, if any.
+
+    Returns:
+        The real PDF, DOCX or XLSX type when the name claims one, else the opaque type.
+
+    Raises:
+        HTTPException: 415 when the name claims a PDF, DOCX or XLSX that the
+            bytes are not; the viewer would fail to draw it.
+    """
+    named = _named_document_type(raw_name)
+    if named is None:
+        return _OPAQUE_DOCUMENT
+    real = "application/pdf" if head.startswith(b"%PDF-") else None
+    if real is None and head.startswith(_ZIP_MAGIC):
+        real = office_document_type(data)
+    if real != named:
+        raise HTTPException(status_code=415, detail="This file type is not supported.")
+    return named
 
 
 def _safe_filename(raw: str | None) -> str:
@@ -441,12 +509,18 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
     def upload_media(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
         file: Annotated[UploadFile, File()],
+        original: Annotated[bool, Form()] = False,
+        name: Annotated[str | None, Form()] = None,
     ) -> ChatMediaResponse:
         """Store one media file for the caller.
 
         Args:
             user: The authenticated caller, who owns the stored file.
             file: The uploaded file.
+            original: Whether the file is an attached file's original, which
+                is stored as a ``document`` whatever its type.
+            name: The file's real name, if the client sends it; else the
+                multipart filename.
 
         Returns:
             The stored file's id, name, kind, real type and size.
@@ -461,7 +535,7 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         """
         engine = _engine(job_store)
         head = file.file.read(_SNIFF_BYTES)
-        sniffed = sniff_media(head, file.content_type or "")
+        sniffed = SniffedMedia("document", _OPAQUE_DOCUMENT) if original else sniff_media(head, file.content_type or "")
         # Media shares the file text route's hourly cap. A document original
         # (SKY-735) gets its own: its file's text read already counted there.
         # So a direct caller can store more files an hour, but the storage quota
@@ -478,13 +552,21 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         data = head + file.file.read(limit + 1 - len(head))
         if len(data) > limit:
             raise HTTPException(status_code=413, detail="This file is too large.")
-        if sniffed.mime_type == "application/zip":
+        # A browser sends '"', CR and LF in a multipart filename as %22, %0D
+        # and %0A, which a real name can also hold. A plain field keeps the
+        # name exact, so the server's key matches the viewer's.
+        raw_name = file.filename if name is None else name
+        filename = _safe_filename(raw_name)
+        if original:
+            sniffed = SniffedMedia("document", _original_type(head, data, raw_name))
+        elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)
             if office is None:
                 raise HTTPException(status_code=415, detail="This file type is not supported.")
             sniffed = SniffedMedia("document", office)
-        filename = _safe_filename(file.filename)
-        if sniffed.kind == "document" and not filename.lower().endswith(_DOCUMENT_EXTENSIONS[sniffed.mime_type]):
+        if sniffed.kind == "document" and _named_document_type(raw_name) != (
+            None if sniffed.mime_type == _OPAQUE_DOCUMENT else sniffed.mime_type
+        ):
             raise HTTPException(status_code=415, detail="This file type is not supported.")
         # The quota check measures storage, and that measure first sweeps the
         # user's stale unsent files, so they never block this upload.
@@ -530,11 +612,13 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         data = load_media_data(engine, [row.id]).get(row.id)
         if data is None:
             raise HTTPException(status_code=404, detail="Attachment not found.")
+        # The viewer never draws an opaque original, so the browser saves it.
+        disposition = "attachment" if row.mime_type == _OPAQUE_DOCUMENT else "inline"
         return Response(
             content=data,
             media_type=row.mime_type,
             headers={
-                "Content-Disposition": f"inline; filename*=UTF-8''{quote(row.filename)}",
+                "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(row.filename)}",
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
                 "Cache-Control": "private, max-age=3600",

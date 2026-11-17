@@ -22,7 +22,7 @@ void test("a dataset card joins the typed text and goes as an attached file", ()
   const draft = putDatasetChip("Use this for setup", chip, null);
   const split = splitPastes(draft);
   assert.equal(split.text, "Use this for setup");
-  assert.deepEqual(split.files, [{ name: "data.xlsx", text: chip.text }]);
+  assert.deepEqual(split.files, [{ name: "data.xlsx", text: chip.text, id: chip.id }]);
   assert.ok(draftHasChip(draft, chip));
 });
 

@@ -30,7 +30,7 @@ from uuid import uuid4
 
 import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
@@ -106,7 +106,7 @@ TITLE_MAX_CHARS = 40
 # Composer blocks for attached files and long pastes (frontend
 # ``shared/ui/agent/pasted-text.ts``); their bodies are not the user's words.
 _COMPOSER_BLOCK_RE = re.compile(
-    r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)">.*?</attached_file>', re.DOTALL
+    r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)"(?: id="[^"]*")?>.*?</attached_file>', re.DOTALL
 )
 # Hidden setup wizard turns (frontend ``features/agent-panel/lib/screen-agent.ts``).
 # The kickoff holds no user words; a Back turn carries the agent's request.
@@ -307,6 +307,29 @@ class GeneralistAgentRequest(BaseModel):
             "original is only for the chat viewer: the model reads the file's text in the message."
         ),
     )
+    media_cards: dict[str, Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9-]{1,64}$")]] = Field(
+        default_factory=dict,
+        max_length=MAX_MEDIA_PER_MESSAGE,
+        description=(
+            "Maps a document original's id in ``media_ids`` to the ``id`` of its file block in the "
+            "message. The stored turn keeps it as the media item's ``card``, so the viewer links the "
+            "original to its file after a reload."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _cards_name_sent_media(self) -> GeneralistAgentRequest:
+        """Refuse a card link for a file that the message does not send.
+
+        Returns:
+            The request.
+
+        Raises:
+            ValueError: A ``media_cards`` key is not in ``media_ids``.
+        """
+        if not set(self.media_cards) <= set(self.media_ids):
+            raise ValueError("media_cards keys must be in media_ids.")
+        return self
 
 
 # Input for a compaction the user asked for with /compact.
@@ -719,6 +742,7 @@ def _persist_user_turn(
     steer: bool = False,
     compaction: dict[str, Any] | None = None,
     media: list[ChatMediaModel] | None = None,
+    cards: dict[str, str] | None = None,
     replaced: bool = False,
     copy_bytes: int | None = None,
     session: Session | None = None,
@@ -735,6 +759,8 @@ def _persist_user_turn(
         media: The caller's attached files. The row names them, so a reload
             shows them again. The conversation holds its own rows for them, so
             deleting the chat deletes them and never touches another chat.
+        cards: The file block id that each document original belongs to, by
+            the caller's media id.
         replaced: True when this message replaces stored turns (an edit or a
             regenerate). The files that only those turns named are deleted.
         copy_bytes: The file copy bytes that the caller already checked
@@ -762,7 +788,11 @@ def _persist_user_turn(
             # store a turn that names a missing file.
             if any(row.id not in held for row in media):
                 raise HTTPException(status_code=404, detail="Attachment not found.")
-            metadata["media"] = [{"id": held[row.id], "name": row.filename, "kind": row.kind} for row in media]
+            metadata["media"] = [
+                {"id": held[row.id], "name": row.filename, "kind": row.kind}
+                | ({"card": cards[row.id]} if row.kind == "document" and row.id in (cards or {}) else {})
+                for row in media
+            ]
         if replaced:
             _free_unnamed_media(session, conversation_id, {item["id"] for item in metadata.get("media", [])})
         message = AgentMessageModel(
@@ -1831,6 +1861,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                         req.user_message,
                         compaction=carried,
                         media=media,
+                        cards=req.media_cards,
                         replaced=req.edit_user_text is not None or req.regenerate,
                         copy_bytes=copied,
                         session=session,

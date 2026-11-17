@@ -39,7 +39,7 @@ test("typed text comes first, then attached files, then pastes, and round-trips"
   // History turns are cut from the start, so the question must lead.
   assert.ok(
     joined.startsWith(
-      'compare them\n\n<attached_file name="report.pdf">\nPage 1\nrevenue\n</attached_file>',
+      `compare them\n\n<attached_file name="report.pdf" id="${parts.files[0].id}">\nPage 1\nrevenue\n</attached_file>`,
     ),
   );
   assert.deepEqual(splitPastes(joined), parts);
@@ -62,4 +62,12 @@ test("a file name or body cannot break out of its block", () => {
   assert.equal(file.name, "evil____x_.txt");
   const parts = { text: "hi", pastes: [], files: [file] };
   assert.deepEqual(splitPastes(joinPastes(parts)), parts);
+});
+
+test("each attached file gets its own card id, and a block without one still splits", () => {
+  const [a, b] = [attachedFile("a.pdf", "x"), attachedFile("a.pdf", "x")];
+  assert.ok(a.id && b.id && a.id !== b.id);
+  const legacy = '<attached_file name="old.pdf">\nPage 1\n</attached_file>';
+  assert.deepEqual(splitPastes(legacy).files, [{ name: "old.pdf", text: "Page 1" }]);
+  assert.equal(joinPastes(splitPastes(legacy)), legacy);
 });

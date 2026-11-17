@@ -32,7 +32,8 @@ interface DatasetUploadCardProps {
   /** File already chosen via the OS picker; when set, the card skips the
    *  dropzone entirely and parses it straight away. */
   initialFile?: File | null;
-  onConfirm: (confirmed: ConfirmedDataset) => void;
+  /** The picked file goes too, so the chat can keep its original for the viewer. */
+  onConfirm: (confirmed: ConfirmedDataset, file: File) => void;
 }
 
 const DATASET_FILE_ACCEPT = DATASET_UPLOAD_ACCEPT;
@@ -217,7 +218,8 @@ function libraryPickNote(picked: ConfirmedLibraryDataset): string {
  *     (removed, or replaced by another dataset), so its tool card can reopen.
  *
  * Returns:
- *   ``attach`` and ``attachLibrary`` put a card in the draft. ``holds``
+ *   ``attach`` and ``attachLibrary`` put a card in the draft; ``attach``
+ *   returns the card's id, which links its stored original. ``holds``
  *   tells if a draft has the pending card. ``staging``
  *   tells if Send must wait for the rows. ``take`` applies the dataset of a
  *   draft on Send and returns its turn override, or null for no dataset.
@@ -235,7 +237,7 @@ export function useDatasetDraft({
   wizard: DatasetUploadWizard | null;
   onRelease?: (owner: string) => void;
 }): {
-  attach: (dataset: ConfirmedDataset, owner?: string) => void;
+  attach: (dataset: ConfirmedDataset, owner?: string) => string;
   attachLibrary: (picked: ConfirmedLibraryDataset, owner?: string) => void;
   holds: (draft: string) => boolean;
   staging: (draft: string) => boolean;
@@ -274,9 +276,10 @@ export function useDatasetDraft({
 
   const attach = React.useCallback(
     (dataset: ConfirmedDataset, owner?: string) => {
+      const chip = attachedFile(dataset.fileName, datasetAttachedNote(dataset));
       const next: DraftDataset = {
         kind: "upload",
-        chip: attachedFile(dataset.fileName, datasetAttachedNote(dataset)),
+        chip,
         owner,
         dataset,
         staging: true,
@@ -289,6 +292,7 @@ export function useDatasetDraft({
         .then((stagedId) => {
           if (pendingRef.current === next) update({ ...next, staging: false, stagedId });
         });
+      return chip.id;
     },
     [putCard, stage, update],
   );
@@ -404,7 +408,7 @@ export function DatasetUploadCard({
       };
       setParsed(read);
       setConfirmed(true);
-      onConfirmRef.current(read);
+      onConfirmRef.current(read, file);
     } catch {
       if (readId !== readRef.current) return;
       setParsed(null);
