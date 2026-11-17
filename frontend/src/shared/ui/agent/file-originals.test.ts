@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fitOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
+import { fitOriginals, keptOriginals, originalFormat, pairOriginals } from "./file-originals.ts";
 
 test("the viewer draws only a pdf, docx or xlsx original", () => {
   assert.equal(originalFormat("Brief.PDF"), "pdf");
@@ -68,4 +68,19 @@ test("an original the viewer draws fits before one it does not draw (SKY-782)", 
   const pdf = { name: "brief.pdf" };
   assert.deepEqual(fitOriginals([csv, txt, pdf], 1), [pdf]);
   assert.deepEqual(fitOriginals([csv, txt, pdf], 2), [csv, pdf]);
+});
+
+test("a legacy name whose file and original counts differ keeps no original", () => {
+  const first = { name: "report.pdf", id: "1" };
+  const second = { name: "report.pdf", id: "2" };
+  const other = { name: "plan.docx", id: "3" };
+  // One of two same-name files left: no one can tell whose original stays.
+  assert.deepEqual(
+    keptOriginals([{ name: "report.pdf" }, { name: "plan.docx" }], [first, second, other]),
+    [other],
+  );
+  assert.deepEqual(
+    keptOriginals([{ name: "report.pdf" }, { name: "report.pdf" }], [first, second]),
+    [first, second],
+  );
 });

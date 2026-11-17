@@ -27,7 +27,7 @@ import {
 } from "@/shared/lib/thinking-segments";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
-import { pairOriginals } from "@/shared/ui/agent/file-originals";
+import { keptOriginals } from "@/shared/ui/agent/file-originals";
 import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
@@ -267,19 +267,20 @@ interface SessionRuntime {
 /**
  * The media a turn sends: all of it, but only the originals (SKY-735) whose
  * file cards are in the turn's text. A card's id links its original
- * (SKY-782); a card sent before SKY-782 has none and pairs by name.
+ * (SKY-782); a card sent before SKY-782 has none and keeps its original
+ * only when its name's counts match.
  */
 function messageMedia(media: AgentMessage["media"], content: string): AgentMessage["media"] {
   if (!media) return media;
   const files = splitPastes(content).files;
   const cards = new Set(files.flatMap((f) => (f.id ? [f.id] : [])));
-  const legacy = pairOriginals(
+  const legacy = keptOriginals(
     files.filter((f) => !f.id),
     media.filter((m) => m.kind === "document" && !m.card),
   );
   const kept = new Set([
     ...media.filter((m) => m.kind === "document" && m.card && cards.has(m.card)),
-    ...legacy.filter((m) => m !== null),
+    ...legacy,
   ]);
   const next = media.filter((m) => m.kind !== "document" || kept.has(m));
   return next.length ? next : undefined;

@@ -55,6 +55,30 @@ export function pairOriginals<T extends { name: string }>(
 }
 
 /**
+ * The originals that can go out with the ``files`` of a message sent before
+ * SKY-782. Pairing by name is sure only when a name has one original for each
+ * of its files. When the counts differ (an edit took a file out), no one can
+ * tell which file lost its original, so all the files with that name fall
+ * back to their text.
+ */
+export function keptOriginals<T extends { name: string }>(
+  files: ReadonlyArray<{ name: string }>,
+  originals: readonly T[],
+): T[] {
+  const count = new Map<string, number>();
+  for (const file of files)
+    if (originalFormat(file.name)) {
+      const key = nameKey(file.name);
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+  for (const o of originals) {
+    const key = nameKey(o.name);
+    count.set(key, (count.get(key) ?? 0) - 1);
+  }
+  return originals.filter((o) => originalFormat(o.name) && count.get(nameKey(o.name)) === 0);
+}
+
+/**
  * The originals that fit in ``room`` places of a message, in their order. The
  * viewer draws only a PDF, DOCX or XLSX original, so those fit first.
  */

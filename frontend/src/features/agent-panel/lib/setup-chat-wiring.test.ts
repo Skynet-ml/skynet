@@ -830,6 +830,29 @@ test("Send reads the ready media and the wait reason for the draft's own file ca
   assert.deepEqual(calls, ["ready c-1", "blocked c-1", "toast wait"]);
 });
 
+test("a confirmed dataset card stores its file's original under the card's id (SKY-782)", () => {
+  for (const webChat of [false, true]) {
+    const calls: unknown[][] = [];
+    const file = { name: "qa.xlsx" };
+    const confirm = expression(panel, "handleDatasetConfirm", {
+      webChat,
+      confirmedDatasetCallsRef: { current: new Set<string>() },
+      datasetDraft: { attach: (...args: unknown[]) => (calls.push(["attach", ...args]), "card-1") },
+      addOriginals: (files: unknown) => calls.push(["addOriginals", files]),
+    });
+    confirm("call-1", { fileName: "qa.xlsx" }, file);
+    assert.deepEqual(
+      calls,
+      webChat
+        ? []
+        : [
+            ["attach", { fileName: "qa.xlsx" }, "call-1"],
+            ["addOriginals", [{ file, card: "card-1" }]],
+          ],
+    );
+  }
+});
+
 // Run the panel's handleSubmit with a pending dataset card (SKY-780).
 function datasetSubmit(options: {
   staging?: boolean;

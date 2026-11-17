@@ -87,7 +87,10 @@ def _seed(store: _MemStore, *conversations: tuple[str, str]) -> None:
         conversations: ``(id, username)`` pairs to insert.
     """
     with store._session_factory() as session:
-        session.add_all(AgentConversationModel(id=cid, username=username, title=cid) for cid, username in conversations)
+        session.add_all(
+            AgentConversationModel(id=cid, username=username, title=cid)
+            for cid, username in conversations
+        )
         session.commit()
 
 

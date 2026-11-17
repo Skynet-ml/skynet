@@ -35,16 +35,11 @@ const src = new URL("../../../", import.meta.url);
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (stubs[specifier]) {
-      return {
-        shortCircuit: true,
-        url: `data:text/javascript,${encodeURIComponent(stubs[specifier])}`,
-      };
+      return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(stubs[specifier])}` };
     }
     const base = specifier.startsWith("@/")
       ? new URL(specifier.slice(2), src)
-      : specifier.startsWith(".") &&
-          !/\.tsx?$/.test(specifier) &&
-          context.parentURL?.startsWith("file:")
+      : specifier.startsWith(".") && !/\.tsx?$/.test(specifier) && context.parentURL?.startsWith("file:")
         ? new URL(specifier, context.parentURL)
         : null;
     if (base) {
@@ -92,14 +87,7 @@ async function mount() {
   const root = createRoot(document.getElementById("root")!);
   await React.act(async () => root.render(React.createElement(Probe)));
   const act = (fn: () => void) => React.act(async () => fn());
-  return {
-    agent: () => agent.current!,
-    calls,
-    titles,
-    missed,
-    act,
-    unmount: () => React.act(async () => root.unmount()),
-  };
+  return { agent: () => agent.current!, calls, titles, missed, act, unmount: () => React.act(async () => root.unmount()) };
 }
 
 const done = { assistant_message: "hi", model: null, served_model: null, stats: null };
@@ -113,9 +101,7 @@ test("an error after done leaves the next turn untouched", async () => {
       calls[0]!.handlers.onDone!(done);
     });
     await act(() => agent().send("two"));
-    await act(() =>
-      calls[1]!.handlers.onToolStart!({ id: "t1", tool: "list_jobs", arguments: {} }),
-    );
+    await act(() => calls[1]!.handlers.onToolStart!({ id: "t1", tool: "list_jobs", arguments: {} }));
 
     await act(() => calls[0]!.handlers.onError!("socket closed"));
     assert.equal(agent().status, "streaming");
@@ -142,11 +128,7 @@ test("a late title event renames the row and leaves the next turn's edit, status
     assert.deepEqual(calls[1]!.req.edit_user_text, "one");
 
     await act(() =>
-      calls[0]!.handlers.onConversationTitle!({
-        conversation_id: "c1",
-        title: "Model",
-        cut_title: "one",
-      }),
+      calls[0]!.handlers.onConversationTitle!({ conversation_id: "c1", title: "Model", cut_title: "one" }),
     );
     assert.deepEqual(titles, [["c1", "Model", "one"]]);
     assert.equal(agent().status, "streaming");
@@ -176,10 +158,7 @@ test("a new stream closes the oldest title tail when the connections would pass 
     await act(() => agent().send("chat 3"));
     assert.equal(calls.length, 5);
     assert.equal(calls[0]!.handlers.signal.aborted, true);
-    assert.equal(
-      calls.slice(1).some((c) => c.handlers.signal.aborted),
-      false,
-    );
+    assert.equal(calls.slice(1).some((c) => c.handlers.signal.aborted), false);
   } finally {
     await unmount();
   }
@@ -214,9 +193,7 @@ test("a new chat's stream that closes before its title asks to read the title ag
   const { agent, calls, missed, act, unmount } = await mount();
   try {
     await act(() => agent().send("one"));
-    await act(() =>
-      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "one" }),
-    );
+    await act(() => calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "one" }));
     await act(() => agent().stop());
     await act(() => calls[0]!.close());
     assert.deepEqual(missed, [["c1", "one"]]);
@@ -226,11 +203,7 @@ test("a new chat's stream that closes before its title asks to read the title ag
     await act(() => agent().send("two"));
     await act(() => {
       calls[1]!.handlers.onConversationMeta!({ conversation_id: "c2", title: "two" });
-      calls[1]!.handlers.onConversationTitle!({
-        conversation_id: "c2",
-        title: "T",
-        cut_title: "two",
-      });
+      calls[1]!.handlers.onConversationTitle!({ conversation_id: "c2", title: "T", cut_title: "two" });
       calls[1]!.handlers.onDone!(done);
     });
     await act(() => calls[1]!.close());
@@ -253,11 +226,7 @@ test("an empty title event ends the wait: no title read and no rename", async ()
     await act(() => {
       calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "one" });
       calls[0]!.handlers.onDone!(done);
-      calls[0]!.handlers.onConversationTitle!({
-        conversation_id: "c1",
-        title: "",
-        cut_title: "one",
-      });
+      calls[0]!.handlers.onConversationTitle!({ conversation_id: "c1", title: "", cut_title: "one" });
     });
     await act(() => calls[0]!.close());
     assert.deepEqual(missed, []);
@@ -378,6 +347,27 @@ test("a turn sends each original's card id, and an edit keeps the original of ea
   }
 });
 
+test("an edit of a message from before card ids keeps no original of a name whose counts differ (SKY-782)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  const block = `<attached_file name="report.pdf">\ntext\n</attached_file>\n\n`;
+  const doc = (id: string) => ({ id, name: "report.pdf", kind: "document" as const, url: "" });
+  try {
+    await act(() =>
+      agent().send(`${block}${block}look`, undefined, { media: [doc("m-a"), doc("m-b")] }),
+    );
+    assert.deepEqual(calls[0]!.req.media_ids, ["m-a", "m-b"]);
+    await act(() => {
+      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "look" });
+      calls[0]!.handlers.onDone!(done);
+    });
+    // One of two same-name blocks left: no one can tell whose original stays.
+    await act(() => agent().editAndResend(0, `${block}look`));
+    assert.equal(calls[1]!.req.media_ids, undefined, "no original goes");
+  } finally {
+    await unmount();
+  }
+});
+
 test("an edit that drops a file's block also drops that file's original, and a retry keeps it out", async () => {
   const { agent, calls, act, unmount } = await mount();
   const block = (name: string) => `<attached_file name="${name}">\ntext\n</attached_file>\n\n`;
@@ -396,10 +386,7 @@ test("an edit that drops a file's block also drops that file's original, and a r
 
     await act(() => agent().editAndResend(0, `${block("b.docx")}look`));
     assert.deepEqual(calls[1]!.req.media_ids, ["m-b"]);
-    assert.deepEqual(
-      agent().messages[0]?.media?.map((m) => m.id),
-      ["m-b"],
-    );
+    assert.deepEqual(agent().messages[0]?.media?.map((m) => m.id), ["m-b"]);
 
     await act(() => agent().retry());
     assert.deepEqual(calls[2]!.req.media_ids, ["m-b"]);
@@ -420,10 +407,7 @@ for (const drop of ["pending clear", "stop"] as const) {
       await act(() => h.onReasoningPatch!("Check the jobs."));
       await act(() => (drop === "stop" ? agent().stop() : h.onToolPendingClear!()));
       const last = agent().messages[agent().messages.length - 1];
-      assert.deepEqual(
-        last?.toolCalls?.map((c) => c.id),
-        ["t1"],
-      );
+      assert.deepEqual(last?.toolCalls?.map((c) => c.id), ["t1"]);
       assert.equal(last?.thinkingSegments?.[0]?.toolsBefore, 1);
     } finally {
       await unmount();
