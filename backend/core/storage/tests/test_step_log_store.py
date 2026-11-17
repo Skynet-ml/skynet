@@ -62,7 +62,7 @@ class CountingObjectStore(LocalObjectStore):
 
 
 def _make_engine(path: Path) -> Engine:
-    """Return a SQLite file engine with the schema and job ``job-1`` at generation 1.
+    """Return a SQLite file engine with the schema and jobs ``job-1`` and ``job-2`` at generation 1.
 
     Args:
         path: The database file.
@@ -793,6 +793,16 @@ def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
     """An empty, too long or not printable ASCII worker id, or one that changes the pack folder, is refused."""
     with pytest.raises(ValueError, match="bad worker id"):
         make_store(worker_id)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"flush_window_seconds": 0.0}, {"flush_window_seconds": -1.0}, {"flush_max_bytes": 0}, {"flush_max_bytes": -1}],
+)
+def test_a_flush_window_or_size_cap_that_is_not_positive_is_refused(make_store, options: dict[str, float]) -> None:
+    """A window or a size cap that the settings refuse fails at construction, and does not read the setting."""
+    with pytest.raises(ValueError, match="bad flush window or size cap"):
+        make_store(**options)
 
 
 def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:

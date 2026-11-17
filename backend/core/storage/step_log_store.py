@@ -230,12 +230,13 @@ class StepLogStore:
             objects: Where the packs go.
             worker_id: This worker's stable id; its packs go under
                 ``packs/<worker_id>/`` so a restarted worker recovers its own.
-            flush_window_seconds: The buffer window; ``None`` reads the setting.
-            flush_max_bytes: The buffer size cap; ``None`` reads the setting.
+            flush_window_seconds: The buffer window, above 0; ``None`` reads the setting.
+            flush_max_bytes: The buffer size cap, at least 1; ``None`` reads the setting.
 
         Raises:
             ValueError: When ``worker_id`` is empty, too long, not printable
-                ASCII, has a ``/``, or is ``.`` or ``..``.
+                ASCII, has a ``/``, or is ``.`` or ``..``; or when the window is
+                not above 0 or the size cap is below 1.
         """
         # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
         if not 0 < len(worker_id) <= 64 or not _is_text_id(worker_id) or "/" in worker_id or worker_id in {".", ".."}:
@@ -243,8 +244,13 @@ class StepLogStore:
         self._engine = engine
         self._objects = objects
         self._worker_id = worker_id
-        self._window = flush_window_seconds or settings.step_log_flush_window_seconds
-        self._max_bytes = flush_max_bytes or settings.step_log_flush_max_bytes
+        window = settings.step_log_flush_window_seconds if flush_window_seconds is None else flush_window_seconds
+        max_bytes = settings.step_log_flush_max_bytes if flush_max_bytes is None else flush_max_bytes
+        # A window of 0 or less makes the flusher retry a failed flush with no wait.
+        if not window > 0 or max_bytes < 1:
+            raise ValueError(f"bad flush window or size cap: {window!r}, {max_bytes!r}")
+        self._window = window
+        self._max_bytes = max_bytes
         self._cond = threading.Condition()
         self._flush_lock = threading.Lock()
         self._pending: list[tuple[_Step | _Object, bytes]] = []
