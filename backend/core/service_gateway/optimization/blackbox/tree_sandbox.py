@@ -54,8 +54,9 @@ _IN_DIR = ".tree-in"
 _OUT_FILE = ".tree-out.b64"
 _TAR_FILE = ".tree-out.tgz"
 _MOVE_TIMEOUT_SECONDS = 600
-# Base64 text is 4/3 of the archive, plus line breaks on Linux.
-_MAX_OUT_FILE_BYTES = 2 * MAX_ARCHIVE_BYTES
+# The base64 text of the largest archive: 4 characters per 3 bytes, plus a line break per 76 on Linux.
+_MAX_B64_CHARS = 4 * -(-MAX_ARCHIVE_BYTES // 3)
+_MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76)
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
 
@@ -186,11 +187,13 @@ class TreeSandbox:
 
         Raises:
             GrantDeniedError: When the grants do not resolve.
-            BoxFailureError: When the box fails or dies; retry the step.
+            BoxFailureError: When the box fails, dies or does not go back;
+                retry the step.
             TreeRejectedError: When the box's tree is over a size limit or
                 not a valid tree; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see the tree.
+            BudgetReached: And the other budget errors; the run stops.
         """
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
@@ -244,11 +247,13 @@ class TreeSandbox:
 
         Raises:
             GrantDeniedError: When the grants do not resolve.
-            BoxFailureError: When the box fails or dies; retry the step.
+            BoxFailureError: When the box fails, dies or does not go back;
+                retry the step.
             MetricFailedError: When the metric fails or prints no finite number.
             TreeRejectedError: When the outputs tree holds a link; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see a tree.
+            BudgetReached: And the other budget errors; the run stops.
         """
         grant_list_id = self._grant_list_id(step, grants)
         outputs = tree_to_tar(self._trees, step.run_id, outputs_tree_id)
@@ -325,8 +330,9 @@ class TreeSandbox:
 
         Raises:
             GrantDeniedError: When the source refuses the grants.
-            BoxFailureError: When the box does not open, fails or dies.
+            BoxFailureError: When the box does not open, fails, dies or does not go back.
             TreeRejectedError: When the box's tree is over a size limit or not a valid tree.
+            BudgetReached: And the other budget errors, from the work or the release.
         """
         try:
             box = source.acquire(step.agent_id, grants)
@@ -355,7 +361,8 @@ class TreeSandbox:
                 raise
             except Exception as error:
                 if healthy:
-                    raise
+                    # Only the type: the provider's text can name the box.
+                    raise BoxFailureError(step.step_id, f"The box did not go back ({type(error).__name__}).") from error
                 # The step's own error is the one the caller acts on.
                 logger.warning("A failed tree sandbox box did not go back (%s)", type(error).__name__)
         return outcome
@@ -404,14 +411,15 @@ class TreeSandbox:
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
-            # The size check runs in the box, so the worker never reads an oversized file.
+            # The box checks the archive bytes against the tree limit, so the worker never reads an oversized archive.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .; base64 < {_TAR_FILE} > {_OUT_FILE};"
-            f' [ "$(wc -c < {_OUT_FILE})" -le {_MAX_OUT_FILE_BYTES} ] || exit {_TOO_LARGE_EXIT}',
+            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
+            f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
+            f" base64 < {_TAR_FILE} > {_OUT_FILE}",
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if result.exit_code == _TOO_LARGE_EXIT:
-            raise BadArchiveError(f"The tree archive is larger than {_MAX_OUT_FILE_BYTES} base64 bytes.")
+            raise BadArchiveError(f"The tree archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
         text = box.read_file(_OUT_FILE) if result.ok else None
         if text is None:
             raise RuntimeError(f"The tree could not be read back (exit code {result.exit_code}).")

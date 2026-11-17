@@ -619,17 +619,64 @@ def test_a_budget_stop_inside_the_box_gives_the_box_back_unhealthy_and_stays_a_b
     assert source.released == [False]
 
 
-def test_a_release_error_does_not_replace_the_box_failure(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The caller gets the step's box failure, not the release's own error."""
+def test_a_release_error_does_not_replace_the_box_failure(
+    trees: TreeStore, step_log: StepLogStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The caller gets the step's box failure; the release's own error is logged by type only.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        caplog: Pytest log capture.
+    """
     sandbox, source = _fake_sandbox(
-        trees, step_log, _FakeBox(SandboxInfraError("The box stopped.")), RuntimeError("no close")
+        trees, step_log, _FakeBox(SandboxInfraError("The box stopped.")), RuntimeError("box-secret-name")
     )
 
-    with pytest.raises(BoxFailureError) as raised:
+    with caplog.at_level("WARNING", logger=tree_sandbox.__name__), pytest.raises(BoxFailureError) as raised:
         sandbox.run(_step(), _tree(trees, {}), "true", [])
 
     assert raised.value.step_id == f"{RUN}:agent-1:1"
     assert source.released == [False]
+    assert [record.getMessage() for record in caplog.records] == [
+        "A failed tree sandbox box did not go back (RuntimeError)"
+    ]
+    assert "box-secret-name" not in caplog.text
+
+
+def test_a_release_error_after_good_work_is_a_box_failure_without_the_provider_text(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A provider error of a healthy release becomes a typed box failure that names the step."""
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(), SandboxInfraError("box-secret-name"))
+    empty = _tree(trees, {})
+
+    with pytest.raises(BoxFailureError) as raised:
+        sandbox.score(_step(), empty, empty, "echo 1.0")
+
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
+    assert "box-secret-name" not in str(raised.value)
+    assert source.released == [True]
+
+
+@pytest.mark.parametrize("error", [BudgetReached("stopped"), UsagePendingError("pending")])
+def test_a_budget_error_of_a_release_after_good_work_goes_up(
+    trees: TreeStore, step_log: StepLogStore, error: BaseException
+) -> None:
+    """A budget error of a healthy release is not hidden in a box failure, so the run stops.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        error: The budget error the release raises.
+    """
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(), error)
+    empty = _tree(trees, {})
+
+    with pytest.raises(type(error)):
+        sandbox.score(_step(), empty, empty, "echo 1.0")
+
+    assert source.released == [True]
 
 
 @pytest.mark.parametrize(
@@ -799,21 +846,71 @@ def test_any_link_in_the_outputs_tree_is_refused(trees: TreeStore, step_log: Ste
 def test_a_tree_over_the_box_size_limit_is_refused_in_the_box(
     trees: TreeStore, step_log: StepLogStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The box checks the archive size, so the worker never reads it; the step does not retry.
+    """An archive just over the byte limit stops in the box, so the worker never reads it; the step does not retry.
+
+    Random bytes do not compress, so the archive is a little larger than the file, and its base64 text
+    is well under twice the limit.
 
     Args:
         trees: The tree store.
         step_log: The step log.
         monkeypatch: Pytest monkeypatch.
     """
-    monkeypatch.setattr(tree_sandbox, "_MAX_OUT_FILE_BYTES", 10)
-    sandbox, candidates, _ = _sandbox(trees, step_log, _Runtime())
+    size = 300_000
+    monkeypatch.setattr(tree_sandbox, "MAX_ARCHIVE_BYTES", size)
+    reads: list[str] = []
+
+    class _ReadCountingSession(_DyingSession):
+        """Run every command, and record each file read."""
+
+        def run(self, command: str, **options: Any) -> CommandResult:
+            """Run the command in the inner box.
+
+            Args:
+                command: The shell command.
+                **options: The run options.
+
+            Returns:
+                The inner box's result.
+            """
+            return self._inner.run(command, **options)
+
+        def read_file(self, path: str) -> str | None:
+            """Record the read, then read from the inner box.
+
+            Args:
+                path: Relative path.
+
+            Returns:
+                The text, or ``None``.
+            """
+            reads.append(path)
+            return self._inner.read_file(path)
+
+    class _ReadCountingSource(_Source):
+        """Give boxes that record each file read."""
+
+        def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+            """Open a box and wrap it.
+
+            Args:
+                agent_id: The agent.
+                grants: The grants.
+
+            Returns:
+                The wrapped box.
+            """
+            return _ReadCountingSession(super().acquire(agent_id, grants))  # type: ignore[return-value]
+
+    source = _ReadCountingSource(_Runtime())
+    sandbox = TreeSandbox(trees, step_log, source, source)
 
     with pytest.raises(TreeRejectedError) as raised:
-        sandbox.run(_step(), _tree(trees, {}), "echo data > a.txt", [])
+        sandbox.run(_step(), _tree(trees, {}), f"head -c {size} /dev/urandom > a.bin", [])
 
     assert raised.value.step_id == f"{RUN}:agent-1:1"
-    assert candidates.released == [False]
+    assert reads == []
+    assert source.released == [False]
     assert step_log.get_step(f"{RUN}:agent-1:1") is None
 
 

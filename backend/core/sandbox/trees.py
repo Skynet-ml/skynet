@@ -307,7 +307,7 @@ def _byte_length(name: str) -> int:
     return len(name.encode("utf-8", "surrogateescape"))
 
 
-def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
+def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytearray:
     """Return a regular member's content, read in chunks under the read limit.
 
     Args:
@@ -315,15 +315,15 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
         member: A regular-file member.
 
     Returns:
-        The member's bytes.
+        The member's bytes, in a bytearray.
 
     Raises:
         BadArchiveError: When the member ends before its header size.
     """
     handle = archive.extractfile(member)
     if handle is None:
-        return b""
-    # One buffer of the header size, filled in place, so the file is never in memory twice.
+        return bytearray()
+    # The read holds one buffer of the member size, not a list of chunks plus a joined copy.
     data = bytearray(member.size)
     with memoryview(data) as view:
         filled = 0
@@ -332,7 +332,7 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
             if not count:
                 raise BadArchiveError(f"Archive member {member.name!r} is shorter than its header says.")
             filled += count
-    # The tree store copies the bytes into its own object, so no second copy is made here.
+    # A bytearray, not bytes: bytes(data) would add one more full copy.
     return data
 
 
