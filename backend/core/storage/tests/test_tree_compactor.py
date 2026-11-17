@@ -10,6 +10,7 @@ PostgreSQL database, in their own schema that they drop after.
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import threading
 import time
 import types
@@ -24,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import create_engine, event, select, text, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from core.config import app_env, settings
@@ -349,7 +351,7 @@ def test_a_lone_pack_is_not_merged(engine, objects, store, make_compactor) -> No
 
 
 def test_a_large_pack_is_not_merged(engine, objects, store, make_compactor) -> None:
-    """A pack at the target size or above stays as it is."""
+    """A pack over half the target size stays as it is."""
     _fill(store, flushes=2)
     size = min(len(objects.get(key)) for key in objects.list("packs/w1/"))
 
@@ -874,6 +876,117 @@ def test_a_pass_never_goes_past_the_target_bytes(engine, objects, store, make_co
     _assert_all_readable(store, written)
 
 
+def _fill_sizes(step_log: StepLogStore, paddings: list[int]) -> list[tuple[str, int]]:
+    """Write one pack per padding, each with one step whose body holds that many random bytes.
+
+    Args:
+        step_log: The step log.
+        paddings: The body padding of each pack, oldest first.
+
+    Returns:
+        Each pack key with its byte size, oldest first.
+    """
+    for n, padding in enumerate(paddings):
+        step_log.commit(
+            run_id=RUNS[0],
+            agent_id="agent-a",
+            seq=n,
+            kind="model",
+            execution_generation=1,
+            grant_list_id="grants-1",
+            body={"output": os.urandom(padding).hex()},
+        )
+        step_log.flush()
+    with Session(step_log._engine) as session:
+        return [
+            (row.pack_key, row.byte_size)
+            for row in session.execute(
+                select(StoragePackModel.pack_key, StoragePackModel.byte_size).order_by(
+                    StoragePackModel.created_at, StoragePackModel.pack_key
+                )
+            )
+        ]
+
+
+def test_an_old_large_pack_does_not_stop_the_newer_merges(engine, objects, store, make_compactor) -> None:
+    """The oldest pack has no room for one more pack; the pass still merges the three newer small packs."""
+    packs = _fill_sizes(store, [4000, 300, 300, 300])
+    (large, large_size), *small = packs
+    target = large_size + min(size for _, size in small) - 1
+    assert 3 * max(size for _, size in small) <= target
+
+    assert make_compactor(target_bytes=target).merge() == 3
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert _pack_keys_of_rows(engine) == {large, compacted}
+
+
+def test_a_later_smaller_pack_fills_the_target_exactly(engine, objects, store, make_compactor) -> None:
+    """A pack that does not fit is skipped, and a later smaller pack that brings the total to the target joins."""
+    packs = _fill_sizes(store, [1000, 1000, 600, 300])
+    (_, size0), (_, size1), (skipped, size2), (_, size3) = packs
+    assert size2 > size3
+    target = size0 + size1 + size3
+
+    assert make_compactor(target_bytes=target).merge() == 3
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert _pack_keys_of_rows(engine) == {skipped, compacted}
+
+
+def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """A GET that fails with an error other than a missing object fails the merge and marks no pack."""
+    _fill(store)
+    failing = min(objects.list("packs/w1/"))
+    get = objects.get
+
+    def flaky_get(key: str, *args: Any) -> bytes:
+        """Fail for one pack, as a network error does.
+
+        Args:
+            key: The object key.
+            *args: The range arguments.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            OSError: For the failing pack.
+        """
+        if key == failing:
+            raise OSError("connection reset")
+        return get(key, *args)
+
+    monkeypatch.setattr(objects, "get", flaky_get)
+
+    with pytest.raises(OSError):
+        make_compactor().merge()
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, failing).worker_id == "w1"
+
+
+def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine, objects, make_compactor) -> None:
+    """One unrecorded pack whose delete fails stays; the unrecorded packs after it go."""
+    stuck, other = (f"{COMPACTED_PREFIX}/{n:020d}-a.pack" for n in (1, 2))
+    objects.put(stuck, b"x")
+    objects.put(other, b"x")
+
+    def delete_object(key: str) -> None:
+        """Delete the object, but fail for one key.
+
+        Args:
+            key: The pack key.
+
+        Raises:
+            OSError: For the stuck key.
+        """
+        if key == stuck:
+            raise OSError("access denied")
+        objects._path(key).unlink()
+
+    assert make_compactor(grace_seconds=0.0, delete_object=delete_object).remove_unrecorded() == 1
+    assert objects.list(f"{COMPACTED_PREFIX}/") == [stuck]
+
+
 def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, store, make_compactor, monkeypatch) -> None:
     """The oldest pack has no object; the pass keeps its rows on it, and the next pass merges the other two."""
     _fill(store)
@@ -1183,4 +1296,47 @@ def test_postgres_a_merge_does_not_wait_for_a_locked_job(tmp_path, postgres_engi
     assert results == [0]
     assert objects.list(f"{COMPACTED_PREFIX}/") == []
     assert _pack_keys_of_rows(postgres_engine) == old
+    _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """While a merge holds its job locks, a non-key job UPDATE finishes at once and a job DELETE waits."""
+    written = _fill(postgres_store)
+    at_move = threading.Event()
+    release = threading.Event()
+
+    def hold_at_move(conn, cursor, statement, parameters, context, executemany) -> None:
+        """Stop the merge at its first row move until the test releases it."""
+        if statement.startswith("UPDATE agent_steps") and not at_move.is_set():
+            at_move.set()
+            release.wait(30)
+
+    event.listen(postgres_engine, "before_cursor_execute", hold_at_move)
+    results: list[int] = []
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+    thread = threading.Thread(target=lambda: results.append(compactor.merge()))
+    thread.start()
+    try:
+        assert at_move.wait(30)
+        with postgres_engine.connect() as other:
+            other.execute(text("SET lock_timeout = '200ms'"))
+            updated = other.execute(
+                update(JobModel).where(JobModel.optimization_id == RUNS[0]).values(execution_generation=2)
+            )
+            assert updated.rowcount == 1
+            other.rollback()
+            other.execute(text("SET lock_timeout = '200ms'"))
+            with pytest.raises(OperationalError) as blocked:
+                other.execute(text("DELETE FROM jobs WHERE optimization_id = :run"), {"run": RUNS[0]})
+            assert blocked.value.orig.pgcode == "55P03"
+            other.rollback()
+    finally:
+        release.set()
+        thread.join(30)
+        event.remove(postgres_engine, "before_cursor_execute", hold_at_move)
+
+    assert results == [3]
     _assert_all_readable(postgres_store, written)

@@ -31,12 +31,14 @@ wrote but did not apply yet stays for :meth:`StepLogStore.recover`. The new
 packs are outside ``packs/``, where recovery never lists them, and their
 rows commit in the same transaction as the moved rows.
 
-A compacted pack under ``target_bytes`` is a candidate again, so a byte can
-be copied in more than one pass before its pack reaches the target. This is
-acceptable: a pass copies at most ``target_bytes`` and runs at most once an
-interval on each replica, and a pack leaves the candidates once it reaches
-the target, or once it holds more than half of ``MAX_ROWS_PER_PASS`` rows.
-Size tiers are a later change if the copy volume shows a need.
+A compacted pack of at most half of ``target_bytes`` is a candidate again, so
+a byte can be copied in more than one pass. This is acceptable: a pass copies
+at most ``target_bytes`` and runs at most once an interval on each replica.
+A pack leaves the candidates once it holds more than half of ``target_bytes``
+or more than half of ``MAX_ROWS_PER_PASS`` rows. Two such packs never fit in
+one pass, so any two candidates do, and an old large pack cannot stop the
+merges of the newer ones. Size tiers are a later change if the copy volume
+shows a need.
 """
 
 from __future__ import annotations
@@ -209,8 +211,9 @@ class TreeCompactor:
         """Merge the oldest small packs into one new pack, and move their rows to it in one transaction.
 
         Returns:
-            The number of old packs merged; ``0`` when fewer than two packs qualify, or when another
-            transaction holds a lock that the move needs, or another pass moved a row first.
+            The number of old packs merged; ``0`` when fewer than two packs qualify, when missing
+            objects leave fewer than two packs, when another transaction holds a lock that the move
+            needs, or when another pass moved a row first.
 
         Raises:
             TimeoutError: When half the grace time passed before the commit; the new pack is deleted.
@@ -220,7 +223,8 @@ class TreeCompactor:
                 select(StoragePackModel.pack_key, StoragePackModel.byte_size)
                 .where(
                     StoragePackModel.created_at < datetime.now(UTC) - self._min_age,
-                    StoragePackModel.byte_size < self._target_bytes,
+                    # Over half the target is full: any two candidates fit in one pass.
+                    StoragePackModel.byte_size * 2 <= self._target_bytes,
                     StoragePackModel.worker_id.not_in((FULL_COMPACTOR_ID, BROKEN_COMPACTOR_ID)),
                     _REFERENCED,
                 )
@@ -236,7 +240,7 @@ class TreeCompactor:
                 if row_count >= MAX_ROWS_PER_PASS:
                     break
                 # The new pack is built in memory, so it never grows past the target. Each candidate is
-                # under the target, so the first one always fits.
+                # at most half the target, so the first two always fit.
                 if total + size > self._target_bytes:
                     continue
                 pack_steps = session.execute(
@@ -458,10 +462,17 @@ class TreeCompactor:
                 recorded.update(
                     session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.in_(chunk)))
                 )
-        unrecorded = [key for key in old if key not in recorded]
-        for key in unrecorded:
-            self._delete_object(key)
-        return len(unrecorded)
+        removed = 0
+        for key in old:
+            if key in recorded:
+                continue
+            try:
+                self._delete_object(key)
+            except Exception:
+                logger.warning("Could not delete the unrecorded pack %s; a later pass tries again", key, exc_info=True)
+                continue
+            removed += 1
+        return removed
 
     def start(self) -> None:
         """Start the background pass loop."""
