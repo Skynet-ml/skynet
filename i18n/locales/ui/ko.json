@@ -4559,7 +4559,7 @@
   "shared.agent.media_buffering": "{name} 불러오는 중",
   "shared.agent.media_download_name": "{name} 다운로드",
   "agent.media.upload_failed": "{name}을(를) 첨부할 수 없습니다.",
-  "agent.media.unreadable": "{name}을(를) 업로드하지 못했습니다. 에이전트가 이 파일을 읽을 수 없습니다.",
+  "agent.media.unreadable": "{name}을(를) 첨부하지 못했습니다. 에이전트가 이 파일을 읽을 수 없습니다.",
   "agent.media.too_large": "{name}이(가) 너무 큽니다. 이미지는 3MB, 오디오는 20MB, 동영상은 50MB까지 가능합니다.",
   "agent.media.unsupported": "{name}은(는) 지원되는 이미지, 동영상 또는 오디오 파일이 아닙니다.",
   "agent.media.quota": "저장 공간이 가득 찼습니다. 더 첨부하려면 파일을 삭제하세요.",

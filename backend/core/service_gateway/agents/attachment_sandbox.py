@@ -12,6 +12,7 @@ user's own machine (:mod:`.local_command_runner`), with no sandbox charge.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import logging
@@ -888,7 +889,9 @@ def command_tools(runner: CommandRunner) -> list[dspy.Tool]:
         The two tools.
     """
 
-    def exec_command(
+    # The approval wrapper awaits each tool on the request loop, so the tools are
+    # async and the blocking runner works on a worker thread.
+    async def exec_command(
         cmd: str, workdir: str | None = None, yield_time_ms: int | None = None, max_output_tokens: int | None = None
     ) -> str:
         """Run a shell command in the chat's workspace.
@@ -902,9 +905,9 @@ def command_tools(runner: CommandRunner) -> list[dspy.Tool]:
         Returns:
             The result text for the model.
         """
-        return runner.exec_command(cmd, workdir, yield_time_ms, max_output_tokens)
+        return await asyncio.to_thread(runner.exec_command, cmd, workdir, yield_time_ms, max_output_tokens)
 
-    def write_stdin(
+    async def write_stdin(
         session_id: int,
         chars: str | None = None,
         yield_time_ms: int | None = None,
@@ -921,7 +924,7 @@ def command_tools(runner: CommandRunner) -> list[dspy.Tool]:
         Returns:
             The result text for the model.
         """
-        return runner.write_stdin(session_id, chars, yield_time_ms, max_output_tokens)
+        return await asyncio.to_thread(runner.write_stdin, session_id, chars, yield_time_ms, max_output_tokens)
 
     return [
         dspy.Tool(

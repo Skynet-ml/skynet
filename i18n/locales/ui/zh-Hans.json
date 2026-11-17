@@ -4559,7 +4559,7 @@
   "shared.agent.media_buffering": "正在加载 {name}",
   "shared.agent.media_download_name": "下载 {name}",
   "agent.media.upload_failed": "无法附加 {name}。",
-  "agent.media.unreadable": "无法上传 {name}。智能体无法读取此文件。",
+  "agent.media.unreadable": "无法附加 {name}。智能体无法读取此文件。",
   "agent.media.too_large": "{name} 太大。图片最大 3 MB，音频最大 20 MB，视频最大 50 MB。",
   "agent.media.unsupported": "{name} 不是受支持的图片、视频或音频文件。",
   "agent.media.quota": "你的存储空间已满。请删除一些文件后再附加。",

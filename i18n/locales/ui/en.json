@@ -4559,7 +4559,7 @@
   "shared.agent.media_load_error": "Couldn't load this file",
   "shared.agent.media_try_again": "Try again",
   "agent.media.upload_failed": "Could not attach {name}.",
-  "agent.media.unreadable": "Could not upload {name}. The agent cannot read this file.",
+  "agent.media.unreadable": "Could not attach {name}. The agent cannot read this file.",
   "agent.media.too_large": "{name} is too large. Images can be up to 3 MB, audio up to 20 MB and video up to 50 MB.",
   "agent.media.unsupported": "{name} is not a supported image, video or audio file.",
   "agent.media.quota": "Your storage is full. Delete some files to attach more.",

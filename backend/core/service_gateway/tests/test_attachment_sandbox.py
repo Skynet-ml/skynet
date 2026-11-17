@@ -29,9 +29,15 @@ from core.service_gateway.agents.attachment_sandbox import (
     SandboxCommandRunner,
     attachment_path,
     chat_file_loader,
+    command_tools,
     rewrite_paths,
 )
-from core.service_gateway.agents.generalist import _needs_approval, chat_rule_allowed
+from core.service_gateway.agents.generalist import (
+    ApprovalRegistry,
+    _needs_approval,
+    _wrap_tool_with_approval,
+    chat_rule_allowed,
+)
 from core.storage.models import Base, ChatMediaModel
 
 on_mac = pytest.mark.skipif(
@@ -813,3 +819,86 @@ def test_mac_restart_still_removes_files_that_left_the_chat(tmp_path: Path) -> N
     files.clear()
     module._LocalFilesRunner(workspace, load).exec_command("true")
     assert not (workspace / "attachments" / "m1").exists()
+
+
+class _EchoRunner:
+    """A command runner that answers at once and records the thread it ran on."""
+
+    def __init__(self) -> None:
+        """Start with no recorded calls."""
+        self.threads: list[int] = []
+
+    def exec_command(
+        self,
+        cmd: str,
+        workdir: str | None = None,
+        yield_time_ms: int | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """Record the thread and echo the command.
+
+        Args:
+            cmd: The shell command.
+            workdir: Not used.
+            yield_time_ms: Not used.
+            max_output_tokens: Not used.
+
+        Returns:
+            A text that names the command.
+        """
+        self.threads.append(threading.get_ident())
+        return f"ran {cmd}"
+
+    def write_stdin(
+        self,
+        session_id: int,
+        chars: str | None = None,
+        yield_time_ms: int | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """Record the thread and echo the session id.
+
+        Args:
+            session_id: The session id.
+            chars: Not used.
+            yield_time_ms: Not used.
+            max_output_tokens: Not used.
+
+        Returns:
+            A text that names the session.
+        """
+        self.threads.append(threading.get_ident())
+        return f"read {session_id}"
+
+
+def test_command_tools_run_through_the_approval_wrapper() -> None:
+    """Check that the wrapped tools return the runner's text and run it off the request loop."""
+    runner = _EchoRunner()
+
+    async def turn() -> tuple[list[str], list[dict[str, Any]], int]:
+        """Call each wrapped tool from a worker thread, as DSPy does.
+
+        Returns:
+            The results, the emitted events and the loop's thread id.
+        """
+        events: list[dict[str, Any]] = []
+        tools = [
+            _wrap_tool_with_approval(
+                tool,
+                trust_mode="yolo",
+                registry=ApprovalRegistry(),
+                emit=events.append,
+                outer_loop=asyncio.get_running_loop(),
+            )
+            for tool in command_tools(runner)  # type: ignore[arg-type]
+        ]
+        results = [
+            await asyncio.to_thread(tools[0].func, cmd="echo hi"),
+            await asyncio.to_thread(tools[1].func, session_id=3),
+        ]
+        return results, events, threading.get_ident()
+
+    results, events, loop_thread = asyncio.run(turn())
+    assert results == ["ran echo hi", "read 3"]
+    assert [e["data"]["status"] for e in events if e["event"] == "tool_end"] == ["ok", "ok"]
+    assert loop_thread not in runner.threads

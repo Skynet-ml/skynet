@@ -387,7 +387,7 @@ void test("each same-name card keeps its own original when the other's upload fa
   await flush();
   // The agent cannot read a file with no stored original, so the user is told (SKY-781).
   assert.deepEqual(errors.slice(errorsBefore), [
-    "Could not upload a.pdf. The agent cannot read this file.",
+    "Could not attach a.pdf. The agent cannot read this file.",
   ]);
   // The first upload failed: its card has no original, and the second keeps its own.
   assert.deepEqual(
@@ -846,7 +846,7 @@ void test("a restore links each original to its card again, and skips one with n
   );
   // A document that does not load stays out, and the user is told the agent cannot read it.
   assert.deepEqual(errors.slice(errorsBefore), [
-    "Could not upload lost.pdf. The agent cannot read this file.",
+    "Could not attach lost.pdf. The agent cannot read this file.",
   ]);
   assert.deepEqual(originalUploads.slice(uploadsBefore), ["r.pdf", "r.pdf"]);
   // The card c-2 left while the restore loaded, so its original stays out.

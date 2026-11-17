@@ -4559,7 +4559,7 @@
   "shared.agent.media_buffering": "Chargement de {name}",
   "shared.agent.media_download_name": "Télécharger {name}",
   "agent.media.upload_failed": "Impossible de joindre {name}.",
-  "agent.media.unreadable": "Impossible d’importer {name}. L’agent ne peut pas lire ce fichier.",
+  "agent.media.unreadable": "Impossible de joindre {name}. L’agent ne peut pas lire ce fichier.",
   "agent.media.too_large": "{name} est trop volumineux. Les images peuvent atteindre 3 Mo, l’audio 20 Mo et la vidéo 50 Mo.",
   "agent.media.unsupported": "{name} n’est pas un fichier image, vidéo ou audio pris en charge.",
   "agent.media.quota": "Votre stockage est plein. Supprimez des fichiers pour en joindre d’autres.",

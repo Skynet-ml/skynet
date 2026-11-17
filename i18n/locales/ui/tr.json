@@ -4559,7 +4559,7 @@
   "shared.agent.media_buffering": "{name} yükleniyor",
   "shared.agent.media_download_name": "{name} dosyasını indir",
   "agent.media.upload_failed": "{name} eklenemedi.",
-  "agent.media.unreadable": "{name} yüklenemedi. Ajan bu dosyayı okuyamaz.",
+  "agent.media.unreadable": "{name} eklenemedi. Ajan bu dosyayı okuyamaz.",
   "agent.media.too_large": "{name} çok büyük. Görseller 3 MB, ses 20 MB ve video 50 MB olabilir.",
   "agent.media.unsupported": "{name} desteklenen bir görsel, video veya ses dosyası değil.",
   "agent.media.quota": "Depolama alanınız dolu. Daha fazla eklemek için bazı dosyaları silin.",

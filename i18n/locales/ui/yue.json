@@ -4559,7 +4559,7 @@
   "shared.agent.media_buffering": "正在載入 {name}",
   "shared.agent.media_download_name": "下載 {name}",
   "agent.media.upload_failed": "附加唔到 {name}。",
-  "agent.media.unreadable": "上載唔到 {name}。代理讀唔到呢個檔案。",
+  "agent.media.unreadable": "附加唔到 {name}。代理讀唔到呢個檔案。",
   "agent.media.too_large": "{name} 太大。圖片最多 3 MB，音訊最多 20 MB，影片最多 50 MB。",
   "agent.media.unsupported": "{name} 唔係支援嘅圖片、影片或者音訊檔案。",
   "agent.media.quota": "你嘅儲存空間滿咗。刪除啲檔案先可以再附加。",
