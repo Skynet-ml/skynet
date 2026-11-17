@@ -12,9 +12,10 @@ The order makes a kill at any point safe:
    PUTs the new pack, with no transaction open. A kill before the commit
    leaves the rows on the old packs and a new pack with no row, which a
    later pass deletes once its key time is older than the grace time.
-2. A short transaction locks the old packs with SKIP LOCKED and moves each
-   row only while it still points at its old pack. When a pack is locked by
-   another pass or a row moved, the pass rolls back and deletes its new pack.
+2. A short transaction locks the jobs of the moved steps and the old packs,
+   each in key order with NOWAIT, and moves each row only while it still
+   points at its old pack. When a lock is held by another transaction or a
+   row moved, the pass rolls back and deletes its new pack.
    It also gives up when half the grace time passed since the key time, so
    another replica never deletes a new pack that is about to commit.
 3. The same transaction adds the new pack's ``storage_packs`` row and sets
@@ -50,11 +51,12 @@ from uuid import uuid4
 
 from sqlalchemy import ColumnElement, Table, Update, and_, case, delete, exists, or_, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from .base import ObjectStore
-from .models import AgentStepModel, StoragePackModel, TreeObjectModel
+from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from .object_store import S3ObjectStore
 
 try:
@@ -70,6 +72,11 @@ COMPACTOR_ID = "compactor"
 # the candidate query leaves them out; otherwise they fill the oldest-first window and merging stops.
 # A step log worker id never holds "/", so recovery never selects these rows.
 FULL_COMPACTOR_ID = f"{COMPACTOR_ID}/full"
+# The worker id of a pack whose object is missing. Its rows stay on it, and it leaves the candidates, so
+# it does not hold the oldest-first window on every pass. Recovery never lists it: it has no object.
+BROKEN_COMPACTOR_ID = f"{COMPACTOR_ID}/broken"
+# PostgreSQL's lock_not_available: a NOWAIT lock found the row held by another transaction.
+_LOCK_NOT_AVAILABLE = "55P03"
 MIN_AGE_SECONDS = 600.0
 # Much longer than a read of a row and then of its pack range.
 GRACE_SECONDS = 600.0
@@ -203,7 +210,7 @@ class TreeCompactor:
 
         Returns:
             The number of old packs merged; ``0`` when fewer than two packs qualify, or when another
-            pass holds or moved one of them.
+            transaction holds a lock that the move needs, or another pass moved a row first.
 
         Raises:
             TimeoutError: When half the grace time passed before the commit; the new pack is deleted.
@@ -214,7 +221,7 @@ class TreeCompactor:
                 .where(
                     StoragePackModel.created_at < datetime.now(UTC) - self._min_age,
                     StoragePackModel.byte_size < self._target_bytes,
-                    StoragePackModel.worker_id != FULL_COMPACTOR_ID,
+                    StoragePackModel.worker_id.not_in((FULL_COMPACTOR_ID, BROKEN_COMPACTOR_ID)),
                     _REFERENCED,
                 )
                 .order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
@@ -226,12 +233,16 @@ class TreeCompactor:
             total = row_count = 0
             # Rows are read one pack at a time, so a pack that does not fit uses none of the byte or row budget.
             for key, size in candidates:
-                if total >= self._target_bytes or row_count >= MAX_ROWS_PER_PASS:
+                if row_count >= MAX_ROWS_PER_PASS:
                     break
+                # The new pack is built in memory, so it never grows past the target. Each candidate is
+                # under the target, so the first one always fits.
+                if total + size > self._target_bytes:
+                    continue
                 pack_steps = session.execute(
-                    select(_STEPS.c.step_id, _STEPS.c.pack_key, _STEPS.c.pack_offset, _STEPS.c.pack_length).where(
-                        _STEPS.c.pack_key == key
-                    )
+                    select(
+                        _STEPS.c.step_id, _STEPS.c.run_id, _STEPS.c.pack_key, _STEPS.c.pack_offset, _STEPS.c.pack_length
+                    ).where(_STEPS.c.pack_key == key)
                 ).all()
                 pack_objects = session.execute(
                     select(
@@ -256,44 +267,43 @@ class TreeCompactor:
         # The new key is made only now, so its time is not older than the PUT.
         key_ns = time.time_ns()
         new_key = f"{COMPACTED_PREFIX}/{key_ns:020d}-{uuid4().hex}.pack"
-        parts: list[bytes] = []
-        offset = 0
+        data = bytearray()
         step_moves: list[tuple[Any, int]] = []
         object_moves: list[tuple[Any, int]] = []
+        broken: set[str] = set()
         pack_key, pack = None, b""
         # Sorted by pack, so each old pack is read once and only one is in memory at a time.
         for row in sorted([*steps, *tree_objects], key=lambda row: (row.pack_key, row.pack_offset)):
+            if row.pack_key in broken:
+                continue
             if row.pack_key != pack_key:
-                pack_key, pack = row.pack_key, self._objects.get(row.pack_key)
-            parts.append(pack[row.pack_offset : row.pack_offset + row.pack_length])
-            (step_moves if "step_id" in row._fields else object_moves).append((row, offset))
-            offset += row.pack_length
+                pack_key = row.pack_key
+                try:
+                    pack = self._objects.get(pack_key)
+                except KeyError:
+                    logger.exception("Pack %s is missing; its rows stay on it and it leaves the candidates", pack_key)
+                    broken.add(pack_key)
+                    continue
+            (step_moves if "step_id" in row._fields else object_moves).append((row, len(data)))
+            data += pack[row.pack_offset : row.pack_offset + row.pack_length]
         del pack
-        data = b"".join(parts)
-        del parts
+        if broken:
+            self._mark_broken(broken)
+            keys = [key for key in keys if key not in broken]
+            if len(keys) < 2:
+                return 0
         self._objects.put(new_key, data)
         byte_size = len(data)
         del data
         with Session(self._engine) as session:
-            # SKIP LOCKED: a pass that holds one of the packs wins; this pass gives up and does not wait.
-            locked = session.scalars(
-                select(StoragePackModel.pack_key)
-                .where(StoragePackModel.pack_key.in_(keys))
-                .with_for_update(skip_locked=True)
-            ).all()
-            moved = 0
-            if len(locked) == len(keys):
-                for chunk in _chunks(step_moves):
-                    moved += session.execute(_move_chunk(_STEPS, ("step_id",), chunk, new_key)).rowcount
-                for chunk in _chunks(object_moves):
-                    moved += session.execute(_move_chunk(_OBJECTS, ("username", "object_id"), chunk, new_key)).rowcount
+            moved = self._lock_and_move(session, keys, step_moves, object_moves, new_key)
             if moved != len(step_moves) + len(object_moves):
                 session.rollback()
                 self._discard(new_key)
                 return 0
             # The retire time starts the grace time of the old packs, so it is the commit time.
             retired_at = datetime.now(UTC)
-            worker_id = FULL_COMPACTOR_ID if 2 * row_count > MAX_ROWS_PER_PASS else COMPACTOR_ID
+            worker_id = FULL_COMPACTOR_ID if 2 * moved > MAX_ROWS_PER_PASS else COMPACTOR_ID
             session.add(
                 StoragePackModel(pack_key=new_key, worker_id=worker_id, byte_size=byte_size, created_at=retired_at)
             )
@@ -307,6 +317,72 @@ class TreeCompactor:
                 raise TimeoutError(f"the merge into {new_key} took more than half the grace time")
             session.commit()
         return len(keys)
+
+    def _lock_and_move(
+        self,
+        session: Session,
+        keys: list[str],
+        step_moves: list[tuple[Any, int]],
+        object_moves: list[tuple[Any, int]],
+        new_key: str,
+    ) -> int:
+        """Lock the jobs of the moved steps and the old packs, then point the rows at the new pack.
+
+        Args:
+            session: The merge transaction.
+            keys: The old pack keys.
+            step_moves: Each step row with its offset in the new pack.
+            object_moves: Each tree object row with its offset in the new pack.
+            new_key: The new pack key.
+
+        Returns:
+            The number of rows moved; ``0`` when another transaction holds one of the locks.
+        """
+        run_ids = sorted({row.run_id for row, _ in step_moves})
+        # Each lock is taken in one order and with NOWAIT, so a pass never waits and two passes over
+        # shared packs cannot each hold a part. The jobs come first, as in StepLogStore._apply. KEY SHARE
+        # keeps a job delete, whose cascade locks steps in another order, out until the commit, and
+        # does not block the job's other updates.
+        try:
+            for chunk in _chunks(run_ids):
+                session.execute(
+                    select(JobModel.optimization_id)
+                    .where(JobModel.optimization_id.in_(chunk))
+                    .order_by(JobModel.optimization_id)
+                    .with_for_update(read=True, key_share=True, nowait=True)
+                ).all()
+            for chunk in _chunks(sorted(keys)):
+                session.execute(
+                    select(StoragePackModel.pack_key)
+                    .where(StoragePackModel.pack_key.in_(chunk))
+                    .order_by(StoragePackModel.pack_key)
+                    .with_for_update(nowait=True)
+                ).all()
+        except OperationalError as error:
+            if getattr(error.orig, "pgcode", None) != _LOCK_NOT_AVAILABLE:
+                raise
+            return 0
+        moved = 0
+        for chunk in _chunks(step_moves):
+            moved += session.execute(_move_chunk(_STEPS, ("step_id",), chunk, new_key)).rowcount
+        for chunk in _chunks(object_moves):
+            moved += session.execute(_move_chunk(_OBJECTS, ("username", "object_id"), chunk, new_key)).rowcount
+        return moved
+
+    def _mark_broken(self, keys: set[str]) -> None:
+        """Take packs whose object is missing out of the candidates; their rows stay where they are.
+
+        Args:
+            keys: The pack keys.
+        """
+        with Session(self._engine) as session:
+            for chunk in _chunks(sorted(keys)):
+                session.execute(
+                    update(StoragePackModel)
+                    .where(StoragePackModel.pack_key.in_(chunk))
+                    .values(worker_id=BROKEN_COMPACTOR_ID)
+                )
+            session.commit()
 
     def _discard(self, key: str) -> None:
         """Delete a new pack that no row points at; on a failure, a later pass deletes it.
@@ -339,14 +415,20 @@ class TreeCompactor:
                 )
             )
         # The object goes before its row: recovery applies a pack object that has no row.
+        deleted: list[str] = []
         for key in keys:
-            self._delete_object(key)
-        if keys:
+            try:
+                self._delete_object(key)
+            except Exception:
+                logger.warning("Could not delete the retired pack %s; a later pass tries again", key, exc_info=True)
+                continue
+            deleted.append(key)
+        if deleted:
             with Session(self._engine) as session:
-                for chunk in _chunks(keys):
+                for chunk in _chunks(deleted):
                     session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), retired))
                 session.commit()
-        return len(keys)
+        return len(deleted)
 
     def remove_unrecorded(self) -> int:
         """Delete the new packs that a pass wrote and did not commit, once they are older than the grace time.

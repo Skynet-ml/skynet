@@ -39,6 +39,7 @@ from core.storage.models import (
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_compactor import (
+    BROKEN_COMPACTOR_ID,
     COMPACTED_PREFIX,
     COMPACTOR_ID,
     FULL_COMPACTOR_ID,
@@ -481,20 +482,20 @@ def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
     calls: list[str] = []
 
     def delete_then_fail(key: str) -> None:
-        """Delete the first pack, then fail.
+        """Delete the first pack, then stop the pass as a kill does.
 
         Args:
             key: The pack key.
 
         Raises:
-            OSError: On the second call.
+            SystemExit: On the second call; the removal catches only ``Exception``, as a kill is not one.
         """
         if calls:
-            raise OSError("killed during the removal")
+            raise SystemExit("killed during the removal")
         calls.append(key)
         objects._path(key).unlink()
 
-    with pytest.raises(OSError):
+    with pytest.raises(SystemExit):
         make_compactor(grace_seconds=0.0, delete_object=delete_then_fail).remove_retired()
     assert len(objects.list("packs/w1/")) == 2
     assert len(_pack_rows(engine)) == 4
@@ -863,6 +864,57 @@ def test_full_packs_do_not_fill_the_candidate_window(engine, objects, store, mak
     _assert_all_readable(store, written)
 
 
+def test_a_pass_never_goes_past_the_target_bytes(engine, objects, store, make_compactor) -> None:
+    """A pack that would take the new pack past the target stays out of the pass."""
+    written = _fill(store)
+    with Session(engine) as session:
+        total = sum(session.scalars(select(StoragePackModel.byte_size)))
+
+    assert make_compactor(target_bytes=total - 1).merge() == 2
+    _assert_all_readable(store, written)
+
+
+def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """The oldest pack has no object; the pass keeps its rows on it, and the next pass merges the other two."""
+    _fill(store)
+    missing = min(objects.list("packs/w1/"))
+    objects._path(missing).unlink()
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+
+    assert make_compactor().merge() == 0
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert make_compactor().merge() == 2
+
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, missing).worker_id == BROKEN_COMPACTOR_ID
+        assert session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.pack_key == missing)).all()
+    assert len(_pack_keys_of_rows(engine)) == 2
+
+
+def test_a_delete_that_always_fails_does_not_stop_the_removal(engine, objects, store, make_compactor) -> None:
+    """One retired pack whose delete fails keeps its row; the other retired packs and their rows go."""
+    _fill(store)
+    make_compactor().merge()
+    stuck = min(objects.list("packs/w1/"))
+
+    def delete_object(key: str) -> None:
+        """Delete the object, but fail for one key.
+
+        Args:
+            key: The pack key.
+
+        Raises:
+            OSError: For the stuck key.
+        """
+        if key == stuck:
+            raise OSError("access denied")
+        objects._path(key).unlink()
+
+    assert make_compactor(grace_seconds=0.0, delete_object=delete_object).remove_retired() == 2
+    assert objects.list("packs/w1/") == [stuck]
+    assert _pack_rows(engine) == {stuck, *objects.list(f"{COMPACTED_PREFIX}/")}
+
+
 def test_packs_merged_after_the_candidate_read_write_no_empty_pack(engine, objects, store, make_compactor) -> None:
     """Another pass merges the packs between this pass's candidate read and row read; this pass writes nothing."""
     written = _fill(store)
@@ -1078,6 +1130,48 @@ def test_postgres_a_merge_does_not_wait_for_a_locked_pack(tmp_path, postgres_eng
         holder.execute(
             select(StoragePackModel.pack_key).where(StoragePackModel.pack_key == min(old)).with_for_update()
         ).all()
+        thread = threading.Thread(target=lambda: results.append(compactor.merge()))
+        thread.start()
+        thread.join(10)
+        waited = thread.is_alive()
+        holder.rollback()
+    thread.join(30)
+
+    assert not waited
+    assert results == [0]
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert _pack_keys_of_rows(postgres_engine) == old
+    _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """The merge locks the jobs and then the packs, each sorted by key and with NOWAIT, so two passes cannot split them."""
+    _fill(postgres_store)
+    statements = _record_statements(postgres_engine)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+
+    assert compactor.merge() == 3
+
+    locks = [statement for statement, _ in statements if "NOWAIT" in statement]
+    assert len(locks) == 2
+    assert "FROM jobs" in locks[0]
+    assert "ORDER BY jobs.optimization_id FOR KEY SHARE NOWAIT" in locks[0]
+    assert "FROM storage_packs" in locks[1]
+    assert "ORDER BY storage_packs.pack_key FOR UPDATE NOWAIT" in locks[1]
+
+
+@needs_postgres
+def test_postgres_a_merge_does_not_wait_for_a_locked_job(tmp_path, postgres_engine, objects, postgres_store) -> None:
+    """A job row that another transaction holds, as a job delete does, makes the merge give up at once."""
+    written = _fill(postgres_store)
+    old = set(objects.list("packs/w1/"))
+    results: list[int] = []
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        holder.execute(select(JobModel.optimization_id).where(JobModel.optimization_id == RUNS[1]).with_for_update())
         thread = threading.Thread(target=lambda: results.append(compactor.merge()))
         thread.start()
         thread.join(10)
