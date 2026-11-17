@@ -34,7 +34,8 @@ A compacted pack under ``target_bytes`` is a candidate again, so a byte can
 be copied in more than one pass before its pack reaches the target. This is
 acceptable: a pass copies at most ``target_bytes`` and runs at most once an
 interval on each replica, and a pack leaves the candidates once it reaches
-the target. Size tiers are a later change if the copy volume shows a need.
+the target, or once it holds more than half of ``MAX_ROWS_PER_PASS`` rows.
+Size tiers are a later change if the copy volume shows a need.
 """
 
 from __future__ import annotations
@@ -65,6 +66,10 @@ logger = logging.getLogger(__name__)
 
 COMPACTED_PREFIX = "compacted"
 COMPACTOR_ID = "compactor"
+# The worker id of a merged pack with more than half the row cap. Two such packs never fit in one pass, so
+# the candidate query leaves them out; otherwise they fill the oldest-first window and merging stops.
+# A step log worker id never holds "/", so recovery never selects these rows.
+FULL_COMPACTOR_ID = f"{COMPACTOR_ID}/full"
 MIN_AGE_SECONDS = 600.0
 # Much longer than a read of a row and then of its pack range.
 GRACE_SECONDS = 600.0
@@ -72,7 +77,8 @@ TARGET_BYTES = 64 * 1024 * 1024
 MAX_PACKS_PER_PASS = 1000
 # A pass must commit inside half the grace time, so the rows it moves are capped as well as its bytes.
 # A pass adds a pack only when its rows fit under the cap. A pack with this many rows is full, as a
-# pack at the target size is: it is never merged again.
+# pack at the target size is: it is never merged again. A merged pack over half the cap gets
+# FULL_COMPACTOR_ID and is not a candidate.
 MAX_ROWS_PER_PASS = 100_000
 # Rows in one UPDATE or keys in one IN query; at most 6 binds a row stays far below the SQLite bind limit.
 CHUNK_SIZE = 200
@@ -208,6 +214,7 @@ class TreeCompactor:
                 .where(
                     StoragePackModel.created_at < datetime.now(UTC) - self._min_age,
                     StoragePackModel.byte_size < self._target_bytes,
+                    StoragePackModel.worker_id != FULL_COMPACTOR_ID,
                     _REFERENCED,
                 )
                 .order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
@@ -286,8 +293,9 @@ class TreeCompactor:
                 return 0
             # The retire time starts the grace time of the old packs, so it is the commit time.
             retired_at = datetime.now(UTC)
+            worker_id = FULL_COMPACTOR_ID if 2 * row_count > MAX_ROWS_PER_PASS else COMPACTOR_ID
             session.add(
-                StoragePackModel(pack_key=new_key, worker_id=COMPACTOR_ID, byte_size=byte_size, created_at=retired_at)
+                StoragePackModel(pack_key=new_key, worker_id=worker_id, byte_size=byte_size, created_at=retired_at)
             )
             session.execute(
                 update(StoragePackModel).where(StoragePackModel.pack_key.in_(keys)).values(created_at=retired_at)

@@ -38,7 +38,13 @@ from core.storage.models import (
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
 from core.storage.step_log_store import StepLogStore
-from core.storage.tree_compactor import COMPACTED_PREFIX, TreeCompactor, start_tree_compactor
+from core.storage.tree_compactor import (
+    COMPACTED_PREFIX,
+    COMPACTOR_ID,
+    FULL_COMPACTOR_ID,
+    TreeCompactor,
+    start_tree_compactor,
+)
 from core.storage.tree_store import TreeEntry, TreeStore
 
 RUNS = ("job-1", "job-2", "job-3")
@@ -806,7 +812,7 @@ def test_two_packs_over_the_row_cap_are_not_merged(engine, objects, store, make_
 
 
 def test_a_pack_at_the_row_cap_is_full(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The oldest pack has the cap's rows; the pass skips it, as a pack at the target size, and merges the next two."""
+    """The oldest pack has the cap's rows but no full mark; the pass skips it and merges the next two."""
     written = _fill(store, flushes=4)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
     assert make_compactor().merge() == 2
@@ -815,13 +821,45 @@ def test_a_pack_at_the_row_cap_is_full(engine, objects, store, make_compactor, m
         session.execute(
             update(StoragePackModel)
             .where(StoragePackModel.pack_key == full)
-            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2), worker_id=COMPACTOR_ID)
         )
         session.commit()
 
     assert make_compactor().merge() == 2
     assert full in _pack_keys_of_rows(engine)
     assert len(_pack_keys_of_rows(engine)) == 2
+    _assert_all_readable(store, written)
+
+
+def test_full_packs_do_not_fill_the_candidate_window(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """More full packs than the window holds are older than two small packs; a pass still merges the small ones."""
+    written = _fill(store, flushes=8)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
+    for _ in range(3):
+        assert make_compactor().merge() == 2
+    full = set(objects.list(f"{COMPACTED_PREFIX}/"))
+    with Session(engine) as session:
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key.in_(full))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        session.commit()
+        marks = set(session.scalars(select(StoragePackModel.worker_id).where(StoragePackModel.pack_key.in_(full))))
+    assert marks == {FULL_COMPACTOR_ID}
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+
+    assert make_compactor().merge() == 2
+
+    assert len(_pack_keys_of_rows(engine)) == 4
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+    assert full < set(objects.list(f"{COMPACTED_PREFIX}/"))
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 0
+    finally:
+        recovering.close()
+    assert len(_pack_keys_of_rows(engine)) == 4
     _assert_all_readable(store, written)
 
 
