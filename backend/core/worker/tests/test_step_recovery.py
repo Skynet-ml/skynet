@@ -9,6 +9,7 @@ lease runs out, and its buffered steps never flush in its own generation.
 from __future__ import annotations
 
 import contextlib
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from sqlalchemy.pool import NullPool
 import core.storage.remote as remote_mod
 from core.billing.budgets import BudgetService
 from core.config import app_env
+from core.constants import WORKER_RESTART_CAUSE
 from core.storage.models import Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
@@ -208,21 +210,22 @@ def _kill(store: StepJobStore, run_id: str = RUN) -> None:
         session.commit()
 
 
-def _commit(log: StepLogStore, seq: int, generation: int, output: str = "ok") -> str:
-    """Commit one command step of the test agent.
+def _commit(log: StepLogStore, seq: int, generation: int, output: str = "ok", agent: str = AGENT) -> str:
+    """Commit one command step of an agent.
 
     Args:
         log: The step log.
         seq: The step position.
         generation: The generation the agent works under.
         output: The command output in the body.
+        agent: The agent that commits.
 
     Returns:
         The step id.
     """
     return log.commit(
         run_id=RUN,
-        agent_id=AGENT,
+        agent_id=agent,
         seq=seq,
         kind="command",
         execution_generation=generation,
@@ -409,3 +412,200 @@ def test_park_run_refuses_a_stale_generation(store: StepJobStore) -> None:
 
     assert not park_run(store.engine, RUN, expected_generation=generation - 1, wake_at=datetime.now(UTC))
     assert store.get_job(RUN)["status"] == "running"
+
+
+def _bill(store: StepJobStore, key: str, cents: int) -> None:
+    """Settle one run-phase model call of the run's first budget generation.
+
+    Args:
+        store: The job store.
+        key: The operation identity.
+        cents: The charge.
+    """
+    service = BudgetService(engine=store.engine)
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    operation = service.reserve(
+        budget_id,
+        "owner",
+        operation_key=key,
+        generation=0,
+        phase="run",
+        cost_kind="model",
+        request_fingerprint=key,
+        price_snapshot={"version": "fixture-v1"},
+        max_cents=cents,
+    )
+    service.mark_dispatched(operation.id, "owner")
+    service.settle(operation.id, "owner", evidence_key=key, actual_cents=cents, evidence={"usage": key})
+    # The waiver compares settle times with step times, so keep them apart.
+    time.sleep(0.02)
+
+
+def _set_job(store: StepJobStore, **values: Any) -> None:
+    """Write job columns directly, as another worker or a race would.
+
+    Args:
+        store: The job store.
+        **values: The columns to set.
+    """
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(**values))
+        session.commit()
+
+
+def test_the_waiver_starts_at_the_agent_whose_newest_step_is_oldest(store: StepJobStore, step_logs: Any) -> None:
+    """Work that settled after the oldest of the agents' newest steps is waived; work before it stays billed."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log_a = step_logs("pod-a")
+    _bill(store, "kept", 1)
+    _commit(log_a, 0, generation, agent="first")
+    log_a.flush()
+    time.sleep(0.02)
+    _bill(store, "repeated-by-first", 2)
+    _commit(log_a, 0, generation, agent="second")
+    log_a.flush()
+    time.sleep(0.02)
+    _bill(store, "repeated-by-both", 3)
+    with Session(store.engine) as session:
+        assert session.get(BillingCustomerModel, "owner").balance_cents == 44
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+
+    assert store.get_job(RUN)["status"] == "pending"
+    budget = BudgetService(engine=store.engine).get(store.get_job(RUN)["execution_budget_id"], "owner")
+    assert budget.billed_cents == 1
+    with Session(store.engine) as session:
+        assert session.get(BillingCustomerModel, "owner").balance_cents == 49
+
+
+def test_park_run_folds_the_finished_leg_into_the_run_time(store: StepJobStore) -> None:
+    """The time the run ran before it parks goes into ``accumulated_runtime_seconds``, and the timer stops."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _set_job(store, started_at=datetime.now(UTC) - timedelta(seconds=30), accumulated_runtime_seconds=5.0)
+
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    with Session(store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert 35.0 <= row.accumulated_runtime_seconds < 40.0
+        assert row.started_at is None
+
+
+@pytest.mark.parametrize("status", ["cancelled", "pending"])
+def test_park_run_refuses_a_run_that_is_not_active(store: StepJobStore, status: str) -> None:
+    """A run that is not validating or running is not parked, even with the worker's generation."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _set_job(store, status=status)
+
+    assert not park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    job = store.get_job(RUN)
+    assert job["status"] == status
+    assert job["execution_generation"] == generation
+
+
+def test_a_step_log_resume_unpins_the_worker_version(store: StepJobStore, step_logs: Any) -> None:
+    """A run of an old worker version resumes from its steps, and any current worker may claim it."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _set_job(store, code_version="old-version")
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["code_version"] is None
+
+
+def test_waking_a_run_unpins_the_worker_version(store: StepJobStore) -> None:
+    """A woken run carries no worker version, so a worker of the current version claims it."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    _set_job(store, code_version="old-version")
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["code_version"] is None
+
+
+def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobStore, step_logs: Any) -> None:
+    """A run at the cap still resumes after a planned worker restart, and its count stays the same."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    _set_job(
+        store,
+        attempts=MAX_AUTOMATIC_RESUMES,
+        recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
+    )
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["attempts"] == MAX_AUTOMATIC_RESUMES
+
+
+def test_the_wake_skips_a_run_that_changed_after_the_read(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run woken, claimed and parked again between the sweep's read and its update stays parked."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    read = store._due_waiting_runs
+
+    def race(now: datetime) -> list[tuple[str, int]]:
+        """Read the due runs, then let another sweep and worker wake, claim and park the run.
+
+        Args:
+            now: The sweep time.
+
+        Returns:
+            The due runs as the first read saw them.
+        """
+        due = read(now)
+        _set_job(store, status="pending", execution_generation=generation + 2, recovery=None)
+        regeneration = _claim(store, "pod-b")
+        assert park_run(
+            store.engine, RUN, expected_generation=regeneration, wake_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        return due
+
+    parked_generation = generation + 4
+    monkeypatch.setattr(store, "_due_waiting_runs", race)
+    assert store._wake_waiting_runs() == 0
+    job = store.get_job(RUN)
+    assert job["status"] == "paused"
+    assert job["execution_generation"] == parked_generation
+
+
+@pytest.mark.parametrize("wake_at", ["not a time", "2020-01-01T00:00:00"])
+def test_a_bad_wake_at_is_skipped_and_other_runs_still_wake(store: StepJobStore, wake_at: str) -> None:
+    """A waiting run with an unreadable or naive ``wake_at`` stays paused, and the sweep still wakes the others."""
+    waiting = {"state": "recovering", "phase": "waiting", "reason": "test"}
+    for identifier, value in (("bad", wake_at), ("good", "2020-01-01T00:00:00+00:00")):
+        store.create_job(identifier)
+        with Session(store.engine) as session:
+            session.execute(
+                update(JobModel)
+                .where(JobModel.optimization_id == identifier)
+                .values(status="paused", recovery={**waiting, "wake_at": value})
+            )
+            session.commit()
+
+    store.recover_orphaned_jobs()
+
+    assert store.get_job("bad")["status"] == "paused"
+    assert store.get_job("good")["status"] == "pending"

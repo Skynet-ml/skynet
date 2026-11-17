@@ -1727,6 +1727,11 @@ class RemoteDBJobStore:
         no checkpoint yet starts again from the beginning. A manual resume of a
         run the orphan sweep stopped as interrupted may start again the same way.
 
+        A run with step log rows resumes from its committed steps, with or
+        without a checkpoint (SKY-711). Its automatic resumes count against
+        ``MAX_AUTOMATIC_RESUMES`` instead of ``job_max_attempts``; 4 is above
+        the default ``job_max_attempts`` of 3, so a step log run gets more tries.
+
         Args:
             optimization_id: The job to resume.
             bump_attempts: Whether to count this re-queue against the attempt cap.
@@ -1763,13 +1768,20 @@ class RemoteDBJobStore:
                 and isinstance(job.recovery, dict)
                 and job.recovery.get("interrupted_budget_generation") is not None
             )
-            last_step_at = (
-                session.query(func.max(AgentStepModel.created_at))
+            # Each agent keeps its steps up to its own newest one, so the agent that
+            # committed last-but-oldest bounds the work that every agent keeps. An
+            # agent with no committed step is not seen by this bound. created_at is
+            # the time the pack was applied, not the commit time, so the bound can
+            # be a flush window late (SKY-711 follow-up).
+            newest_per_agent = (
+                session.query(func.max(AgentStepModel.created_at).label("newest"))
                 .filter(AgentStepModel.run_id == optimization_id)
-                .scalar()
+                .group_by(AgentStepModel.agent_id)
+                .subquery()
             )
-            fresh_restart = (automatic or resumes_interrupted) and not checkpoints and last_step_at is None
-            if not checkpoints and last_step_at is None and not fresh_restart:
+            step_resume_at = session.query(func.min(newest_per_agent.c.newest)).scalar()
+            fresh_restart = (automatic or resumes_interrupted) and not checkpoints and step_resume_at is None
+            if not checkpoints and step_resume_at is None and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
             for checkpoint in checkpoints:
                 validate_checkpoint(
@@ -1786,7 +1798,7 @@ class RemoteDBJobStore:
                     "This run has no verified cumulative execution budget; authorize a new run instead."
                 )
             current_attempt = int(job.attempts or 0)
-            if automatic and last_step_at is not None:
+            if automatic and step_resume_at is not None:
                 if bump_attempts and current_attempt >= MAX_AUTOMATIC_RESUMES:
                     raise CheckpointCompatibilityError(
                         f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
@@ -1856,16 +1868,17 @@ class RemoteDBJobStore:
                 if automatic or interrupted is not None:
                     # The earliest pair checkpoint bounds what every pair keeps;
                     # work that settled after it runs again and is not charged twice.
-                    # A step log run keeps its committed steps and repeats only what came after the last one.
-                    resumed_from = (
-                        None
-                        if fresh_restart
-                        else last_step_at
-                        if last_step_at is not None
-                        else session.query(func.min(GepaCheckpointModel.updated_at))
-                        .filter(GepaCheckpointModel.optimization_id == optimization_id)
-                        .scalar()
-                    )
+                    # A step log run keeps its committed steps; with checkpoints too,
+                    # the earlier of the two bounds what the run keeps.
+                    bounds = [] if fresh_restart else [step_resume_at]
+                    if checkpoints and not fresh_restart:
+                        bounds.append(
+                            session.query(func.min(GepaCheckpointModel.updated_at))
+                            .filter(GepaCheckpointModel.optimization_id == optimization_id)
+                            .scalar()
+                        )
+                    known = [bound for bound in bounds if bound is not None]
+                    resumed_from = min(known) if known else None
                     budget_service.waive_interrupted_work(
                         job.execution_budget_id,
                         job.username,
@@ -1900,7 +1913,7 @@ class RemoteDBJobStore:
             current = int(job.attempts or 0)
             next_attempt = current + 1 if bump_attempts else current
             job.attempts = next_attempt  # type: ignore[assignment]
-            # A step log resume carries no checkpoint of one worker version, as a fresh restart does not.
+            # Neither a step log resume nor a fresh restart has a checkpoint tied to one worker version.
             if not checkpoints or (automatic and job.sandbox_image is not None):
                 # The sweep or the API can run on a pod of the version a deploy is
                 # replacing; an unversioned row stays claimable by the workers that remain.
@@ -2554,17 +2567,9 @@ class RemoteDBJobStore:
         Returns:
             The number of runs woken.
         """
-        now = datetime.now(UTC)
+        due = self._due_waiting_runs(datetime.now(UTC))
         session = self._get_session()
         try:
-            # ``wake_at`` lives in the recovery JSON, so the filter runs here, not in SQL.
-            due = [
-                (job.optimization_id, int(job.execution_generation or 0))
-                for job in session.query(JobModel).filter(JobModel.status == "paused").all()
-                if isinstance(job.recovery, dict)
-                and job.recovery.get("phase") == WAITING_PHASE
-                and datetime.fromisoformat(str(job.recovery.get("wake_at"))) <= now
-            ]
             woken = 0
             for identifier, generation in due:
                 woken += (
@@ -2590,6 +2595,45 @@ class RemoteDBJobStore:
             return woken
         finally:
             session.close()
+
+    def _due_waiting_runs(self, now: datetime) -> list[tuple[str, int]]:
+        """Return the id and generation of each waiting run whose ``wake_at`` passed.
+
+        A row whose ``wake_at`` does not parse, or has no time zone, is logged
+        and skipped, so one bad row cannot fail every sweep.
+
+        Args:
+            now: The aware time to compare ``wake_at`` with.
+
+        Returns:
+            The due runs, read before any of them is woken.
+        """
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(JobModel.optimization_id, JobModel.execution_generation, JobModel.recovery)
+                .filter(JobModel.status == "paused")
+                .all()
+            )
+        finally:
+            session.close()
+        due: list[tuple[str, int]] = []
+        # ``wake_at`` lives in the recovery JSON, so the filter runs here, not in SQL.
+        for identifier, generation, recovery in rows:
+            if not isinstance(recovery, dict) or recovery.get("phase") != WAITING_PHASE:
+                continue
+            try:
+                wake_at = datetime.fromisoformat(str(recovery.get("wake_at")))
+            except ValueError:
+                wake_at = None
+            if wake_at is None or wake_at.tzinfo is None:
+                logger.warning(
+                    "Waiting run %s has a bad wake_at %r; it stays paused", identifier, recovery.get("wake_at")
+                )
+                continue
+            if wake_at <= now:
+                due.append((identifier, int(generation or 0)))
+        return due
 
     def _note_ended_orphan(self, optimization_id: str, generation: int) -> None:
         """Remember a run that the orphan sweep ended, so its owner hears about it.

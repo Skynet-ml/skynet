@@ -10,7 +10,9 @@ The step log's worker id is the pod name, the same value as
 ``jobs.claimed_by``. A pod that restarts under its name recovers its own
 packs in :func:`open_step_log`. No other worker reads a dead worker's
 packs: their steps never became durable, the sweep's generation bump fences
-them, and the next worker continues from the last committed step.
+them, and the next worker continues from the last committed step. When a
+dead pod comes back under a new name, its unapplied packs stay in object
+storage, and no worker applies or removes them.
 
 A run that waits frees its worker: :func:`park_run` moves it to ``paused``
 with no lease and stores ``wake_at`` in its recovery state. The orphan sweep
