@@ -134,12 +134,29 @@ def test_a_plain_and_a_credential_grant_for_one_host_merge() -> None:
 
 @pytest.mark.parametrize(
     "host",
-    ["api.example.com:443", "https://api.example.com", "api.example.com/path", "*.com", "localhost", "", "  ", 7],
+    [
+        "api.example.com:443",
+        "https://api.example.com",
+        "api.example.com/path",
+        "*.com",
+        "localhost",
+        "",
+        "  ",
+        7,
+        "api.example.com\n.",
+        "*.example.com\n.",
+    ],
 )
 def test_an_invalid_grant_host_is_refused(host: object) -> None:
-    """Refuse ports, schemes, paths, top-level wildcards and values that are not hosts."""
+    """Refuse ports, schemes, paths, top-level wildcards, line ends and values that are not hosts."""
     with pytest.raises(GrantError):
         resolve_grants([Grant(host)], {})  # type: ignore[arg-type]
+
+
+def test_a_registry_host_with_a_line_end_is_refused() -> None:
+    """Refuse a registry host that keeps a line end after its final dot goes."""
+    with pytest.raises(GrantError, match="must be a host"):
+        resolve_grants([Grant("api.example.com")], {"api.example.com\n.": {"Authorization": "Bearer test"}})
 
 
 def test_a_registry_host_that_repeats_after_normalization_is_refused() -> None:

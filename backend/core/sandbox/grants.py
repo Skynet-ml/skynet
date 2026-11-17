@@ -182,6 +182,6 @@ def _clean_host(host: object) -> str:
             two or more labels; ports, paths and schemes are refused.
     """
     cleaned = host.strip().rstrip(".").lower() if isinstance(host, str) else ""
-    if not cleaned or len(cleaned) > 253 or not REPO_SECRET_HOST_PATTERN.match(cleaned):
+    if not cleaned or len(cleaned) > 253 or not REPO_SECRET_HOST_PATTERN.fullmatch(cleaned):
         raise GrantError(f"Grant host {host!r} must be a host such as api.example.com, or *.example.com.")
     return cleaned
