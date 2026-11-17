@@ -423,22 +423,51 @@ void test("an original over the file limit is not uploaded; the file keeps only 
   await unmount();
 });
 
-void test("dropOriginalsNamed takes out the oldest originals with that name", async () => {
+void test("a replacing original takes the place of every original with its name key", async () => {
   const { draft, unmount } = await mountDraft();
-  let ids: string[] = [];
+  const before = deleted.length;
+  let old: string[] = [];
+  await React.act(async () => void (old = draft().addOriginals([pdf("a<1>.pdf"), pdf("b.pdf")])));
+  await flush();
+  const stored = documents(draft().ready()).map((m) => m.id);
+  let next: string[] = [];
+  // The block shows "a<1>.pdf" as "a_1_.pdf"; both have one key.
   await React.act(
-    async () => void (ids = draft().addOriginals([pdf("a.pdf"), pdf("b.pdf"), pdf("a.pdf")])),
+    async () => void (next = draft().addOriginals([pdf("a_1_.pdf")], { replace: true })),
   );
   await flush();
-  await React.act(async () => draft().dropOriginalsNamed("a.pdf", 1));
-  const files = [{ name: "a.pdf" }, { name: "b.pdf" }];
+  const files = [{ name: "a_1_.pdf" }, { name: "b.pdf" }];
   assert.deepEqual(
     draft()
       .shownOriginals(files)
       .map((m) => m.id)
       .sort(),
-    [ids[1], ids[2]].sort(),
+    [old[1], next[0]].sort(),
   );
+  assert.deepEqual(deleted.slice(before), [stored[0]]);
+  await unmount();
+});
+
+void test("a replacing original wins over a restore that still loads its name", async () => {
+  const { draft, unmount } = await mountDraft();
+  let release!: () => void;
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () =>
+    draft().restore([
+      { id: "sent-a", name: "a.pdf", kind: "document", url: "" },
+      { id: "sent-b", name: "b.pdf", kind: "document", url: "" },
+    ]),
+  );
+  let next: string[] = [];
+  await React.act(
+    async () => void (next = draft().addOriginals([pdf("a.pdf")], { replace: true })),
+  );
+  heldReads = null;
+  release();
+  await flush();
+  const shown = draft().shownOriginals([{ name: "a.pdf" }, { name: "b.pdf" }]);
+  assert.equal(shown.length, 2);
+  assert.equal(shown.find((m) => m.name === "a.pdf")?.id, next[0]);
   await unmount();
 });
 

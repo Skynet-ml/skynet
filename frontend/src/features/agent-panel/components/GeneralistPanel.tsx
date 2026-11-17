@@ -43,7 +43,7 @@ import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
 import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
-import { attachedFile, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
+import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
 import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
 import {
@@ -177,7 +177,6 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
-  datasetAttachedNote,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -1017,9 +1016,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     wizard: wizardCtx,
     onRelease: reopenDatasetCard,
   });
-  const { addOriginals, dropOriginal, dropOriginalsNamed } = chatMedia;
-  // The dataset card in the draft and the local id of its stored original.
-  const datasetOriginalRef = React.useRef<{ localId: string; chip: AttachedFile } | null>(null);
+  const { addOriginals, dropOriginal } = chatMedia;
+  // The local id of the dataset card's stored original.
+  const datasetOriginalRef = React.useRef<string | null>(null);
   const handleDatasetConfirm = React.useCallback(
     (callId: string | undefined, confirmed: ConfirmedDataset, file: File) => {
       // A web chat must not stage rows or change the Mac's wizard.
@@ -1027,25 +1026,18 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // A composer attach has no tool card to mark or reopen.
       if (callId) confirmedDatasetCallsRef.current.add(callId);
       // The new card takes the place of the earlier dataset card, so the
-      // earlier card's original goes too. Else a card with the same name has
-      // two originals, and keepOriginals drops both.
-      const earlier = datasetOriginalRef.current;
-      if (earlier) dropOriginal(earlier.localId);
-      // The new card also takes out each card that is the same as it
-      // (putDatasetChip), such as one a fork restored. No ref tracks their
-      // originals, so they go by name; the earlier card's went by id.
-      const chip = attachedFile(confirmed.fileName, datasetAttachedNote(confirmed));
-      const same = (f: AttachedFile) => f.name === chip.name && f.text === chip.text;
-      const twins = splitPastes(draft).files.filter(same).length;
-      dropOriginalsNamed(chip.name, twins - (earlier && twins && same(earlier.chip) ? 1 : 0));
+      // earlier card's original goes too.
+      if (datasetOriginalRef.current) dropOriginal(datasetOriginalRef.current);
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       datasetDraft.attach(confirmed, callId);
       // The card keeps its original as every attached file does (SKY-782),
-      // so the viewer shows the real workbook of an XLSX.
-      const localId = addOriginals([file])[0];
-      datasetOriginalRef.current = localId ? { localId, chip } : null;
+      // so the viewer shows the real workbook of an XLSX. The card also takes
+      // out each same card, such as one a fork restored, so its original
+      // replaces theirs; else the name has two originals for one card and
+      // keepOriginals drops both.
+      datasetOriginalRef.current = addOriginals([file], { replace: true })[0] ?? null;
     },
-    [webChat, datasetDraft, addOriginals, dropOriginal, dropOriginalsNamed, draft],
+    [webChat, datasetDraft, addOriginals, dropOriginal],
   );
 
   const handleLibraryPick = React.useCallback(
@@ -1054,7 +1046,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       confirmedDatasetCallsRef.current.add(callId);
       // A library dataset has no local file, so it has no original; the
       // earlier upload card's original must not pair with its card.
-      if (datasetOriginalRef.current) dropOriginal(datasetOriginalRef.current.localId);
+      if (datasetOriginalRef.current) dropOriginal(datasetOriginalRef.current);
       datasetOriginalRef.current = null;
       datasetDraft.attachLibrary(picked, callId);
     },

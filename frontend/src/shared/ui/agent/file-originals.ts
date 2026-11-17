@@ -18,8 +18,8 @@ const CHANGED = new Set(['"', "<", ">", "_"]);
 
 /** The format of a file whose original the viewer draws, from its name, or null. */
 export function originalFormat(name: string): OriginalFormat | null {
-  // The cleaned name decides, as on the server: a name the server cleans to
-  // ".pdf" is stored as opaque bytes, which the viewer cannot draw.
+  // The key decides, here and on the server (chat_media._draw_key), so the
+  // raw name, the block's name and the stored name all give one answer.
   const key = nameKey(name);
   const dot = key.lastIndexOf(".");
   const ext = dot > 0 ? key.slice(dot + 1).toLowerCase() : "";
@@ -35,7 +35,8 @@ export function originalsToKeep<T extends { name: string }>(
   return files.filter((f) => !names.has(f.name));
 }
 
-function nameKey(name: string): string {
+/** One key for a file name and its cleaned forms; the server types an original by the same key. */
+export function nameKey(name: string): string {
   return Array.from(name.normalize("NFC").split(/[\\/]/).pop()!)
     .filter((c) => c > "\u001f" && c !== "\u007f" && !CHANGED.has(c))
     .join("")

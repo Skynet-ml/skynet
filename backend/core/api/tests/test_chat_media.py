@@ -361,6 +361,29 @@ def test_a_name_that_is_only_an_extension_claims_no_drawn_type(harness: SimpleNa
     assert (body["kind"], body["mime_type"]) == ("document", "application/octet-stream")
 
 
+def test_the_drawn_type_uses_the_viewers_name_key() -> None:
+    """The server types an original by the viewer's name key, so both sides agree on every name."""
+    assert chat_media._named_document_type("_.pdf") is None
+    assert chat_media._named_document_type('"<>.pdf') is None
+    assert chat_media._named_document_type("\ufeff.pdf") is None
+    assert chat_media._named_document_type("x.p_df") == "application/pdf"
+    assert chat_media._named_document_type("dir\\Book.XLSX") == chat_media._OFFICE_PARTS["xl/workbook.xml"]
+    assert chat_media._named_document_type("a" * 300 + ".pdf") == "application/pdf"
+
+
+def test_an_original_named_x_p_df_must_be_a_real_pdf(harness: SimpleNamespace) -> None:
+    """The viewer draws "x.p_df" as a PDF, so its original must hold a real PDF."""
+    assert _upload_original(harness.client, b"notes", "x.p_df").status_code == 415
+    body = _upload_original(harness.client, _PDF, "x.p_df").json()
+    assert body["mime_type"] == "application/pdf"
+
+
+def test_a_long_pdf_name_keeps_its_drawn_type(harness: SimpleNamespace) -> None:
+    """A name cut at 255 characters for storage keeps the type the viewer sees in its full name."""
+    body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
+    assert body["mime_type"] == "application/pdf"
+
+
 @pytest.mark.parametrize(
     ("data", "name"),
     [(b"a,b\n", "rows.pdf"), (_PDF, "brief.xlsx"), (_zip("ppt/presentation.xml"), "deck.docx")],

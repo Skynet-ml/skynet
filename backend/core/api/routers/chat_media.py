@@ -61,6 +61,10 @@ MAX_MEDIA_PER_MESSAGE = 10
 MAX_MODEL_IMAGE_BYTES = 12 * 1024 * 1024
 _SNIFF_BYTES = 64
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f"\\/]')
+_KEY_DROPPED = re.compile(r'[\x00-\x1f\x7f"<>_]')
+# JavaScript's String.trim set, less the control characters that the key
+# already drops. Python's bare strip differs: it keeps U+FEFF, drops U+0085.
+_JS_TRIMMED = " \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _ZIP_MAGIC = b"PK\x03\x04"
 # The part each Office Open XML format must hold, and the type it is served as.
 _OFFICE_PARTS = {
@@ -211,30 +215,46 @@ def office_document_type(data: bytes) -> str | None:
     return next((mime for part, mime in _OFFICE_PARTS.items() if part in names), None)
 
 
-def _named_document_type(filename: str) -> str | None:
+def _draw_key(raw: str | None) -> str:
+    """Return the key that decides whether the viewer draws a file.
+
+    Args:
+        raw: The filename from the upload, if any.
+
+    Returns:
+        The name with no path, no control characters and no ``"<>_``, trimmed.
+    """
+    # The same key as the viewer's ``nameKey``. The composer's block changes
+    # ``"<>`` to ``_``, so the raw name, the block's name and the stored name
+    # all give one answer, and the 255-character cut never changes it.
+    name = unicodedata.normalize("NFC", re.split(r"[\\/]", raw or "")[-1])
+    return _KEY_DROPPED.sub("", name).strip(_JS_TRIMMED)
+
+
+def _named_document_type(raw: str | None) -> str | None:
     """Return the document type that a file name's extension claims.
 
     Args:
-        filename: The cleaned upload filename.
+        raw: The filename from the upload, if any.
 
     Returns:
         The PDF, DOCX or XLSX content type, or ``None`` for any other name.
     """
     # The same rule as the viewer's ``originalFormat``: a name that is only an
     # extension (".pdf") claims no type, so the viewer does not draw it.
-    stem, dot, ext = filename.lower().rpartition(".")
+    stem, dot, ext = _draw_key(raw).rpartition(".")
     if not stem or not dot:
         return None
-    return next((mime for mime, known in _DOCUMENT_EXTENSIONS.items() if known == f".{ext}"), None)
+    return next((mime for mime, known in _DOCUMENT_EXTENSIONS.items() if known == f".{ext.lower()}"), None)
 
 
-def _original_type(head: bytes, data: bytes, filename: str) -> str:
+def _original_type(head: bytes, data: bytes, raw_name: str | None) -> str:
     """Find the stored type of an attached file's original.
 
     Args:
         head: The first bytes of the file.
         data: The whole file.
-        filename: The cleaned upload filename.
+        raw_name: The filename from the upload, if any.
 
     Returns:
         The real PDF, DOCX or XLSX type when the name claims one, else the opaque type.
@@ -243,7 +263,7 @@ def _original_type(head: bytes, data: bytes, filename: str) -> str:
         HTTPException: 415 when the name claims a PDF, DOCX or XLSX that the
             bytes are not; the viewer would fail to draw it.
     """
-    named = _named_document_type(filename)
+    named = _named_document_type(raw_name)
     if named is None:
         return _OPAQUE_DOCUMENT
     real = "application/pdf" if head.startswith(b"%PDF-") else None
@@ -531,13 +551,13 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             raise HTTPException(status_code=413, detail="This file is too large.")
         filename = _safe_filename(file.filename)
         if original:
-            sniffed = SniffedMedia("document", _original_type(head, data, filename))
+            sniffed = SniffedMedia("document", _original_type(head, data, file.filename))
         elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)
             if office is None:
                 raise HTTPException(status_code=415, detail="This file type is not supported.")
             sniffed = SniffedMedia("document", office)
-        if sniffed.kind == "document" and _named_document_type(filename) != (
+        if sniffed.kind == "document" and _named_document_type(file.filename) != (
             None if sniffed.mime_type == _OPAQUE_DOCUMENT else sniffed.mime_type
         ):
             raise HTTPException(status_code=415, detail="This file type is not supported.")
