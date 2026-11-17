@@ -219,9 +219,10 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
 # as a shell, would otherwise take new input with no prompt after a switch to Ask.
 _ASK_FILE_TOOLS: frozenset[str] = frozenset({WRITE_FILE_TOOL, EDIT_FILE_TOOL, EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL})
 
-# "Allow for this chat" never covers these (SKY-706). Each call spends the
-# balance, or (``change_setting``) can switch the assistant engine or the data
-# policy, so each one asks again.
+# "Allow for this chat" never covers these (SKY-706). Each call starts a paid
+# run, or (``change_setting``) can switch the assistant engine or the data
+# policy, so each one asks again. A chat command's sandbox time is small and
+# metered per turn, so a rule may cover ``exec_command`` (SKY-781).
 _NO_CHAT_RULE_TOOLS: frozenset[str] = frozenset(
     {
         "submit_unified_run_optimize_post",
@@ -505,8 +506,9 @@ def chat_rule_allowed(tool_name: str) -> bool:
     """Tell whether "allow for this chat" may cover a tool.
 
     A rule names one exact tool. It covers only a tool that asks in Ask mode,
-    never an always-confirm tool, a tool that spends the balance or
-    ``change_setting``.
+    never an always-confirm tool, a tool that starts a paid run or
+    ``change_setting``. A rule may cover ``exec_command``: a web command adds
+    only the chat box's small metered time, which the turn bills after it ends.
 
     Args:
         tool_name: The MCP tool's registered name.

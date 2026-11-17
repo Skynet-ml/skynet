@@ -6,6 +6,7 @@ import asyncio
 import base64
 import math
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -231,17 +232,27 @@ def test_large_file_goes_in_parts(monkeypatch: pytest.MonkeyPatch) -> None:
     runner.close()
 
 
-def test_workdir_runs_in_folder_and_must_stay_inside() -> None:
-    """Check that a workdir becomes a cd and that an outside workdir is refused."""
+def test_workdir_runs_in_folder_and_must_stay_inside(tmp_path: Path) -> None:
+    """Check that a workdir becomes a cd, a missing one runs no part, and an outside one is refused.
+
+    Args:
+        tmp_path: A folder with no ``missing`` subfolder, for the real shell.
+    """
     boxes: list[FakeBox] = []
     runner = make_runner([], boxes, Clock())
     assert "must stay inside" in runner.exec_command("ls", workdir="../x")
     assert "must stay inside" in runner.exec_command("ls", workdir="/etc")
     assert boxes == []
     runner.exec_command("ls", workdir="attachments/m 1")
-    assert boxes[0].commands[-1] == "cd -- 'attachments/m 1' && ls"
+    assert boxes[0].commands[-1] == "cd -- 'attachments/m 1' && {\nls\n}"
     runner.exec_command("ls", workdir="..data")
-    assert boxes[0].commands[-1] == "cd -- ..data && ls"
+    assert boxes[0].commands[-1] == "cd -- ..data && {\nls\n}"
+    runner.exec_command("echo one; echo two || echo three", workdir="missing")
+    shell = subprocess.run(
+        ["sh", "-c", boxes[0].commands[-1]], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert shell.stdout == ""
+    assert shell.returncode != 0
     runner.close()
 
 

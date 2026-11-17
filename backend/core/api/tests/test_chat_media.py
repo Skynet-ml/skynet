@@ -286,7 +286,7 @@ def test_a_zip64_end_cannot_hide_a_large_directory_from_the_cap() -> None:
 
 
 def test_document_original_has_its_own_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A document original does not use the cap that its file's text read already counted against."""
+    """A document original does not use the media upload cap; it has its own."""
     monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
 
     assert _upload(harness.client, _PNG).status_code == 201
@@ -433,7 +433,7 @@ def test_an_original_named_as_a_drawn_type_must_hold_that_type(
 
 
 def test_an_original_uses_the_originals_hourly_cap(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any original counts against the originals cap, not the cap its text read already used."""
+    """Any original counts against the originals cap, not the media upload cap."""
     monkeypatch.setattr(chat_media.settings, "rate_limit_attachments_per_hour", 1)
 
     assert _upload(harness.client, _PNG).status_code == 201

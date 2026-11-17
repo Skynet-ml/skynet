@@ -337,7 +337,9 @@ class SandboxCommandRunner(SessionTable):
             streamed.append(True)
             session.append(text)
 
-        command = cmd if folder == "." else f"cd -- {shlex.quote(folder)} && {cmd}"
+        # The braces keep every part of a command such as ``a; b`` behind the cd,
+        # so nothing runs in the wrong folder when the workdir does not exist.
+        command = cmd if folder == "." else f"cd -- {shlex.quote(folder)} && {{\n{cmd}\n}}"
         # Sending the command under the lock keeps a close() from stopping the box first.
         with self._box_lock:
             if self._env is not env:

@@ -530,8 +530,8 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
             HTTPException: 415 for a type that is not allowed or a document
                 whose name has another type's extension, 413 for a file over
                 its kind's limit.
-            DomainError: 429 over the hourly cap (file text reads share it,
-                and document originals have their own), 409 over the storage
+            DomainError: 429 over the hourly cap (media uploads and
+                document originals have separate caps), 409 over the storage
                 quota.
         """
         engine = _engine(job_store)
