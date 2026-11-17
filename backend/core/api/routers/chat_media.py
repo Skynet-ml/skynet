@@ -61,6 +61,8 @@ MAX_MEDIA_PER_MESSAGE = 10
 MAX_MODEL_IMAGE_BYTES = 12 * 1024 * 1024
 _SNIFF_BYTES = 64
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f"\\/]')
+_FORM_ESCAPES = {"%22": '"', "%0D": "\r", "%0A": "\n"}
+_FORM_ESCAPE = re.compile(r"%(?:22|0[dDaA])")
 _KEY_DROPPED = re.compile(r'[\x00-\x1f\x7f"<>_]')
 # JavaScript's String.trim set, less the control characters that the key
 # already drops. Python's bare strip differs: it keeps U+FEFF, drops U+0085.
@@ -213,6 +215,23 @@ def office_document_type(data: bytes) -> str | None:
     except (zipfile.BadZipFile, ValueError):
         return None
     return next((mime for part, mime in _OFFICE_PARTS.items() if part in names), None)
+
+
+def _form_filename(raw: str | None) -> str | None:
+    """Undo the browser's escapes in a multipart filename.
+
+    Args:
+        raw: The filename from the upload, if any.
+
+    Returns:
+        The name with ``%22``, ``%0D`` and ``%0A`` back as the characters.
+    """
+    # The HTML form rules make the browser send '"', CR and LF in a filename
+    # as %22, %0D and %0A, and the parser keeps them. Without this, the server's
+    # key for 'x.p"df' would differ from the viewer's.
+    if raw is None:
+        return None
+    return _FORM_ESCAPE.sub(lambda m: _FORM_ESCAPES[m.group(0).upper()], raw)
 
 
 def _draw_key(raw: str | None) -> str:
@@ -549,15 +568,16 @@ def create_chat_media_router(*, job_store: Any = None) -> APIRouter:
         data = head + file.file.read(limit + 1 - len(head))
         if len(data) > limit:
             raise HTTPException(status_code=413, detail="This file is too large.")
-        filename = _safe_filename(file.filename)
+        raw_name = _form_filename(file.filename)
+        filename = _safe_filename(raw_name)
         if original:
-            sniffed = SniffedMedia("document", _original_type(head, data, file.filename))
+            sniffed = SniffedMedia("document", _original_type(head, data, raw_name))
         elif sniffed.mime_type == "application/zip":
             office = office_document_type(data)
             if office is None:
                 raise HTTPException(status_code=415, detail="This file type is not supported.")
             sniffed = SniffedMedia("document", office)
-        if sniffed.kind == "document" and _named_document_type(file.filename) != (
+        if sniffed.kind == "document" and _named_document_type(raw_name) != (
             None if sniffed.mime_type == _OPAQUE_DOCUMENT else sniffed.mime_type
         ):
             raise HTTPException(status_code=415, detail="This file type is not supported.")

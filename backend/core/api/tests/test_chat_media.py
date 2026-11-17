@@ -378,6 +378,14 @@ def test_an_original_named_x_p_df_must_be_a_real_pdf(harness: SimpleNamespace) -
     assert body["mime_type"] == "application/pdf"
 
 
+def test_a_browser_escaped_quote_in_a_name_gives_the_viewers_key(harness: SimpleNamespace) -> None:
+    """A browser sends 'x.p"df' as 'x.p%22df'; the viewer draws it as a PDF, so it must hold a real PDF."""
+    assert chat_media._form_filename("a%22b%0d%0A.pdf") == 'a"b\r\n.pdf'
+    assert _upload_original(harness.client, b"notes", "x.p%22df").status_code == 415
+    body = _upload_original(harness.client, _PDF, "x.p%22df").json()
+    assert (body["name"], body["mime_type"]) == ("x.pdf", "application/pdf")
+
+
 def test_a_long_pdf_name_keeps_its_drawn_type(harness: SimpleNamespace) -> None:
     """A name cut at 255 characters for storage keeps the type the viewer sees in its full name."""
     body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
