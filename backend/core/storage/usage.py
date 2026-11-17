@@ -42,6 +42,7 @@ from .models import (
     RunCallModel,
     SetupDraftModel,
     TaggingSessionModel,
+    TreeObjectModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -295,6 +296,10 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 RunCallModel.optimization_id.in_(user_job_ids)
             )
         )
+        # Workspace trees belong to the account, not to one run, so they count by owner (SKY-710).
+        trees = scalar(
+            select(func.coalesce(func.sum(TreeObjectModel.byte_size), 0)).where(TreeObjectModel.username == normalized)
+        )
         agent_chats = scalar(
             select(
                 func.coalesce(
@@ -371,6 +376,7 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + checkpoints
         + agent_runs
         + run_calls
+        + trees
         + optimization_embeddings,
         "datasets": datasets,
         "tagging_sessions": tagging_sessions,
