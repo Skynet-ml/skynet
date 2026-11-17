@@ -47,6 +47,9 @@ _LEGACY_PREFIX = "SKYNET_"
 _LEGACY_KEY_TOKEN = "__SKYNET_API_KEY__"
 SHIM_DIR = ".local/app-bin"
 SESSIONS_DIR = ".app-bridge"
+# Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
+EXEC_SHIM_DIR = "exec-bin"
+EXEC_LOG = "exec-log.jsonl"
 _SLUG_RE = re.compile(r"[^A-Za-z0-9-]")
 _USAGE_KEYS = ("input_tokens", "output_tokens")
 # The instruction file every harness reads on start, pointing it at the skills
@@ -1386,9 +1389,10 @@ def run_session(
         proposer: Serialized launch: ``run_command``, ``files``, ``env``,
             ``output_format``, ``instructions_file`` and optional ``price``
             and ``max_tool_calls`` (stop the harness once it starts more
-            tool calls than this; its workspace edits so far stand), and
+            tool calls than this; its workspace edits so far stand),
             ``hidden_hashes`` (the parent's :func:`hidden_hashes` of the
-            scoring-side paths; every tool call that names one is refused).
+            scoring-side paths; every tool call that names one is refused),
+            and ``exec_commands`` (command names the exec shim records).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1427,10 +1431,18 @@ def run_session(
     if hashes:
         home = Path(env["HOME"]) if env.get("HOME") else None
         env.update(install_guard(session_dir, workspace, hashes, home))
+    exec_commands = proposer.get("exec_commands") or []
+    if exec_commands:
+        shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["APP_EXEC_SHIM_DIR"] = str(shim_dir)
+        env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
     for name, value in (
         ("MODEL", model),
         ("PROMPT_FILE", str(prompt_file)),
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
+        # A harness with native resume keeps its own session state here, so the committed tree carries it.
+        ("SESSION_DIR", str(session_dir)),
     ):
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
     shell = shutil.which("bash") or "/bin/sh"
@@ -1700,6 +1712,34 @@ def install_shim(home: Path, bridge_file: Path, python: str) -> Path:
     return shim_dir
 
 
+def install_exec_shim(shim_dir: Path, names: Iterable[str], python: str) -> Path:
+    """Write one wrapper for each command name that runs it through ``exec_shim.py``.
+
+    Args:
+        shim_dir: Folder for the wrappers; it must lead ``PATH``.
+        names: Plain command names to record.
+        python: Interpreter that runs the shim.
+
+    Returns:
+        ``shim_dir``.
+
+    Raises:
+        ValueError: When a name is not a plain file name.
+        FileNotFoundError: When ``exec_shim.py`` is not next to this file.
+    """
+    shim_file = Path(__file__).resolve().with_name("exec_shim.py")
+    if not shim_file.is_file():
+        raise FileNotFoundError(f"exec shim not found: {shim_file}")
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        if name in ("", ".", "..") or "/" in name or "\0" in name:
+            raise ValueError(f"exec shim command must be a plain name: {name!r}")
+        wrapper = shim_dir / name
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.join([python, str(shim_file), name])} "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+    return shim_dir
+
+
 def main(argv: list[str]) -> int:
     """Answer one ``claude --print`` invocation with the configured harness.
 
@@ -1732,8 +1772,11 @@ def main(argv: list[str]) -> int:
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
     opening = session_dir / "opening-prompt.md"
-    if resumed and opening.exists():
-        # No other harness resumes a Claude session by id: the workspace carries
+    if resumed and opening.exists() and proposer.get("resume_command"):
+        # The harness continues its own session from the session folder, so it gets only the follow-up.
+        proposer = {**proposer, "run_command": proposer["resume_command"]}
+    elif resumed and opening.exists():
+        # This harness cannot resume a session by id: the workspace carries
         # the progress, so the follow-up restates the task before the nudge.
         prompt = opening.read_text(encoding="utf-8") + _RESUME_NOTE + prompt
     elif not opening.exists():

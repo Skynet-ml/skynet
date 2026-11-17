@@ -1555,3 +1555,66 @@ def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
     else:
         assert outcome.refusals == []
         assert "hello" in _FakeChat.tool_outputs[0]
+
+
+def _fake_tool(bin_dir: Path, name: str, script: str) -> None:
+    """Write an executable shell command into ``bin_dir``.
+
+    Args:
+        bin_dir: Folder for the command.
+        name: The command name.
+        script: Its shell body.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    tool = bin_dir / name
+    tool.write_text(f"#!/bin/sh\n{script}\n")
+    tool.chmod(0o755)
+
+
+def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_through(tmp_path: Path) -> None:
+    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior."""
+    bin_dir = tmp_path / "bin"
+    _fake_tool(bin_dir, "probe", 'echo "out $*"; echo err >&2; exit 3')
+    _fake_tool(bin_dir, "outer", "probe inner; exit 0")
+    proposer = {
+        **_PLAIN,
+        "run_command": 'probe "a b" 2>/dev/null; echo "rc=$?"; outer; ls >/dev/null',
+        "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        "exec_commands": ["probe", "outer"],
+    }
+    session = tmp_path / "session"
+
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+
+    assert outcome.returncode == 0
+    assert outcome.text == "out a b\nrc=3\nout inner"
+    records = [json.loads(line) for line in (session / harness_bridge.EXEC_LOG).read_text().splitlines()]
+    assert records == [
+        {"command": "probe 'a b'", "exit_code": 3, "stdout": "out a b\n", "stderr": "err\n"},
+        {"command": "outer", "exit_code": 0, "stdout": "out inner\n", "stderr": "err\n"},
+    ]
+
+
+def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> None:
+    """A listed command that is not installed fails with 127 and is still logged."""
+    proposer = {**_PLAIN, "run_command": 'no-such-tool-xyz; echo "rc=$?"', "exec_commands": ["no-such-tool-xyz"]}
+    session = tmp_path / "session"
+
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+
+    assert outcome.text == "rc=127"
+    [record] = [json.loads(line) for line in (session / harness_bridge.EXEC_LOG).read_text().splitlines()]
+    assert (record["command"], record["exit_code"]) == ("no-such-tool-xyz", 127)
+
+
+def test_run_session_without_exec_commands_installs_no_exec_shim(tmp_path: Path) -> None:
+    """A launch that lists no command gets no shim folder and no log, and sees its session folder."""
+    proposer = {**_PLAIN, "run_command": 'echo "$APP_SESSION_DIR"; echo "$PATH"'}
+    session = tmp_path / "session"
+
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+
+    session_line, path_line = (outcome.text or "").splitlines()
+    assert session_line == str(session)
+    assert str(session / harness_bridge.EXEC_SHIM_DIR) not in path_line
+    assert not (session / harness_bridge.EXEC_LOG).exists()
