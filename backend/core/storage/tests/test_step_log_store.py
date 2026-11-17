@@ -7,9 +7,11 @@ names a disposable PostgreSQL database, in its own schema that it drops after.
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,10 @@ needs_postgres = pytest.mark.skipif(
     reason="Set APP_TEST_DB_URL to a disposable PostgreSQL database.",
 )
 TREE = "a" * 64
+
+
+class CallerLocal:
+    """A local of a caller's frame; a weak reference to it shows whether the frame is still kept."""
 
 
 class CountingObjectStore(LocalObjectStore):
@@ -592,7 +598,123 @@ def test_a_flush_that_fences_more_steps_than_the_cap_fails_each_waiter(make_stor
 
     store.flush()
 
-    assert [waiter.failure.step_id for waiter in waiters] == steps
+    assert [waiter.failure for waiter in waiters] == steps
+
+
+def test_durable_raises_a_new_fence_error_each_time_and_keeps_no_caller_frame(make_store, engine) -> None:
+    """The store keeps a step id as the verdict, so an error that ``durable`` raised keeps no frame alive in the store."""
+    store = make_store()
+    step_id = _commit(store)
+    _set_generation(engine, 2)
+    store.flush()
+
+    def call() -> tuple[StepFenceError, weakref.ref[CallerLocal]]:
+        """Call ``durable`` from a frame with a local, as an agent loop does.
+
+        Returns:
+            The raised error and a weak reference to the frame's local.
+        """
+        local = CallerLocal()
+        try:
+            store.durable(step_id, 1, timeout=0)
+        except StepFenceError as error:
+            return error, weakref.ref(local)
+        pytest.fail("durable returned success for a fenced step")
+
+    first, first_local = call()
+    second, second_local = call()
+
+    assert first is not second
+    assert first.step_id == second.step_id == step_id
+    assert store._failures == {(step_id, 1): step_id}
+    del first, second
+    gc.collect()
+    assert first_local() is None
+    assert second_local() is None
+
+
+def test_durable_that_waits_for_the_flush_raises_a_new_fence_error(make_store, engine, objects) -> None:
+    """A ``durable`` call that waits on the step's waiter raises its own error, not an object that the store keeps."""
+    store = make_store()
+    step_id = _commit(store)
+    waiter = store._waiters[(step_id, 1)]
+    wait = waiter.wait
+
+    def open_the_gate_then_wait(timeout: float | None = None) -> bool:
+        """Let the held PUT go on only after ``durable`` chose the waiter, then wait for the flush.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            Whether the flush set the waiter.
+        """
+        objects.gate.set()
+        return wait(timeout)
+
+    waiter.wait = open_the_gate_then_wait
+    _set_generation(engine, 2)
+    objects.gate.clear()
+    flusher = threading.Thread(target=store.flush)
+    flusher.start()
+
+    def call() -> tuple[StepFenceError, weakref.ref[CallerLocal]]:
+        """Call ``durable`` from a frame with a local.
+
+        Returns:
+            The raised error and a weak reference to the frame's local.
+        """
+        local = CallerLocal()
+        try:
+            store.durable(step_id, 1, timeout=5)
+        except StepFenceError as error:
+            return error, weakref.ref(local)
+        finally:
+            flusher.join()
+        pytest.fail("durable returned success for a fenced step")
+
+    waited, waited_local = call()
+
+    assert waiter.failure == step_id
+    assert waited.step_id == step_id
+    with pytest.raises(StepFenceError) as later:
+        store.durable(step_id, 1, timeout=0)
+    assert later.value is not waited
+    del waited, later
+    gc.collect()
+    assert waited_local() is None
+
+
+def test_commit_raises_a_new_fence_error_and_keeps_no_caller_frame(make_store, engine) -> None:
+    """The fence error of an agent's next commit keeps no frame alive, while the step's verdict stays in the store."""
+    store = make_store()
+    step_id = _commit(store)
+    _set_generation(engine, 2)
+    store.flush()
+    assert store._agent_failures == {("job-1", "agent-a", 1): step_id}
+
+    def call() -> tuple[StepFenceError, weakref.ref[CallerLocal]]:
+        """Commit the agent's next step from a frame with a local.
+
+        Returns:
+            The raised error and a weak reference to the frame's local.
+        """
+        local = CallerLocal()
+        try:
+            _commit(store, seq=2)
+        except StepFenceError as error:
+            return error, weakref.ref(local)
+        pytest.fail("the commit of a fenced agent did not raise")
+
+    raised, raised_local = call()
+
+    assert raised.step_id == step_id
+    assert store._failures == {(step_id, 1): step_id}
+    del raised
+    gc.collect()
+    assert raised_local() is None
+    with pytest.raises(StepFenceError, match=step_id):
+        store.durable(step_id, 1, timeout=0)
 
 
 def test_a_new_fence_verdict_of_a_kept_agent_becomes_the_newest(make_store, engine, objects, monkeypatch) -> None:

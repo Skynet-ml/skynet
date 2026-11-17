@@ -25,7 +25,8 @@ whose ``execution_generation`` is still current. A stale step fails with
 it one time; a commit after that is buffered and gets its own verdict at its
 flush. The step id holds no generation, so the buffer and each verdict are
 kept by step id and generation. The store keeps only the newest
-``FENCE_VERDICT_MAX`` verdicts of a step and of an agent in memory.
+``FENCE_VERDICT_MAX`` verdicts of a step and of an agent in memory. A kept
+verdict is the step id, not an error: each raise makes a new error.
 """
 
 from __future__ import annotations
@@ -60,7 +61,8 @@ _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
 SEQ_MAX = 2**31 - 1
-# A fenced agent stops, so only a caller that goes on after the error fills this. One verdict keeps about 0.7 KB.
+# Each stale step of a flush adds one verdict for its step and one for its agent, also when the agent stops after it.
+# A verdict is only a key and a step id: the two dicts keep about 0.4 KB for a stale step with a 60-character id.
 FENCE_VERDICT_MAX = 10_000
 OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
@@ -133,16 +135,16 @@ def _check_run_id(run_id: str) -> None:
         raise ValueError(f"run_id must not hold a ':': {run_id!r}")
 
 
-def _keep_verdict(verdicts: dict[Any, StepFenceError], key: Any, error: StepFenceError) -> None:
+def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
     """Keep a fence verdict as the newest one and drop the oldest one above ``FENCE_VERDICT_MAX``.
 
     Args:
         verdicts: The verdicts by key, oldest first.
         key: The key of the new verdict.
-        error: The verdict.
+        step_id: The verdict: the id of the fenced step.
     """
     verdicts.pop(key, None)
-    verdicts[key] = error
+    verdicts[key] = step_id
     if len(verdicts) > FENCE_VERDICT_MAX:
         del verdicts[next(iter(verdicts))]
 
@@ -173,7 +175,8 @@ class _Waiter(threading.Event):
     """The durable barrier of one buffered step, with the fence verdict that its flush sets before it opens."""
 
     # On the waiter, not only in a dict by key: a retry of the same key can replace the dict entry first.
-    failure: StepFenceError | None = None
+    # The value is the id of the fenced step; ``None`` means that the step passed the fence.
+    failure: str | None = None
 
 
 def _encode_body(body: dict[str, Any]) -> bytes:
@@ -284,9 +287,10 @@ class StepLogStore:
         # Keyed by step id and generation: two generations of one step id get their own verdicts.
         self._waiters: dict[tuple[str, int], _Waiter] = {}
         # For a ``durable`` call that comes after the flush removed the step's waiter. Oldest first, with a cap.
-        self._failures: dict[tuple[str, int], StepFenceError] = {}
+        # A verdict is the step id, never an error object: each raise adds the frames of its callers to the error.
+        self._failures: dict[tuple[str, int], str] = {}
         # Keyed by generation too: a verdict of an old generation does not fail a commit of the run's new generation.
-        self._agent_failures: dict[tuple[str, str, int], StepFenceError] = {}
+        self._agent_failures: dict[tuple[str, str, int], str] = {}
         self._closed = False
         self._thread = threading.Thread(target=self._run, name=f"step-log-{worker_id}", daemon=True)
         self._thread.start()
@@ -359,7 +363,7 @@ class StepLogStore:
         with self._cond:
             failure = self._agent_failures.pop((run_id, agent_id, execution_generation), None)
             if failure is not None:
-                raise failure
+                raise StepFenceError(failure)
             if self._closed:
                 raise RuntimeError("the step log is closed")
             versions = self._steps.setdefault(step_id, {})
@@ -456,9 +460,9 @@ class StepLogStore:
                     select(JobModel.execution_generation).where(JobModel.optimization_id == row.run_id)
                 )
             if current != execution_generation:
-                failure = StepFenceError(step_id)
+                failure = step_id
         if failure is not None:
-            raise failure
+            raise StepFenceError(failure)
 
     def get_step(self, step_id: str) -> dict[str, Any] | None:
         """Return one step with its body: the stored row first, else the buffer when it is not flushed yet.
@@ -543,14 +547,13 @@ class StepLogStore:
                 raise
             with self._cond:
                 # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
-                verdicts: dict[tuple[str, int], StepFenceError] = {}
+                verdicts: dict[tuple[str, int], str] = {}
                 for entry in stale:
-                    error = StepFenceError(entry["step_id"])
                     step_key = (entry["step_id"], entry["execution_generation"])
-                    verdicts[step_key] = error
-                    _keep_verdict(self._failures, step_key, error)
+                    verdicts[step_key] = entry["step_id"]
+                    _keep_verdict(self._failures, step_key, entry["step_id"])
                     agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
-                    _keep_verdict(self._agent_failures, agent_key, error)
+                    _keep_verdict(self._agent_failures, agent_key, entry["step_id"])
                 for item, _ in batch:
                     if isinstance(item, _Object):
                         self._tree_objects.pop((item.run_id, item.object_id), None)
