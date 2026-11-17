@@ -826,8 +826,8 @@ def test_recover_counts_only_the_packs_it_applied(make_store, engine, objects, m
     assert _step_rows(engine) == 1
 
 
-def test_a_failed_database_write_retries_once_per_window(make_store, engine, objects) -> None:
-    """New commits after a failed flush do not start a retry early, so each window costs at most one pack PUT."""
+def test_a_failed_database_write_puts_no_new_pack_while_the_written_pack_waits(make_store, engine, objects) -> None:
+    """New commits after a failed database write do not PUT a new pack while the written pack waits for its retry."""
     database_down = threading.Event()
     database_down.set()
 
@@ -861,7 +861,7 @@ def test_a_failed_database_write_retries_once_per_window(make_store, engine, obj
             _commit(store, seq=seq)
             time.sleep(0.02)
 
-        assert objects.puts <= 2
+        assert objects.puts == 1
     finally:
         database_down.clear()
         event.remove(engine, "before_cursor_execute", fail_pack_insert)
@@ -1237,6 +1237,98 @@ class _FakeS3:
             **kwargs: The call arguments.
         """
         self.calls.append(kwargs)
+
+
+class _NoSuchKeyError(Exception):
+    """Stands in for the boto3 ``NoSuchKey`` error."""
+
+
+class _ReadableFakeS3(_FakeS3):
+    """Serves ranged GETs and paged listings from a dict of objects; no network."""
+
+    exceptions = type("Exceptions", (), {"NoSuchKey": _NoSuchKeyError})
+
+    def __init__(self, objects: dict[str, bytes], page_size: int) -> None:
+        """Hold the objects to serve.
+
+        Args:
+            objects: The object bytes by key.
+            page_size: The number of keys in one listing page.
+        """
+        super().__init__()
+        self.objects = objects
+        self.page_size = page_size
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Serve one ranged GET with the inclusive HTTP range end.
+
+        Args:
+            **kwargs: The call arguments.
+
+        Returns:
+            A response whose body holds the range.
+
+        Raises:
+            _NoSuchKeyError: When no object is filed under the key.
+        """
+        self.calls.append(kwargs)
+        if kwargs["Key"] not in self.objects:
+            raise _NoSuchKeyError(kwargs["Key"])
+        start, end = kwargs["Range"].removeprefix("bytes=").split("-")
+        data = self.objects[kwargs["Key"]]
+        body = data[int(start) : int(end) + 1] if end else data[int(start) :]
+        return {"Body": type("Body", (), {"read": lambda self: body})()}
+
+    def get_paginator(self, name: str) -> Any:
+        """Return a paginator that splits the matching keys into pages.
+
+        Args:
+            name: The operation name.
+
+        Returns:
+            An object whose ``paginate`` yields the pages.
+        """
+        assert name == "list_objects_v2"
+        fake = self
+
+        class _Paginator:
+            """Yields ``list_objects_v2`` pages."""
+
+            def paginate(self, Bucket: str, Prefix: str) -> Iterator[dict[str, Any]]:  # noqa: N803 (boto3 names)
+                """Yield the matching keys, ``page_size`` at a time, in reverse order.
+
+                Args:
+                    Bucket: The bucket name.
+                    Prefix: The key prefix.
+
+                Yields:
+                    One page; an empty page has no ``Contents``.
+                """
+                keys = sorted((key for key in fake.objects if key.startswith(Prefix)), reverse=True)
+                for start in range(0, len(keys), fake.page_size):
+                    yield {"Contents": [{"Key": key} for key in keys[start : start + fake.page_size]]}
+                yield {}
+
+        return _Paginator()
+
+
+def test_the_s3_store_reads_ranges_and_lists_every_page() -> None:
+    """The S3 store reads exact byte ranges, maps a missing key to KeyError, and joins every listing page in key order."""
+    client = _ReadableFakeS3(
+        {"packs/w1/b.pack": b"0123456789", "packs/w1/a.pack": b"x", "packs/w2/c.pack": b"y", "other/d": b"z"},
+        page_size=2,
+    )
+    store = S3ObjectStore(bucket="trees-test", client=client)
+
+    assert store.get("packs/w1/b.pack", 2, 3) == b"234"
+    assert client.calls[-1]["Range"] == "bytes=2-4"
+    assert store.get("packs/w1/b.pack", 7) == b"789"
+    calls = len(client.calls)
+    assert store.get("packs/w1/b.pack", 4, 0) == b""
+    assert len(client.calls) == calls
+    with pytest.raises(KeyError):
+        store.get("packs/missing")
+    assert store.list("packs/") == ["packs/w1/a.pack", "packs/w1/b.pack", "packs/w2/c.pack"]
 
 
 def test_the_s3_store_reads_its_bucket_from_the_setting(monkeypatch) -> None:
