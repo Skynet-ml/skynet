@@ -896,6 +896,7 @@ class RemoteDBJobStore:
                 "username": job.username,
                 "optimization_type": job.optimization_type,
                 "attempts": job.attempts,
+                "automatic_resumes": job.automatic_resumes,
                 "execution_generation": job.execution_generation,
                 "execution_budget_id": job.execution_budget_id,
                 "execution_budget_generation": job.execution_budget_generation,
@@ -1731,6 +1732,8 @@ class RemoteDBJobStore:
         without a checkpoint (SKY-711). Its automatic resumes count against
         ``MAX_AUTOMATIC_RESUMES`` instead of ``job_max_attempts``; 4 is above
         the default ``job_max_attempts`` of 3, so a step log run gets more tries.
+        Only ``automatic_resumes`` counts toward that cap, so a manual resume
+        does not use up the run's automatic tries (SKY-801).
 
         Args:
             optimization_id: The job to resume.
@@ -1805,7 +1808,7 @@ class RemoteDBJobStore:
                 )
             current_attempt = int(job.attempts or 0)
             if automatic and step_resume_at is not None:
-                if bump_attempts and current_attempt >= MAX_AUTOMATIC_RESUMES:
+                if bump_attempts and int(job.automatic_resumes or 0) >= MAX_AUTOMATIC_RESUMES:
                     raise CheckpointCompatibilityError(
                         f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
                     )
@@ -1919,6 +1922,8 @@ class RemoteDBJobStore:
             current = int(job.attempts or 0)
             next_attempt = current + 1 if bump_attempts else current
             job.attempts = next_attempt  # type: ignore[assignment]
+            if automatic and bump_attempts:
+                job.automatic_resumes = int(job.automatic_resumes or 0) + 1
             # Neither a step log resume nor a fresh restart has a checkpoint tied to one worker version.
             if not checkpoints or (automatic and job.sandbox_image is not None):
                 # The sweep or the API can run on a pod of the version a deploy is
@@ -2048,6 +2053,7 @@ class RemoteDBJobStore:
             job.latest_metrics = {}  # type: ignore[assignment]
             job.result = None  # type: ignore[assignment]
             job.attempts = 0  # type: ignore[assignment]
+            job.automatic_resumes = 0
             job.sandbox_image = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]

@@ -1260,6 +1260,9 @@ class JobModel(Base):
     # shape is a first-class indexed column. NULL on legacy/child rows.
     composition: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Only the orphan sweep's resumes count here, so a manual resume does not use
+    # up a step log run's ``MAX_AUTOMATIC_RESUMES`` (SKY-801).
+    automatic_resumes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     code_version: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     # The image a protected run first executed in. Every later box for the run,
     # a resume after a redeploy included, boots from it so checkpoints stay loadable.

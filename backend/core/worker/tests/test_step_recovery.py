@@ -362,6 +362,7 @@ def test_the_fifth_automatic_resume_fails_the_run(store: StepJobStore, step_logs
         job = store.get_job(RUN)
         assert job["status"] == "pending"
         assert job["attempts"] == resume
+        assert job["automatic_resumes"] == resume
         _claim(store, f"pod-{resume}")
 
     _kill(store)
@@ -588,6 +589,7 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     _set_job(
         store,
         attempts=MAX_AUTOMATIC_RESUMES,
+        automatic_resumes=MAX_AUTOMATIC_RESUMES,
         recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
     )
     _kill(store)
@@ -597,6 +599,38 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     job = store.get_job(RUN)
     assert job["status"] == "pending"
     assert job["attempts"] == MAX_AUTOMATIC_RESUMES
+    assert job["automatic_resumes"] == MAX_AUTOMATIC_RESUMES
+
+
+def test_manual_resumes_do_not_count_against_the_automatic_resume_cap(store: StepJobStore, step_logs: Any) -> None:
+    """A run with many manual resumes still gets its automatic resumes after a crash (SKY-801)."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log_a = step_logs("pod-a")
+    _commit(log_a, 0, generation)
+    log_a.flush()
+    _set_job(store, attempts=MAX_AUTOMATIC_RESUMES)
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["attempts"] == MAX_AUTOMATIC_RESUMES + 1
+    assert job["automatic_resumes"] == 1
+
+
+def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore) -> None:
+    """A from-scratch rerun starts with no automatic resumes used (SKY-801)."""
+    _funded_run(store)
+    _set_job(store, status="failed", attempts=MAX_AUTOMATIC_RESUMES, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+
+    assert store.requeue_for_rerun(RUN) is True
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["attempts"] == 0
+    assert job["automatic_resumes"] == 0
 
 
 def test_the_wake_skips_a_run_that_changed_after_the_read(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -746,6 +780,7 @@ def test_a_manual_resume_of_an_interrupted_step_log_run_resumes(store: StepJobSt
     job = store.get_job(RUN)
     assert job["status"] == "pending"
     assert job["attempts"] == 1
+    assert job["automatic_resumes"] == 0
     assert job["code_version"] is None
 
 
