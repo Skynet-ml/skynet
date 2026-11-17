@@ -128,6 +128,7 @@ from .repo_staging import (
     publish_improvement,
     stage_repository,
 )
+from .step_recovery import park_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
 from .vercel_dspy import run_vercel_dspy
@@ -519,6 +520,24 @@ class BackgroundWorker:
                 pass
             except Exception:
                 logger.exception("release_job failed for %s", optimization_id)
+
+    def park_job(self, optimization_id: str, generation: int, wake_at: datetime) -> bool:
+        """Put a waiting run in the wait state and free this worker's claim on it.
+
+        Args:
+            optimization_id: The run that waits.
+            generation: The execution generation this worker owns.
+            wake_at: When the orphan sweep makes the run claimable again.
+
+        Returns:
+            Whether the run was parked; ``False`` when another owner changed it first.
+        """
+        if not park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at):
+            return False
+        # The run has no lease now: a heartbeat would find no claim and cancel the job as stolen.
+        with self._queue_lock:
+            self._claimed_jobs.discard(optimization_id)
+        return True
 
     def _worker_loop(self, worker_id: int) -> None:
         """Poll for jobs and process them until stopped.

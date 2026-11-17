@@ -9,6 +9,7 @@ Methods tested (no real subprocesses, no real multiprocessing.Queue):
   reset_worker_for_tests                    — clears the module-level singleton
   BackgroundWorker._process_job             — run_completed / run_failed telemetry facts
   BackgroundWorker._sandbox_sweep_loop      — a failed sweep does not end the sweeper
+  BackgroundWorker.park_job                 — frees the claim; a stale generation keeps it
 
 Methods intentionally NOT tested here:
   start() / _worker_loop()                  — require real threads + real mp.Process
@@ -19,7 +20,8 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
@@ -39,6 +41,7 @@ from core.worker.engine import BackgroundWorker, get_worker, reset_worker_for_te
 
 from .conftest import FakeJobStore
 from .mocks import REAL_RUN_PAYLOAD, fake_mp_process, make_mp_context, protect_dispatch
+from .test_step_recovery import RUN, StepJobStore, _claim, _funded_run, make_sqlite_store
 
 
 @pytest.fixture(autouse=True)
@@ -653,6 +656,46 @@ def test_renewing_lease_touches_activity_while_a_blocking_step_runs(
     assert touches[-1][1] == job_thread
     assert sum(name == "lease-renew-1" for _, name in touches) >= 3
     assert {worker_id for worker_id, _ in touches} == {1}
+
+
+def _claimed_worker(tmp_path: Path) -> tuple[BackgroundWorker, StepJobStore, int, threading.Event]:
+    """Build a worker on a real store whose thread 0 holds the claim on a running run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The worker, its store, the claimed generation, and the run's cancel event.
+    """
+    job_store = make_sqlite_store(tmp_path)
+    _funded_run(job_store)
+    w = BackgroundWorker(job_store=cast(JobStore, job_store), num_workers=1, poll_interval=1.0, pod_name="pod-a")
+    generation = _claim(job_store, "pod-a")
+    cancel = threading.Event()
+    w._claimed_jobs.add(RUN)
+    w._cancel_events[RUN] = cancel
+    w._thread_current_job[0] = RUN
+    return w, job_store, generation, cancel
+
+
+def test_park_job_frees_the_claim_so_the_heartbeat_does_not_cancel_the_run(tmp_path: Path) -> None:
+    """A parked run leaves the worker's claims, and the next heartbeat does not treat it as stolen."""
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
+
+    assert w.park_job(RUN, generation, datetime.now(UTC) + timedelta(hours=1))
+    assert RUN not in w._claimed_jobs
+    w._touch_activity(0)
+    assert not cancel.is_set()
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
+def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
+    """A worker that lost the generation does not park the run and keeps its claim for the heartbeat."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+
+    assert not w.park_job(RUN, generation - 1, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]
