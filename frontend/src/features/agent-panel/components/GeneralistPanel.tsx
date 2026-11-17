@@ -252,6 +252,8 @@ interface GeneralistPanelProps {
   wizardState?: WizardState;
 }
 
+const COMPOSER_DATASET_READ_TOAST = "composer-dataset-read";
+
 /**
  * Docked generalist agent panel. Renders as an aside anchored to the document's
  * inline-end edge — left in Hebrew/RTL, right in English/LTR — that the user can
@@ -1031,16 +1033,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [webChat, datasetDraft, addOriginals],
   );
 
-  const attachComposerDataset = useLatestDatasetRead(
+  const readDataset = useLatestDatasetRead(
     agent.conversationId,
     React.useCallback(
-      (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
+      (confirmed: ConfirmedDataset, file: File) => {
+        toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+        handleDatasetConfirm(undefined, confirmed, file);
+      },
       [handleDatasetConfirm],
     ),
-    React.useCallback(
-      () => toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error")),
-      [],
-    ),
+    React.useCallback(() => {
+      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+      toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error"));
+    }, []),
+  );
+  // A large XLSX can take seconds to read, so show that the attach is under way.
+  const attachComposerDataset = React.useCallback(
+    (file: File) => {
+      if (!toast.isActive(COMPOSER_DATASET_READ_TOAST)) {
+        toast.loading(msg("auto.features.agent.panel.components.datasetuploadcard.parsing"), {
+          toastId: COMPOSER_DATASET_READ_TOAST,
+        });
+      }
+      readDataset(file);
+    },
+    [readDataset],
+  );
+  // A chat switch drops the read under way, so its pending toast goes too.
+  React.useEffect(
+    () => () => {
+      toast.dismiss(COMPOSER_DATASET_READ_TOAST);
+    },
+    [agent.conversationId],
   );
 
   const handleLibraryPick = React.useCallback(

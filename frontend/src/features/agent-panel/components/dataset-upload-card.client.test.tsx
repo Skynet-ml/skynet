@@ -131,7 +131,11 @@ void test("a Strict Mode card attaches once, and a closed card attaches nothing"
   );
   await pickFile(strictContainer, new File([csv], "qa.csv", { type: "text/csv" }));
   await settle();
-  assert.equal(strictAttached.length, 1, "Strict Mode runs effects twice but the card attaches once");
+  assert.equal(
+    strictAttached.length,
+    1,
+    "Strict Mode runs effects twice but the card attaches once",
+  );
   await React.act(async () => strictRoot.unmount());
   strictContainer.remove();
 
@@ -148,9 +152,7 @@ void test("a Strict Mode card attaches once, and a closed card attaches nothing"
       finishRead = resolve;
     }).then(readText);
   await React.act(async () =>
-    closedRoot.render(
-      <DatasetUploadCard onConfirm={(d) => closedAttached.push(d)} />,
-    ),
+    closedRoot.render(<DatasetUploadCard onConfirm={(d) => closedAttached.push(d)} />),
   );
   await pickFile(closedContainer, slowFile);
   // The drop zone's exit animation can still show; a disabled input means the read is under way.
@@ -384,9 +386,7 @@ void test("a disabled card attaches nothing", async () => {
   const file = new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" });
 
   await React.act(async () =>
-    root.render(
-      <DatasetUploadCard disabled onConfirm={(d) => attached.push(d)} />,
-    ),
+    root.render(<DatasetUploadCard disabled onConfirm={(d) => attached.push(d)} />),
   );
   await pickFile(container, file);
   for (let i = 0; i < 10; i += 1) {

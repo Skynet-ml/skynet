@@ -579,7 +579,6 @@ export function DatasetUploadCard({
               {msg("auto.features.agent.panel.components.datasetuploadcard.parsing")}
             </motion.div>
           )}
-
         </AnimatePresence>
       </motion.div>
     </div>
