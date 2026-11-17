@@ -109,7 +109,7 @@ To set a default model for new chats, open **Settings** > **Agent panel** > **De
 
 ### Cost
 
-Agent chats on Skynet credits use your balance. If your available balance is too low, the panel shows "Your available balance is too low. Active runs can hold part of your balance." Select the wallet button (**Add funds**) to open Billing settings. For prices, read [Billing](/docs/concepts/billing).
+Agent chats on Skynet credits use your balance. If your available balance is too low, the panel shows "Your available balance is too low. Active runs can hold part of your balance." Select the wallet button (**Add funds**) to open the **Billing** settings. For prices, read [Billing](/docs/concepts/billing).
 
 ## Tips
 
