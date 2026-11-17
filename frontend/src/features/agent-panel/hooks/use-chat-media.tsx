@@ -228,8 +228,8 @@ export function useChatMedia(): ChatMediaDraft {
   const addOriginals = React.useCallback(
     (files: ReadonlyArray<{ file: File; card: string }>) => {
       if (closedRef.current) return;
-      // The server takes no original over the file limit, so a larger file
-      // keeps only its text and is not uploaded for nothing.
+      // The composer drops a file over the limit first. The server takes no
+      // original over it either, so such an upload would only fail.
       const fits = files.filter(({ file }) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
       const added = fits.map(({ file, card }): DraftOriginal => {
         const localId = crypto.randomUUID();
@@ -400,12 +400,16 @@ export function useChatMedia(): ChatMediaDraft {
         if (run !== restoreRef.current || itemsRef.current.length) return;
         // A document is a file's stored original (SKY-735), not a tile. It keeps
         // its card, which the restored text keeps too. One that does not load
-        // stays out: its file still goes as text.
+        // stays out, and its card goes with no path, so the toast tells the user.
         const originals = wanted.flatMap((m, i) => {
           const got = blobs[i]!;
-          return m.kind === "document" && m.card && got.status === "fulfilled"
-            ? [{ file: new File([got.value], m.name, { type: got.value.type }), card: m.card }]
-            : [];
+          if (m.kind !== "document" || !m.card) return [];
+          if (got.status === "fulfilled")
+            return [
+              { file: new File([got.value], m.name, { type: got.value.type }), card: m.card },
+            ];
+          toast.error(msg("agent.media.unreadable", { name: m.name }));
+          return [];
         });
         const added = wanted.flatMap((m, i): Array<{ item: DraftMedia; file: File | null }> => {
           const got = blobs[i]!;

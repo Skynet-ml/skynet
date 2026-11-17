@@ -1315,8 +1315,8 @@ class Settings(BaseSettings):
         default=300,
         ge=0,
         description=(
-            "Per-account cap on files read for agent chats per hour, enforced across replicas via Redis. "
-            "Bounds the parsing work one account can cause. 0 disables the cap."
+            "Per-account cap on agent chat media uploads per hour, enforced across replicas via Redis. "
+            "0 disables the cap."
         ),
     )
     transcription_monthly_budget_usd: float = Field(

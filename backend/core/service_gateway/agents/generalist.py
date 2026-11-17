@@ -75,7 +75,7 @@ from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
 from .approval_choices import declined_result, take_approval_choice
-from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT
+from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT, WRITE_STDIN_TOOL
 from .auto_review import AutoReviewer
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
@@ -215,9 +215,9 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
 # The setup agent's own file tools, not agent routes. Like a safe mutation they
 # ask only in Ask mode: they change the setup draft or the chat's workspace,
 # never the user's repository. A Mac command can also read the user's files.
-# ``write_stdin`` never asks, as in Codex: it talks only to a command the user
-# already allowed.
-_ASK_FILE_TOOLS: frozenset[str] = frozenset({WRITE_FILE_TOOL, EDIT_FILE_TOOL, EXEC_COMMAND_TOOL})
+# ``write_stdin`` asks too: a command that started in another trust mode, such
+# as a shell, would otherwise take new input with no prompt after a switch to Ask.
+_ASK_FILE_TOOLS: frozenset[str] = frozenset({WRITE_FILE_TOOL, EDIT_FILE_TOOL, EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL})
 
 # "Allow for this chat" never covers these (SKY-706). Each call spends the
 # balance, or (``change_setting``) can switch the assistant engine or the data

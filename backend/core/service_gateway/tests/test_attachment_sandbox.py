@@ -557,13 +557,12 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_commands_ask_only_in_ask_mode() -> None:
-    """Check that a command asks first in Ask mode, and its write_stdin calls never ask."""
-    assert _needs_approval(EXEC_COMMAND_TOOL, "ask") is True
-    assert chat_rule_allowed(EXEC_COMMAND_TOOL) is True
-    for mode in ("ask", "auto_safe", "yolo"):
-        assert _needs_approval(WRITE_STDIN_TOOL, mode) is False
-    for mode in ("auto_safe", "yolo"):
-        assert _needs_approval(EXEC_COMMAND_TOOL, mode) is False
+    """Check that a command and its input ask first in Ask mode, and run without a prompt in the other modes."""
+    for name in (EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL):
+        assert _needs_approval(name, "ask") is True
+        assert _needs_approval(name, "auto_safe") is False
+        assert _needs_approval(name, "yolo") is False
+        assert chat_rule_allowed(name) is True
 
 
 def test_failed_start_stops_the_box() -> None:

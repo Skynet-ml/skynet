@@ -485,7 +485,7 @@ void test("a file of any type keeps its original, which goes out on Send (SKY-78
   await unmount();
 });
 
-void test("an original over the file limit is not uploaded; the file keeps only its text", async () => {
+void test("an original over the file limit is not uploaded", async () => {
   const { draft, unmount } = await mountDraft();
   const before = originalUploads.length;
   const big = new File(["x"], "big.csv", { type: "text/csv" });
@@ -844,8 +844,10 @@ void test("a restore links each original to its card again, and skips one with n
     draft().tiles.map((t) => t.name),
     ["a.png"],
   );
-  // A document that does not load stays out with no error: its file still goes as text.
-  assert.equal(errors.length, errorsBefore);
+  // A document that does not load stays out, and the user is told the agent cannot read it.
+  assert.deepEqual(errors.slice(errorsBefore), [
+    "Could not upload lost.pdf. The agent cannot read this file.",
+  ]);
   assert.deepEqual(originalUploads.slice(uploadsBefore), ["r.pdf", "r.pdf"]);
   // The card c-2 left while the restore loaded, so its original stays out.
   assert.deepEqual(
