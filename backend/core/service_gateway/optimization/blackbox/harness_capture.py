@@ -301,7 +301,7 @@ def snapshot_session(
         The root tree id.
     """
     launch_files = {*workspace_files(proposer), SESSIONS_DIR}
-    entries = _put_directory(trees, run_id, workspace, workspace, launch_files.__contains__, route_key)
+    entries = _put_root(trees, run_id, workspace, launch_files.__contains__, route_key)
 
     def is_log(relative: str) -> bool:
         """Tell whether a session-folder path is a log of this box.
@@ -314,21 +314,48 @@ def snapshot_session(
         """
         return any(fnmatchcase(relative, pattern) for pattern in _SESSION_LOGS)
 
-    session = trees.put_tree(run_id, _put_directory(trees, run_id, session_dir, session_dir, is_log, route_key))
+    session = trees.put_tree(run_id, _put_root(trees, run_id, session_dir, is_log, route_key))
     sessions = trees.put_tree(run_id, [TreeEntry(session_dir.name, "tree", session)])
     return trees.put_tree(run_id, [*entries, TreeEntry(SESSIONS_DIR, "tree", sessions)])
 
 
-def _put_directory(
-    trees: TreeStore, run_id: str, root: Path, directory: Path, skip: Callable[[str], bool], route_key: str
+def _put_root(
+    trees: TreeStore, run_id: str, folder: Path, skip: Callable[[str], bool], route_key: str
 ) -> list[TreeEntry]:
-    """Store every file, link and folder below ``directory`` and return its entries.
+    """Store everything below one root folder, which must not be a link.
 
     Args:
         trees: The tree store.
         run_id: The job that owns the objects.
-        root: The folder that ``skip`` paths are relative to.
-        directory: The folder to store.
+        folder: The root folder.
+        skip: Tell whether a root-relative POSIX path is left out.
+        route_key: The key to redact.
+
+    Returns:
+        The folder's tree entries.
+    """
+    folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return _put_directory(trees, run_id, folder_fd, "", skip, route_key)
+    finally:
+        os.close(folder_fd)
+
+
+def _put_directory(
+    trees: TreeStore, run_id: str, folder_fd: int, prefix: str, skip: Callable[[str], bool], route_key: str
+) -> list[TreeEntry]:
+    """Store every file, link and folder in an open folder and return its entries.
+
+    The agent can swap an entry for a link at any moment, so every read goes
+    through a descriptor opened relative to ``folder_fd`` with ``O_NOFOLLOW``.
+    ``O_NONBLOCK`` keeps a pipe from hanging the open. An entry whose open
+    fails, or whose opened file is not the one ``lstat`` saw, is left out.
+
+    Args:
+        trees: The tree store.
+        run_id: The job that owns the objects.
+        folder_fd: An open descriptor of the folder.
+        prefix: The folder's root-relative POSIX path, with a trailing ``/``.
         skip: Tell whether a root-relative POSIX path is left out.
         route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
 
@@ -336,26 +363,73 @@ def _put_directory(
         The folder's tree entries. Sockets, pipes and devices are left out.
     """
     entries = []
-    for path in sorted(directory.iterdir()):
-        if skip(path.relative_to(root).as_posix()) or (route_key and route_key in path.name):
+    for name in sorted(os.listdir(folder_fd)):
+        if skip(prefix + name) or (route_key and route_key in name):
             continue
         # A background job can delete a file during the walk, and the agent can
         # make a file unreadable; the tree then holds what can still be read.
         try:
-            info = path.lstat()
+            info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
-                target = _redact_bytes(os.fsencode(path.readlink()), route_key)
-                entries.append(TreeEntry(path.name, "symlink", trees.put_blob(run_id, target)))
-            elif stat.S_ISDIR(info.st_mode):
-                subtree = trees.put_tree(run_id, _put_directory(trees, run_id, root, path, skip, route_key))
-                entries.append(TreeEntry(path.name, "tree", subtree))
-            elif stat.S_ISREG(info.st_mode):
-                mode = "exec" if info.st_mode & 0o111 else "file"
-                data = _redact_bytes(path.read_bytes(), route_key)
-                entries.append(TreeEntry(path.name, mode, trees.put_blob(run_id, data)))
+                # readlink reads the link itself and never follows it.
+                target = _redact_bytes(os.fsencode(os.readlink(name, dir_fd=folder_fd)), route_key)
+                entries.append(TreeEntry(name, "symlink", trees.put_blob(run_id, target)))
+            elif stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode):
+                entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key)
+                if entry is not None:
+                    entries.append(entry)
         except OSError:
             continue
     return entries
+
+
+def _put_opened(
+    trees: TreeStore,
+    run_id: str,
+    folder_fd: int,
+    prefix: str,
+    name: str,
+    info: os.stat_result,
+    skip: Callable[[str], bool],
+    route_key: str,
+) -> TreeEntry | None:
+    """Open one file or folder without following a link and store it, if it is still what ``lstat`` saw.
+
+    Args:
+        trees: The tree store.
+        run_id: The job that owns the objects.
+        folder_fd: The open parent folder.
+        prefix: The parent's root-relative POSIX path.
+        name: The entry name.
+        info: The entry's ``lstat`` result.
+        skip: Tell whether a root-relative POSIX path is left out.
+        route_key: The key to redact.
+
+    Returns:
+        The entry, or ``None`` when the opened file is another file or type.
+
+    Raises:
+        OSError: When the open fails, for example ``ELOOP`` on a link.
+    """
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder_fd)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, stat.S_IFMT(opened.st_mode)) != (
+            info.st_dev,
+            info.st_ino,
+            stat.S_IFMT(info.st_mode),
+        ):
+            return None
+        if stat.S_ISDIR(opened.st_mode):
+            subtree = trees.put_tree(run_id, _put_directory(trees, run_id, fd, f"{prefix}{name}/", skip, route_key))
+            return TreeEntry(name, "tree", subtree)
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        mode = "exec" if opened.st_mode & 0o111 else "file"
+        return TreeEntry(name, mode, trees.put_blob(run_id, _redact_bytes(b"".join(chunks), route_key)))
+    finally:
+        os.close(fd)
 
 
 def _redact_bytes(data: bytes, route_key: str) -> bytes:

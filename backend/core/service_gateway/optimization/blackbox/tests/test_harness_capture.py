@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -390,6 +393,87 @@ def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log,
         (workspace / "locked-dir").chmod(0o755)
 
     assert set(_tree_files(TreeStore(step_log), tree_id)) == {"main.py"}
+
+
+def _lstat_lies(monkeypatch: pytest.MonkeyPatch, name: str, result: os.stat_result) -> None:
+    """Make the walk's ``lstat`` of one entry return ``result``, as if the entry changed right after it.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+        name: The entry name.
+        result: The stat result the walk sees.
+    """
+    real_stat = os.stat
+
+    def fake_stat(path: Any, *args: Any, dir_fd: int | None = None, follow_symlinks: bool = True) -> os.stat_result:
+        """Return ``result`` for the entry, else the real stat.
+
+        Args:
+            path: The path.
+            *args: Other positional arguments.
+            dir_fd: The folder descriptor.
+            follow_symlinks: Whether to follow a link.
+
+        Returns:
+            The stat result.
+        """
+        if dir_fd is not None and path == name:
+            return result
+        return real_stat(path, *args, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+
+def _as_regular_file(info: os.stat_result) -> os.stat_result:
+    """Return ``info`` with the mode of a regular file.
+
+    Args:
+        info: A real stat result.
+
+    Returns:
+        The same inode and device, typed as a regular file.
+    """
+    fields = list(info)[:10]
+    fields[0] = stat.S_IFREG | 0o644
+    return os.stat_result(fields)
+
+
+def test_a_file_swapped_for_a_link_after_lstat_is_not_read(step_log, tmp_path, monkeypatch) -> None:
+    """The walk never reads a host file through a link that replaced a workspace file after its lstat."""
+    workspace, session_dir, secret = tmp_path / "work", tmp_path / "session", tmp_path / "host-secret"
+    workspace.mkdir()
+    session_dir.mkdir()
+    secret.write_text("host secret")
+    (workspace / "data.txt").symlink_to(secret)
+    _lstat_lies(monkeypatch, "data.txt", secret.stat())
+
+    tree_id = _snapshot(TreeStore(step_log), workspace, session_dir)
+
+    assert "data.txt" not in _tree_files(TreeStore(step_log), tree_id)
+
+
+def test_a_pipe_that_looks_like_a_file_does_not_hang_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
+    """A FIFO in place of a file is opened without blocking and left out."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    pipe = workspace / "pipe"
+    os.mkfifo(pipe)
+    _lstat_lies(monkeypatch, "pipe", _as_regular_file(pipe.stat()))
+    result: list[str] = []
+    walker = threading.Thread(
+        target=lambda: result.append(_snapshot(TreeStore(step_log), workspace, session_dir)), daemon=True
+    )
+    walker.start()
+    walker.join(timeout=10)
+    try:
+        assert not walker.is_alive()
+    finally:
+        if walker.is_alive():
+            # A writer ends the blocked open, so the thread does not outlive the test.
+            with contextlib.suppress(OSError):
+                os.close(os.open(pipe, os.O_WRONLY | os.O_NONBLOCK))
+    assert "pipe" not in _tree_files(TreeStore(step_log), result[0])
 
 
 def test_restore_writes_the_workspace_and_session_folder_without_following_links(step_log, tmp_path) -> None:
