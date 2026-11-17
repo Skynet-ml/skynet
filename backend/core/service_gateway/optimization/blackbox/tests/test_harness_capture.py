@@ -443,6 +443,19 @@ def test_an_exec_log_replaced_by_a_link_is_not_read(step_log, tmp_path, to_devic
     assert capture.finish() == []
 
 
+def test_an_exec_log_replaced_by_a_folder_is_not_read(step_log, tmp_path) -> None:
+    """A log path that is not a regular file and not a link reads as empty and does not break the capture."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    log.mkdir()
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+
+    assert capture.observe({"model": "m1", "messages": [{"role": "user", "content": "go"}]}) == []
+    assert capture.finish() == []
+
+
 def test_an_exec_log_replaced_by_a_pipe_does_not_hang_the_capture(step_log, tmp_path) -> None:
     """A FIFO log with no writer is opened without blocking and read as empty."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"

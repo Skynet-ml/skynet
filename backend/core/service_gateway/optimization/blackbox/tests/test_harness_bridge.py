@@ -1584,7 +1584,9 @@ def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_throu
     }
     session = tmp_path / "session"
 
-    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+    outcome = run_session(
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+    )
 
     assert outcome.returncode == 0
     assert outcome.text == "out a b\nrc=3\nout inner"
@@ -1600,7 +1602,9 @@ def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> N
     proposer = {**_PLAIN, "run_command": 'no-such-tool-xyz; echo "rc=$?"', "exec_commands": ["no-such-tool-xyz"]}
     session = tmp_path / "session"
 
-    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session)
+    outcome = run_session(
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+    )
 
     assert outcome.text == "rc=127"
     [record] = [json.loads(line) for line in (session / harness_bridge.EXEC_LOG).read_text().splitlines()]
@@ -1654,7 +1658,7 @@ def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> N
     _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")
     log = tmp_path / "exec.jsonl"
 
-    done = subprocess.run(["big"], env=_shim_env(tmp_path, ["big"], log), capture_output=True, check=True)
+    done = subprocess.run(["big"], env=_shim_env(tmp_path, ["big"], log), capture_output=True, timeout=10, check=True)
 
     assert done.stdout == b"a" * 70000 + b"END"
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
@@ -1666,7 +1670,7 @@ def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path)
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
 
     env = _shim_env(tmp_path, ["probe"], None)
-    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, check=False)
+    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, timeout=10, check=False)
 
     assert (done.returncode, done.stdout, done.stderr) == (4, b"out\n", b"err\n")
     assert sorted(path.name for path in tmp_path.iterdir()) == ["bin", "shim"]
@@ -1681,7 +1685,10 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
     )
     # Ends the command if the shim holds the output, so the assertion below fails instead of hanging.
     timer = threading.Timer(5.0, flag.touch)
+    # Ends a shim that never runs the command, so readline returns and the test fails.
+    killer = threading.Timer(10.0, process.kill)
     timer.start()
+    killer.start()
     try:
         assert process.stdout is not None
         assert process.stdout.readline() == b"first\n"
@@ -1690,6 +1697,7 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
         flag.touch()
         timer.cancel()
         process.wait(timeout=10)
+        killer.cancel()
     assert process.returncode == 0
 
 
@@ -1698,12 +1706,16 @@ def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path)
     _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
+    # Ends a shim that never runs the command, so readline returns and the test fails.
+    killer = threading.Timer(10.0, process.kill)
+    killer.start()
     try:
         assert process.stdout is not None
         assert process.stdout.readline() == b"ready\n"
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=10) == 128 + signal.SIGTERM
     finally:
+        killer.cancel()
         process.kill()
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     assert record["exit_code"] == 128 + signal.SIGTERM
