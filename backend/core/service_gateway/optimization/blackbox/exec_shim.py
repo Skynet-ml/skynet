@@ -36,6 +36,23 @@ OUTPUT_LIMIT = 64 * 1024
 # with no cut a big argv makes a line the reader skips.
 COMMAND_LIMIT = OUTPUT_LIMIT
 COMMAND_CUT = " [cut]"
+# Signals whose default action writes a core. The shim does not die from one
+# of these: its own crash report or core would be noise, so it exits 128 plus
+# the signal number instead.
+_CORE_SIGNALS = frozenset(
+    {
+        signal.SIGSEGV,
+        signal.SIGABRT,
+        signal.SIGQUIT,
+        signal.SIGBUS,
+        signal.SIGILL,
+        signal.SIGFPE,
+        signal.SIGSYS,
+        signal.SIGTRAP,
+        signal.SIGXCPU,
+        signal.SIGXFSZ,
+    }
+)
 _NOT_FOUND = 127
 _CANNOT_RUN = 126
 
@@ -172,7 +189,8 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     terminal already reaches it: the shim only stays alive for it and does
     not send it a second time. A SIGINT sent to the shim alone does not reach
     the child, except one that comes before the child starts. When a signal
-    ends the child, ``main`` then ends the shim with the same signal.
+    ends the child, ``main`` then ends the shim with the same signal, except
+    a signal in ``_CORE_SIGNALS``, for which the shim exits 128 plus it.
 
     Args:
         real: The command's path.
@@ -284,8 +302,9 @@ def main(argv: list[str]) -> int:
 
     Returns:
         The command's exit code: 127 when it is not installed, 126 when it
-        cannot run. When a signal ended it, the shim dies from that signal;
-        128 plus the signal number is only the fallback.
+        cannot run. When a signal ended it, the shim dies from that signal,
+        except a signal in ``_CORE_SIGNALS``: then it returns 128 plus the
+        signal number. 128 plus the number is also the fallback.
     """
     shim_dir, name, args = argv[0], argv[1], argv[2:]
     real = _real_command(shim_dir, name)
@@ -307,10 +326,12 @@ def main(argv: list[str]) -> int:
     # caller still gets the real exit code, and no extra stderr text.
     with contextlib.suppress(OSError):
         _append(log, record)
-    if code < 0:
+    if code < 0 and -code not in _CORE_SIGNALS:
         # The caller must see the shim die from the child's signal, not exit
         # 128 plus it: bash ends a script only when its child dies from SIGINT.
-        signal.signal(-code, signal.SIG_DFL)
+        # SIGKILL's action is always the default, and Python cannot set it.
+        if -code != signal.SIGKILL:
+            signal.signal(-code, signal.SIG_DFL)
         os.kill(os.getpid(), -code)
     return exit_code
 

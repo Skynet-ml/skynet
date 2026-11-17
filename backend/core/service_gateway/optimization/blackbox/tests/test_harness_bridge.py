@@ -1936,16 +1936,30 @@ def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_g
         assert (record["exit_code"], record[lost_stream], record[kept]) == (0, "a\nb\n", "kept\n")
 
 
-def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGKILL])
+def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, number: signal.Signals) -> None:
     """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal."""
-    _fake_tool(tmp_path / "bin", "zz", "echo out; kill -TERM $$")
+    _fake_tool(tmp_path / "bin", "zz", f"echo out; kill -{number.name[3:]} $$")
     log = tmp_path / "exec.jsonl"
 
     done = subprocess.run(["zz"], env=_shim_env(tmp_path, ["zz"], log), capture_output=True, timeout=10, check=False)
 
-    assert (done.returncode, done.stdout, done.stderr) == (-signal.SIGTERM, b"out\n", b"")
+    assert (done.returncode, done.stdout, done.stderr) == (-number, b"out\n", b"")
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
-    assert (record["exit_code"], record["stdout"]) == (128 + signal.SIGTERM, "out\n")
+    assert (record["exit_code"], record["stdout"]) == (128 + number, "out\n")
+
+
+def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tmp_path: Path) -> None:
+    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own."""
+    # SIGXFSZ writes a core on Linux, but makes no crash report on macOS, so the test leaves nothing behind.
+    _fake_tool(tmp_path / "bin", "zz", "echo out; kill -XFSZ $$")
+    log = tmp_path / "exec.jsonl"
+
+    done = subprocess.run(["zz"], env=_shim_env(tmp_path, ["zz"], log), capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (128 + signal.SIGXFSZ, b"out\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGXFSZ
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
