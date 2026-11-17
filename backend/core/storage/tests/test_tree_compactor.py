@@ -2,7 +2,9 @@
 
 The tests use a SQLite file and the local-filesystem object store. The kill
 points are a raised error (the transaction rolls back, as after a kill) and
-one real SIGKILL of a child process inside the merge commit.
+one real SIGKILL of a child process inside the merge commit. The last tests
+need row locks; they run only when ``APP_TEST_DB_URL`` names a disposable
+PostgreSQL database, in their own schema that they drop after.
 """
 
 from __future__ import annotations
@@ -11,25 +13,39 @@ import multiprocessing as mp
 import threading
 import time
 import types
+import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from core.config import settings
+from core.config import app_env, settings
 from core.storage import tree_compactor
-from core.storage.models import AgentStepModel, Base, JobModel, StoragePackModel, TreeObjectModel
+from core.storage.models import (
+    AgentConversationModel,
+    AgentStepModel,
+    Base,
+    JobModel,
+    StoragePackModel,
+    TreeObjectModel,
+)
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_compactor import COMPACTED_PREFIX, TreeCompactor, start_tree_compactor
 from core.storage.tree_store import TreeEntry, TreeStore
 
 RUNS = ("job-1", "job-2", "job-3")
+TEST_DB_URL = app_env("APP_TEST_DB_URL")
+needs_postgres = pytest.mark.skipif(
+    not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
+    reason="Set APP_TEST_DB_URL to a disposable PostgreSQL database.",
+)
 
 
 class FlakyObjectStore(LocalObjectStore):
@@ -142,7 +158,9 @@ def _deleter(root: Path, deleted: list[str]) -> Any:
 
 @pytest.fixture
 def make_compactor(tmp_path: Path, engine: Engine, objects: FlakyObjectStore, deleted: list[str]) -> Any:
-    """Return a factory of compactors with no minimum age and no grace time by default.
+    """Return a factory of compactors with no minimum age and a 600 s grace time by default.
+
+    A merge needs a grace time that is longer than the pass, so only the removal steps use ``grace_seconds=0``.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -164,11 +182,25 @@ def make_compactor(tmp_path: Path, engine: Engine, objects: FlakyObjectStore, de
             The compactor.
         """
         options.setdefault("min_age_seconds", 0.0)
-        options.setdefault("grace_seconds", 0.0)
+        options.setdefault("grace_seconds", 600.0)
         delete = options.pop("delete_object", _deleter(tmp_path / "objects", deleted))
         return TreeCompactor(engine, objects, delete, **options)
 
     return make
+
+
+def _pass(make_compactor: Any) -> tuple[int, int]:
+    """Run one pass whose removal steps have no grace time and whose merge has the default one.
+
+    Args:
+        make_compactor: The compactor factory.
+
+    Returns:
+        The number of packs merged and the number of packs deleted.
+    """
+    sweeper = make_compactor(grace_seconds=0.0)
+    removed = sweeper.remove_retired() + sweeper.remove_unrecorded()
+    return make_compactor().merge(), removed
 
 
 @pytest.fixture
@@ -332,7 +364,7 @@ def test_a_read_during_compaction_finds_each_tree_in_the_old_or_the_new_pack(
     for key, offset, length in before:
         assert len(objects.get(key, offset, length)) == length
 
-    assert make_compactor().remove_retired() == 3
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 3
     _assert_all_readable(store, written)
 
 
@@ -354,10 +386,10 @@ def test_old_packs_are_removed_only_after_no_row_points_at_them(
         deleted.append(key)
         objects._path(key).unlink()
 
-    compactor = make_compactor(delete_object=delete_object)
-    assert compactor.remove_retired() == 0
-    compactor.merge()
-    assert compactor.remove_retired() == 3
+    remover = make_compactor(grace_seconds=0.0, delete_object=delete_object)
+    assert remover.remove_retired() == 0
+    make_compactor().merge()
+    assert remover.remove_retired() == 3
 
     assert set(deleted) == old
     assert objects.list("packs/") == []
@@ -381,9 +413,8 @@ def test_a_kill_after_the_new_pack_put_loses_nothing_and_the_next_pass_finishes(
     assert _pack_rows(engine) == old
     _assert_all_readable(store, written)
 
-    compactor = make_compactor()
-    assert compactor.run_once() == (3, 1)
-    assert compactor.run_once() == (0, 3)
+    assert _pass(make_compactor) == (3, 1)
+    assert _pass(make_compactor) == (0, 3)
     assert objects.list("packs/") == []
     compacted = objects.list(f"{COMPACTED_PREFIX}/")
     assert len(compacted) == 1
@@ -430,7 +461,7 @@ def test_a_failure_after_the_row_moves_loses_nothing(engine, objects, store, mak
     assert _pack_keys_of_rows(engine) == old
     assert _pack_rows(engine) == old
     _assert_all_readable(store, written)
-    assert make_compactor().run_once() == (3, 1)
+    assert _pass(make_compactor) == (3, 1)
     _assert_all_readable(store, written)
 
 
@@ -457,7 +488,7 @@ def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
         objects._path(key).unlink()
 
     with pytest.raises(OSError):
-        make_compactor(delete_object=delete_then_fail).remove_retired()
+        make_compactor(grace_seconds=0.0, delete_object=delete_then_fail).remove_retired()
     assert len(objects.list("packs/w1/")) == 2
     assert len(_pack_rows(engine)) == 4
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
@@ -467,7 +498,7 @@ def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
         recovering.close()
     _assert_all_readable(store, written)
 
-    assert make_compactor().remove_retired() == 3
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 3
     assert objects.list("packs/") == []
     assert _pack_rows(engine) == set(objects.list(f"{COMPACTED_PREFIX}/"))
     _assert_all_readable(store, written)
@@ -476,9 +507,8 @@ def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
 def test_recovery_never_applies_a_compacted_pack(engine, objects, store, make_compactor) -> None:
     """After a merge and the removal, recovery of the worker applies nothing and the rows stay on the new pack."""
     written = _fill(store)
-    compactor = make_compactor()
-    compactor.merge()
-    compactor.remove_retired()
+    make_compactor().merge()
+    make_compactor(grace_seconds=0.0).remove_retired()
     rows_before = _pack_keys_of_rows(engine)
 
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
@@ -524,9 +554,8 @@ def test_a_pack_written_but_not_applied_is_left_for_its_flush(
             other.flush()
         (unapplied,) = objects.list("packs/w2/")
 
-        compactor = make_compactor()
-        assert compactor.run_once() == (2, 0)
-        assert compactor.run_once() == (0, 2)
+        assert make_compactor().run_once() == (2, 0)
+        assert make_compactor(grace_seconds=0.0).run_once() == (0, 2)
         assert objects.list("packs/w2/") == [unapplied]
 
         monkeypatch.undo()
@@ -545,6 +574,127 @@ def test_a_second_compactor_does_not_merge_the_packs_again(engine, objects, stor
     assert second.merge() == 0
     assert len(_pack_keys_of_rows(engine)) == 1
     _assert_all_readable(store, written)
+
+
+def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects, store, make_compactor) -> None:
+    """A second pass merges the same packs during the first one's PUT; the first one moves no row and drops its pack."""
+    written = _fill(store)
+    results: list[int] = []
+
+    def merge_first(key: str) -> None:
+        """Run the whole second merge once, while the first one is between its PUT and its transaction.
+
+        Args:
+            key: The first merge's new pack key.
+        """
+        objects.on_compacted_put = None
+        results.append(make_compactor().merge())
+
+    objects.on_compacted_put = merge_first
+    results.append(make_compactor().merge())
+
+    assert results == [3, 0]
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert _pack_keys_of_rows(engine) == {compacted}
+    assert compacted in _pack_rows(engine)
+    _assert_all_readable(store, written)
+
+
+def test_the_merge_holds_no_connection_during_the_object_io(engine, objects, store, make_compactor) -> None:
+    """The GETs and the PUT run with no database connection checked out, so no transaction stays open."""
+    _fill(store)
+    checked_out: list[int] = []
+    objects.on_compacted_put = lambda key: checked_out.append(engine.pool.checkedout())
+
+    assert make_compactor().merge() == 3
+    assert checked_out == [0]
+
+
+def test_a_merge_that_takes_half_the_grace_time_gives_up(engine, objects, store, make_compactor) -> None:
+    """A merge that reaches its commit after half the grace time rolls back, deletes its new pack and raises."""
+    written = _fill(store)
+    old = set(objects.list("packs/w1/"))
+    objects.on_compacted_put = lambda key: time.sleep(0.15)
+
+    with pytest.raises(TimeoutError):
+        make_compactor(grace_seconds=0.2).merge()
+
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert _pack_keys_of_rows(engine) == old
+    assert _pack_rows(engine) == old
+    _assert_all_readable(store, written)
+
+
+def test_the_retire_time_is_the_commit_time(engine, objects, store, make_compactor) -> None:
+    """The old packs and the new pack get a ``created_at`` from after the PUT, not from the start of the merge."""
+    _fill(store)
+    put_at: list[datetime] = []
+    objects.on_compacted_put = lambda key: put_at.append(datetime.now(UTC).replace(tzinfo=None))
+
+    make_compactor().merge()
+
+    with Session(engine) as session:
+        times = [created_at.replace(tzinfo=None) for created_at in session.scalars(select(StoragePackModel.created_at))]
+    assert len(times) == 4
+    assert min(times) >= put_at[0]
+
+
+def test_old_packs_get_the_full_grace_time_after_the_merge(engine, store, make_compactor) -> None:
+    """Packs that were written two hours ago are not deleted at once after the merge retires them."""
+    _fill(store)
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(created_at=datetime.now(UTC) - timedelta(hours=2)))
+        session.commit()
+    compactor = make_compactor(grace_seconds=600)
+
+    assert compactor.merge() == 3
+    assert compactor.remove_retired() == 0
+
+
+def test_a_failed_removal_does_not_skip_the_merge(engine, objects, store, make_compactor) -> None:
+    """A pass whose removal steps fail still merges."""
+    written = _fill(store)
+    compactor = make_compactor()
+
+    def fail() -> int:
+        """Fail as a broken LIST or delete does.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("the object store is down")
+
+    compactor.remove_retired = fail
+    compactor.remove_unrecorded = fail
+
+    assert compactor.run_once() == (3, 0)
+    _assert_all_readable(store, written)
+
+
+def test_remove_unrecorded_reads_no_rows_for_young_keys(engine, objects, store, make_compactor) -> None:
+    """New packs younger than the grace time do not go into the database query."""
+    _fill(store)
+    objects.fail_compacted_put = True
+    with pytest.raises(OSError):
+        make_compactor().merge()
+    statements: list[str] = []
+
+    def record(connection: object, cursor: object, statement: str, *args: object) -> None:
+        """Record each SQL statement.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    assert make_compactor().remove_unrecorded() == 0
+    event.remove(engine, "before_cursor_execute", record)
+
+    assert statements == []
 
 
 def _kill_child(database: str, root: str, marker: str) -> None:
@@ -589,9 +739,8 @@ def test_a_sigkill_inside_the_merge_commit_loses_nothing(tmp_path, engine, objec
 
     assert _pack_keys_of_rows(engine) == old
     _assert_all_readable(store, written)
-    compactor = make_compactor()
-    assert compactor.run_once() == (3, 1)
-    assert compactor.run_once() == (0, 3)
+    assert _pass(make_compactor) == (3, 1)
+    assert _pass(make_compactor) == (0, 3)
     assert _pack_rows(engine) == set(objects.list(f"{COMPACTED_PREFIX}/")) == _pack_keys_of_rows(engine)
     _assert_all_readable(store, written)
 
@@ -616,3 +765,105 @@ def test_start_tree_compactor_deletes_through_the_bucket(engine, monkeypatch) ->
     finally:
         compactor.stop()
     client.delete_object.assert_called_once_with(Bucket="trees-test", Key="packs/w1/x.pack")
+
+
+@pytest.fixture
+def postgres_engine() -> Iterator[Engine]:
+    """Yield an engine on a fresh schema of the disposable test database, then drop the schema.
+
+    Yields:
+        The engine, with the schema and the three test jobs.
+    """
+    schema = f"compactor_{uuid.uuid4().hex[:10]}"
+    admin = create_engine(TEST_DB_URL)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"})
+    try:
+        Base.metadata.create_all(
+            engine,
+            tables=[
+                AgentConversationModel.__table__,
+                JobModel.__table__,
+                AgentStepModel.__table__,
+                StoragePackModel.__table__,
+                TreeObjectModel.__table__,
+            ],
+            checkfirst=False,
+        )
+        with Session(engine) as session:
+            for run_id, username in zip(RUNS, ("ada", "ada", "bob"), strict=True):
+                session.add(JobModel(optimization_id=run_id, username=username, execution_generation=1))
+            session.commit()
+        yield engine
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+@pytest.fixture
+def postgres_store(postgres_engine: Engine, objects: FlakyObjectStore) -> Iterator[StepLogStore]:
+    """Yield a step log store of worker ``w1`` on PostgreSQL that the test flushes by hand.
+
+    Args:
+        postgres_engine: The PostgreSQL engine.
+        objects: The test object store.
+
+    Yields:
+        The store.
+    """
+    step_log = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0)
+    yield step_log
+    step_log.close()
+
+
+@needs_postgres
+def test_postgres_two_merges_at_once_do_not_overlap(tmp_path, postgres_engine, objects, postgres_store) -> None:
+    """Two merges on two connections wait for each other at the PUT; one wins, the other moves nothing."""
+    written = _fill(postgres_store)
+    both_put = threading.Barrier(2, timeout=30)
+    objects.on_compacted_put = lambda key: both_put.wait()
+    results: list[int] = []
+
+    def merge() -> None:
+        """Run one merge on its own connection."""
+        compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+        results.append(compactor.merge())
+
+    threads = [threading.Thread(target=merge) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+
+    assert sorted(results) == [0, 3]
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert _pack_keys_of_rows(postgres_engine) == {compacted}
+    _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_a_merge_does_not_wait_for_a_locked_pack(tmp_path, postgres_engine, objects, postgres_store) -> None:
+    """A merge that finds one of its packs locked by another pass gives up at once and keeps every row."""
+    written = _fill(postgres_store)
+    old = set(objects.list("packs/w1/"))
+    results: list[int] = []
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        holder.execute(
+            select(StoragePackModel.pack_key).where(StoragePackModel.pack_key == min(old)).with_for_update()
+        ).all()
+        thread = threading.Thread(target=lambda: results.append(compactor.merge()))
+        thread.start()
+        thread.join(10)
+        waited = thread.is_alive()
+        holder.rollback()
+    thread.join(30)
+
+    assert not waited
+    assert results == [0]
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert _pack_keys_of_rows(postgres_engine) == old
+    _assert_all_readable(postgres_store, written)
