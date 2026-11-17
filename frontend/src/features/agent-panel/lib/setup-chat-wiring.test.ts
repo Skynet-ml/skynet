@@ -837,7 +837,6 @@ test("a confirmed dataset card stores its file's original under the card's id (S
     let uploads: ReadonlySet<string> = new Set();
     const confirm = expression(panel, "handleDatasetConfirm", {
       webChat,
-      confirmedDatasetCallsRef: { current: new Set<string>() },
       setConfirmedUploadCalls: (update: (c: ReadonlySet<string>) => ReadonlySet<string>) =>
         (uploads = update(uploads)),
       datasetDraft: { attach: (...args: unknown[]) => (calls.push(["attach", ...args]), "card-1") },
