@@ -20,10 +20,12 @@ crash between the PUT and the commit.
 
 The fence: the flush locks each run's ``jobs`` row and keeps only the steps
 whose ``execution_generation`` is still current. A stale step fails with
-:class:`StepFenceError`, also when a row with its step id exists; the agent
-sees it on its next commit or on ``durable``. The step id holds no
-generation, so the buffer and each verdict are kept by step id and
-generation.
+:class:`StepFenceError`, also when a row with its step id exists.
+``durable`` raises it, and the agent's next commit at that generation raises
+it one time; a commit after that is buffered and gets its own verdict at its
+flush. The step id holds no generation, so the buffer and each verdict are
+kept by step id and generation. The store keeps only the newest
+``FENCE_VERDICT_MAX`` verdicts of a step and of an agent in memory.
 """
 
 from __future__ import annotations
@@ -58,6 +60,8 @@ _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
 SEQ_MAX = 2**31 - 1
+# A fenced agent stops, so only a caller that goes on after the error fills this. One verdict keeps about 0.7 KB.
+FENCE_VERDICT_MAX = 10_000
 OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
     "step_id",
@@ -127,6 +131,20 @@ def _check_run_id(run_id: str) -> None:
     # With no ``:`` in the run id and only digits in seq, the first and last ``:`` split every step id one way.
     if ":" in run_id:
         raise ValueError(f"run_id must not hold a ':': {run_id!r}")
+
+
+def _keep_verdict(verdicts: dict[Any, StepFenceError], key: Any, error: StepFenceError) -> None:
+    """Keep a fence verdict as the newest one and drop the oldest one above ``FENCE_VERDICT_MAX``.
+
+    Args:
+        verdicts: The verdicts by key, oldest first.
+        key: The key of the new verdict.
+        error: The verdict.
+    """
+    verdicts.pop(key, None)
+    verdicts[key] = error
+    if len(verdicts) > FENCE_VERDICT_MAX:
+        del verdicts[next(iter(verdicts))]
 
 
 @dataclass(frozen=True)
@@ -265,9 +283,9 @@ class StepLogStore:
         self._tree_objects: dict[tuple[str, str], bytes] = {}
         # Keyed by step id and generation: two generations of one step id get their own verdicts.
         self._waiters: dict[tuple[str, int], _Waiter] = {}
-        # For a ``durable`` call that comes after the flush removed the step's waiter.
+        # For a ``durable`` call that comes after the flush removed the step's waiter. Oldest first, with a cap.
         self._failures: dict[tuple[str, int], StepFenceError] = {}
-        # Keyed by generation too, so a fenced old incarnation does not fail the resumed run's first commit.
+        # Keyed by generation too: a verdict of an old generation does not fail a commit of the run's new generation.
         self._agent_failures: dict[tuple[str, str, int], StepFenceError] = {}
         self._closed = False
         self._thread = threading.Thread(target=self._run, name=f"step-log-{worker_id}", daemon=True)
@@ -300,13 +318,18 @@ class StepLogStore:
         Returns:
             The step id, the idempotency key: among current-generation
             commits, the first commit of an id wins. A retry with the same
-            run, agent, ``seq`` and generation returns the same id and changes
-            nothing. A commit of the same id at another generation is
-            buffered on its own and gets its own verdict.
+            run, agent, ``seq`` and generation, while the first commit waits
+            for its flush, returns the same id and changes nothing. A retry
+            after that flush is buffered again: a stored row stays as it is,
+            and a step that failed the fence gets a new verdict at the new
+            flush. A commit of the same id at another generation is buffered
+            on its own and gets its own verdict.
 
         Raises:
-            StepFenceError: When an earlier step of this agent in this run
-                and generation failed the fence.
+            StepFenceError: One time, on the first commit of this agent at
+                this run and generation after one of its steps failed the
+                fence. A commit after that is buffered and gets its own
+                verdict at its flush.
             ValueError: When ``kind`` is unknown, a command has no tree id, an
                 id is empty, longer than its column or not printable ASCII,
                 ``run_id`` holds a ``:``, ``tree_id`` is not 64 lowercase hex
@@ -400,7 +423,10 @@ class StepLogStore:
 
         When the store holds no waiter and no verdict for the step at this
         generation, the database answers: the step is durable only when its
-        row exists and the generation is still the job's current one.
+        row exists and the generation is still the job's current one. That is
+        the case after a restart, and for a fence verdict that left the
+        store's bounded memory; a fenced step with no row then gives
+        ``KeyError``.
 
         Args:
             step_id: The id that :meth:`commit` returned.
@@ -516,10 +542,15 @@ class StepLogStore:
                     self._first_at = first_at
                 raise
             with self._cond:
+                # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
+                verdicts: dict[tuple[str, int], StepFenceError] = {}
                 for entry in stale:
                     error = StepFenceError(entry["step_id"])
-                    self._failures[(entry["step_id"], entry["execution_generation"])] = error
-                    self._agent_failures[(entry["run_id"], entry["agent_id"], entry["execution_generation"])] = error
+                    step_key = (entry["step_id"], entry["execution_generation"])
+                    verdicts[step_key] = error
+                    _keep_verdict(self._failures, step_key, error)
+                    agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
+                    _keep_verdict(self._agent_failures, agent_key, error)
                 for item, _ in batch:
                     if isinstance(item, _Object):
                         self._tree_objects.pop((item.run_id, item.object_id), None)
@@ -532,7 +563,7 @@ class StepLogStore:
                     step_key = (item.step_id, item.execution_generation)
                     waiter = self._waiters.pop(step_key, None)
                     if waiter is not None:
-                        waiter.failure = self._failures.get(step_key)
+                        waiter.failure = verdicts.get(step_key)
                         waiter.set()
 
     def recover(self) -> int:
@@ -586,8 +617,11 @@ class StepLogStore:
 
         Returns:
             Whether this call claimed and applied the pack, and the manifest
-            entries of the steps that failed the fence, here or in the store
-            that applied the pack first.
+            entries of the steps that did not land through this pack. When
+            this call applied the pack, those are the steps that failed the
+            fence. When another store applied it first, those are the steps
+            with a stale generation and the current steps with no row: the
+            other store fenced them.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)

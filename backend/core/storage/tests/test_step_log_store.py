@@ -542,6 +542,88 @@ def test_durable_keeps_the_fence_verdict_when_the_step_is_committed_again(make_s
         flusher.join()
 
 
+def test_the_next_commit_of_a_fenced_agent_raises_the_fence_error_one_time(make_store, engine) -> None:
+    """After a fenced flush the agent's next commit raises; a commit after that is buffered and fenced at its flush."""
+    store = make_store()
+    _commit(store)
+    _set_generation(engine, 2)
+    store.flush()
+
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=2)
+    later = _commit(store, seq=3)
+    store.flush()
+
+    with pytest.raises(StepFenceError, match=later):
+        store.durable(later, 1, timeout=0)
+    with pytest.raises(StepFenceError, match=later):
+        _commit(store, seq=4)
+    assert _step_rows(engine) == 0
+
+
+def test_the_store_keeps_only_the_newest_fence_verdicts(make_store, engine, monkeypatch) -> None:
+    """Above the cap the oldest verdicts leave: ``durable`` then asks the database, and a new commit is buffered."""
+    monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
+    store = make_store()
+    steps = [_commit(store, agent_id=f"agent-{number}") for number in range(4)]
+    _set_generation(engine, 2)
+
+    store.flush()
+
+    assert list(store._failures) == [(step_id, 1) for step_id in steps[2:]]
+    assert list(store._agent_failures) == [("job-1", "agent-2", 1), ("job-1", "agent-3", 1)]
+    with pytest.raises(StepFenceError, match=steps[3]):
+        store.durable(steps[3], 1, timeout=0)
+    with pytest.raises(KeyError):
+        store.durable(steps[0], 1, timeout=0)
+    again = _commit(store, seq=2, agent_id="agent-0")
+    store.flush()
+    with pytest.raises(StepFenceError, match=again):
+        store.durable(again, 1, timeout=0)
+
+
+def test_a_flush_that_fences_more_steps_than_the_cap_fails_each_waiter(make_store, engine, monkeypatch) -> None:
+    """Each waiter of a flush gets its fence verdict, also when the flush fences more steps than the store keeps."""
+    monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
+    store = make_store()
+    steps = [_commit(store, seq=seq) for seq in range(1, 6)]
+    waiters = [store._waiters[(step_id, 1)] for step_id in steps]
+    _set_generation(engine, 2)
+
+    store.flush()
+
+    assert [waiter.failure.step_id for waiter in waiters] == steps
+
+
+def test_a_new_fence_verdict_of_a_kept_agent_becomes_the_newest(make_store, engine, objects, monkeypatch) -> None:
+    """An agent that a later flush fences again moves to the newest place, so the cap removes another agent first."""
+    monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
+    store = make_store()
+    _commit(store, agent_id="agent-0")
+    _commit(store, agent_id="agent-1")
+    _set_generation(engine, 2)
+    put = objects.put
+
+    def put_then_commit(key: str, data: bytes) -> None:
+        """Write the pack, then commit the next step of the first agent before the flush sets its verdict.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+        """
+        put(key, data)
+        monkeypatch.setattr(objects, "put", put)
+        _commit(store, seq=2, agent_id="agent-0")
+
+    monkeypatch.setattr(objects, "put", put_then_commit)
+    store.flush()
+    assert list(store._agent_failures) == [("job-1", "agent-0", 1), ("job-1", "agent-1", 1)]
+
+    store.flush()
+
+    assert list(store._agent_failures) == [("job-1", "agent-1", 1), ("job-1", "agent-0", 1)]
+
+
 def test_tree_objects_are_inserted_in_sorted_key_order(make_store, engine) -> None:
     """Objects put in reverse id order reach the ``tree_objects`` insert sorted, so every flush locks them in one order."""
     ids = [letter * 64 for letter in "fedcb"]
