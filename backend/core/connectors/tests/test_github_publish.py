@@ -491,6 +491,44 @@ def test_a_branch_whose_name_ends_the_same_is_not_the_branch(tmp_path: Path) -> 
     assert _git(origin, "rev-parse", "refs/heads/a/refs/heads/skynet/optimize-1") == _git(origin, "rev-parse", "main")
 
 
+def test_candidates_list_the_remote_branches_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Many candidates make one ls-remote call; an existing branch is matched by its full name only."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+    patch = _patch(origin, pinned)
+    kept = push_version("acme/app", pinned, patch, "skynet/candidate-v1", "Earlier", None, remote=f"file://{origin}")
+    _git(origin, "branch", "a/refs/heads/skynet/candidate-v2", "main")
+    git = github_publish._git
+    listed: list[list[str]] = []
+
+    def counting_git(arguments: list[str], *rest: Any) -> str:
+        """Record each ls-remote call, then run git.
+
+        Args:
+            arguments: The git arguments.
+            *rest: The working folder and the environment.
+
+        Returns:
+            The git output.
+        """
+        if arguments[0] == "ls-remote":
+            listed.append(arguments)
+        return git(arguments, *rest)
+
+    monkeypatch.setattr(github_publish, "_git", counting_git)
+
+    pushed = push_candidates(
+        "acme/app", pinned, [("v1", patch), ("v2", ""), ("v3", patch)], "v2", None, remote=f"file://{origin}"
+    )
+
+    assert len(listed) == 1
+    assert pushed["skynet/candidate-v1"] == kept
+    assert pushed["skynet/candidate-v2"] == pinned == _git(origin, "rev-parse", "refs/heads/skynet/candidate-v2")
+    assert _git(origin, "rev-parse", f"{pushed['skynet/candidate-v3']}^{{tree}}") == _git(
+        origin, "rev-parse", f"{kept}^{{tree}}"
+    )
+
+
 def test_a_candidate_branch_with_other_content_raises(tmp_path: Path) -> None:
     """A candidate branch that holds another tree stops the push, and no branch moves."""
     origin = tmp_path / "origin"
@@ -654,6 +692,34 @@ def test_a_crash_after_the_pull_request_and_before_the_effect_commit_opens_one(
     assert len(sent) == 1
     assert change == replayed
     assert (change.branch, change.number, change.draft) == ("skynet/x", 7, True)
+
+
+def test_one_step_pushes_two_branches_as_two_effects(tmp_path: Path, effects: StepEffects) -> None:
+    """One step that pushes two branches pushes both; the second does not get the first branch's stored result."""
+    origin = tmp_path / "origin"
+    pinned = _repository(origin)
+    patch = _patch(origin, pinned)
+
+    one = push_version("acme/app", pinned, patch, "skynet/one", "One", None, remote=f"file://{origin}", effects=effects)
+    two = push_version("acme/app", pinned, patch, "skynet/two", "Two", None, remote=f"file://{origin}", effects=effects)
+
+    assert one == _git(origin, "rev-parse", "skynet/one")
+    assert two == _git(origin, "rev-parse", "skynet/two")
+    assert _git(origin, "log", "-1", "--format=%s", "skynet/two") == "Two"
+
+
+def test_one_step_opens_pull_requests_for_two_heads(monkeypatch: pytest.MonkeyPatch, effects: StepEffects) -> None:
+    """One step that opens pull requests for two heads opens both, and each replay returns its own."""
+    sent = _github(monkeypatch)
+
+    x = open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B", effects=effects)
+    y = open_pull_request("tok", "acme/app", head="skynet/y", base_branch="main", title="T", body="B", effects=effects)
+    again = open_pull_request(
+        "tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B", effects=effects
+    )
+
+    assert [body["head"] for body in sent] == ["skynet/x", "skynet/y"]
+    assert (x.branch, y.branch, again) == ("skynet/x", "skynet/y", x)
 
 
 def _no_github(*_: Any, **__: Any) -> Any:

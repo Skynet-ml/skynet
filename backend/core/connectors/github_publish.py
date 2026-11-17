@@ -7,12 +7,14 @@ top of the code the run started from.
 Each call is safe to repeat (SKY-712). A branch that already holds the same
 content is not pushed again, and an open pull request for the same head is
 returned, not opened again. With ``effects``, each call goes through the
-effect log keyed by the step id, so a replayed step returns the stored result
-and does not call GitHub.
+effect log keyed by the step id and the target branch or head, so a replayed
+step returns the stored result and does not call GitHub.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -151,7 +153,7 @@ def push_version(
     """
     if effects is not None:
         return effects.once(
-            "push_version",
+            _effect_name("push_version", branch),
             lambda: {
                 "commit": push_version(
                     repository,
@@ -188,7 +190,9 @@ def push_version(
             raise RepoPublishError("The best version no longer applies to the commit the run started from.")
         _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, environment)
         head = _git(["rev-parse", "HEAD"], workdir, environment).strip()
-        existing = _existing_branch(workdir, branch, head, environment)
+        ref = f"refs/heads/{branch}"
+        remote_head = _remote_heads(workdir, ref, environment).get(ref)
+        existing = _existing_branch(workdir, branch, head, remote_head, environment)
         if existing is not None:
             return existing
         _git(["push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"], workdir, environment)
@@ -199,13 +203,50 @@ def push_version(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _existing_branch(workdir: Path, branch: str, commit: str, environment: dict[str, str]) -> str | None:
+def _effect_name(function: str, *arguments: str) -> str:
+    """Return the effect name of one publish call: the function and a digest of the arguments that name its target.
+
+    Two calls of one step for two branches or heads are then two effects. A
+    digest keeps the key inside the 255 characters of ``effect_key``.
+
+    Args:
+        function: The publish function's name.
+        *arguments: The branch, head or other arguments that name the target.
+
+    Returns:
+        ``<function>:<16 hex digits>``.
+    """
+    digest = hashlib.sha256(json.dumps(arguments).encode()).hexdigest()[:16]
+    return f"{function}:{digest}"
+
+
+def _remote_heads(workdir: Path, pattern: str, environment: dict[str, str]) -> dict[str, str]:
+    """List the remote refs that match ``pattern`` in one ``ls-remote`` call.
+
+    Args:
+        workdir: The local repository with ``origin``.
+        pattern: An ``ls-remote`` pattern, for example ``refs/heads/skynet/candidate-*``.
+        environment: The git environment.
+
+    Returns:
+        Each listed ref mapped to its commit id.
+    """
+    # ls-remote matches a pattern by its tail, so ``refs/heads/x`` also lists ``refs/heads/a/refs/heads/x``.
+    # Callers look a ref up by its full name, so such a ref is never taken for the branch.
+    lines = _git(["ls-remote", "origin", pattern], workdir, environment).splitlines()
+    return {ref: sha for sha, ref in (line.split() for line in lines)}
+
+
+def _existing_branch(
+    workdir: Path, branch: str, commit: str, remote_head: str | None, environment: dict[str, str]
+) -> str | None:
     """Return the remote branch's commit when it holds the same tree as ``commit``.
 
     Args:
         workdir: The local repository with ``origin`` and ``commit``.
         branch: The branch name.
         commit: The local commit to compare with.
+        remote_head: The branch's commit on the remote, from :func:`_remote_heads`; ``None`` when it does not exist.
         environment: The git environment.
 
     Returns:
@@ -214,18 +255,14 @@ def _existing_branch(workdir: Path, branch: str, commit: str, environment: dict[
     Raises:
         BranchConflictError: When the branch holds another tree.
     """
-    ref = f"refs/heads/{branch}"
-    # ls-remote matches a pattern by its tail, so ``refs/heads/x`` also lists ``refs/heads/a/refs/heads/x``.
-    lines = _git(["ls-remote", "origin", ref], workdir, environment).splitlines()
-    remote = next((line.split()[0] for line in lines if line.split()[1:] == [ref]), None)
-    if remote is None:
+    if remote_head is None:
         return None
-    if remote != commit:
-        _git(["fetch", "--quiet", "--depth", "1", "origin", ref], workdir, environment)
+    if remote_head != commit:
+        _git(["fetch", "--quiet", "--depth", "1", "origin", f"refs/heads/{branch}"], workdir, environment)
         remote_tree = _git(["rev-parse", "FETCH_HEAD^{tree}"], workdir, environment).strip()
         if remote_tree != _git(["rev-parse", f"{commit}^{{tree}}"], workdir, environment).strip():
             raise BranchConflictError(f"The branch '{branch}' already holds other content.")
-    return remote
+    return remote_head
 
 
 def candidate_branch(version_id: str) -> str:
@@ -288,7 +325,7 @@ def push_candidates(
     """
     if effects is not None:
         return effects.once(
-            "push_candidates",
+            _effect_name("push_candidates", best_id, *(version_id for version_id, _ in versions)),
             lambda: push_candidates(
                 repository,
                 commit,
@@ -315,6 +352,7 @@ def push_candidates(
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         date = _git(["log", "-1", "--format=%cI", "FETCH_HEAD"], workdir, environment).strip()
         dated = {**environment, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+        remote_heads = _remote_heads(workdir, f"refs/heads/{CANDIDATE_PREFIX}*", dated)
         pushed: dict[str, str] = {}
         for (version_id, patch), branch in zip(versions, branches, strict=True):
             _git(
@@ -327,7 +365,8 @@ def push_candidates(
                 message = f"{APP_NAME} candidate {version_id}"
                 _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, dated)
             head = _git(["rev-parse", "HEAD"], workdir, dated).strip()
-            pushed[branch] = _existing_branch(workdir, branch, head, dated) or head
+            remote_head = remote_heads.get(f"refs/heads/{branch}")
+            pushed[branch] = _existing_branch(workdir, branch, head, remote_head, dated) or head
         pushed[BEST_BRANCH] = pushed[candidate_branch(best_id)]
         refspecs = [f"{sha}:refs/heads/{branch}" for branch, sha in pushed.items() if branch != BEST_BRANCH]
         _git(
@@ -429,7 +468,7 @@ def open_pull_request(
     """
     if effects is not None:
         found = effects.once(
-            "open_pull_request",
+            _effect_name("open_pull_request", head, base_branch or ""),
             lambda: asdict(
                 open_pull_request(
                     token,
