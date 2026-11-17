@@ -18,16 +18,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .step_log_store import StepLogStore
+from .step_log_store import _OBJECT_ID, StepLogStore
 
 TREE_MODES = frozenset({"file", "exec", "symlink", "tree"})
 _BLOB_HEADER = b"blob\0"
 _TREE_HEADER = b"tree\0"
-_OBJECT_ID = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -85,7 +83,7 @@ def encode_tree(entries: Iterable[TreeEntry]) -> bytes:
             raise ValueError(f"bad tree entry name: {name!r}")
         if mode not in TREE_MODES:
             raise ValueError(f"bad tree entry mode: {mode!r}")
-        if not _OBJECT_ID.match(object_id):
+        if not _OBJECT_ID.fullmatch(object_id):
             raise ValueError(f"bad tree entry object id: {object_id!r}")
     body = json.dumps([list(row) for row in rows], separators=(",", ":"), ensure_ascii=False)
     return _TREE_HEADER + body.encode("utf-8")

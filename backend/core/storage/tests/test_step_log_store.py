@@ -114,21 +114,22 @@ def make_store(engine: Engine, objects: CountingObjectStore) -> Iterator[Any]:
         objects: The test object store.
 
     Yields:
-        ``make(**options)`` that builds a store for worker ``w1``.
+        ``make(worker_id="w1", **options)`` that builds a store.
     """
     stores: list[StepLogStore] = []
 
-    def make(**options: Any) -> StepLogStore:
+    def make(worker_id: str = "w1", **options: Any) -> StepLogStore:
         """Build one store.
 
         Args:
+            worker_id: The store's worker id.
             **options: Store options; the window defaults to 60 seconds.
 
         Returns:
             The store.
         """
         options.setdefault("flush_window_seconds", 60.0)
-        store = StepLogStore(engine, objects, "w1", **options)
+        store = StepLogStore(engine, objects, worker_id, **options)
         stores.append(store)
         return store
 
@@ -176,6 +177,21 @@ def _step_rows(engine: Engine) -> int:
         return int(session.scalar(select(func.count()).select_from(AgentStepModel)) or 0)
 
 
+def _set_generation(engine: Engine, generation: int, run_id: str = "job-1") -> None:
+    """Move a job to another execution generation, as a resume does.
+
+    Args:
+        engine: The test engine.
+        generation: The new generation.
+        run_id: The job.
+    """
+    with Session(engine) as session:
+        session.execute(
+            update(JobModel).where(JobModel.optimization_id == run_id).values(execution_generation=generation)
+        )
+        session.commit()
+
+
 def test_commit_returns_the_step_id_before_any_write(make_store, engine, objects) -> None:
     """A commit only buffers: no PUT, no row, and ``durable`` is not done yet."""
     store = make_store()
@@ -186,9 +202,9 @@ def test_commit_returns_the_step_id_before_any_write(make_store, engine, objects
     assert objects.puts == 0
     assert _step_rows(engine) == 0
     with pytest.raises(TimeoutError):
-        store.durable(step_id, timeout=0.05)
+        store.durable(step_id, 1, timeout=0.05)
     store.flush()
-    store.durable(step_id, timeout=0)
+    store.durable(step_id, 1, timeout=0)
     assert _step_rows(engine) == 1
 
 
@@ -200,9 +216,9 @@ def test_durable_waits_for_the_object_put(make_store, engine, objects) -> None:
     assert objects.entered.wait(5)
 
     with pytest.raises(TimeoutError):
-        store.durable(step_id, timeout=0.2)
+        store.durable(step_id, 1, timeout=0.2)
     objects.gate.set()
-    store.durable(step_id, timeout=5)
+    store.durable(step_id, 1, timeout=5)
 
     assert objects.puts == 1
     assert len(objects.list("packs/w1/")) == 1
@@ -230,9 +246,9 @@ def test_durable_waits_for_the_postgres_commit(make_store, engine, objects) -> N
 
     assert objects.puts == 1
     with pytest.raises(TimeoutError):
-        store.durable(step_id, timeout=0.2)
+        store.durable(step_id, 1, timeout=0.2)
     release.set()
-    store.durable(step_id, timeout=5)
+    store.durable(step_id, 1, timeout=5)
     event.remove(engine, "commit", hold_commit)
 
     assert _step_rows(engine) == 1
@@ -249,7 +265,7 @@ def test_a_stale_generation_fails_the_step_with_a_fence_error(make_store, engine
     store.flush()
 
     with pytest.raises(StepFenceError, match="job-1:agent-a:1") as raised:
-        store.durable(step_id)
+        store.durable(step_id, 1)
     assert raised.value.step_id == step_id
     assert _step_rows(engine) == 0
     assert store.get_step(step_id) is None
@@ -268,9 +284,9 @@ def test_a_fresh_run_lands_while_a_stale_run_in_the_same_flush_fails(make_store,
 
     store.flush()
 
-    store.durable(fresh)
+    store.durable(fresh, 1)
     with pytest.raises(StepFenceError):
-        store.durable(stale)
+        store.durable(stale, 1)
     with Session(engine) as session:
         assert session.scalars(select(AgentStepModel.step_id)).all() == [fresh]
 
@@ -305,23 +321,111 @@ def test_a_retry_after_the_flush_reads_the_first_body(make_store) -> None:
     assert store.get_step(first)["body"] == {"command": "ls", "output": "a\n"}
 
 
-def test_a_retry_of_a_durable_step_after_a_generation_bump_does_not_fail(make_store, engine) -> None:
-    """A retry of a step whose row exists is not fenced, and the agent's next commit at the new generation lands."""
+def test_after_a_generation_bump_only_the_new_generation_retry_of_a_durable_step_succeeds(make_store, engine) -> None:
+    """The old generation's retry fails the fence; the new one's retry is a no-op, and its next seq lands."""
     store = make_store()
     first = _commit(store)
     store.flush()
-    _commit(store, body={"command": "retry", "output": ""})
-    with Session(engine) as session:
-        session.execute(update(JobModel).where(JobModel.optimization_id == "job-1").values(execution_generation=2))
-        session.commit()
+    _commit(store, body={"command": "old retry", "output": ""})
+    _set_generation(engine, 2)
+    assert _commit(store, execution_generation=2, body={"command": "new retry", "output": ""}) == first
 
     store.flush()
 
-    store.durable(first, timeout=0)
+    with pytest.raises(StepFenceError, match=first):
+        store.durable(first, 1, timeout=0)
+    store.durable(first, 2, timeout=0)
+    assert store.get_step(first)["body"] == {"command": "echo 1", "output": "1\n"}
     second = _commit(store, seq=2, execution_generation=2)
     store.flush()
-    store.durable(second, timeout=0)
+    store.durable(second, 2, timeout=0)
     assert _step_rows(engine) == 2
+
+
+def test_a_stale_generation_commit_after_the_current_one_landed_fails_the_fence(make_store, engine) -> None:
+    """Generation 2 lands seq 5; a later generation 1 commit of seq 5 fails, and the row stays generation 2's."""
+    store = make_store()
+    _set_generation(engine, 2)
+    current = _commit(store, seq=5, execution_generation=2, body={"command": "new", "output": ""})
+    store.flush()
+
+    stale = _commit(store, seq=5, execution_generation=1, body={"command": "old", "output": ""})
+    store.flush()
+
+    assert stale == current
+    store.durable(current, 2, timeout=0)
+    with pytest.raises(StepFenceError, match=stale):
+        store.durable(stale, 1, timeout=0)
+    step = store.get_step(current)
+    assert (step["execution_generation"], step["body"]["command"]) == (2, "new")
+    assert _step_rows(engine) == 1
+
+
+def test_a_stale_generation_commit_on_another_worker_fails_the_fence(make_store, engine) -> None:
+    """A generation 1 commit of a seq that generation 2 landed fails on a second store with another worker id."""
+    store = make_store()
+    other = make_store(worker_id="w2")
+    _set_generation(engine, 2)
+    current = _commit(store, seq=5, execution_generation=2, body={"command": "new", "output": ""})
+    store.flush()
+
+    stale = _commit(other, seq=5, execution_generation=1, body={"command": "old", "output": ""})
+    other.flush()
+
+    with pytest.raises(StepFenceError, match=stale):
+        other.durable(stale, 1, timeout=0)
+    step = other.get_step(current)
+    assert (step["execution_generation"], step["body"]["command"]) == (2, "new")
+    assert _step_rows(engine) == 1
+
+
+def test_two_generations_of_one_step_in_one_flush_land_only_the_current_one(make_store, engine) -> None:
+    """Generations 1 and 2 commit seq 5 in one window: generation 2 lands its body, generation 1 fails."""
+    store = make_store()
+    old = _commit(store, seq=5, execution_generation=1, body={"command": "old", "output": ""})
+    _set_generation(engine, 2)
+    new = _commit(store, seq=5, execution_generation=2, body={"command": "new", "output": ""})
+
+    store.flush()
+
+    store.durable(new, 2, timeout=0)
+    with pytest.raises(StepFenceError, match=old):
+        store.durable(old, 1, timeout=0)
+    with Session(engine) as session:
+        row = session.get(AgentStepModel, new)
+        assert row.execution_generation == 2
+    assert store.get_step(new)["body"]["command"] == "new"
+    assert _step_rows(engine) == 1
+
+
+def test_a_fenced_step_stays_fenced_after_the_new_generation_lands_the_same_seq(make_store, engine) -> None:
+    """Generation 1's fenced seq 5 still fails after generation 2 commits and lands seq 5."""
+    store = make_store()
+    old = _commit(store, seq=5, execution_generation=1)
+    _set_generation(engine, 2)
+    store.flush()
+
+    new = _commit(store, seq=5, execution_generation=2)
+    store.flush()
+
+    store.durable(new, 2, timeout=0)
+    with pytest.raises(StepFenceError, match=old):
+        store.durable(old, 1, timeout=0)
+
+
+def test_durable_without_a_buffered_entry_checks_the_current_generation(make_store, engine) -> None:
+    """With nothing buffered, ``durable`` fails an old generation's landed step and does not know an unknown id."""
+    store = make_store()
+    step_id = _commit(store)
+    store.flush()
+    store.durable(step_id, 1, timeout=0)
+
+    _set_generation(engine, 2)
+
+    with pytest.raises(StepFenceError, match=step_id):
+        store.durable(step_id, 1, timeout=0)
+    with pytest.raises(KeyError):
+        store.durable("job-1:agent-a:99", 1, timeout=0)
 
 
 def test_a_fence_error_of_an_old_generation_does_not_fail_the_new_generation(make_store, engine) -> None:
@@ -336,7 +440,7 @@ def test_a_fence_error_of_an_old_generation_does_not_fail_the_new_generation(mak
     step_id = _commit(store, execution_generation=2)
     store.flush()
 
-    store.durable(step_id, timeout=0)
+    store.durable(step_id, 2, timeout=0)
     assert store.get_step(step_id)["execution_generation"] == 2
     with pytest.raises(StepFenceError):
         _commit(store, seq=2, execution_generation=1)
@@ -366,9 +470,39 @@ def test_a_pack_that_another_store_applied_reports_its_fenced_step(make_store, e
     monkeypatch.setattr(objects, "put", put_then_recover)
     store.flush()
 
-    store.durable(applied, timeout=0)
+    store.durable(applied, 1, timeout=0)
     with pytest.raises(StepFenceError, match=fenced):
-        store.durable(fenced, timeout=0)
+        store.durable(fenced, 1, timeout=0)
+    assert _step_rows(engine) == 1
+
+
+def test_a_pack_that_another_store_applied_fences_a_stale_retry_of_a_landed_step(
+    make_store, engine, objects, monkeypatch
+) -> None:
+    """A generation 1 retry of a landed step fails when another store applies its pack after a bump."""
+    store = make_store()
+    recovering = make_store()
+    step_id = _commit(store)
+    store.flush()
+    _commit(store, body={"command": "retry", "output": ""})
+    _set_generation(engine, 2)
+    put = objects.put
+
+    def put_then_recover(key: str, data: bytes) -> None:
+        """Write the pack, then let the other store apply it before this flush's transaction.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+        """
+        put(key, data)
+        assert recovering.recover() == 1
+
+    monkeypatch.setattr(objects, "put", put_then_recover)
+    store.flush()
+
+    with pytest.raises(StepFenceError, match=step_id):
+        store.durable(step_id, 1, timeout=0)
     assert _step_rows(engine) == 1
 
 
@@ -443,8 +577,8 @@ def test_two_runs_with_the_same_agent_and_seq_keep_their_own_steps(make_store, e
 
     assert first != second
     store.flush()
-    store.durable(first, timeout=0)
-    store.durable(second, timeout=0)
+    store.durable(first, 1, timeout=0)
+    store.durable(second, 1, timeout=0)
     assert _step_rows(engine) == 2
     assert (store.get_step(first)["run_id"], store.get_step(first)["body"]["command"]) == ("job-1", "first")
     assert (store.get_step(second)["run_id"], store.get_step(second)["body"]["command"]) == ("job-2", "second")
@@ -460,7 +594,7 @@ def test_after_a_restart_another_run_with_the_same_agent_and_seq_lands(make_stor
     second = _commit(restarted, run_id="job-2", body={"command": "second", "output": ""})
     restarted.flush()
 
-    restarted.durable(second, timeout=0)
+    restarted.durable(second, 1, timeout=0)
     with Session(engine) as session:
         assert session.get(AgentStepModel, second).run_id == "job-2"
     assert restarted.get_step(second)["body"]["command"] == "second"
@@ -498,14 +632,49 @@ def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
         {"run_id": "job:1"},
         {"seq": -1},
         {"seq": 2**31},
+        {"seq": 1.0},
+        {"run_id": "job\x001"},
+        {"agent_id": "agent\x00a"},
+        {"agent_id": "agent-é"},
+        {"agent_id": "agent-\ud800"},
+        {"grant_list_id": "grants\x001"},
+        {"tree_id": "a" * 65},
+        {"tree_id": "A" * 64},
+        {"tree_id": "g" * 64},
+        {"tree_id": "a" * 64 + "\n"},
     ],
 )
-def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, overrides: dict[str, Any]) -> None:
-    """An empty run id, a ``:`` in the run id, or a seq outside the column is refused before the buffer."""
+def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, objects, overrides: dict[str, Any]) -> None:
+    """An id or seq that the database or the step id would refuse is refused before the buffer."""
     store = make_store()
 
     with pytest.raises(ValueError):
         _commit(store, **overrides)
+    store.flush()
+    assert objects.list("packs/") == []
+
+
+@pytest.mark.parametrize(
+    ("run_id", "object_id"),
+    [
+        ("job-1", "c" * 65),
+        ("job-1", "C" * 64),
+        ("job-1", "z" * 64),
+        ("job-1", "c" * 64 + "\n"),
+        ("", "c" * 64),
+        ("j" * 37, "c" * 64),
+        ("job:1", "c" * 64),
+        ("job\x001", "c" * 64),
+    ],
+)
+def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, objects, run_id, object_id) -> None:
+    """A bad object id or run id is refused at the call, and nothing reaches a pack."""
+    store = make_store()
+
+    with pytest.raises(ValueError):
+        store.put_object(run_id, object_id, b"blob\0x")
+    store.flush()
+    assert objects.list("packs/") == []
 
 
 def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
@@ -514,7 +683,7 @@ def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
     started = time.monotonic()
     step_id = _commit(store)
 
-    store.durable(step_id, timeout=10)
+    store.durable(step_id, 1, timeout=10)
 
     assert time.monotonic() - started >= 0.2
     assert _step_rows(engine) == 1
@@ -525,7 +694,7 @@ def test_the_buffer_flushes_at_the_size_cap_before_the_window(make_store, engine
     store = make_store(flush_window_seconds=60.0, flush_max_bytes=100)
     step_id = _commit(store, body={"command": "cat big", "output": "x" * 200})
 
-    store.durable(step_id, timeout=10)
+    store.durable(step_id, 1, timeout=10)
 
     assert _step_rows(engine) == 1
 
@@ -588,7 +757,7 @@ def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, obj
 
     store.flush()
 
-    store.durable(step_id, timeout=0)
+    store.durable(step_id, 1, timeout=0)
     assert _step_rows(engine) == 1
 
 
@@ -696,9 +865,9 @@ def test_postgres_flush_fences_and_dedupes(postgres_engine, tmp_path) -> None:
         _commit(store, agent_id="agent-a", body={"command": "retry", "output": ""})
         store.flush()
 
-        store.durable(fresh)
+        store.durable(fresh, 1)
         with pytest.raises(StepFenceError):
-            store.durable(stale)
+            store.durable(stale, 1)
         assert _step_rows(postgres_engine) == 1
         assert store.get_object("job-1", "d" * 64) == b"blob\0x"
         assert store.get_step(fresh)["body"]["command"] == "echo 1"

@@ -20,14 +20,17 @@ crash between the PUT and the commit.
 
 The fence: the flush locks each run's ``jobs`` row and keeps only the steps
 whose ``execution_generation`` is still current. A stale step fails with
-:class:`StepFenceError`; the agent sees it on its next commit or on
-``durable``.
+:class:`StepFenceError`, also when a row with its step id exists; the agent
+sees it on its next commit or on ``durable``. The step id holds no
+generation, so the buffer and each verdict are kept by step id and
+generation.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 import threading
 import time
@@ -55,6 +58,7 @@ _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
 SEQ_MAX = 2**31 - 1
+_OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
     "step_id",
     "run_id",
@@ -92,6 +96,37 @@ def step_id_for(run_id: str, agent_id: str, seq: int) -> str:
         ``<run_id>:<agent_id>:<seq>``.
     """
     return f"{run_id}:{agent_id}:{seq}"
+
+
+def _is_text_id(value: str) -> bool:
+    """Return whether an id is printable ASCII.
+
+    PostgreSQL text refuses a NUL, and the driver's UTF-8 encode fails on a
+    lone surrogate.
+
+    Args:
+        value: The id.
+
+    Returns:
+        Whether the database takes the id as it is.
+    """
+    return value.isascii() and value.isprintable()
+
+
+def _check_run_id(run_id: str) -> None:
+    """Refuse a run id that the database or the step id would refuse.
+
+    Args:
+        run_id: The job id.
+
+    Raises:
+        ValueError: When the id is empty, too long, not printable ASCII, or holds a ``:``.
+    """
+    if not 0 < len(run_id) <= RUN_ID_MAX or not _is_text_id(run_id):
+        raise ValueError(f"run_id is empty, too long or not printable ASCII: {run_id!r}")
+    # With no ``:`` in the run id and only digits in seq, the first and last ``:`` split every step id one way.
+    if ":" in run_id:
+        raise ValueError(f"run_id must not hold a ':': {run_id!r}")
 
 
 @dataclass(frozen=True)
@@ -206,12 +241,13 @@ class StepLogStore:
         self._pending: list[tuple[_Step | _Object, bytes]] = []
         self._pending_bytes = 0
         self._first_at: float | None = None
-        # The memtable: buffered and in-flight entries, until their flush commits.
-        self._steps: dict[str, tuple[_Step, bytes]] = {}
+        # The memtable: buffered and in-flight entries by step id, then by generation, until their flush commits.
+        self._steps: dict[str, dict[int, tuple[_Step, bytes]]] = {}
         # Keyed by run, so an unflushed object never reaches another account and each owner counts its own bytes.
         self._tree_objects: dict[tuple[str, str], bytes] = {}
-        self._waiters: dict[str, threading.Event] = {}
-        self._failures: dict[str, StepFenceError] = {}
+        # Keyed by step id and generation: two generations of one step id get their own verdicts.
+        self._waiters: dict[tuple[str, int], threading.Event] = {}
+        self._failures: dict[tuple[str, int], StepFenceError] = {}
         # Keyed by generation too, so a fenced old incarnation does not fail the resumed run's first commit.
         self._agent_failures: dict[tuple[str, str, int], StepFenceError] = {}
         self._closed = False
@@ -243,30 +279,36 @@ class StepLogStore:
             tree_id: The workspace tree after a command.
 
         Returns:
-            The step id, the idempotency key: the first commit of an id wins.
-            A retry with the same run, agent and ``seq`` returns the same id
-            and changes nothing.
+            The step id, the idempotency key: among current-generation
+            commits, the first commit of an id wins. A retry with the same
+            run, agent, ``seq`` and generation returns the same id and changes
+            nothing. A commit of the same id at another generation is
+            buffered on its own and gets its own verdict.
 
         Raises:
             StepFenceError: When an earlier step of this agent in this run
                 and generation failed the fence.
             ValueError: When ``kind`` is unknown, a command has no tree id, an
-                id is empty or longer than its column, ``run_id`` holds a
-                ``:``, or ``seq`` is outside the ``seq`` column.
+                id is empty, longer than its column or not printable ASCII,
+                ``run_id`` holds a ``:``, ``tree_id`` is not 64 lowercase hex
+                characters, or ``seq`` is not an ``int`` in the ``seq`` column.
         """
         # A row the database refuses would fail every later flush of the batch, so refuse it here.
-        if not 0 < len(run_id) <= RUN_ID_MAX or not 0 < len(agent_id) <= AGENT_ID_MAX or len(grant_list_id) > 64:
-            raise ValueError("run_id, agent_id or grant_list_id is too long or empty")
-        # With no ``:`` in the run id and only digits in seq, the first and last ``:`` split every step id one way.
-        if ":" in run_id:
-            raise ValueError(f"run_id must not hold a ':': {run_id!r}")
-        if not 0 <= seq <= SEQ_MAX:
-            raise ValueError(f"seq is outside 0..{SEQ_MAX}: {seq}")
+        _check_run_id(run_id)
+        if not 0 < len(agent_id) <= AGENT_ID_MAX or len(grant_list_id) > 64:
+            raise ValueError("agent_id or grant_list_id is too long or empty")
+        if not _is_text_id(agent_id) or not _is_text_id(grant_list_id):
+            raise ValueError("agent_id or grant_list_id is not printable ASCII")
+        if type(seq) is not int or not 0 <= seq <= SEQ_MAX:
+            raise ValueError(f"seq is not an int in 0..{SEQ_MAX}: {seq!r}")
+        if tree_id is not None and not _OBJECT_ID.fullmatch(tree_id):
+            raise ValueError(f"tree_id is not 64 lowercase hex characters: {tree_id!r}")
         if kind not in STEP_KINDS:
             raise ValueError(f"unknown step kind: {kind!r}")
         if kind == "command" and tree_id is None:
             raise ValueError("a command step needs its new tree id")
         step_id = step_id_for(run_id, agent_id, seq)
+        key = (step_id, execution_generation)
         data = _encode_body(body)
         with self._cond:
             failure = self._agent_failures.pop((run_id, agent_id, execution_generation), None)
@@ -274,13 +316,14 @@ class StepLogStore:
                 raise failure
             if self._closed:
                 raise RuntimeError("the step log is closed")
-            if step_id in self._steps:
+            versions = self._steps.setdefault(step_id, {})
+            if execution_generation in versions:
                 return step_id
             step = _Step(step_id, run_id, agent_id, seq, kind, execution_generation, grant_list_id, tree_id)
-            # A new commit of a fenced id (a resumed run at the same seq) gets a new verdict at its own flush.
-            self._failures.pop(step_id, None)
-            self._steps[step_id] = (step, data)
-            self._waiters[step_id] = threading.Event()
+            # A new commit of a fenced step at the same generation gets a new verdict at its own flush.
+            self._failures.pop(key, None)
+            versions[execution_generation] = (step, data)
+            self._waiters[key] = threading.Event()
             self._buffer(step, data)
         return step_id
 
@@ -294,7 +337,15 @@ class StepLogStore:
             run_id: The job whose owner owns the object.
             object_id: The object's content hash.
             data: The stored object bytes.
+
+        Raises:
+            ValueError: When ``run_id`` is not a valid run id or
+                ``object_id`` is not 64 lowercase hex characters.
         """
+        # As in ``commit``: an id the database refuses would fail every later flush of the batch.
+        _check_run_id(run_id)
+        if not _OBJECT_ID.fullmatch(object_id):
+            raise ValueError(f"object_id is not 64 lowercase hex characters: {object_id!r}")
         with self._cond:
             if self._closed:
                 raise RuntimeError("the step log is closed")
@@ -316,30 +367,43 @@ class StepLogStore:
             self._first_at = time.monotonic()
         self._cond.notify_all()
 
-    def durable(self, step_id: str, timeout: float | None = None) -> None:
+    def durable(self, step_id: str, execution_generation: int, timeout: float | None = None) -> None:
         """Wait until the step's pack is in the object store and its row is committed.
+
+        When the store holds no waiter and no verdict for the step at this
+        generation, the database answers: the step is durable only when its
+        row exists and the generation is still the job's current one.
 
         Args:
             step_id: The id that :meth:`commit` returned.
+            execution_generation: The generation the step was committed under.
             timeout: The most seconds to wait; ``None`` waits without limit.
 
         Raises:
-            StepFenceError: When the step failed the fence.
+            StepFenceError: When the step failed the fence, or its generation
+                is no longer current.
             TimeoutError: When the flush does not commit in time.
-            KeyError: When the store knows no such step.
+            KeyError: When the store knows no such step and it has no row.
         """
+        key = (step_id, execution_generation)
         with self._cond:
-            failure = self._failures.get(step_id)
-            event = self._waiters.get(step_id)
+            failure = self._failures.get(key)
+            event = self._waiters.get(key)
         if failure is None and event is not None:
             if not event.wait(timeout):
                 raise TimeoutError(f"step {step_id} is not durable yet")
             with self._cond:
-                failure = self._failures.get(step_id)
+                failure = self._failures.get(key)
         elif failure is None:
             with Session(self._engine) as session:
-                if session.get(AgentStepModel, step_id) is None:
+                row = session.get(AgentStepModel, step_id)
+                if row is None:
                     raise KeyError(step_id)
+                current = session.scalar(
+                    select(JobModel.execution_generation).where(JobModel.optimization_id == row.run_id)
+                )
+            if current != execution_generation:
+                failure = StepFenceError(step_id)
         if failure is not None:
             raise failure
 
@@ -347,7 +411,8 @@ class StepLogStore:
         """Return one step with its body: the stored row first, else the buffer when it is not flushed yet.
 
         A retry of a stored step sits in the buffer until its flush; the
-        stored row wins, so a reader always sees the first commit.
+        stored row wins, so a reader always sees the first commit. With no
+        row, the buffered entry of the highest generation wins.
 
         Args:
             step_id: The step id.
@@ -357,7 +422,8 @@ class StepLogStore:
         """
         # Read the buffer before the row: the flush drops a step from the buffer only after its row commits.
         with self._cond:
-            buffered = self._steps.get(step_id)
+            versions = self._steps.get(step_id)
+            buffered = versions[max(versions)] if versions else None
         with Session(self._engine) as session:
             row = session.get(AgentStepModel, step_id)
             if row is not None:
@@ -425,14 +491,18 @@ class StepLogStore:
             with self._cond:
                 for entry in stale:
                     error = StepFenceError(entry["step_id"])
-                    self._failures[entry["step_id"]] = error
+                    self._failures[(entry["step_id"], entry["execution_generation"])] = error
                     self._agent_failures[(entry["run_id"], entry["agent_id"], entry["execution_generation"])] = error
                 for item, _ in batch:
                     if isinstance(item, _Object):
                         self._tree_objects.pop((item.run_id, item.object_id), None)
                         continue
-                    self._steps.pop(item.step_id, None)
-                    waiter = self._waiters.pop(item.step_id, None)
+                    versions = self._steps.get(item.step_id)
+                    if versions is not None:
+                        versions.pop(item.execution_generation, None)
+                        if not versions:
+                            del self._steps[item.step_id]
+                    waiter = self._waiters.pop((item.step_id, item.execution_generation), None)
                     if waiter is not None:
                         waiter.set()
 
@@ -474,8 +544,10 @@ class StepLogStore:
 
         The ``storage_packs`` row makes the apply happen once: a second apply
         of the same pack, by recovery or a retry, finds the row and stops.
-        A step that already has a row is never fenced and never inserted
-        again, so the first commit of a step id wins.
+        The fence comes first: a step whose generation is not the job's
+        current one fails, also when a row with its id exists. A current step
+        whose id has a row is done and not inserted again, so the first
+        commit of a step id wins.
 
         Args:
             pack_key: The pack's object key.
@@ -506,20 +578,20 @@ class StepLogStore:
                 .values(pack_key=pack_key, worker_id=manifest["worker_id"], byte_size=byte_size, created_at=now)
                 .on_conflict_do_nothing()
             ).rowcount
-            # A step with a row is a retry of an applied step, or this pack applied by another store: it is done.
             ids = [entry["step_id"] for entry in steps]
             stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
-            if not claimed:
-                session.rollback()
-                # The store that applied this pack inserted every step it did not fence.
-                return [entry for entry in steps if entry["step_id"] not in stored]
+            current = {(job.optimization_id, job.execution_generation) for job in jobs.values()}
             fresh, stale = [], []
             for entry in steps:
-                if entry["step_id"] in stored:
-                    continue
-                job = jobs.get(entry["run_id"])
-                current = job is not None and job.execution_generation == entry["execution_generation"]
-                (fresh if current else stale).append(entry)
+                if (entry["run_id"], entry["execution_generation"]) not in current:
+                    stale.append(entry)
+                # A current step with a row is a retry of an applied step: it is done.
+                elif entry["step_id"] not in stored:
+                    fresh.append(entry)
+            if not claimed:
+                session.rollback()
+                # The store that applied this pack inserted every current step that had no row.
+                return stale + fresh
             if fresh:
                 session.execute(
                     insert(AgentStepModel)

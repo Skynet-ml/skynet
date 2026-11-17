@@ -160,7 +160,7 @@ def test_a_kill_between_the_put_and_the_commit_leaves_no_step_and_recovery_adds_
     try:
         assert store.get_step("job-1:agent-a:1") is None
         assert store.recover() == 1
-        store.durable("job-1:agent-a:1", timeout=0)
+        store.durable("job-1:agent-a:1", 1, timeout=0)
         assert store.get_step("job-1:agent-a:1")["body"] == {"command": "make", "output": "ok\n"}
         assert store.get_object("job-1", OBJECT) == b"blob\0data"
 
@@ -194,7 +194,7 @@ def test_recovery_keeps_the_fence(tmp_path) -> None:
     try:
         assert store.recover() == 1
         with pytest.raises(KeyError):
-            store.durable("job-1:agent-a:1")
+            store.durable("job-1:agent-a:1", 1)
     finally:
         store.close()
     assert _count(engine, AgentStepModel) == 0
