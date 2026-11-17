@@ -36,14 +36,18 @@ UPGRADES: tuple[UpgradeStep, ...] = ()
 
 
 class StorageUpgradeError(RuntimeError):
-    """An upgrade step failed; the workspace keeps the version it had before that step."""
+    """An upgrade step failed.
+
+    The workspace normally stays at ``from_version``. If the commit landed but its reply was lost,
+    the stored version can be ahead of ``from_version``.
+    """
 
     def __init__(self, workspace_id: str, from_version: int) -> None:
         """Name the workspace and the version whose upgrade failed.
 
         Args:
             workspace_id: The workspace.
-            from_version: The version the workspace keeps.
+            from_version: The version that the failed upgrade started from.
         """
         super().__init__(f"workspace {workspace_id}: the upgrade from storage version {from_version} failed")
         self.workspace_id = workspace_id
@@ -62,6 +66,23 @@ class StorageVersionAheadError(RuntimeError):
         """
         super().__init__(
             f"workspace {workspace_id}: storage version {stored_version} is newer than {current_version()}"
+        )
+        self.workspace_id = workspace_id
+        self.stored_version = stored_version
+
+
+class StorageVersionBelowBaseError(RuntimeError):
+    """The workspace's stored version is below ``BASE_VERSION``, so no upgrade step fits it."""
+
+    def __init__(self, workspace_id: str, stored_version: int) -> None:
+        """Name the workspace and its stored version.
+
+        Args:
+            workspace_id: The workspace.
+            stored_version: The version in the database.
+        """
+        super().__init__(
+            f"workspace {workspace_id}: storage version {stored_version} is below the base version {BASE_VERSION}"
         )
         self.workspace_id = workspace_id
         self.stored_version = stored_version
@@ -89,6 +110,7 @@ def _stored_version(session: Session, workspace_id: str, *, lock: bool) -> int:
 
     Raises:
         LookupError: The workspace does not exist.
+        StorageVersionBelowBaseError: The stored version is below ``BASE_VERSION``.
     """
     query = select(WorkspaceModel.storage_version).where(WorkspaceModel.id == workspace_id)
     if lock:
@@ -96,6 +118,9 @@ def _stored_version(session: Session, workspace_id: str, *, lock: bool) -> int:
     version = session.execute(query).scalar_one_or_none()
     if version is None:
         raise LookupError(f"workspace {workspace_id} does not exist")
+    # A version below the base would index UPGRADES with a negative number and run the wrong step.
+    if version < BASE_VERSION:
+        raise StorageVersionBelowBaseError(workspace_id, version)
     return version
 
 
@@ -112,7 +137,9 @@ def ensure_current(engine: Engine, workspace_id: str) -> int:
     Raises:
         LookupError: The workspace does not exist.
         StorageUpgradeError: A step, its version update or its commit failed; its cause is that error.
+            The stored version normally stays at ``from_version``; after a lost commit reply it can be ahead.
         StorageVersionAheadError: Newer code already upgraded the data.
+        StorageVersionBelowBaseError: The stored version is below ``BASE_VERSION``.
     """
     target = current_version()
     # A read without the lock keeps the common wake, a current workspace, free of row lock waits.

@@ -25,6 +25,7 @@ from core.storage.storage_version import (
     BASE_VERSION,
     StorageUpgradeError,
     StorageVersionAheadError,
+    StorageVersionBelowBaseError,
     current_version,
     ensure_current,
 )
@@ -199,6 +200,54 @@ def test_an_unflushed_step_write_that_fails_raises_a_typed_error(engine, monkeyp
     assert row.username == "ada"
 
 
+def test_a_failed_commit_raises_a_typed_error(engine, monkeypatch) -> None:
+    """Only the commit fails: ``StorageUpgradeError`` names it as the cause, and the version and writes stay."""
+    calls: list[str] = []
+    monkeypatch.setattr(storage_version, "UPGRADES", (_recording_step(calls, "to2"),))
+    _add_workspace(engine)
+    boom = RuntimeError("commit lost")
+    real_commit = Session.commit
+    commits = [0]
+
+    def commit_fails_once(self: Session) -> None:
+        """Fail the first commit, then commit as normal.
+
+        Args:
+            self: The session.
+        """
+        commits[0] += 1
+        if commits[0] == 1:
+            raise boom
+        real_commit(self)
+
+    monkeypatch.setattr(Session, "commit", commit_fails_once)
+
+    with pytest.raises(StorageUpgradeError) as caught:
+        ensure_current(engine, "ws-1")
+
+    assert calls == ["to2"]
+    assert caught.value.from_version == 1
+    assert caught.value.__cause__ is boom
+    row = _workspace(engine)
+    assert row.storage_version == 1
+    assert row.policy == {}
+
+
+def test_a_version_below_the_base_raises_before_any_step(engine, monkeypatch) -> None:
+    """A stored version 0 has no step; a negative index would run the last step, so nothing runs."""
+    calls: list[str] = []
+    monkeypatch.setattr(storage_version, "UPGRADES", (_recording_step(calls, "to2"),))
+    _add_workspace(engine, version=0)
+
+    with pytest.raises(StorageVersionBelowBaseError) as caught:
+        ensure_current(engine, "ws-1")
+
+    assert caught.value.workspace_id == "ws-1"
+    assert caught.value.stored_version == 0
+    assert calls == []
+    assert _workspace(engine).storage_version == 0
+
+
 def test_a_retry_after_a_failed_step_runs_only_that_step(engine, monkeypatch) -> None:
     """Once the failed step works, the retry runs it and not the step that already landed."""
     calls: list[str] = []
@@ -331,6 +380,8 @@ def test_postgres_two_workers_run_each_step_once(postgres_engine, monkeypatch) -
         release.set()
     first.join(30)
     second.join(30)
+    assert not first.is_alive(), "the first worker did not stop"
+    assert not second.is_alive(), "the second worker did not stop"
 
     assert errors == []
     assert results == {"first": 3, "second": 3}
