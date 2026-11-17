@@ -557,6 +557,7 @@ def test_recovery_never_applies_a_compacted_pack(engine, objects, store, make_co
     written = _fill(store)
     make_compactor().merge()
     make_compactor(grace_seconds=0.0).remove_retired()
+    assert objects.list("packs/") == []
     rows_before = _pack_keys_of_rows(engine)
 
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
@@ -564,7 +565,7 @@ def test_recovery_never_applies_a_compacted_pack(engine, objects, store, make_co
         assert recovering.recover() == 0
     finally:
         recovering.close()
-    assert not any(key.startswith("packs/") for key in objects.list(f"{COMPACTED_PREFIX}/"))
+    assert set(objects.list(f"{COMPACTED_PREFIX}/")) == rows_before
     assert _pack_keys_of_rows(engine) == rows_before
     _assert_all_readable(store, written)
 

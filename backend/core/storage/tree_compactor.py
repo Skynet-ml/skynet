@@ -289,6 +289,7 @@ class TreeCompactor:
             if row.pack_key != pack_key:
                 pack_key = row.pack_key
                 starts = (len(data), len(step_moves), len(object_moves))
+                pack = b""
                 try:
                     pack = self._objects.get(pack_key)
                 except KeyError:
