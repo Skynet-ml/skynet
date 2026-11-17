@@ -1202,6 +1202,39 @@ def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, obj
     assert _step_rows(engine) == 1
 
 
+def test_new_commits_after_a_failed_put_do_not_start_a_retry_early(make_store, objects, monkeypatch) -> None:
+    """After a failed PUT, the flusher waits one window: the commits in that window do not each PUT the batch again."""
+    attempts: list[str] = []
+
+    def failing_put(key: str, data: bytes) -> None:
+        """Count the PUT, then fail it.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+
+        Raises:
+            OSError: Always.
+        """
+        attempts.append(key)
+        raise OSError("object store is down")
+
+    monkeypatch.setattr(objects, "put", failing_put)
+    store = make_store(flush_window_seconds=0.5)
+    _commit(store)
+    deadline = time.monotonic() + 2
+    while not attempts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(attempts) == 1
+
+    for seq in range(2, 12):
+        _commit(store, seq=seq)
+        time.sleep(0.02)
+
+    assert len(attempts) == 1
+    monkeypatch.undo()
+
+
 def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, monkeypatch) -> None:
     """A batch that a failed outside ``flush`` puts back lands with no new commit to wake the flusher."""
     store = make_store(flush_window_seconds=0.1)
@@ -1278,6 +1311,15 @@ def test_the_local_object_store_reads_ranges_and_lists_by_prefix(tmp_path) -> No
         store.get("packs/missing")
     with pytest.raises(ValueError):
         store.put("../escape", b"x")
+
+
+def test_the_local_object_store_does_not_list_a_half_written_file(tmp_path) -> None:
+    """A temporary file that a crash left during ``put`` is not a key, so recovery never reads it as a pack."""
+    store = LocalObjectStore(tmp_path)
+    store.put("packs/w1/a.pack", b"0123456789")
+    (tmp_path / "packs" / "w1" / ".put-abc123").write_bytes(b"half")
+
+    assert store.list("packs/") == ["packs/w1/a.pack"]
 
 
 class _FakeS3:
