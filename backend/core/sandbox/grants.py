@@ -103,7 +103,9 @@ def resolve_grants(grants: Iterable[Grant], registry: Mapping[str, Mapping[str, 
     wanted = _merge(grants)
     grant_list_id = json_fingerprint(sorted([host, credential] for host, credential in wanted.items()))
     if not wanted:
-        return ResolvedGrants(grant_list_id=grant_list_id, mode=NetworkMode.DENY_ALL)
+        return ResolvedGrants(
+            grant_list_id=grant_list_id, mode=NetworkMode.DENY_ALL, inject_headers=MappingProxyType({})
+        )
     capabilities = _clean_registry(registry)
     headers: dict[str, Mapping[str, str]] = {}
     for host, credential in wanted.items():
@@ -179,9 +181,12 @@ def _clean_host(host: object) -> str:
 
     Raises:
         GrantError: The value is not an exact host or ``*.`` and a suffix of
-            two or more labels; ports, paths and schemes are refused.
+            two or more labels; ports, paths, schemes and non-ASCII text are
+            refused.
     """
-    cleaned = host.strip().rstrip(".").lower() if isinstance(host, str) else ""
+    # str.lower() and str.strip() turn some non-ASCII text into a valid ASCII
+    # host (the Kelvin sign into "k", a no-break space into nothing).
+    cleaned = host.strip().rstrip(".").lower() if isinstance(host, str) and host.isascii() else ""
     if not cleaned or len(cleaned) > 253 or not REPO_SECRET_HOST_PATTERN.fullmatch(cleaned):
         raise GrantError(f"Grant host {host!r} must be a host such as api.example.com, or *.example.com.")
     return cleaned

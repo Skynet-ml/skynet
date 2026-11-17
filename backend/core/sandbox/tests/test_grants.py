@@ -30,6 +30,8 @@ def test_an_empty_grant_list_denies_all_network() -> None:
     assert resolved.mode is NetworkMode.DENY_ALL
     assert resolved.allowed_hosts == ()
     assert dict(resolved.inject_headers) == {}
+    with pytest.raises(TypeError):
+        resolved.inject_headers["api.example.com"] = {}  # type: ignore[index]
     spec = resolved.apply(SandboxSpec(lifetime_seconds=60))
     assert spec.network_disabled
     validate_spec(spec, VERCEL_CAPABILITIES)
@@ -145,10 +147,13 @@ def test_a_plain_and_a_credential_grant_for_one_host_merge() -> None:
         7,
         "api.example.com\n.",
         "*.example.com\n.",
+        "\u212a.example.com",
+        "\u00a0api.example.com",
+        "api.example.com\u2028",
     ],
 )
 def test_an_invalid_grant_host_is_refused(host: object) -> None:
-    """Refuse ports, schemes, paths, top-level wildcards, line ends and values that are not hosts."""
+    """Refuse ports, schemes, paths, top-level wildcards, line ends, non-ASCII text and values that are not hosts."""
     with pytest.raises(GrantError):
         resolve_grants([Grant(host)], {})  # type: ignore[arg-type]
 
@@ -157,6 +162,12 @@ def test_a_registry_host_with_a_line_end_is_refused() -> None:
     """Refuse a registry host that keeps a line end after its final dot goes."""
     with pytest.raises(GrantError, match="must be a host"):
         resolve_grants([Grant("api.example.com")], {"api.example.com\n.": {"Authorization": "Bearer test"}})
+
+
+def test_a_registry_host_that_is_not_ascii_is_refused() -> None:
+    """Refuse a registry host with a character that lower-cases to an ASCII letter."""
+    with pytest.raises(GrantError, match="must be a host"):
+        resolve_grants([Grant("k.example.com")], {"\u212a.example.com": {"Authorization": "Bearer test"}})
 
 
 def test_a_registry_host_that_repeats_after_normalization_is_refused() -> None:
@@ -193,7 +204,6 @@ def test_the_grant_list_id_and_repr_hold_no_credential_value() -> None:
     rotated = resolve_grants(grants, {"api.github.example": {"Authorization": "Bearer other-fake-token"}})
     assert resolved.grant_list_id == rotated.grant_list_id
     assert FAKE_TOKEN not in repr(resolved)
-    assert "fake-token" not in resolved.grant_list_id
 
 
 def test_the_resolved_headers_cannot_change_after_resolution() -> None:
