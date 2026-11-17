@@ -657,14 +657,34 @@ def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects,
     _assert_all_readable(store, written)
 
 
-def test_the_merge_holds_no_connection_during_the_object_io(engine, objects, store, make_compactor) -> None:
+def test_the_merge_holds_no_connection_during_the_object_io(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
     """The GETs and the PUT run with no database connection checked out, so no transaction stays open."""
     _fill(store)
-    checked_out: list[int] = []
-    objects.on_compacted_put = lambda key: checked_out.append(engine.pool.checkedout())
+    at_put: list[int] = []
+    at_get: list[int] = []
+    objects.on_compacted_put = lambda key: at_put.append(engine.pool.checkedout())
+    get = objects.get
+
+    def counted_get(key: str, *args: Any) -> bytes:
+        """Record the checked-out connections at each GET.
+
+        Args:
+            key: The object key.
+            *args: The range arguments.
+
+        Returns:
+            The object bytes.
+        """
+        at_get.append(engine.pool.checkedout())
+        return get(key, *args)
+
+    monkeypatch.setattr(objects, "get", counted_get)
 
     assert make_compactor().merge() == 3
-    assert checked_out == [0]
+    assert at_put == [0]
+    assert at_get == [0, 0, 0]
 
 
 def test_a_merge_that_takes_half_the_grace_time_gives_up(engine, objects, store, make_compactor) -> None:

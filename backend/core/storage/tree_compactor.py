@@ -304,7 +304,8 @@ class TreeCompactor:
                     # The S3 store always sends a Range header, and S3 answers 416 for an empty object.
                     # The pack then stays empty, so the short-pack check below marks it broken.
             piece = pack[row.pack_offset : row.pack_offset + row.pack_length]
-            # A short pack would shift the offsets of every later row, so its rows leave the pass.
+            # A short piece keeps its row's pack_length, so its row would read the next row's bytes.
+            # All rows of the pack leave the pass, also the ones already copied.
             if len(piece) != row.pack_length:
                 logger.error(
                     "Pack %s is shorter than its rows; its rows stay on it and it leaves the candidates", pack_key
@@ -392,7 +393,7 @@ class TreeCompactor:
         # shared packs cannot each hold a part. The jobs come first, as in StepLogStore._apply. KEY SHARE
         # keeps a job delete, whose cascade locks steps in another order, out until the commit. It also
         # blocks SELECT ... FOR UPDATE on the job (a claim skips the row), but not a plain UPDATE. The
-        # half-grace time limit bounds that wait.
+        # row cap keeps that wait short; the half-grace check only stops a late commit.
         try:
             for chunk in _chunks(run_ids):
                 session.execute(
