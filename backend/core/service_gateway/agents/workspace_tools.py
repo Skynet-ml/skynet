@@ -97,6 +97,10 @@ How to write the run's files:
   whole file), or change part of one with ``{EDIT_FILE_TOOL}``. Each write goes into the editor at once. The run
   uses your repository files in place of the repository's own; the user's repository stays unchanged. Change
   other repository files only when the run needs it, and tell the user which files you changed.
+* You can write every file of the repository, also the files under ``[paths] protected`` and the metric's
+  files, for example ``evaluation/``. That protection binds only the candidate versions during a run: no
+  version can change those files. In setup, the signed-in user owns the run. When the user asks you to change
+  one of those files, make the change and tell the user what you changed. Never ask who the user is.
 * Every run optimizes a repository. The run has no run.py. ``metric.py`` defines ``score(repo_path)``, or
   ``score(repo_path, case)`` when the run has data, and scores the checkout at ``repo_path``. It returns
   ``(score, feedback)`` or ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
@@ -124,14 +128,14 @@ How to write the run's files:
   for example ``docs/intent.md``, and set ``instructions = "docs/intent.md"`` at the top of optimize.toml,
   before any section. When the user names approaches the run must not use, write them in a markdown file, for
   example ``docs/rules.md``, one top-level ``- `` bullet for each rule, and set ``illegal = "docs/rules.md"``
-  in ``[proposer]``. {APP_NAME} protects both files, so no version can change them. Show the user each
-  file's contents.
+  in ``[proposer]``. During a run, {APP_NAME} protects both files, so no version can change them. Show the
+  user each file's contents.
   When the metric needs cases, write them in a JSONL file, for example ``data/cases.jsonl``, one
   ``{{"input": ..., "expected": ...}}`` object on each line (``expected`` is optional), and set
   ``cases = "data/cases.jsonl"`` in ``[data]``. Write only cases from the user's data. {APP_NAME} hides the
-  file from the agent and the candidate: the candidate gets only each case's ``input``, and the metric gets
-  the whole case. When the metric needs no cases, such as a speed metric or a metric that reads a test report,
-  write no ``[data]`` section.
+  file from the run's optimizer and the candidate: the candidate gets only each case's ``input``, and the
+  metric gets the whole case. When the metric needs no cases, such as a speed metric or a metric that reads a
+  test report, write no ``[data]`` section.
 * ``optimize.toml`` is the whole file at the repository root. {APP_NAME} checks it with its parser, which
   stops at the first error and refuses any section or key it does not know ("... is not a supported
   setting"). Use only this schema. Every path is relative to the repository root.
@@ -147,7 +151,7 @@ How to write the run's files:
     2 to 32, default 2), ``timeout`` (seconds for each ``skynet.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
     60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``.
-  - ``[metric]``: ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
+  - ``[metric]``: ``files`` (a list of paths hidden from the run's optimizer), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
     besides the relay, default none) and ``vcpus`` (SKY-398).
