@@ -417,6 +417,16 @@ def test_park_run_refuses_a_stale_generation(store: StepJobStore) -> None:
     assert store.get_job(RUN)["status"] == "running"
 
 
+def test_park_run_refuses_a_wake_time_with_no_time_zone(store: StepJobStore) -> None:
+    """A naive wake time raises and leaves the run as it is, so the host time zone cannot move the wake."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+
+    with pytest.raises(ValueError):
+        park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime(2026, 1, 1, 12, 0))
+    assert store.get_job(RUN)["status"] == "running"
+
+
 def _bill(store: StepJobStore, key: str, cents: int) -> None:
     """Settle one run-phase model call of the run's first budget generation.
 

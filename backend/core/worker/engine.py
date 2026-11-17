@@ -553,7 +553,8 @@ class BackgroundWorker:
 
         Returns:
             Whether the run was parked; ``False`` when the worker does not
-            process the run, or when another owner changed the run first.
+            process the run, when this worker already parked the run, or
+            when another owner changed the run first.
             When the park fails or raises, the worker state comes back. If
             the worker finished the run during a failed park, the claim is
             released and no state comes back.

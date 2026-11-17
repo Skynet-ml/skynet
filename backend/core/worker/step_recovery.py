@@ -90,11 +90,18 @@ def park_run(engine: Engine, optimization_id: str, *, expected_generation: int, 
         engine: Engine with the jobs table.
         optimization_id: The run to park.
         expected_generation: The generation the parking worker owns.
-        wake_at: When the orphan sweep makes the run claimable again.
+        wake_at: When the orphan sweep makes the run claimable again. It must
+            carry a time zone.
 
     Returns:
         Whether the run was parked; ``False`` when another owner changed it first.
+
+    Raises:
+        ValueError: When ``wake_at`` has no time zone.
     """
+    # astimezone() reads a naive time as host local time, which moves the wake time on a non-UTC host.
+    if wake_at.tzinfo is None or wake_at.utcoffset() is None:
+        raise ValueError("wake_at must carry a time zone")
     now = datetime.now(UTC)
     with Session(engine) as session:
         job = session.scalar(
