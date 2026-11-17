@@ -88,10 +88,10 @@ Sie können Dateien an eine Nachricht anhängen. Jede Datei darf bis zu 20 MB gr
 So laden Sie einen Datensatz über den Agenten hoch:
 
 1. Hängen Sie eine CSV-, JSON- oder Excel-Datei an.
-2. Prüfen Sie die Upload-Karte. Sie zeigt die Spalten der Datei.
-3. Legen Sie auf der Karte die Spaltenrollen fest und bestätigen Sie.
+2. Während die Datei gelesen wird, erscheint der Hinweis „Datei wird gelesen…“.
+3. Die Datei wartet als Dateikarte in Ihrer Nachricht. Senden Sie die Nachricht.
 
-Kann der Agent die Datei nicht lesen, zeigt die Karte „Datei konnte nicht gelesen werden. Verwende eine CSV-, JSON- oder XLSX-Datei.“
+Kann die Datei nicht gelesen werden, erscheint der Hinweis „Datei konnte nicht gelesen werden. Verwende eine CSV-, JSON- oder XLSX-Datei.“
 
 Die Regeln für Dateien finden Sie unter [Einen Datensatz vorbereiten](/docs/guides/datasets).
 

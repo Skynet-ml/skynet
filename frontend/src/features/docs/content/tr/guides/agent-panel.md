@@ -88,10 +88,10 @@ Bir mesaja dosya ekleyebilirsiniz. Her dosya en fazla 20 MB olabilir. Tek seferd
 Ajan aracılığıyla bir veri kümesi yüklemek için:
 
 1. Bir CSV, JSON veya Excel dosyası ekleyin.
-2. Yükleme kartını kontrol edin. Kart dosyanın sütunlarını gösterir.
-3. Karttaki sütun rollerini belirleyin, ardından onaylayın.
+2. Dosya okunurken "Dosya okunuyor…" bildirimi görünür.
+3. Dosya, mesajınızda bir dosya kartı olarak bekler. Mesajı gönderin.
 
-Ajan dosyayı okuyamazsa kart "Dosya okunamadı. CSV, JSON veya XLSX dosyası kullanın." mesajını gösterir.
+Dosya okunamazsa "Dosya okunamadı. CSV, JSON veya XLSX dosyası kullanın." bildirimi görünür.
 
 Dosya kuralları için [Veri kümesi hazırlayın](/docs/guides/datasets) sayfasına bakın.
 
