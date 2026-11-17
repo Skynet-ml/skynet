@@ -390,8 +390,9 @@ class TreeCompactor:
         run_ids = sorted({row.run_id for row, _ in step_moves})
         # Each lock is taken in one order and with NOWAIT, so a pass never waits and two passes over
         # shared packs cannot each hold a part. The jobs come first, as in StepLogStore._apply. KEY SHARE
-        # keeps a job delete, whose cascade locks steps in another order, out until the commit, and
-        # does not block the job's other updates.
+        # keeps a job delete, whose cascade locks steps in another order, out until the commit. It also
+        # blocks SELECT ... FOR UPDATE on the job (a claim skips the row), but not a plain UPDATE. The
+        # half-grace time limit bounds that wait.
         try:
             for chunk in _chunks(run_ids):
                 session.execute(
