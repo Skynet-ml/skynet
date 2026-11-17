@@ -814,6 +814,58 @@ def test_a_park_that_commits_and_raises_after_a_reclaim_keeps_the_new_claim(
         assert row.lease_expires_at is not None
 
 
+def test_a_park_that_raises_before_its_commit_with_a_failed_read_leaves_the_lease_to_expire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the park and the read both failing, the run leaves the worker, no release runs, and the sweep requeues it."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    released: list[str] = []
+
+    def raise_before_commit(*args: Any, **kwargs: Any) -> bool:
+        """Fail as a park that loses its connection before the commit would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("connection dropped before commit")
+
+    def broken_read(*args: Any, **kwargs: Any) -> bool:
+        """Fail as the ownership read on a lost connection would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(engine_module, "park_run", raise_before_commit)
+    monkeypatch.setattr(engine_module, "still_owns_run", broken_read)
+    monkeypatch.setattr(job_store, "release_job", lambda optimization_id, pod: released.append(optimization_id))
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    w._mark_job_done(RUN, 0)
+
+    assert released == []
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.status == "running"
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        session.commit()
+    assert job_store.recover_orphaned_jobs() == 1
+    assert job_store.get_job(RUN)["status"] == "pending"
+
+
 def test_a_park_whose_ownership_read_fails_restores_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When the park commits and raises and the ownership read also fails, the worker state does not come back."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)
@@ -1079,13 +1131,27 @@ def test_a_failed_park_keeps_the_cancel_event_of_a_claim_made_during_the_park(
 
     monkeypatch.setattr(engine_module, "park_run", requeue_claim_then_fail)
 
-    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
     assert claimed == [RUN]
-    assert w._cancel_events[RUN] is not old_cancel
-    assert not w._cancel_events[RUN].is_set()
+    new_cancel = w._cancel_events[RUN]
+    assert new_cancel is not old_cancel
+    assert not new_cancel.is_set()
     assert RUN in w._claimed_jobs
     assert RUN in w._processing_jobs
+    assert w._parked_jobs == {(0, RUN)}
+
+    # The old worker's next fenced commit fails, and its cleanup must leave the later claim and its lease.
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is new_cancel
     assert not w._parked_jobs
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]

@@ -555,7 +555,9 @@ class BackgroundWorker:
             ``True`` when the run left this worker, so the worker must stop
             work on it. That is a park that succeeds, and also a park that
             raises when this worker no longer owns the run or cannot read
-            whether it does; it logs the error. ``False`` when the worker
+            whether it does; it logs the error. It is also a park that fails
+            while a later claim of the run on this pod holds the run; that
+            claim keeps the maps and the lease. ``False`` when the worker
             does not process the run, when this worker already parked the
             run, or when another owner changed the run first; the worker
             state then comes back. If the worker finished the run during a
@@ -593,37 +595,53 @@ class BackgroundWorker:
             # other case a restore would let this thread's _mark_job_done release a later claim's
             # lease. The pair stays, and a lease of this generation that nobody renews expires.
             try:
-                owns = still_owns_run(self._job_store.engine, optimization_id, generation)
+                owns: bool | None = still_owns_run(self._job_store.engine, optimization_id, generation)
             except Exception:
-                logger.exception("Could not read whether this worker still owns %s", optimization_id)
-                owns = False
+                logger.exception(
+                    "park_run raised for %s and the ownership read failed; the run leaves this worker",
+                    optimization_id,
+                )
+                owns = None
             if owns:
                 raise
             parked = True
-            logger.exception("park_run raised for %s and this worker no longer owns the run", optimization_id)
+            if owns is False:
+                logger.exception("park_run raised for %s and this worker no longer owns the run", optimization_id)
         finally:
             if not parked:
-                self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)
+                parked = self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)
         return parked
 
     def _undo_park(
         self, pair: tuple[int, str], *, was_claimed: bool, was_processing: bool, cancel: threading.Event | None
-    ) -> None:
+    ) -> bool:
         """Give a run that did not park its worker state back.
 
         If the worker finished the run during the park, its ``_mark_job_done``
         took the pair and skipped the release. The run is not parked, so this
         method then releases the claim in its place, and restores no state.
 
+        If another claim of the run on this pod happened during the park, that
+        claim owns the maps and the lease. This method then restores and
+        releases nothing, and keeps the pair, so the old worker's
+        ``_mark_job_done`` does nothing.
+
         Args:
             pair: The (worker id, run id) that ``park_job`` recorded.
             was_claimed: Whether this pod held the claim before the park.
             was_processing: Whether the run was in the processing set before the park.
             cancel: The run's cancel event before the park.
+
+        Returns:
+            ``True`` when a later claim holds the run, so the run left this worker.
         """
         optimization_id = pair[1]
         with self._queue_lock:
             finished = pair not in self._parked_jobs
+            # park_job removed the run from the claims, so a claim here is a later one. release_job
+            # matches only the pod, so a restore and a release would take that claim's lease.
+            if optimization_id in self._claimed_jobs:
+                return True
             self._parked_jobs.discard(pair)
             if not finished:
                 if was_claimed:
@@ -644,6 +662,7 @@ class BackgroundWorker:
                 self._job_store.release_job(optimization_id, self._pod_name)
             except Exception:
                 logger.exception("release_job failed for %s", optimization_id)
+        return False
 
     def _worker_loop(self, worker_id: int) -> None:
         """Poll for jobs and process them until stopped.
