@@ -365,6 +365,48 @@ export async function readDatasetFile(file: File): Promise<ConfirmedDataset> {
   };
 }
 
+/**
+ * Read composer-attached dataset files, and keep only the newest read.
+ *
+ * Args:
+ *   resetKey: A new value (e.g. the conversation id) drops reads still under way.
+ *   onRead: Gets the read dataset and its file.
+ *   onError: Runs when the newest file cannot be read.
+ *
+ * Returns:
+ *   The attach handler.
+ */
+export function useLatestDatasetRead(
+  resetKey: unknown,
+  onRead: (confirmed: ConfirmedDataset, file: File) => void,
+  onError: () => void,
+): (file: File) => void {
+  // A slow file picked first must not replace a later pick, and a read that
+  // ends after a chat switch or unmount must not reach the next draft.
+  const readRef = React.useRef(0);
+  const handlersRef = React.useRef({ onRead, onError });
+  React.useEffect(() => {
+    handlersRef.current = { onRead, onError };
+  }, [onRead, onError]);
+  React.useEffect(
+    () => () => {
+      readRef.current += 1;
+    },
+    [resetKey],
+  );
+  return React.useCallback((file: File) => {
+    const readId = ++readRef.current;
+    readDatasetFile(file).then(
+      (confirmed) => {
+        if (readId === readRef.current) handlersRef.current.onRead(confirmed, file);
+      },
+      () => {
+        if (readId === readRef.current) handlersRef.current.onError();
+      },
+    );
+  }, []);
+}
+
 export function DatasetUploadCard({
   call,
   disabled,

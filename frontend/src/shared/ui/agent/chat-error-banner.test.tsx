@@ -11,6 +11,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 const { ChatErrorBanner } = await import("./chat-error-banner");
+const { RetryIconButton } = await import("@/shared/ui/retry-icon-button");
+const { Wallet } = await import("@/shared/ui/icons");
 
 const BALANCE = "Your balance is empty. Add funds to keep chatting with the agent.";
 const ADD_FUNDS = "Add funds";
@@ -33,6 +35,17 @@ void describe("ChatErrorBanner", () => {
     // One rectangular row: the action follows the message inside the banner (SKY-783).
     assert.match(html, /^<div role="alert" class="flex [^"]*\brounded-md\b/);
     assert.match(html, /<\/p><button type="button">Add funds<\/button><\/div>$/);
+  });
+
+  void it("names an icon-only Add funds action for screen readers", () => {
+    const html = renderToStaticMarkup(
+      <ChatErrorBanner
+        message={BALANCE}
+        action={<RetryIconButton label={ADD_FUNDS} icon={Wallet} onClick={() => {}} />}
+      />,
+    );
+    assert.match(html, /<button[^>]*aria-label="Add funds"/);
+    assert.doesNotMatch(html, />Add funds</, "the action shows an icon, not a text label");
   });
 
   void it("lets an error without an action wrap", () => {

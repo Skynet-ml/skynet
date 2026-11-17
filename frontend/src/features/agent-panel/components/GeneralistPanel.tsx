@@ -179,7 +179,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import {
   DatasetUploadCard,
-  readDatasetFile,
+  useLatestDatasetRead,
   useDatasetDraft,
   useSendAfterRender,
   type ConfirmedDataset,
@@ -1031,6 +1031,18 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [webChat, datasetDraft, addOriginals],
   );
 
+  const attachComposerDataset = useLatestDatasetRead(
+    agent.conversationId,
+    React.useCallback(
+      (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
+      [handleDatasetConfirm],
+    ),
+    React.useCallback(
+      () => toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error")),
+      [],
+    ),
+  );
+
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
@@ -1874,7 +1886,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                               label={msg("billing.action.add_funds")}
                               icon={Wallet}
                               onClick={() => openSettingsTo("billing")}
-                              className="border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)]"
+                              className="size-[44px] shrink-0 border-[var(--danger-border)] bg-transparent text-[var(--danger)] shadow-none hover:bg-[var(--danger-dim)] hover:text-[var(--danger)] md:size-7 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
                             />
                           ) : undefined
                         }
@@ -1944,13 +1956,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         mediaWaiting={chatMedia.tiles.length > 0 || draftFiles.length > 0}
         sendBlocked={chatMedia.blocked(draftFiles)}
         // The file card in the draft shows the dataset, so nothing else opens (SKY-783).
-        onAttachFile={(file) => {
-          readDatasetFile(file)
-            .then((confirmed) => handleDatasetConfirm(undefined, confirmed, file))
-            .catch(() =>
-              toast.error(msg("auto.features.agent.panel.components.datasetuploadcard.parse_error")),
-            );
-        }}
+        onAttachFile={attachComposerDataset}
         leadingControls={
           <>
             {/* Every agent screen, setup too: in Ask mode the setup agent's file writes wait for approval. */}

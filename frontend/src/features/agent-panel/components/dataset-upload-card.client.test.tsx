@@ -40,7 +40,9 @@ const {
   applyDatasetUpload,
   datasetAttachedNote,
   libraryPickOverride,
+  readDatasetFile,
   useDatasetDraft,
+  useLatestDatasetRead,
   useSendAfterRender,
 } = await import("./DatasetUploadCard");
 
@@ -162,6 +164,79 @@ void test("a Strict Mode card attaches once, and a closed card attaches nothing"
   await settle();
   assert.equal(closedAttached.length, 0, "a card closed during the read attaches nothing");
   closedContainer.remove();
+});
+
+void test("readDatasetFile reads rows and columns, and rejects a file with no columns", async () => {
+  const read = await readDatasetFile(
+    new File(["question,answer\nWhat is 2+2?,4\n"], "qa.csv", { type: "text/csv" }),
+  );
+  assert.equal(read.fileName, "qa.csv");
+  assert.equal(read.rowCount, 1);
+  assert.deepEqual(read.columns, ["question", "answer"]);
+  await assert.rejects(readDatasetFile(new File([""], "empty.csv", { type: "text/csv" })));
+});
+
+void test("a composer attach keeps only the newest read", async () => {
+  const csv = "question,answer\nWhat is 2+2?,4\n";
+  // The first file's read waits for the test, so it ends after the second.
+  let finishSlow: () => void = () => {};
+  const slow = new File([csv], "big.csv", { type: "text/csv" });
+  const readSlow = slow.text.bind(slow);
+  slow.text = () =>
+    new Promise<void>((resolve) => {
+      finishSlow = resolve;
+    }).then(readSlow);
+  const fast = new File([csv], "qa.csv", { type: "text/csv" });
+  const late = new File([csv], "late.csv", { type: "text/csv" });
+  const readLate = late.text.bind(late);
+  let finishLate: () => void = () => {};
+  late.text = () =>
+    new Promise<void>((resolve) => {
+      finishLate = resolve;
+    }).then(readLate);
+
+  const attached: string[] = [];
+  let errors = 0;
+  let attach: (file: File) => void = () => {};
+  function Probe({ chat }: { chat: string }) {
+    attach = useLatestDatasetRead(
+      chat,
+      (d) => attached.push(d.fileName),
+      () => {
+        errors += 1;
+      },
+    );
+    return null;
+  }
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await React.act(async () => root.render(<Probe chat="a" />));
+
+  attach(slow);
+  attach(fast);
+  await settle();
+  finishSlow();
+  await settle();
+  assert.deepEqual(attached, ["qa.csv"], "the older, slower read does not replace the newer pick");
+
+  attach(late);
+  await React.act(async () => root.render(<Probe chat="b" />));
+  finishLate();
+  await settle();
+  assert.deepEqual(attached, ["qa.csv"], "a read from the earlier chat does not reach the new one");
+
+  attach(new File([""], "empty.csv", { type: "text/csv" }));
+  await settle();
+  assert.equal(errors, 1, "an unreadable file reports one error");
+
+  await React.act(async () => root.unmount());
+  container.remove();
 });
 
 void test("the attached-file note has no RTL isolate marks in a Hebrew UI", () => {
