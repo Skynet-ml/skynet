@@ -1202,6 +1202,34 @@ def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, obj
     assert _step_rows(engine) == 1
 
 
+def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, monkeypatch) -> None:
+    """A batch that a failed outside ``flush`` puts back lands with no new commit to wake the flusher."""
+    store = make_store(flush_window_seconds=0.1)
+    step_id = _commit(store)
+    put = objects.put
+
+    def slow_failing_put(key: str, data: bytes) -> None:
+        """Fail after the flusher's window ends, so it sleeps on an empty buffer first.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+
+        Raises:
+            OSError: Always.
+        """
+        time.sleep(0.4)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(objects, "put", slow_failing_put)
+    with pytest.raises(OSError):
+        store.flush()
+    monkeypatch.setattr(objects, "put", put)
+
+    store.durable(step_id, 1, timeout=3)
+    assert _step_rows(engine) == 1
+
+
 def test_a_failed_flush_at_close_opens_the_waiters_with_an_error(make_store, objects, monkeypatch) -> None:
     """A waiter with no time limit does not block forever when the last flush of ``close`` fails."""
     store = make_store()

@@ -454,6 +454,8 @@ class StepLogStore:
                 is no longer current.
             TimeoutError: When the flush does not commit in time.
             KeyError: When the store knows no such step and it has no row.
+            RuntimeError: When the last flush of :meth:`close` failed before
+                the step was durable.
         """
         key = (step_id, execution_generation)
         with self._cond:
@@ -565,6 +567,8 @@ class StepLogStore:
                     self._pending = batch + self._pending
                     self._pending_bytes += sum(len(data) for _, data in batch)
                     self._first_at = first_at
+                    # An outside flush took the batch while the flusher slept on an empty buffer with no deadline.
+                    self._cond.notify_all()
                 raise
             try:
                 _, stale = self._apply(key, len(pack), manifest)
