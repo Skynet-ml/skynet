@@ -286,7 +286,7 @@ class BackgroundWorker:
         self._claimed_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         # (worker id, run id) for each run that its worker parked and has not yet marked done.
-        self._parked_jobs: set[tuple[int | None, str]] = set()
+        self._parked_jobs: set[tuple[int, str]] = set()
         self._queue_lock = threading.Lock()
         poll_raw = str(settings.cancel_poll_interval)
         try:
@@ -508,11 +508,17 @@ class BackgroundWorker:
         Args:
             optimization_id: ID of the job that just finished.
             worker_id: The worker thread that processed the job, when known.
+                When ``None``, the run counts as parked if any pair in
+                ``_parked_jobs`` has this run id, so a caller with no worker
+                id still honors a park.
         """
         was_claimed = False
         with self._queue_lock:
-            parked = (worker_id, optimization_id)
-            if parked in self._parked_jobs:
+            if worker_id is None:
+                parked = next((pair for pair in self._parked_jobs if pair[1] == optimization_id), None)
+            else:
+                parked = (worker_id, optimization_id)
+            if parked is not None and parked in self._parked_jobs:
                 # park_job already freed this worker's claim; the maps and the lease may belong to a later claim.
                 self._parked_jobs.discard(parked)
                 return

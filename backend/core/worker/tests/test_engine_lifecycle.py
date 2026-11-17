@@ -843,6 +843,27 @@ def test_a_second_park_keeps_the_pair_so_a_later_claim_survives(tmp_path: Path) 
     assert not w._parked_jobs
 
 
+def test_mark_job_done_with_no_worker_id_honors_a_park(tmp_path: Path) -> None:
+    """A cleanup with no worker id still treats a parked run as parked and leaves a later claim."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert job_store._wake_waiting_runs() == 1
+    assert w._claim_job_from_store() == RUN
+
+    w._mark_job_done(RUN)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+    assert not w._parked_jobs
+
+
 def test_a_park_that_fails_after_the_worker_finished_releases_the_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
