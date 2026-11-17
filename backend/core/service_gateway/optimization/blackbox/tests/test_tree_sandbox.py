@@ -688,6 +688,27 @@ def test_a_denied_grant_never_reaches_a_source_that_does_not_check_grants(
     assert source.acquired == []
 
 
+@pytest.mark.parametrize("printed", ["nan", "inf", "-infinity"])
+def test_a_metric_that_prints_a_non_finite_number_is_a_metric_error(
+    trees: TreeStore, step_log: StepLogStore, printed: str
+) -> None:
+    """NaN or infinity with exit code 0 gives no score and commits no step.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        printed: The last stdout line of the metric.
+    """
+    sandbox, _, _ = _sandbox(trees, step_log, _Runtime())
+    empty = _tree(trees, {})
+
+    with pytest.raises(MetricFailedError) as raised:
+        sandbox.score(_step(), empty, empty, f"echo {printed}")
+
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
+    assert step_log.get_step(f"{RUN}:agent-1:1") is None
+
+
 def test_a_metric_that_prints_a_number_and_fails_is_a_metric_error(trees: TreeStore, step_log: StepLogStore) -> None:
     """A non-zero exit gives no score, even after a number."""
     sandbox, _, _ = _sandbox(trees, step_log, _Runtime())

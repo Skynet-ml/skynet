@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import math
 import shlex
 import tarfile
 from collections.abc import Callable, Mapping, Sequence
@@ -232,7 +233,7 @@ class TreeSandbox:
         Raises:
             GrantDeniedError: When the grants do not resolve.
             BoxFailureError: When the box fails or dies; retry the step.
-            MetricFailedError: When the metric fails or prints no number.
+            MetricFailedError: When the metric fails or prints no finite number.
             TreeRejectedError: When the outputs tree holds a link; do not retry.
             FenceLostError: When the run generation is no longer current.
             LookupError: When the run cannot see a tree.
@@ -266,6 +267,9 @@ class TreeSandbox:
             if not result.ok or not lines:
                 raise ValueError
             value = float(lines[-1])
+            # NaN or infinity is no score, and json.dumps would write a non-standard token to the step log.
+            if not math.isfinite(value):
+                raise ValueError
         except ValueError:
             raise MetricFailedError(step.step_id, f"The metric gave no score (exit code {result.exit_code}).") from None
         self._commit(step, grant_list_id, {"command": command, "score": value}, outputs_tree_id)
