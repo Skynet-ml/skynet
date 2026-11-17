@@ -100,7 +100,6 @@ from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
 from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
-from .routers.agent_attachments import create_agent_attachments_router
 from .routers.agent_history import create_agent_history_router
 from .routers.agent_ide_completion import create_agent_ide_completion_router
 from .routers.agent_settings import create_agent_settings_router
@@ -1347,7 +1346,6 @@ def create_app(
     app.include_router(create_mcp_probe_router(), tags=["Code Validation"])
     app.include_router(create_transcription_router(job_store=job_store), tags=["Transcription"])
     app.include_router(create_docs_agent_router(), tags=["Docs"])
-    app.include_router(create_agent_attachments_router(), tags=["Optimizations"])
     app.include_router(create_chat_media_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])

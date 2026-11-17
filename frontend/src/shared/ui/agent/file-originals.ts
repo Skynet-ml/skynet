@@ -54,6 +54,12 @@ export function pairOriginals<T extends { name: string }>(
   });
 }
 
+/** A file's path in the chat's workspace; it matches the backend's attachment_path. */
+export function attachmentPath(mediaId: string, storedName: string): string {
+  const name = ["", ".", ".."].includes(storedName) ? "file" : storedName;
+  return `attachments/${mediaId}/${name}`;
+}
+
 /**
  * The originals that can go out with the ``files`` of a message sent before
  * SKY-782. Pairing by name is sure only when a name has one original for each

@@ -16,9 +16,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...storage.models import UserModel
+from ...service_gateway.agents.attachment_sandbox import stop_chat_runner
+from ...storage.models import AgentConversationModel, UserModel
 from ..account_data_service import delete_account, export_account
 from ..account_export_formats import ExportFormat, render_export
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -126,8 +128,14 @@ def create_account_data_router(*, job_store) -> APIRouter:
             row = session.get(UserModel, user.username)
             if _has_password(row) and not verify_password(body.password, str(row.password_hash)):
                 raise DomainError("accounts.invalid_credentials", status=401)
+            chats = session.scalars(
+                select(AgentConversationModel.id).where(AgentConversationModel.username == user.username)
+            ).all()
             summary = delete_account(session, user.username)
             session.commit()
+        # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.
+        for conversation_id in chats:
+            stop_chat_runner(conversation_id)
         return AccountDeletionResult(
             deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows
         )

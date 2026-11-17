@@ -5,7 +5,7 @@ import { toast } from "react-toastify";
 
 import { msg } from "@/shared/lib/messages";
 import { MAX_ATTACHMENT_MB } from "@/shared/ui/agent/file-attachments";
-import { fitOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
+import { attachmentPath, fitOriginals, originalFormat } from "@/shared/ui/agent/file-originals";
 import {
   mediaKind,
   type MediaAttachment,
@@ -46,6 +46,8 @@ interface DraftOriginal {
   shown: MediaAttachment;
   /** The stored file's id; null while the upload runs. */
   serverId: string | null;
+  /** The name the server stored, which the file's workspace path uses. */
+  storedName: string | null;
 }
 
 /** The draft's file cards; each card's ``id`` links its original. */
@@ -64,6 +66,8 @@ export interface ChatMediaDraft {
   remove: (localId: string) => void;
   /** The files to send with ``files``, by stored id, originals last; null while an upload still runs. */
   ready: (files: DraftFiles) => MediaAttachment[] | null;
+  /** The workspace path of each card in ``files``, in order, or null (SKY-781). */
+  filePaths: (files: DraftFiles) => Array<string | null>;
   /** Why Send must wait for ``files``: an upload runs or failed. Null when the files can go. */
   blocked: (files: DraftFiles) => string | null;
   /**
@@ -224,8 +228,8 @@ export function useChatMedia(): ChatMediaDraft {
   const addOriginals = React.useCallback(
     (files: ReadonlyArray<{ file: File; card: string }>) => {
       if (closedRef.current) return;
-      // The server takes no original over the file limit, so a larger file
-      // keeps only its text and is not uploaded for nothing.
+      // The composer drops a file over the limit first. The server takes no
+      // original over it either, so such an upload would only fail.
       const fits = files.filter(({ file }) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
       const added = fits.map(({ file, card }): DraftOriginal => {
         const localId = crypto.randomUUID();
@@ -241,13 +245,15 @@ export function useChatMedia(): ChatMediaDraft {
           card,
           shown: { id: localId, name: file.name, kind: "document", url: localMediaUrl(blob), card },
           serverId: null,
+          storedName: null,
         };
       });
       syncOriginals([...originalsRef.current, ...added]);
       added.forEach((item, i) => {
-        // A failed upload is silent: the file still goes as text, and its slide shows the text.
+        // The file's card still goes, with no path, so the toast tells the user the agent cannot read it.
         const drop = () => {
           if (!originalsRef.current.some((o) => o.localId === item.localId)) return;
+          toast.error(msg("agent.media.unreadable", { name: item.name }));
           unshownRef.current.push(item.shown.url);
           syncOriginals(originalsRef.current.filter((o) => o.localId !== item.localId));
         };
@@ -263,7 +269,9 @@ export function useChatMedia(): ChatMediaDraft {
           }
           syncOriginals(
             originalsRef.current.map((o) =>
-              o.localId === item.localId ? { ...o, serverId: stored.id } : o,
+              o.localId === item.localId
+                ? { ...o, serverId: stored.id, storedName: stored.name }
+                : o,
             ),
           );
         }, drop);
@@ -327,8 +335,9 @@ export function useChatMedia(): ChatMediaDraft {
 
   const ready = React.useCallback((files: DraftFiles): MediaAttachment[] | null => {
     const current = itemsRef.current;
-    // Past the message limit an original stays out; its file still goes as text.
     const originals = sendable(files, originalsRef.current, MAX_MEDIA_PER_MESSAGE - current.length);
+    // The agent reads a file only from its stored original, so none may stay out (SKY-781).
+    if (originals.length < sendable(files, originalsRef.current, Infinity).length) return null;
     if (current.some((m) => !m.serverId) || originals.some((o) => !o.serverId)) return null;
     const media = current.map((m) => ({ id: m.serverId!, name: m.name, kind: m.kind, url: m.url }));
     return [
@@ -341,6 +350,18 @@ export function useChatMedia(): ChatMediaDraft {
         card: o.card,
       })),
     ];
+  }, []);
+
+  const filePaths = React.useCallback((files: DraftFiles) => {
+    const room = MAX_MEDIA_PER_MESSAGE - itemsRef.current.length;
+    const paths = new Map(
+      sendable(files, originalsRef.current, room).flatMap((o) =>
+        o.serverId && o.storedName !== null
+          ? [[o.card, attachmentPath(o.serverId, o.storedName)] as const]
+          : [],
+      ),
+    );
+    return files.map((f) => (f.id ? (paths.get(f.id) ?? null) : null));
   }, []);
 
   const clear = React.useCallback(
@@ -379,12 +400,16 @@ export function useChatMedia(): ChatMediaDraft {
         if (run !== restoreRef.current || itemsRef.current.length) return;
         // A document is a file's stored original (SKY-735), not a tile. It keeps
         // its card, which the restored text keeps too. One that does not load
-        // stays out: its file still goes as text.
+        // stays out, and its card goes with no path, so the toast tells the user.
         const originals = wanted.flatMap((m, i) => {
           const got = blobs[i]!;
-          return m.kind === "document" && m.card && got.status === "fulfilled"
-            ? [{ file: new File([got.value], m.name, { type: got.value.type }), card: m.card }]
-            : [];
+          if (m.kind !== "document" || !m.card) return [];
+          if (got.status === "fulfilled")
+            return [
+              { file: new File([got.value], m.name, { type: got.value.type }), card: m.card },
+            ];
+          toast.error(msg("agent.media.unreadable", { name: m.name }));
+          return [];
         });
         const added = wanted.flatMap((m, i): Array<{ item: DraftMedia; file: File | null }> => {
           const got = blobs[i]!;
@@ -457,16 +482,16 @@ export function useChatMedia(): ChatMediaDraft {
   );
   // An original whose card left does not go, so its upload does not hold Send.
   const blocked = React.useCallback(
-    (files: DraftFiles) =>
-      items.some((m) => m.failed)
+    (files: DraftFiles) => {
+      const sent = sendable(files, draftOriginals, MAX_MEDIA_PER_MESSAGE - items.length);
+      return items.some((m) => m.failed)
         ? msg("agent.media.remove_failed")
-        : restoring ||
-            items.some((m) => !m.serverId) ||
-            sendable(files, draftOriginals, MAX_MEDIA_PER_MESSAGE - items.length).some(
-              (o) => !o.serverId,
-            )
-          ? msg("agent.media.uploading")
-          : null,
+        : sent.length < sendable(files, draftOriginals, Infinity).length
+          ? msg("agent.media.too_many", { max: MAX_MEDIA_PER_MESSAGE })
+          : restoring || items.some((m) => !m.serverId) || sent.some((o) => !o.serverId)
+            ? msg("agent.media.uploading")
+            : null;
+    },
     [items, restoring, draftOriginals],
   );
 
@@ -477,6 +502,7 @@ export function useChatMedia(): ChatMediaDraft {
     addOriginals,
     remove,
     ready,
+    filePaths,
     blocked,
     clear,
     restore,

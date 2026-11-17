@@ -45,6 +45,12 @@ from ...local.cli_catalog import RetiredEffort
 from ...models import ModelConfig
 from ...service_gateway.agents import compaction
 from ...service_gateway.agents.approval_choices import DECLINE_NOTE_MAX_CHARS, ApprovalScope, post_approval_choice
+from ...service_gateway.agents.attachment_sandbox import (
+    attachment_path,
+    charge_chat_sandbox,
+    chat_command_tools,
+    rewrite_paths,
+)
 from ...service_gateway.agents.auto_review import send_protected_review
 from ...service_gateway.agents.chat_title import with_title_event, write_chat_title
 from ...service_gateway.agents.code import _reply_language
@@ -304,7 +310,7 @@ class GeneralistAgentRequest(BaseModel):
             "Ids from ``POST /agent/media`` of the images, video, audio and document originals attached "
             "to this message. The model sees the images when it accepts image input. Every other "
             "image, video and audio file is a reference, listed in a ``media_notice`` event. A document "
-            "original is only for the chat viewer: the model reads the file's text in the message."
+            "original is the attached file: the message names its path, and the agent reads it with commands."
         ),
     )
     media_cards: dict[str, Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9-]{1,64}$")]] = Field(
@@ -752,7 +758,8 @@ def _persist_user_turn(
     Args:
         job_store: Job-store instance whose engine backs the DB session.
         conversation_id: Owning conversation id.
-        content: User message text exactly as received from the client.
+        content: User message text as received from the client. Its file
+            paths are changed to name the chat's own copies of the files.
         steer: True for a message sent while a turn runs. A run's setup chat
             keeps a steer as part of that turn, not as a later turn.
         compaction: The compaction entry of the turn this message replaces, if any.
@@ -793,6 +800,7 @@ def _persist_user_turn(
                 | ({"card": cards[row.id]} if row.kind == "document" and row.id in (cards or {}) else {})
                 for row in media
             ]
+            content = rewrite_paths(content, held)
         if replaced:
             _free_unnamed_media(session, conversation_id, {item["id"] for item in metadata.get("media", [])})
         message = AgentMessageModel(
@@ -1276,7 +1284,7 @@ def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[C
         ``(images, references)``: the images the model sees, and the files it
         only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in total are
         references. A ``document`` is in neither list: the message already
-        holds its text, and the original is only for the chat viewer.
+        names its workspace path, where the agent reads it with commands.
     """
     images: list[ChatMediaModel] = []
     references: list[ChatMediaModel] = []
@@ -1311,19 +1319,28 @@ def _image_data_uris(engine: Any, images: list[ChatMediaModel]) -> list[str]:
     ]
 
 
-def _with_media_references(user_message: str, references: list[ChatMediaModel]) -> str:
+def _with_media_references(
+    user_message: str, references: list[ChatMediaModel], held: dict[str, str] | None = None
+) -> str:
     """Name the files the model cannot view in the message the agent reads.
 
     Args:
         user_message: The user's text.
         references: The files the model only gets named.
+        held: Maps each sent file id to the chat's copy, when the agent can
+            read the chat's files with ``exec_command``; None when it cannot.
 
     Returns:
         The text with one note for each reference file, or the text unchanged.
     """
     notes = [
-        f"[Attached {row.kind} file: {row.filename}. You cannot view this file. Tell the user that you cannot "
-        "see it, and use it only as a reference.]"
+        (
+            f"[Attached {row.kind} file: {row.filename}, at {attachment_path(held.get(row.id, row.id), row.filename)}. "
+            "You cannot view it, but you can read it with exec_command.]"
+            if held is not None
+            else f"[Attached {row.kind} file: {row.filename}. You cannot view this file. Tell the user that you "
+            "cannot see it, and use it only as a reference.]"
+        )
         for row in references
     ]
     return "\n\n".join([user_message, *notes]) if notes else user_message
@@ -1892,11 +1909,16 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         )
         image_rows, media_references = _split_media(media, await asyncio.to_thread(_sees_images, model_config))
         images = await asyncio.to_thread(_image_data_uris, engine, image_rows) if image_rows else []
-        agent_message = _with_media_references(req.user_message, media_references)
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
         conversation_id, title, user_message_id, held_media = await asyncio.to_thread(_setup_turn)
+        file_runner, file_tools = await asyncio.to_thread(
+            chat_command_tools, engine, current_user.username, conversation_id
+        )
+        agent_message = _with_media_references(
+            rewrite_paths(req.user_message, held_media), media_references, held_media if file_tools else None
+        )
         # A new chat gets a model title in parallel with the turn. The setup
         # wizard kickoff has no cut title and gets no model title either.
         title_task = (
@@ -2040,8 +2062,54 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 images=images or None,
                 chat_allowed_tools=req.chat_allowed_tools,
                 auto_review_send=auto_review_send,
+                file_tools=file_tools or None,
             ):
                 yield event
+
+        async def _charge_sandbox() -> int:
+            """Debit the chat's file workspace for this turn.
+
+            Returns:
+                The cents charged.
+            """
+            if file_runner is None or not conversation_id:
+                return 0
+            return await _finish_in_thread(
+                charge_chat_sandbox,
+                engine,
+                current_user.username,
+                file_runner,
+                settlement_key=f"chat-sandbox:{conversation_id}:{user_message_id}",
+            )
+
+        async def _with_sandbox_charge(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+            """Debit the chat's file workspace after the turn, also when the turn stops early.
+
+            Args:
+                events: The metered turn events.
+
+            Yields:
+                The same events, then a ``turn_stats`` whose cents include the
+                workspace charge, so the shown cost is what gets debited.
+            """
+            stats: dict[str, Any] | None = None
+            charged = False
+            try:
+                async for event in events:
+                    data = event.get("data")
+                    if event.get("event") in ("done", "turn_stats") and isinstance(data, dict):
+                        stats = data.get("stats") if isinstance(data.get("stats"), dict) else stats
+                    yield event
+                charged = True
+                cents = await _charge_sandbox()
+                if cents and stats is not None:
+                    yield {
+                        "event": "turn_stats",
+                        "data": {"stats": {**stats, "cents": (stats.get("cents") or 0) + cents}},
+                    }
+            finally:
+                if not charged:
+                    await _charge_sandbox()
 
         async def _with_compaction_cents(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
             """Mark the part of the turn's cost that the compaction's summary call took.
@@ -2067,9 +2135,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     event = {**event, "data": {**data, "stats": {**stats, "compaction_cents": compaction_cents}}}
                 yield event
 
-        source = _turn_source()
         metered = stream_with_llm_metering(
-            source,
+            _turn_source(),
             job_store=job_store,
             username=current_user.username,
             description="Agent chat",
@@ -2077,7 +2144,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             token_source=metering_token_source(model_config),
         )
         wrapped = _wrap_with_persistence(
-            _with_compaction_cents(metered),
+            _with_compaction_cents(_with_sandbox_charge(metered)),
             job_store=job_store,
             conversation_id=conversation_id,
             title=title,
