@@ -34,7 +34,7 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -44,6 +44,7 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
+from ....sandbox.grants import Grant
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -448,18 +449,83 @@ def _close_quietly(session: SandboxSession, what: str) -> None:
         logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
 
 
+class RepoBoxSource:
+    """Open a fresh evaluation box for each acquire and close it at release (SKY-718).
+
+    The repository rules accept hosts that the grant rules refuse (a port, one
+    label), so this source puts the role's hosts on the box as given, without
+    grant resolution, and a run's network stays what its ``[run]`` and
+    ``[metric]`` tables say.
+    """
+
+    def __init__(self, runtime: SandboxRuntime, spec: SandboxSpec) -> None:
+        """Bind the source to a runtime and the spec of its boxes.
+
+        Args:
+            runtime: Opens the boxes.
+            spec: The box spec; the grant hosts replace its network fields.
+        """
+        self._runtime = runtime
+        self._spec = spec
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new box whose allowed hosts are the grant hosts.
+
+        Args:
+            agent_id: The box role; each call gets its own box.
+            grants: The role's grants; empty keeps the box offline.
+
+        Returns:
+            The open box.
+        """
+        hosts = tuple(grant.host for grant in grants)
+        return self._runtime.open(replace(self._spec, network_disabled=not hosts, allowed_hosts=hosts))
+
+    def release(self, box: SandboxSession, healthy: bool) -> None:
+        """Close the box; a close error goes to the caller.
+
+        Args:
+            box: A box that :meth:`acquire` gave.
+            healthy: Not used: a closed box is never reused.
+        """
+        box.close()
+
+
+def _release_failed(source: RepoBoxSource, session: SandboxSession, what: str) -> None:
+    """Give a failed box back to its source as unhealthy, and log only a failure's type.
+
+    Args:
+        source: The source that gave the box.
+        session: The box.
+        what: Names the box in the log line.
+
+    Raises:
+        BudgetReached: And the other budget errors of the close, in place of the box's own failure.
+    """
+    try:
+        source.release(session, healthy=False)
+    except _BUDGET_ERRORS:
+        # A budget stop must not be lost, so it replaces the box's own failure.
+        raise
+    except Exception as release_error:
+        # The caller raises or returns the box's own failure.
+        logger.warning("%s did not close cleanly (%s)", what, type(release_error).__name__)
+
+
 class CandidateBox:
     """One evaluation's candidate box C: the prepared repository with the version laid out."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str) -> None:
+    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, source: RepoBoxSource) -> None:
         """Bind an open, laid-out box to the workspace that checks its protected files.
 
         Args:
             workspace: The workspace that opened the box.
             session: The box.
             root: The box's working directory.
+            source: The box source that takes the box back at close.
         """
         self._workspace = workspace
+        self._source = source
         self.session = session
         self.root = root
         self.path = WORK_DIR
@@ -591,18 +657,20 @@ class CandidateBox:
             return changes
 
     def close(self) -> None:
-        """End the box; every process the version started ends with it."""
+        """Give the box back to its source; every process the version started ends with it."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-        self.session.close()
+        self._source.release(self.session, healthy=True)
 
 
 class MetricBox:
     """One evaluation's metric box M: the metric state, the metric files and the runner, no repository."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None) -> None:
+    def __init__(
+        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, source: RepoBoxSource
+    ) -> None:
         """Bind an open metric box.
 
         Args:
@@ -610,8 +678,10 @@ class MetricBox:
             session: The box.
             root: The box's working directory.
             key: The box's operation key, or ``None`` when the spec has none.
+            source: The box source that takes the box back at close.
         """
         self._workspace = workspace
+        self._source = source
         self.session = session
         self.root = root
         self.key = key
@@ -643,11 +713,11 @@ class MetricBox:
             raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
 
     def close(self) -> None:
-        """End the box."""
+        """Give the box back to its source."""
         if self._closed:
             return
         self._closed = True
-        self.session.close()
+        self._source.release(self.session, healthy=True)
 
 
 def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
@@ -746,9 +816,9 @@ class RepoWorkspace:
         self._readonly = tuple(readonly_paths)
         self._protected = tuple(protected_paths)
         self._hidden = tuple(posixpath.normpath(path) for path in hidden_paths)
-        self._run_hosts = tuple(run_hosts)
+        self._run_grants = tuple(Grant(host) for host in run_hosts)
         self._run_vcpus = run_vcpus
-        self._metric_hosts = tuple(metric_hosts)
+        self._metric_grants = tuple(Grant(host) for host in metric_hosts)
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
         self._secrets = dict(secrets)
@@ -1022,15 +1092,19 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(self, spec: SandboxSpec, state: _State | None) -> SandboxSession:
-        """Open one box from a saved state.
+    def _open_box(
+        self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]
+    ) -> tuple[RepoBoxSource, SandboxSession]:
+        """Open one box from a saved state through the evaluation box source (SKY-718).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
+            role: ``candidate`` or ``metric``.
+            grants: The role's network grants; empty keeps the box offline.
 
         Returns:
-            The open box, with a tar state unpacked.
+            The source that takes the box back, and the open box, with a tar state unpacked.
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
@@ -1040,8 +1114,9 @@ class RepoWorkspace:
             spec = replace(spec, snapshot_id=state.snapshot_id)
         elif state is not None and state.archive is not None:
             spec = replace(spec, snapshot_archive=str(state.archive))
+        source = RepoBoxSource(self._runtime, spec)
         try:
-            session = self._runtime.open(spec)
+            session = source.acquire(role, grants)
         except _BUDGET_ERRORS:
             raise
         except Exception as error:
@@ -1052,7 +1127,7 @@ class RepoWorkspace:
             self._drop_snapshots()
             raise _SnapshotLostError("A box could not open from the saved snapshot.") from None
         if state is None or state.archive is None:
-            return session
+            return source, session
         try:
             parts = []
             for index, chunk in enumerate(archive_chunks(state.archive)):
@@ -1067,16 +1142,15 @@ class RepoWorkspace:
             if not result.ok:
                 raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
         except BaseException:
-            _close_quietly(session, "A box from a tar state")
+            _release_failed(source, session, "A box from a tar state")
             raise
-        return session
+        return source, session
 
-    def _box_spec(self, kind: str, hosts: tuple[str, ...], vcpus: int | None, *, services: bool) -> SandboxSpec:
-        """Return the spec of one evaluation box.
+    def _box_spec(self, kind: str, vcpus: int | None, *, services: bool) -> SandboxSpec:
+        """Return the spec of one evaluation box; the box source sets its network from the grants.
 
         Args:
             kind: ``candidate`` or ``metric``.
-            hosts: The role's ``network`` hosts; empty keeps the box offline.
             vcpus: The role's ``vcpus``; ``None`` keeps the setup's.
             services: Whether the box runs the compose services.
 
@@ -1088,8 +1162,6 @@ class RepoWorkspace:
         return replace(
             self._spec,
             operation_key=key,
-            network_disabled=not hosts,
-            allowed_hosts=hosts,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),
             private=kind == "metric",
@@ -1150,9 +1222,9 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
         self.prepare()
-        spec = self._box_spec("candidate", self._run_hosts, self._run_vcpus, services=True)
+        spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        session = self._open_box(spec, state)
+        source, session = self._open_box(spec, state, "candidate", self._run_grants)
         try:
             if self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
@@ -1167,13 +1239,14 @@ class RepoWorkspace:
                 f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
-            if not applied.ok:
-                _close_quietly(session, "The candidate box")
-                return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
-            return CandidateBox(self, session, box_root(session))
+            if applied.ok:
+                return CandidateBox(self, session, box_root(session), source)
         except BaseException:
-            _close_quietly(session, "The candidate box")
+            _release_failed(source, session, "The candidate box")
             raise
+        # Outside the try: a budget error of this release must not release the box a second time.
+        _release_failed(source, session, "The candidate box")
+        return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
     def open_metric(self) -> MetricBox:
         """Open a metric box from the metric state, without any repository file.
@@ -1203,9 +1276,9 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the packages.
         """
         self.prepare()
-        spec = self._box_spec("metric", self._metric_hosts, self._metric_vcpus, services=False)
+        spec = self._box_spec("metric", self._metric_vcpus, services=False)
         state = self._metric_state
-        session = self._open_box(spec, state)
+        source, session = self._open_box(spec, state, "metric", self._metric_grants)
         try:
             if state is not None:
                 ready = session.run(f"test -f {_METRIC_READY}", timeout_seconds=60)
@@ -1215,9 +1288,9 @@ class RepoWorkspace:
                     raise (_SnapshotLostError if lost else RepoSetupError)(
                         "The metric box does not hold the metric packages."
                     )
-            return MetricBox(self, session, box_root(session), spec.operation_key)
+            return MetricBox(self, session, box_root(session), spec.operation_key, source)
         except BaseException:
-            _close_quietly(session, "The metric box")
+            _release_failed(source, session, "The metric box")
             raise
 
     def _drop_snapshots(self) -> None:
