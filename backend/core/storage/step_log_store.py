@@ -58,7 +58,7 @@ _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
 SEQ_MAX = 2**31 - 1
-_OBJECT_ID = re.compile(r"[0-9a-f]{64}")
+OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
     "step_id",
     "run_id",
@@ -291,7 +291,8 @@ class StepLogStore:
             ValueError: When ``kind`` is unknown, a command has no tree id, an
                 id is empty, longer than its column or not printable ASCII,
                 ``run_id`` holds a ``:``, ``tree_id`` is not 64 lowercase hex
-                characters, or ``seq`` is not an ``int`` in the ``seq`` column.
+                characters, ``seq`` is not an ``int`` in the ``seq`` column, or
+                ``execution_generation`` is not an ``int``.
         """
         # A row the database refuses would fail every later flush of the batch, so refuse it here.
         _check_run_id(run_id)
@@ -301,7 +302,10 @@ class StepLogStore:
             raise ValueError("agent_id or grant_list_id is not printable ASCII")
         if type(seq) is not int or not 0 <= seq <= SEQ_MAX:
             raise ValueError(f"seq is not an int in 0..{SEQ_MAX}: {seq!r}")
-        if tree_id is not None and not _OBJECT_ID.fullmatch(tree_id):
+        # ``True`` and ``1.0`` equal generation 1 at the fence, and the integer column refuses them.
+        if type(execution_generation) is not int:
+            raise ValueError(f"execution_generation is not an int: {execution_generation!r}")
+        if tree_id is not None and not OBJECT_ID.fullmatch(tree_id):
             raise ValueError(f"tree_id is not 64 lowercase hex characters: {tree_id!r}")
         if kind not in STEP_KINDS:
             raise ValueError(f"unknown step kind: {kind!r}")
@@ -344,7 +348,7 @@ class StepLogStore:
         """
         # As in ``commit``: an id the database refuses would fail every later flush of the batch.
         _check_run_id(run_id)
-        if not _OBJECT_ID.fullmatch(object_id):
+        if not OBJECT_ID.fullmatch(object_id):
             raise ValueError(f"object_id is not 64 lowercase hex characters: {object_id!r}")
         with self._cond:
             if self._closed:

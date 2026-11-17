@@ -633,6 +633,8 @@ def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
         {"seq": -1},
         {"seq": 2**31},
         {"seq": 1.0},
+        {"execution_generation": True},
+        {"execution_generation": 1.0},
         {"run_id": "job\x001"},
         {"agent_id": "agent\x00a"},
         {"agent_id": "agent-é"},
@@ -645,7 +647,7 @@ def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
     ],
 )
 def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, objects, overrides: dict[str, Any]) -> None:
-    """An id or seq that the database or the step id would refuse is refused before the buffer."""
+    """An id, seq or generation that the database or the step id would refuse is refused before the buffer."""
     store = make_store()
 
     with pytest.raises(ValueError):
