@@ -150,7 +150,7 @@ def _exec(real: str, name: str, args: list[str]) -> int:
                 raise
             os.execv("/bin/sh", [name, real, *args])
     except OSError as error:
-        print(f"{name}: {error.strerror}", file=sys.stderr)
+        _write_stderr(f"{name}: {error.strerror}\n".encode())
     return _CANNOT_RUN
 
 
@@ -207,8 +207,9 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
         threading.Thread(target=_pump, args=(stream, sink, tail), daemon=True)
         for stream, sink, tail in (
             # Fixed fd numbers: with fd 1 or 2 closed at start, ``sys.stdout``
-            # or ``sys.stderr`` is None, and a write to the closed fd fails
-            # with an OSError that ``_pump`` handles.
+            # or ``sys.stderr`` is None. That fd is then a read end of a pipe
+            # that Popen opened, or closed again after the spawn; either way
+            # the write fails with EBADF, an OSError that ``_pump`` handles.
             (process.stdout, 1, tails[0]),
             (process.stderr, 2, tails[1]),
         )
@@ -280,7 +281,7 @@ def main(argv: list[str]) -> int:
     log = os.environ.get(LOG_ENV)
     if os.environ.get(ACTIVE_ENV) or not log:
         if real is None:
-            print(f"{name}: command not found", file=sys.stderr)
+            _write_stderr(f"{name}: command not found\n".encode())
             return _NOT_FOUND
         return _exec(real, name, args)
     if real is None:

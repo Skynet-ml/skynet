@@ -1888,6 +1888,32 @@ def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_th
     assert (record["command"], record["exit_code"], record["stderr"]) == ("probe", 4, "err\n")
 
 
+@pytest.mark.parametrize("mode", ["logged", "nested", "no-log"])
+@pytest.mark.parametrize(
+    ("command", "code", "stdout"), [("probe", 4, b"out\n"), ("nosuch", 127, b""), ("broken", 126, b"")]
+)
+def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_command_code(
+    tmp_path: Path, mode: str, command: str, code: int, stdout: bytes
+) -> None:
+    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+    (tmp_path / "bin" / "broken").write_text("#!/no/such/interpreter\n")
+    (tmp_path / "bin" / "broken").chmod(0o755)
+    log = tmp_path / "exec.jsonl"
+    env = _shim_env(tmp_path, ["probe", "nosuch", "broken"], None if mode == "no-log" else log)
+    if mode == "nested":
+        env[exec_shim.ACTIVE_ENV] = "1"
+
+    done = subprocess.run(["/bin/sh", "-c", f"{command} 2>&-"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (code, stdout, b"")
+    if mode == "logged":
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"], record["stdout"]) == (command, code, stdout.decode())
+    else:
+        assert not log.exists()
+
+
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
     """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141."""
     (tmp_path / "bin").mkdir()
