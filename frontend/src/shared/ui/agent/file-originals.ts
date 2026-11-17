@@ -36,8 +36,8 @@ export function nameKey(name: string): string {
 
 /**
  * The original of each file of a message sent before SKY-782, in the files'
- * order: the first unpaired original with the same name, or null. A file in a format the viewer does not draw
- * gets no original.
+ * order: the first unpaired original with the same name, or null. A file in
+ * a format the viewer does not draw gets no original.
  */
 export function pairOriginals<T extends { name: string }>(
   files: ReadonlyArray<{ name: string }>,
