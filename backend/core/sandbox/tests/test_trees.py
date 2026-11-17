@@ -290,6 +290,15 @@ def test_a_member_name_or_link_target_over_the_name_limit_is_refused(trees: Tree
         tar_to_tree(trees, RUN, _archive((info, b"")))
 
 
+def test_a_file_larger_than_one_read_chunk_comes_back_whole(trees: TreeStore) -> None:
+    """A file of several read chunks and a partial last chunk keeps every byte."""
+    content = bytes(range(256)) * (tree_helpers._CHUNK_BYTES * 5 // 512) + b"tail"
+    tree_id = tar_to_tree(trees, RUN, _archive((_info("big.bin"), content)))
+
+    [entry] = trees.get_tree(RUN, tree_id) or []
+    assert trees.get_blob(RUN, entry.object_id) == content
+
+
 def test_a_name_limit_counts_bytes_not_characters(trees: TreeStore) -> None:
     """A name of 4096 two-byte characters is over the 4096-byte limit."""
     with pytest.raises(BadArchiveError, match="longer than"):

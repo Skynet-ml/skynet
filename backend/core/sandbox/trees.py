@@ -316,14 +316,24 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
 
     Returns:
         The member's bytes.
+
+    Raises:
+        BadArchiveError: When the member ends before its header size.
     """
     handle = archive.extractfile(member)
     if handle is None:
         return b""
-    chunks = []
-    while chunk := handle.read(_CHUNK_BYTES):
-        chunks.append(chunk)
-    return b"".join(chunks)
+    # One buffer of the header size, filled in place, so the file is never in memory twice.
+    data = bytearray(member.size)
+    with memoryview(data) as view:
+        filled = 0
+        while filled < member.size:
+            count = handle.readinto(view[filled : filled + _CHUNK_BYTES])
+            if not count:
+                raise BadArchiveError(f"Archive member {member.name!r} is shorter than its header says.")
+            filled += count
+    # The tree store copies the bytes into its own object, so no second copy is made here.
+    return data
 
 
 def _parts(name: str) -> list[str]:

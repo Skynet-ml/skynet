@@ -688,6 +688,48 @@ def test_a_denied_grant_never_reaches_a_source_that_does_not_check_grants(
     assert source.acquired == []
 
 
+def test_a_stale_file_in_a_used_box_does_not_join_the_new_tree(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A box that already holds a file in the tree folder gives back only the input tree and the command's files."""
+
+    class _UsedSource(_Source):
+        """Give boxes that hold an old file from an earlier step."""
+
+        def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+            """Open a box and leave an old file in its tree folder.
+
+            Args:
+                agent_id: The agent.
+                grants: The grants.
+
+            Returns:
+                The box.
+            """
+            box = super().acquire(agent_id, grants)
+            box.write_files({"tree/stale.txt": "old\n"})
+            return box
+
+    runtime = _Runtime()
+    source = _UsedSource(runtime)
+    sandbox = TreeSandbox(trees, step_log, source, source)
+
+    _, new_tree = sandbox.run(_step(), _tree(trees, {"a.txt": "one\n"}), "echo two > b.txt", [])
+
+    assert _files(trees, new_tree) == {"a.txt": b"one\n", "b.txt": b"two\n"}
+
+
+def test_a_runtime_box_source_with_another_registry_is_refused(trees: TreeStore, step_log: StepLogStore) -> None:
+    """The layer and its runtime sources resolve grants against one registry, so a mismatch fails at build."""
+    registry = {"api.example.com": {"Authorization": "Bearer test"}}
+    runtime = _Runtime()
+
+    with pytest.raises(ValueError, match="same capability registry"):
+        TreeSandbox(trees, step_log, _Source(runtime, registry), _Source(runtime))
+    with pytest.raises(ValueError, match="same capability registry"):
+        TreeSandbox(trees, step_log, _Source(runtime), _Source(runtime), registry=registry)
+
+    TreeSandbox(trees, step_log, _Source(runtime, registry), _Source(runtime, dict(registry)), registry=registry)
+
+
 @pytest.mark.parametrize("printed", ["nan", "inf", "-infinity"])
 def test_a_metric_that_prints_a_non_finite_number_is_a_metric_error(
     trees: TreeStore, step_log: StepLogStore, printed: str

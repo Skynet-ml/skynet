@@ -656,17 +656,13 @@ class CandidateBox:
             self._unstamped = False
             return changes
 
-    def close(self, healthy: bool = True) -> None:
-        """Give the box back to its source; every process the version started ends with it.
-
-        Args:
-            healthy: False when the box failed, so no later step may use it.
-        """
+    def close(self) -> None:
+        """Give the box back to its source; every process the version started ends with it."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-        self._source.release(self.session, healthy)
+        self._source.release(self.session, healthy=True)
 
 
 class MetricBox:
@@ -716,16 +712,12 @@ class MetricBox:
         if not result.ok:
             raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
 
-    def close(self, healthy: bool = True) -> None:
-        """Give the box back to its source.
-
-        Args:
-            healthy: False when the box failed, so no later step may use it.
-        """
+    def close(self) -> None:
+        """Give the box back to its source."""
         if self._closed:
             return
         self._closed = True
-        self._source.release(self.session, healthy)
+        self._source.release(self.session, healthy=True)
 
 
 def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
@@ -1247,13 +1239,14 @@ class RepoWorkspace:
                 f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
-            if not applied.ok:
-                _release_failed(source, session, "The candidate box")
-                return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
-            return CandidateBox(self, session, box_root(session), source)
+            if applied.ok:
+                return CandidateBox(self, session, box_root(session), source)
         except BaseException:
             _release_failed(source, session, "The candidate box")
             raise
+        # Outside the try: a budget error of this release must not release the box a second time.
+        _release_failed(source, session, "The candidate box")
+        return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
     def open_metric(self) -> MetricBox:
         """Open a metric box from the metric state, without any repository file.

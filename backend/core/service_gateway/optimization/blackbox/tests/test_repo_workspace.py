@@ -1552,7 +1552,7 @@ def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
 def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Closing an evaluation box releases it through the box source, with its health (SKY-718)."""
+    """Closing an evaluation box releases it through the box source as healthy (SKY-718)."""
     released: list[bool] = []
     release = RepoBoxSource.release
 
@@ -1571,10 +1571,10 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
     space, _ = _scoring_space(tmp_path, _Runtime())
     try:
         _open(space, "").close()
-        space.open_metric().close(healthy=False)
+        space.open_metric().close()
     finally:
         space.close()
-    assert released == [True, False]
+    assert released == [True, True]
 
 
 def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
@@ -1625,11 +1625,14 @@ def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, m
         UnpricedOperationError("unpriced"),
     ],
 )
-def test_a_budget_error_of_a_failed_box_release_is_raised(error: BaseException) -> None:
+def test_a_budget_error_of_a_failed_box_release_is_raised(
+    error: BaseException, caplog: pytest.LogCaptureFixture
+) -> None:
     """Every budget error of a failed box's close stops the caller; another close error is only logged.
 
     Args:
         error: The budget error the close raises.
+        caplog: Captures the log line of the other close error.
     """
 
     class _Source:
@@ -1654,7 +1657,51 @@ def test_a_budget_error_of_a_failed_box_release_is_raised(error: BaseException) 
 
     with pytest.raises(type(error)):
         repo_workspace._release_failed(_Source(error), None, "The candidate box")  # type: ignore[arg-type]
-    repo_workspace._release_failed(_Source(RuntimeError("gone")), None, "The candidate box")  # type: ignore[arg-type]
+    caplog.clear()
+    raised: list[BaseException] = []
+    with caplog.at_level(logging.WARNING, logger=repo_workspace.logger.name):
+        try:
+            repo_workspace._release_failed(_Source(RuntimeError("gone")), None, "The candidate box")  # type: ignore[arg-type]
+        except BaseException as other:
+            raised.append(other)
+    assert raised == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "The candidate box did not close cleanly (RuntimeError)"
+    ]
+
+
+def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version that does not apply releases its box once, even when that close raises a budget error."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    closes: list[_Box] = []
+    try:
+        space.prepare()
+
+        def pending(self: _Box) -> None:
+            """Close the box, then fail as a settlement that is still pending.
+
+            Args:
+                self: The box.
+
+            Raises:
+                UsagePendingError: Always.
+            """
+            closes.append(self)
+            self._inner.close()
+            raise UsagePendingError("pending")
+
+        monkeypatch.setattr(_Box, "close", pending)
+        with pytest.raises(UsagePendingError):
+            space.open_candidate(
+                "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
+            )
+    finally:
+        monkeypatch.undo()
+        space.close()
+    assert len(closes) == 1
 
 
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(

@@ -80,6 +80,11 @@ class RuntimeBoxSource:
         self._spec = spec
         self._registry = registry or {}
 
+    @property
+    def registry(self) -> Mapping[str, Mapping[str, str]]:
+        """Return the capability registry that this source resolves grants against."""
+        return self._registry
+
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
         """Open a new box whose network is the grant list.
 
@@ -151,6 +156,9 @@ class TreeSandbox:
             metrics: Gives the metric boxes; never the same as ``candidates``.
             registry: The capability registry that the grant lists resolve against.
             timeout_seconds: The limit of one command or metric.
+
+        Raises:
+            ValueError: When a runtime box source has another registry.
         """
         self._trees = trees
         self._step_log = step_log
@@ -158,6 +166,10 @@ class TreeSandbox:
         self._metrics = metrics
         self._registry = registry or {}
         self._timeout = timeout_seconds
+        for source in (candidates, metrics):
+            # The layer records the grant list that it resolves, so a box must open with the same registry.
+            if isinstance(source, RuntimeBoxSource) and source.registry != self._registry:
+                raise ValueError("A runtime box source must use the same capability registry as the tree sandbox.")
 
     def run(self, step: StepRef, tree_id: str, command: str, grants: Sequence[Grant]) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
@@ -349,7 +361,7 @@ class TreeSandbox:
         return outcome
 
     def _unpack(self, box: SandboxSession, archive: bytes, folder: str) -> None:
-        """Write an archive into a box and unpack it in a folder.
+        """Write an archive into a box and unpack it in an emptied folder.
 
         Args:
             box: The box.
@@ -367,8 +379,9 @@ class TreeSandbox:
         }
         box.write_files(parts)
         files = " ".join(shlex.quote(name) for name in parts)
+        # A source can give back a used box, so old files in the folder must not join the tree.
         result = box.run(
-            f"set -e; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder}; rm -rf {_IN_DIR}",
+            f"set -e; rm -rf {folder}; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder}; rm -rf {_IN_DIR}",
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if not result.ok:
