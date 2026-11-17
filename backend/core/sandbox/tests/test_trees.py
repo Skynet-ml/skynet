@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import tarfile
 from collections.abc import Iterator
@@ -287,6 +288,66 @@ def test_a_member_name_or_link_target_over_the_name_limit_is_refused(trees: Tree
 
     with pytest.raises(BadArchiveError, match="longer than"):
         tar_to_tree(trees, RUN, _archive((info, b"")))
+
+
+def test_a_name_limit_counts_bytes_not_characters(trees: TreeStore) -> None:
+    """A name of 4096 two-byte characters is over the 4096-byte limit."""
+    with pytest.raises(BadArchiveError, match="longer than"):
+        tar_to_tree(trees, RUN, _archive((_info("é" * tree_helpers.MAX_NAME_BYTES), b"")))
+
+
+def test_a_huge_member_of_an_unknown_type_is_refused_before_the_seek(
+    trees: TreeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A skipped member that claims 50 GiB does not make the reader unpack past the limit.
+
+    Args:
+        trees: The tree store.
+        monkeypatch: Sets small size limits and counts the unpacked bytes.
+    """
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_BYTES", 0)
+    monkeypatch.setattr(tree_helpers, "MAX_TREE_MEMBERS", 1)
+    info = tarfile.TarInfo("huge")
+    info.type, info.size = b"Z", 50 * 1024**3
+    # Zeros after the header give the seek real data to unpack, as a gzip bomb would.
+    data = gzip.compress(info.tobuf(tarfile.GNU_FORMAT) + bytes(1024 * 1024))
+    peaks: list[int] = []
+
+    class _Counting(gzip.GzipFile):
+        """Record the highest unpacked position that the reader reaches."""
+
+        def read(self, size: int = -1) -> bytes:
+            """Read and record the position.
+
+            Args:
+                size: The number of bytes.
+
+            Returns:
+                The bytes read.
+            """
+            chunk = super().read(size)
+            peaks.append(self.tell())
+            return chunk
+
+        def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+            """Seek and record the position.
+
+            Args:
+                offset: The new position, relative to ``whence``.
+                whence: The ``io`` seek origin.
+
+            Returns:
+                The new position.
+            """
+            position = super().seek(offset, whence)
+            peaks.append(position)
+            return position
+
+    monkeypatch.setattr(tree_helpers.gzip, "GzipFile", _Counting)
+
+    with pytest.raises(BadArchiveError, match="unpacks to more than"):
+        tar_to_tree(trees, RUN, data)
+    assert max(peaks) <= 1024
 
 
 def test_header_bytes_count_toward_the_unpacked_size(trees: TreeStore, monkeypatch: pytest.MonkeyPatch) -> None:

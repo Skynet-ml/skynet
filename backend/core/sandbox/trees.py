@@ -139,23 +139,33 @@ class _CountingReader:
 
         Returns:
             The new position.
+
+        Raises:
+            BadArchiveError: When the target is past the size limit.
         """
+        # A forward seek on a gzip stream unpacks every byte up to the target, so a
+        # member of an unknown type with a huge size is refused before the seek.
+        if whence in (io.SEEK_SET, io.SEEK_CUR):
+            self._check(offset if whence == io.SEEK_SET else self._raw.tell() + offset)
         position = self._raw.seek(offset, whence)
-        self._check()
+        self._check(position)
         return position
 
     def tell(self) -> int:
         """Return the position in the tar stream."""
         return self._raw.tell()
 
-    def _check(self) -> None:
-        """Refuse a stream that unpacks past the size limit.
+    def _check(self, position: int | None = None) -> None:
+        """Refuse a stream position past the size limit.
+
+        Args:
+            position: The position to check; None checks the current one.
 
         Raises:
             BadArchiveError: When the position is past the limit.
         """
         # Headers and block padding add up to 1 KiB to each member.
-        if self._raw.tell() > MAX_TREE_BYTES + MAX_TREE_MEMBERS * 1024:
+        if (self._raw.tell() if position is None else position) > MAX_TREE_BYTES + MAX_TREE_MEMBERS * 1024:
             raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
 
 
@@ -241,7 +251,7 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
                 members += 1
                 if members > MAX_TREE_MEMBERS:
                     raise BadArchiveError(f"The archive has more than {MAX_TREE_MEMBERS} members.")
-                if len(member.name) > MAX_NAME_BYTES or len(member.linkname) > MAX_NAME_BYTES:
+                if _byte_length(member.name) > MAX_NAME_BYTES or _byte_length(member.linkname) > MAX_NAME_BYTES:
                     raise BadArchiveError(f"An archive member name is longer than {MAX_NAME_BYTES} bytes.")
                 parts = _parts(member.name)
                 if not parts:
@@ -282,6 +292,19 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
     except ValueError as error:
         # tarfile keeps a name that is not UTF-8 as surrogates, which the tree store cannot encode.
         raise BadArchiveError(f"The archive does not store ({type(error).__name__}).") from error
+
+
+def _byte_length(name: str) -> int:
+    """Return the length of a member name in bytes, as the archive holds it.
+
+    Args:
+        name: The member name or link target.
+
+    Returns:
+        The number of bytes.
+    """
+    # tarfile keeps a non-UTF-8 byte as a surrogate, which surrogateescape turns back into one byte.
+    return len(name.encode("utf-8", "surrogateescape"))
 
 
 def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
