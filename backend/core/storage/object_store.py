@@ -117,6 +117,7 @@ class S3ObjectStore:
 
         Raises:
             ValueError: When no bucket is set.
+            RuntimeError: When ``client`` is ``None`` and boto3 is not installed.
         """
         self._bucket = bucket or settings.tree_bucket
         if not self._bucket:

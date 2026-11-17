@@ -1220,7 +1220,8 @@ def test_new_commits_after_a_failed_put_do_not_start_a_retry_early(make_store, o
         raise OSError("object store is down")
 
     monkeypatch.setattr(objects, "put", failing_put)
-    store = make_store(flush_window_seconds=0.5)
+    # The size cap makes each commit due at once; the long window keeps a slow loop inside the wait.
+    store = make_store(flush_window_seconds=5, flush_max_bytes=1)
     _commit(store)
     deadline = time.monotonic() + 2
     while not attempts and time.monotonic() < deadline:
@@ -1261,6 +1262,17 @@ def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, m
 
     store.durable(step_id, 1, timeout=3)
     assert _step_rows(engine) == 1
+
+
+def test_a_closed_store_refuses_new_steps_and_objects(make_store) -> None:
+    """After ``close``, no flusher is left, so a new step or object fails at once instead of waiting forever."""
+    store = make_store()
+    store.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        _commit(store)
+    with pytest.raises(RuntimeError, match="closed"):
+        store.put_object("job-1", "c" * 64, b"blob\0hello")
 
 
 def test_a_failed_flush_at_close_opens_the_waiters_with_an_error(make_store, objects, monkeypatch) -> None:
