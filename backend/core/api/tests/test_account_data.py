@@ -164,6 +164,15 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     @app.exception_handler(DomainError)
     async def _domain_error(request: Request, exc: DomainError) -> JSONResponse:
+        """Render a domain error as the app does.
+
+        Args:
+            request: The request.
+            exc: The error.
+
+        Returns:
+            The error response.
+        """
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail, "code": exc.code, "params": exc.params},

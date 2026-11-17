@@ -213,7 +213,7 @@ const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset upload card instead of being read as text. */
+/** Whether a file opens the dataset upload card instead of a file card. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -1938,7 +1938,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // Dataset files go to the dataset upload card; any other file
         // becomes a file card in the composer.
         claimsFile={isDatasetFile}
-        // The media routes are on this Mac's backend, so a hosted chat reads media as text as before.
+        // The media routes are on this Mac's backend, so a hosted chat's file card gives only its type and size.
         onMediaFiles={webChat ? undefined : chatMedia.addFiles}
         onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
         originals={webChat ? undefined : draftOriginals}

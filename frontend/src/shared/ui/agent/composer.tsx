@@ -75,7 +75,7 @@ interface ComposerProps {
    *  draft. A queued message is sent later, when its rejection would lose it. */
   acceptsMidTurn?: (text: string) => boolean;
   /** Whether the host handles a picked or pasted file itself instead of the
-   *  composer reading it as text (the generalist sends datasets to its
+   *  composer making it a file card (the generalist sends datasets to its
    *  column-mapping card this way). The host takes only the first such file;
    *  the composer skips the others with a message. */
   claimsFile?: (file: File) => boolean;
@@ -244,7 +244,7 @@ function SlashTokenLayer({
 /**
  * The shared chat composer, laid out Codex-style: one bordered box holding a
  * borderless textarea with a control row docked under it. The + attach button
- * (any file type, read as text by the backend) and the trust control sit at
+ * (any file type; the agent reads it at its workspace path) and the trust control sit at
  * the inline start; the model chip, the dictation mic and the circular
  * send/stop button sit at the inline end. While dictating, the textarea swaps
  * for a recording strip (pulsing dot, timer, live waveform, cancel) and the mic

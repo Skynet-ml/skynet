@@ -747,15 +747,19 @@ def test_a_failed_removal_closes_the_box() -> None:
 
 
 def test_mac_restart_writes_a_file_whose_folder_is_empty(tmp_path: Path) -> None:
-    """Check that an empty file folder left by a failed write does not count as a copied file."""
+    """Check that a file folder left empty or half written by a failed write does not count as a copied file."""
     workspace = tmp_path / "ws"
     (workspace / "attachments" / "m1").mkdir(parents=True)
-    files = [ChatFile("m1", "a.txt", b"a")]
+    (workspace / "attachments" / "m2").mkdir(parents=True)
+    # A write that stopped before its rename leaves only its temp file.
+    (workspace / "attachments" / "m2" / f".b.txt.{'0' * 32}").write_bytes(b"part")
+    files = [ChatFile("m1", "a.txt", b"a"), ChatFile("m2", "b.txt", b"b")]
     runner = module._LocalFilesRunner(
         workspace, lambda skip: ({f.id for f in files}, [f for f in files if f.id not in skip])
     )
     runner.exec_command("true")
     assert (workspace / "attachments" / "m1" / "a.txt").read_bytes() == b"a"
+    assert (workspace / "attachments" / "m2" / "b.txt").read_bytes() == b"b"
     runner.close()
 
 

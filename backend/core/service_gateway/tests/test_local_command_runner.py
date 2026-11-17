@@ -147,6 +147,22 @@ def test_long_command_gives_session_and_stdin(tmp_path: Path) -> None:
     runner.close()
 
 
+@on_mac
+def test_input_that_the_command_does_not_read_does_not_hold_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that input to a command that never reads it stops after the wait, with an error."""
+    monkeypatch.setattr(runner_module, "STDIN_WAIT_SECONDS", 0.2)
+    runner = LocalCommandRunner(tmp_path / "ws")
+    first = runner.exec_command("sleep 30", yield_time_ms=100)
+    session_id = int(first.split("session ID ")[1].split()[0])
+    started = time.monotonic()
+    result = runner.write_stdin(session_id, chars="x" * 1_000_000, yield_time_ms=0)
+    assert time.monotonic() - started < 5
+    assert "did not read its input" in result
+    runner.close()
+
+
 def test_prunes_least_recently_used_session_and_keeps_recent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that at the limit the least recently used session ends and the 8 most recently used stay."""
     runner = LocalCommandRunner(tmp_path / "ws")

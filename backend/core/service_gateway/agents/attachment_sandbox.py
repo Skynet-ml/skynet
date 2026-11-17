@@ -60,6 +60,8 @@ _UPLOAD_PART_CHARS = 4_000_000
 # The time a new box needs to start and take the chat's files.
 _REOPEN_MARGIN_SECONDS = 60
 _UPLOAD_DIR = ".skynet-upload"
+# The temp name of a Mac file write that has not replaced the file yet (see _write_inside).
+_TEMP_NAME = re.compile(r"\..+\.[0-9a-f]{32}")
 
 FILE_TOOLS_PROMPT = """\
 Attached files: the user's files are in your workspace, at the paths their \
@@ -515,7 +517,7 @@ class SandboxCommandRunner(SessionTable):
             raise RuntimeError(f"Could not copy {file.name} into the workspace: {result.stderr[-500:]}")
 
     def _box_cents(self, now: float) -> int:
-        """Price the open box's live time so far, as its opening hold prices it.
+        """Price the open box's live time so far at the sandbox hold rate (``sandbox_hold_cents``).
 
         Args:
             now: The clock's time now.
@@ -646,8 +648,12 @@ class _LocalFilesRunner(LocalCommandRunner):
         # The folder outlives the app, so files copied before a restart are known and can be removed.
         attachments = self.workspace / "attachments"
         self._copied: set[str] = (
-            # An empty folder is a write that failed, so its file is written again.
-            {p.name for p in attachments.iterdir() if p.is_dir() and not p.is_symlink() and any(p.iterdir())}
+            # A folder with no file but a write's temp file is a write that failed, so its file is written again.
+            {
+                p.name
+                for p in attachments.iterdir()
+                if p.is_dir() and not p.is_symlink() and any(not _TEMP_NAME.fullmatch(c.name) for c in p.iterdir())
+            }
             if attachments.is_dir() and not attachments.is_symlink()
             else set()
         )

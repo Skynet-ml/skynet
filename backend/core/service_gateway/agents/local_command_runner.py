@@ -37,6 +37,8 @@ MAX_SESSIONS = 64
 PROTECTED_SESSIONS = 8
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 _SHELL = "/bin/bash"
+# A command that does not read its input must not hold the turn, as a Mac command has no time limit.
+STDIN_WAIT_SECONDS = 10
 
 
 def clamp_yield_ms(yield_time_ms: int | None) -> int:
@@ -480,11 +482,12 @@ class LocalCommandRunner(SessionTable):
         if session is None:
             return f"Error: Unknown session {session_id}. It ended, or it never existed."
         if chars and session.process is not None and session.process.stdin is not None and not session.done:
-            try:
-                session.process.stdin.write(chars.encode())
-                session.process.stdin.flush()
-            except OSError:
-                pass
+            left = _send_input(session.process.stdin.fileno(), chars.encode())
+            if left:
+                return (
+                    f"Error: the command did not read its input within {STDIN_WAIT_SECONDS} seconds, "
+                    f"so {left} bytes were not sent. Read its output with empty chars, or end it."
+                )
         return self.collect(
             session, started=started, yield_ms=clamp_yield_ms(yield_time_ms), max_output_tokens=max_output_tokens
         )
@@ -531,3 +534,28 @@ def _decoder() -> codecs.IncrementalDecoder:
         The incremental decoder.
     """
     return codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+
+def _send_input(fd: int, data: bytes) -> int:
+    """Write input to a command's stdin, and give up when it stops reading.
+
+    Args:
+        fd: The command's stdin.
+        data: The input.
+
+    Returns:
+        The bytes that were not sent; 0 when all were sent or the command closed its stdin.
+    """
+    # A blocking write to a full pipe would wait forever.
+    os.set_blocking(fd, False)
+    deadline = time.monotonic() + STDIN_WAIT_SECONDS
+    while data:
+        try:
+            data = data[os.write(fd, data) :]
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return len(data)
+            time.sleep(0.01)
+        except OSError:
+            return 0
+    return 0
