@@ -330,9 +330,15 @@ class SandboxCommandRunner(SessionTable):
             session.append(text)
 
         command = cmd if folder == "." else f"cd -- {shlex.quote(folder)} && {cmd}"
-        future = sync_bridge.submit(
-            partial(env.exec, command, timeout_sec=COMMAND_TIMEOUT_SECONDS, on_output=sink),
-        )
+        # Sending the command under the lock keeps a close() from stopping the box first.
+        with self._box_lock:
+            if self._env is not env:
+                session.finish(1)
+                session.append("Error: this chat was deleted, so its file workspace is closed.")
+                return self.collect(session, started=started, yield_ms=0, max_output_tokens=max_output_tokens)
+            future = sync_bridge.submit(
+                partial(env.exec, command, timeout_sec=COMMAND_TIMEOUT_SECONDS, on_output=sink),
+            )
         self._futures[session.id] = future
         future.add_done_callback(partial(self._finish, env, session, streamed))
         return self.collect(
@@ -425,7 +431,12 @@ class SandboxCommandRunner(SessionTable):
                 self._stop(old)
             if self._env is None:
                 env = self._factory(self._conversation_id)
-                sync_bridge.run(env.start)
+                try:
+                    sync_bridge.run(env.start)
+                except Exception:
+                    # The provider can make the box before its start fails, so stop it here.
+                    self._stop(env)
+                    raise
                 self._env, self._box_started, self._box_charged = env, self._clock(), 0
                 self._copied = set()
             env = self._env
@@ -609,7 +620,7 @@ class _LocalFilesRunner(LocalCommandRunner):
         yield_time_ms: int | None = None,
         max_output_tokens: int | None = None,
     ) -> str:
-        """Write the chat's new files, then start the command.
+        """Write the chat's new files, then start the command and wait a short time for its output.
 
         Args:
             cmd: The shell command.
@@ -620,13 +631,19 @@ class _LocalFilesRunner(LocalCommandRunner):
         Returns:
             The result text for the model.
         """
+        started = time.monotonic()
+        # The lock holds until the process starts, so a close() that waits on it then ends that process too.
         with self._files_lock:
             if self._closed:
                 return "Error: this chat was deleted, so its file workspace is closed."
             held, new = self._load_files(set(self._copied))
             # A file that left the chat (a delete, or an edit that dropped it) leaves the workspace too.
+            root = self.workspace.resolve()
             for media_id in self._copied - held:
-                shutil.rmtree(self.workspace / "attachments" / media_id, ignore_errors=True)
+                folder = (self.workspace / "attachments" / media_id).resolve()
+                # A command can make ``attachments`` a link; never delete outside the workspace.
+                if root in folder.parents:
+                    shutil.rmtree(folder, ignore_errors=True)
             self._copied &= held
             for file in new:
                 try:
@@ -635,7 +652,12 @@ class _LocalFilesRunner(LocalCommandRunner):
                     logger.warning("Could not write a chat file into %s", self.workspace, exc_info=True)
                     continue
                 self._copied.add(file.id)
-        return super().exec_command(cmd, workdir, yield_time_ms, max_output_tokens)
+            session = self.start(cmd, workdir)
+        if isinstance(session, str):
+            return session
+        return self.collect(
+            session, started=started, yield_ms=clamp_yield_ms(yield_time_ms), max_output_tokens=max_output_tokens
+        )
 
     def close(self) -> None:
         """Stop every command, delete the workspace, and write no files again."""

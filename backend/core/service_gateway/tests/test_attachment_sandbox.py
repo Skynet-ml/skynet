@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import math
+import shutil
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +16,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from core.billing.pricing import cents_for_usage
 from core.billing.vercel_usage import sandbox_hold_cents
 from core.sandbox.environment import ExecResult
 from core.service_gateway.agents import attachment_sandbox as module
@@ -491,7 +494,7 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
     class Billing:
-        """Record a debit and price it as ``debit_run`` does."""
+        """Record a debit and price it with the billing code that ``debit_run`` uses."""
 
         def __init__(self, engine: Any) -> None:
             """Keep nothing.
@@ -512,12 +515,16 @@ def test_charge_debits_exact_cents(monkeypatch: pytest.MonkeyPatch) -> None:
                 The charged cents.
             """
             calls.append({"username": username, **kwargs})
-            raw = usages[0].reported_cost_usd
-            return max(1, math.ceil(raw * module.usage_markup() / module.CENT_USD_VALUE))
+            return cents_for_usage(usages)
 
     monkeypatch.setattr(module, "StripeBillingService", Billing)
     charged = module.charge_chat_sandbox(object(), "ann", runner, settlement_key="k1")
     assert charged == _cents(600)
+    for owed in (1, 2, 7, 99, 1000, 123457):
+        monkeypatch.setattr(runner, "take_charge_cents", lambda owed=owed: owed)
+        assert module.charge_chat_sandbox(object(), "ann", runner, settlement_key="k") == owed
+    monkeypatch.undo()
+    monkeypatch.setattr(module, "StripeBillingService", Billing)
     assert calls[0]["settlement_key"] == "k1"
     assert calls[0]["token_source"] == "managed"
 
@@ -551,3 +558,120 @@ def test_commands_ask_only_in_ask_mode() -> None:
         assert _needs_approval(name, "auto_safe") is False
         assert _needs_approval(name, "yolo") is False
         assert chat_rule_allowed(name) is True
+
+
+def test_failed_start_stops_the_box() -> None:
+    """Check that a box whose start fails is stopped, and the next command opens a new one."""
+    boxes: list[FakeBox] = []
+    runner = make_runner([], boxes, Clock())
+
+    async def broken_start() -> None:
+        """Fail like a provider that made the box but timed out."""
+        raise RuntimeError("start timed out")
+
+    def factory(_conversation_id: str) -> Any:
+        """Open a fake box whose first start fails.
+
+        Args:
+            _conversation_id: Not used.
+
+        Returns:
+            The box.
+        """
+        box = FakeBox()
+        if not boxes:
+            box.start = broken_start  # type: ignore[method-assign]
+        boxes.append(box)
+        return box
+
+    runner._factory = factory
+    assert runner.exec_command("true").startswith("Error: the file workspace did not open")
+    assert boxes[0].stopped
+    assert "ran: true" in runner.exec_command("true")
+    assert len(boxes) == 2
+    runner.close()
+
+
+def test_close_before_the_command_is_sent_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a chat deleted after the box is ready but before the command goes gets no command."""
+    boxes: list[FakeBox] = []
+    runner = make_runner([], boxes, Clock())
+    open_session = runner.open
+
+    def open_then_close() -> Any:
+        """Open the session, then close the runner as a chat delete would.
+
+        Returns:
+            The session.
+        """
+        session = open_session()
+        runner.close()
+        return session
+
+    monkeypatch.setattr(runner, "open", open_then_close)
+    result = runner.exec_command("echo hi")
+    assert "this chat was deleted" in result
+    assert "echo hi" not in boxes[0].commands
+    assert boxes[0].stopped
+
+
+def test_mac_removal_never_leaves_the_workspace(tmp_path: Path) -> None:
+    """Check that a link in place of the attachments folder keeps a removal inside the workspace."""
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    files = [ChatFile("m1", "a.txt", b"a")]
+    runner = module._LocalFilesRunner(
+        workspace, lambda skip: ({f.id for f in files}, [f for f in files if f.id not in skip])
+    )
+    runner.exec_command("true")
+    (outside / "m1").mkdir(parents=True)
+    shutil.rmtree(workspace / "attachments")
+    (workspace / "attachments").symlink_to(outside)
+    files.clear()
+    runner.exec_command("true")
+    assert (outside / "m1").is_dir()
+    runner.close()
+
+
+def test_mac_close_during_the_file_copy_ends_the_new_command(tmp_path: Path) -> None:
+    """Check that a chat deleted while files are copied still ends the command that then starts."""
+    workspace = tmp_path / "ws"
+    closer: list[threading.Thread] = []
+
+    def load(skip: set[str]) -> tuple[set[str], list[ChatFile]]:
+        """Start a chat delete in another thread while the files are copied.
+
+        Args:
+            skip: Not used.
+
+        Returns:
+            One file.
+        """
+        thread = threading.Thread(target=runner.close)
+        thread.start()
+        closer.append(thread)
+        time.sleep(0.1)
+        return {"m1"}, [ChatFile("m1", "a.txt", b"a")]
+
+    runner = module._LocalFilesRunner(workspace, load)
+    started: list[Any] = []
+    start = runner.start
+
+    def record(cmd: str, workdir: str | None = None) -> Any:
+        """Start the command and keep its session.
+
+        Args:
+            cmd: The shell command.
+            workdir: The directory to run in.
+
+        Returns:
+            The session.
+        """
+        started.append(start(cmd, workdir))
+        return started[-1]
+
+    runner.start = record  # type: ignore[method-assign]
+    runner.exec_command("sleep 30", yield_time_ms=250)
+    closer[0].join(timeout=10)
+    assert not closer[0].is_alive()
+    assert started[0].process.wait(timeout=5) != 0

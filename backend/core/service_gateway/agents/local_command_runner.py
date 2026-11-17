@@ -417,6 +417,23 @@ class LocalCommandRunner(SessionTable):
             The result text for the model.
         """
         started = time.monotonic()
+        session = self.start(cmd, workdir)
+        if isinstance(session, str):
+            return session
+        return self.collect(
+            session, started=started, yield_ms=clamp_yield_ms(yield_time_ms), max_output_tokens=max_output_tokens
+        )
+
+    def start(self, cmd: str, workdir: str | None = None) -> CommandSession | str:
+        """Start a command in its own sandbox, and do not wait for it.
+
+        Args:
+            cmd: The shell command.
+            workdir: The directory to run in, relative to the workspace.
+
+        Returns:
+            The command's session, or the error text when it cannot start.
+        """
         cwd = self._workdir(workdir)
         if cwd is None or not cwd.is_dir():
             return "Error: the workdir must stay inside the workspace and exist."
@@ -438,9 +455,7 @@ class LocalCommandRunner(SessionTable):
             session.append(f"Could not start the command: {exc}")
         else:
             threading.Thread(target=self._pump, args=(session,), daemon=True).start()
-        return self.collect(
-            session, started=started, yield_ms=clamp_yield_ms(yield_time_ms), max_output_tokens=max_output_tokens
-        )
+        return session
 
     def write_stdin(
         self,
