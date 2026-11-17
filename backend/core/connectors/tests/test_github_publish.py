@@ -23,6 +23,7 @@ from ..github_publish import (
     BEST_BRANCH,
     BranchConflictError,
     HardeningSummary,
+    PublishedChange,
     RepoPublishError,
     open_pull_request,
     push_candidates,
@@ -653,3 +654,34 @@ def test_a_crash_after_the_pull_request_and_before_the_effect_commit_opens_one(
     assert len(sent) == 1
     assert change == replayed
     assert (change.branch, change.number, change.draft) == ("skynet/x", 7, True)
+
+
+def _no_github(*_: Any, **__: Any) -> Any:
+    """Fail the test: a replayed step must not call GitHub.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError("a replayed step called GitHub")
+
+
+def test_a_replayed_pull_request_returns_the_stored_change_without_github(
+    monkeypatch: pytest.MonkeyPatch, effects: StepEffects
+) -> None:
+    """The second pull request call of a step returns the stored change and makes no GitHub call."""
+    _github(monkeypatch)
+    first = open_pull_request(
+        "tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B", effects=effects
+    )
+    monkeypatch.setattr(github_publish, "get_json", _no_github)
+    monkeypatch.setattr(github_publish, "request", _no_github)
+
+    again = open_pull_request(
+        "tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B", effects=effects
+    )
+
+    assert (
+        again
+        == first
+        == PublishedChange(branch="skynet/x", url="https://github.com/acme/app/pull/7", number=7, draft=True)
+    )

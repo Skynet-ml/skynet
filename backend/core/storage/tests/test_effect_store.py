@@ -238,13 +238,15 @@ def test_the_effect_does_not_run_before_the_step_is_durable(engine, objects, ste
         lambda: EffectStore(engine, steps).once("job-1", "k", effect, step_id=step_id, execution_generation=1)
     )
 
-    time.sleep(0.3)
-    assert effect.calls == 0
-    assert caller.is_alive()
-
-    objects.gate.set()
-    flusher.join(5)
-    caller.join(5)
+    # The gate must open even when an assert fails, or the blocked flusher hangs the suite.
+    try:
+        time.sleep(0.3)
+        assert effect.calls == 0
+        assert caller.is_alive()
+    finally:
+        objects.gate.set()
+        flusher.join(5)
+        caller.join(5)
     assert out == [{"pr": 7}]
     assert effect.calls == 1
 
@@ -298,6 +300,38 @@ def test_a_failed_effect_stores_nothing_and_a_retry_runs_it(engine, steps) -> No
     effect = Counter()
     assert store.once("job-1", "k", effect, step_id=step_id, execution_generation=1) == {"pr": 7}
     assert effect.calls == 1
+
+
+def test_a_conflicting_row_that_went_away_raises_and_runs_no_effect(engine, steps, monkeypatch) -> None:
+    """When the key's row is gone by the read after a conflict, as a job delete cascades, the call raises."""
+    step_id = _step(steps)
+    steps.flush()
+    store = EffectStore(engine, steps)
+    store.once("job-1", "k", Counter(), step_id=step_id, execution_generation=1)
+    get = Session.get
+
+    def vanish(session: Session, entity: Any, ident: Any, **kwargs: Any) -> Any:
+        """Read no effect row, as after the job's delete; read any other row as usual.
+
+        Args:
+            session: The reading session.
+            entity: The mapped class.
+            ident: The primary key.
+            **kwargs: Other read options.
+
+        Returns:
+            ``None`` for an effect row, else the stored row.
+        """
+        if entity is AgentEffectModel:
+            return None
+        return get(session, entity, ident, **kwargs)
+
+    monkeypatch.setattr(Session, "get", vanish)
+    effect = Counter()
+
+    with pytest.raises(LookupError, match="went away"):
+        store.once("job-1", "k", effect, step_id=step_id, execution_generation=1)
+    assert effect.calls == 0
 
 
 def test_a_crash_after_the_effect_and_before_its_commit_runs_it_again(engine, steps, monkeypatch) -> None:

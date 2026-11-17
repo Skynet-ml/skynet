@@ -9,6 +9,10 @@ the first commits, then returns the stored result. On SQLite the first insert
 holds the database write lock, so a second caller waits only for the busy
 timeout and then raises ``OperationalError`` ("database is locked").
 
+The call holds its database connection for the whole effect. On PostgreSQL
+it also holds the row lock of the key. On SQLite it holds the database write
+lock, which blocks every other writer, the step log's flusher included.
+
 A crash between the effect and its commit rolls the row back, so the next
 call runs the effect again. The log is at-least-once across that crash: each
 effect must find its own earlier result outside (an existing branch or pull
