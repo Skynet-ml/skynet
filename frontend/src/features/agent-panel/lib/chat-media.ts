@@ -31,7 +31,11 @@ export class ChatMediaError extends Error {
   }
 }
 
-/** Upload one file; the server finds its real type from its bytes. */
+/**
+ * Upload one file; the server finds a media file's type from its bytes. An
+ * ``original`` is stored whatever its type; its name decides whether it must
+ * be a real PDF, DOCX or XLSX.
+ */
 export async function uploadChatMedia(
   file: File,
   { original = false }: { original?: boolean } = {},

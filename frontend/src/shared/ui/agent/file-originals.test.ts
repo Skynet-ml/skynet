@@ -19,6 +19,9 @@ test("the viewer draws only a pdf, docx or xlsx original", () => {
   assert.equal(originalFormat("notes.txt"), null);
   assert.equal(originalFormat(".pdf"), null);
   assert.equal(originalFormat("README"), null);
+  // The server cleans these names to ".pdf" and stores opaque bytes.
+  assert.equal(originalFormat(" .pdf"), null);
+  assert.equal(originalFormat('".pdf'), null);
 });
 
 test("each file gets the first unused original with its name", () => {
@@ -85,6 +88,14 @@ test("a name's originals fit in a message together or not at all", () => {
   assert.deepEqual(fitOriginals([a1, c, a2], 1), [c]);
   assert.deepEqual(fitOriginals([a1, a2, c], 0), []);
   assert.deepEqual(fitOriginals([a1, a2, c], -1), []);
+});
+
+test("an original the viewer draws fits before one it does not draw (SKY-782)", () => {
+  const csv = { name: "rows.csv" };
+  const txt = { name: "notes.txt" };
+  const pdf = { name: "brief.pdf" };
+  assert.deepEqual(fitOriginals([csv, txt, pdf], 1), [pdf]);
+  assert.deepEqual(fitOriginals([csv, txt, pdf], 2), [csv, pdf]);
 });
 
 test("every read file keeps its original when its text went in (SKY-782)", () => {

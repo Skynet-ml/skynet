@@ -423,6 +423,25 @@ void test("an original over the file limit is not uploaded; the file keeps only 
   await unmount();
 });
 
+void test("dropOriginalsNamed takes out the oldest originals with that name", async () => {
+  const { draft, unmount } = await mountDraft();
+  let ids: string[] = [];
+  await React.act(
+    async () => void (ids = draft().addOriginals([pdf("a.pdf"), pdf("b.pdf"), pdf("a.pdf")])),
+  );
+  await flush();
+  await React.act(async () => draft().dropOriginalsNamed("a.pdf", 1));
+  const files = [{ name: "a.pdf" }, { name: "b.pdf" }];
+  assert.deepEqual(
+    draft()
+      .shownOriginals(files)
+      .map((m) => m.id)
+      .sort(),
+    [ids[1], ids[2]].sort(),
+  );
+  await unmount();
+});
+
 void test("dropOriginal takes out only that original, and deletes its stored copy", async () => {
   const { draft, unmount } = await mountDraft();
   const before = deleted.length;

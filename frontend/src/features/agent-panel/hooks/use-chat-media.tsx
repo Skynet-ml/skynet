@@ -59,6 +59,8 @@ export interface ChatMediaDraft {
   keepOriginals: (files: ReadonlyArray<{ name: string }>) => void;
   /** Drop one original by the local id ``addOriginals`` gave; an id not in the draft does nothing. */
   dropOriginal: (localId: string) => void;
+  /** Drop the first ``count`` originals named ``name``, oldest first. */
+  dropOriginalsNamed: (name: string, count: number) => void;
   /** Take a tile out of the draft, with Undo; the stored file goes when the toast closes. */
   remove: (localId: string) => void;
   /** The files to send, by stored id, originals last; null while an upload still runs. */
@@ -260,6 +262,14 @@ export function useChatMedia(): ChatMediaDraft {
     [syncOriginals],
   );
 
+  const dropOriginalsNamed = React.useCallback(
+    (name: string, count: number) => {
+      const ids = originalsRef.current.filter((o) => o.name === name).slice(0, Math.max(count, 0));
+      for (const o of ids) dropOriginal(o.localId);
+    },
+    [dropOriginal],
+  );
+
   const keepOriginals = React.useCallback(
     (files: ReadonlyArray<{ name: string }>) => {
       const kept = new Set(keptOriginals(files, originalsRef.current));
@@ -459,6 +469,7 @@ export function useChatMedia(): ChatMediaDraft {
     addOriginals,
     keepOriginals,
     dropOriginal,
+    dropOriginalsNamed,
     remove,
     ready,
     blocked,

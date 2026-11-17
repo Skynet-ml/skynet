@@ -383,6 +383,11 @@ def test_an_original_uses_the_originals_hourly_cap(harness: SimpleNamespace, mon
     assert _upload_original(harness.client, b"a,b\n", "b.csv").status_code == 429
 
 
+def test_a_media_pdf_named_only_as_an_extension_is_refused(harness: SimpleNamespace) -> None:
+    """The viewer draws no file named only ".pdf", so a media upload of one gets a 415, as any unnamed PDF does."""
+    assert _upload(harness.client, _PDF, name=".pdf", content_type="application/pdf").status_code == 415
+
+
 def test_a_media_upload_keeps_the_allow_list(harness: SimpleNamespace) -> None:
     """A media upload keeps the allow-list: a CSV or SVG not marked as an original gets a 415."""
     assert _upload(harness.client, b"a,b\n", name="rows.csv", content_type="text/csv").status_code == 415

@@ -30,8 +30,8 @@ export type MediaKind = "image" | "video" | "audio";
 
 /**
  * An image, video or audio file that goes with a message and renders as itself, not as text.
- * A `document` is the stored original of an attached PDF, DOCX or XLSX (SKY-735): it has no
- * tile of its own and shows only in its file's slide.
+ * A `document` is the stored original of an attached file (SKY-735, SKY-782): it has no
+ * tile of its own, and only a PDF, DOCX or XLSX one shows in its file's slide.
  */
 export interface MediaAttachment {
   id: string;

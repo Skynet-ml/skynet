@@ -18,8 +18,11 @@ const CHANGED = new Set(['"', "<", ">", "_"]);
 
 /** The format of a file whose original the viewer draws, from its name, or null. */
 export function originalFormat(name: string): OriginalFormat | null {
-  const dot = name.lastIndexOf(".");
-  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  // The cleaned name decides, as on the server: a name the server cleans to
+  // ".pdf" is stored as opaque bytes, which the viewer cannot draw.
+  const key = nameKey(name);
+  const dot = key.lastIndexOf(".");
+  const ext = dot > 0 ? key.slice(dot + 1).toLowerCase() : "";
   return FORMATS.includes(ext) ? (ext as OriginalFormat) : null;
 }
 
@@ -82,8 +85,8 @@ export function keptOriginals<T extends { name: string }>(
 }
 
 /**
- * The originals that fit in ``room`` places of a message. A name's originals
- * go together or not at all: half a group would leave its counts unequal, so
+ * The originals that fit in ``room`` places of a message, the ones the viewer
+ * draws first. A name's originals go together or not at all: half a group would leave its counts unequal, so
  * keptOriginals would drop the half that went too.
  */
 export function fitOriginals<T extends { name: string }>(
@@ -94,7 +97,11 @@ export function fitOriginals<T extends { name: string }>(
   for (const o of originals) groups.set(nameKey(o.name), (groups.get(nameKey(o.name)) ?? 0) + 1);
   const fits = new Set<string>();
   let left = room;
-  for (const [key, size] of groups)
+  // The viewer draws only a PDF, DOCX or XLSX original, so those fit first.
+  const drawn = [...groups].sort(
+    ([a], [b]) => Number(!originalFormat(a)) - Number(!originalFormat(b)),
+  );
+  for (const [key, size] of drawn)
     if (size <= left) {
       fits.add(key);
       left -= size;
