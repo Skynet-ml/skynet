@@ -677,6 +677,8 @@ def _claimed_worker(tmp_path: Path) -> tuple[BackgroundWorker, StepJobStore, int
     w._claimed_jobs.add(RUN)
     w._cancel_events[RUN] = cancel
     w._thread_current_job[0] = RUN
+    # A running worker, so a failed park restores the cancel event unset, as in production.
+    w._running = True
     return w, job_store, generation, cancel
 
 
@@ -693,14 +695,15 @@ def test_park_job_frees_the_claim_so_the_heartbeat_does_not_cancel_the_run(tmp_p
 
 def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
     """A worker that lost the generation does not park the run and keeps its claim for the heartbeat."""
-    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
 
     w._processing_jobs.add(RUN)
 
     assert not w.park_job(0, RUN, generation - 1, datetime.now(UTC))
     assert RUN in w._claimed_jobs
     assert RUN in w._processing_jobs
-    assert RUN in w._cancel_events
+    assert w._cancel_events[RUN] is cancel
+    assert not cancel.is_set()
     assert not w._parked_jobs
     assert job_store.get_job(RUN)["status"] == "running"
 
@@ -729,6 +732,7 @@ def test_a_park_that_raises_gives_the_worker_state_back(tmp_path: Path, monkeypa
     assert RUN in w._claimed_jobs
     assert RUN in w._processing_jobs
     assert w._cancel_events[RUN] is cancel
+    assert not cancel.is_set()
     assert not w._parked_jobs
     assert job_store.get_job(RUN)["status"] == "running"
 
@@ -849,7 +853,6 @@ def test_a_stop_during_a_failing_park_leaves_the_restored_event_set(
     """A stop that runs while the park is out of the maps still cancels the run once the undo restores it."""
     w, _, generation, cancel = _claimed_worker(tmp_path)
     w._processing_jobs.add(RUN)
-    w._running = True
 
     def stop_then_fail(*args: Any, **kwargs: Any) -> bool:
         """Stop the worker during the park, then report that the park failed.
@@ -960,6 +963,7 @@ def test_a_failed_park_keeps_the_cancel_event_of_a_claim_made_during_the_park(
     assert not w.park_job(0, RUN, generation, datetime.now(UTC))
     assert claimed == [RUN]
     assert w._cancel_events[RUN] is not old_cancel
+    assert not w._cancel_events[RUN].is_set()
     assert RUN in w._claimed_jobs
     assert RUN in w._processing_jobs
     assert not w._parked_jobs
