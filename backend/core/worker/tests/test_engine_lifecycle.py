@@ -843,6 +843,34 @@ def test_a_second_park_keeps_the_pair_so_a_later_claim_survives(tmp_path: Path) 
     assert not w._parked_jobs
 
 
+def test_a_stop_during_a_failing_park_leaves_the_restored_event_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that runs while the park is out of the maps still cancels the run once the undo restores it."""
+    w, _, generation, cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    w._running = True
+
+    def stop_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Stop the worker during the park, then report that the park failed.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        w.stop(timeout=0.1)
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", stop_then_fail)
+
+    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert w._cancel_events[RUN] is cancel
+    assert cancel.is_set()
+
+
 def test_mark_job_done_with_no_worker_id_honors_a_park(tmp_path: Path) -> None:
     """A cleanup with no worker id still treats a parked run as parked and leaves a later claim."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)

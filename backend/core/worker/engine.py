@@ -610,7 +610,13 @@ class BackgroundWorker:
                     self._processing_jobs.add(optimization_id)
                 # A claim made during the unlocked park owns the newer event; keep it so a cancel reaches that worker.
                 if cancel is not None:
-                    self._cancel_events.setdefault(optimization_id, cancel)
+                    restored = self._cancel_events.setdefault(optimization_id, cancel)
+                    # stop() clears _running before it sets the events under this lock, so a stop
+                    # during the park either sets the restored event itself or leaves _running False.
+                    # A user cancel in that window finds no event; the heartbeat's store poll
+                    # (_raise_if_store_cancelled) still stops the run.
+                    if not self._running:
+                        restored.set()
         if finished and was_claimed:
             try:
                 self._job_store.release_job(optimization_id, self._pod_name)
