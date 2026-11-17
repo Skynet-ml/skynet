@@ -9,10 +9,14 @@ request, before it goes to the model, and commits the commands that ran since
 the previous one, with the tree of that moment.
 
 Step contract: a command commits once. When a request answers new tool calls,
-the exec log lines of the same interval ran inside those calls (a model's
-Bash tool that runs a listed command), so only the ``tool_use`` steps commit
-and those lines are dropped. Exec log lines commit only for an interval with
-no new tool result.
+only the ``tool_use`` steps commit, and every exec log line of the same
+interval is dropped. Most of those lines ran inside the tool calls (a model's
+Bash tool that runs a listed command). A command the harness ran on its own in
+that interval is dropped too and never becomes a step: a known gap. Exec log
+lines commit only for an interval with no new tool result.
+
+The exec log is per session, and a session can serve many captures (one per
+turn). A capture reads only the lines written after it starts.
 
 The route key reaches the harness env, so tool output, exec records and
 workspace files can hold it. Every exact copy becomes ``KEY_TOKEN`` before a
@@ -42,6 +46,10 @@ from .harness_bridge import EXEC_LOG, EXEC_SHIM_DIR, KEY_TOKEN, SESSIONS_DIR, wo
 # and the exec log can hold the route key, and a restored exec log would commit
 # its old records again.
 _SESSION_LOGS = ("run-*.stdout", "run-*.stderr", EXEC_LOG, EXEC_SHIM_DIR)
+# The agent can write the exec log without limit; one read takes at most this much.
+_EXEC_READ_LIMIT = 8 << 20
+# Deeper folders are left out of a snapshot: the walk recurses and holds one descriptor per level.
+_MAX_DEPTH = 64
 
 
 class HarnessCapture:
@@ -71,7 +79,8 @@ class HarnessCapture:
             snapshot: Store the current workspace and session folder and
                 return the tree id (for example :func:`snapshot_session`).
             route_key: The key the harness routes with; step bodies never hold it.
-            exec_log: The session's exec shim log, when the launch records commands.
+            exec_log: The session's exec shim log, when the launch records
+                commands. The capture reads only what is written after it starts.
             seq: The agent's next step position.
         """
         self._step_log = step_log
@@ -82,7 +91,12 @@ class HarnessCapture:
         self._snapshot = snapshot
         self._route_key = route_key
         self._exec_log = exec_log
+        # Earlier turns of the session wrote the lines before this point, and their captures committed them.
         self._exec_offset = 0
+        opened = self._open_exec_log()
+        if opened is not None:
+            os.close(opened[0])
+            self._exec_offset = opened[1]
         self._seq = seq
         # A harness resends a request when the model call fails; its pairs are already steps.
         self._committed: set[str] = set()
@@ -149,17 +163,30 @@ class HarnessCapture:
         The agent can write the log, so a line that is not a well-formed
         record is skipped. A line with no newline yet is read next time.
         The caller moves the read position only after the commit, so a failed
-        snapshot reads the same lines again.
+        snapshot reads the same lines again. One call reads at most
+        ``_EXEC_READ_LIMIT`` bytes; a full read with no newline is skipped
+        whole, so one huge line cannot stop the log.
 
         Returns:
             One body for each well-formed new record, and the log position after them.
         """
-        if self._exec_log is None or not self._exec_log.exists():
+        opened = self._open_exec_log()
+        if opened is None:
             return [], self._exec_offset
-        with self._exec_log.open("rb") as handle:
-            handle.seek(self._exec_offset)
-            data = handle.read()
+        fd = opened[0]
+        try:
+            os.lseek(fd, self._exec_offset, os.SEEK_SET)
+            chunks: list[bytes] = []
+            size = 0
+            while size < _EXEC_READ_LIMIT and (chunk := os.read(fd, _EXEC_READ_LIMIT - size)):
+                chunks.append(chunk)
+                size += len(chunk)
+        finally:
+            os.close(fd)
+        data = b"".join(chunks)
         complete = data[: data.rfind(b"\n") + 1]
+        if not complete and size >= _EXEC_READ_LIMIT:
+            return [], self._exec_offset + size
         offset = self._exec_offset + len(complete)
         bodies = []
         for line in complete.splitlines():
@@ -182,6 +209,28 @@ class HarnessCapture:
                     }
                 )
         return bodies, offset
+
+    def _open_exec_log(self) -> tuple[int, int] | None:
+        """Open the exec log for reading, only when it is a regular file.
+
+        The agent can replace the log with a link (to ``/dev/zero`` or a host
+        file) or a pipe, so the open does not follow a link or wait for a writer.
+
+        Returns:
+            The open descriptor, which the caller closes, and the log size; or
+            ``None`` when there is no log or it is not a regular file.
+        """
+        if self._exec_log is None:
+            return None
+        try:
+            fd = os.open(self._exec_log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            return None
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            os.close(fd)
+            return None
+        return fd, info.st_size
 
 
 def _redact(value: Any, route_key: str) -> Any:
@@ -336,13 +385,19 @@ def _put_root(
     """
     folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        return _put_directory(trees, run_id, folder_fd, "", skip, route_key)
+        return _put_directory(trees, run_id, folder_fd, "", skip, route_key, 0)
     finally:
         os.close(folder_fd)
 
 
 def _put_directory(
-    trees: TreeStore, run_id: str, folder_fd: int, prefix: str, skip: Callable[[str], bool], route_key: str
+    trees: TreeStore,
+    run_id: str,
+    folder_fd: int,
+    prefix: str,
+    skip: Callable[[str], bool],
+    route_key: str,
+    depth: int,
 ) -> list[TreeEntry]:
     """Store every file, link and folder in an open folder and return its entries.
 
@@ -358,6 +413,8 @@ def _put_directory(
         prefix: The folder's root-relative POSIX path, with a trailing ``/``.
         skip: Tell whether a root-relative POSIX path is left out.
         route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
+        depth: The folder's depth below the root; its subfolders are left
+            out at ``_MAX_DEPTH``.
 
     Returns:
         The folder's tree entries. Sockets, pipes and devices are left out.
@@ -374,8 +431,8 @@ def _put_directory(
                 # readlink reads the link itself and never follows it.
                 target = _redact_bytes(os.fsencode(os.readlink(name, dir_fd=folder_fd)), route_key)
                 entries.append(TreeEntry(name, "symlink", trees.put_blob(run_id, target)))
-            elif stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode):
-                entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key)
+            elif (stat.S_ISDIR(info.st_mode) and depth < _MAX_DEPTH) or stat.S_ISREG(info.st_mode):
+                entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key, depth)
                 if entry is not None:
                     entries.append(entry)
         except OSError:
@@ -392,6 +449,7 @@ def _put_opened(
     info: os.stat_result,
     skip: Callable[[str], bool],
     route_key: str,
+    depth: int,
 ) -> TreeEntry | None:
     """Open one file or folder without following a link and store it, if it is still what ``lstat`` saw.
 
@@ -404,6 +462,7 @@ def _put_opened(
         info: The entry's ``lstat`` result.
         skip: Tell whether a root-relative POSIX path is left out.
         route_key: The key to redact.
+        depth: The parent's depth below the root.
 
     Returns:
         The entry, or ``None`` when the opened file is another file or type.
@@ -421,7 +480,9 @@ def _put_opened(
         ):
             return None
         if stat.S_ISDIR(opened.st_mode):
-            subtree = trees.put_tree(run_id, _put_directory(trees, run_id, fd, f"{prefix}{name}/", skip, route_key))
+            subtree = trees.put_tree(
+                run_id, _put_directory(trees, run_id, fd, f"{prefix}{name}/", skip, route_key, depth + 1)
+            )
             return TreeEntry(name, "tree", subtree)
         chunks = []
         while chunk := os.read(fd, 1 << 20):

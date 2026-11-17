@@ -1435,7 +1435,6 @@ def run_session(
     if exec_commands:
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
-        env["APP_EXEC_SHIM_DIR"] = str(shim_dir)
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
     for name, value in (
         ("MODEL", model),
@@ -1735,7 +1734,9 @@ def install_exec_shim(shim_dir: Path, names: Iterable[str], python: str) -> Path
         if name in ("", ".", "..") or "/" in name or "\0" in name:
             raise ValueError(f"exec shim command must be a plain name: {name!r}")
         wrapper = shim_dir / name
-        wrapper.write_text(f'#!/bin/sh\nexec {shlex.join([python, str(shim_file), name])} "$@"\n', encoding="utf-8")
+        wrapper.write_text(
+            f'#!/bin/sh\nexec {shlex.join([python, str(shim_file), str(shim_dir), name])} "$@"\n', encoding="utf-8"
+        )
         wrapper.chmod(0o755)
     return shim_dir
 

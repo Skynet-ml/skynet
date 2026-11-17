@@ -24,7 +24,6 @@ import threading
 from typing import BinaryIO
 
 LOG_ENV = "APP_EXEC_LOG"
-SHIM_DIR_ENV = "APP_EXEC_SHIM_DIR"
 # Set for the children of a recorded command, so a nested listed command is
 # part of its parent's record and is not logged a second time.
 ACTIVE_ENV = "APP_EXEC_SHIM_ACTIVE"
@@ -33,16 +32,18 @@ OUTPUT_LIMIT = 64 * 1024
 _NOT_FOUND = 127
 
 
-def _real_command(name: str) -> str | None:
+def _real_command(shim_dir: str, name: str) -> str | None:
     """Find the command that the shim stands in for.
 
     Args:
+        shim_dir: The wrapper folder. The wrapper line names it, so a child
+            env that drops the ``APP_*`` vars cannot make the shim run itself.
         name: The command name.
 
     Returns:
         The path of the first match on ``PATH`` outside the shim folder, or ``None``.
     """
-    shim_dir = os.path.realpath(os.environ.get(SHIM_DIR_ENV, ""))
+    shim_dir = os.path.realpath(shim_dir)
     path = os.pathsep.join(
         part for part in os.environ.get("PATH", "").split(os.pathsep) if part and os.path.realpath(part) != shim_dir
     )
@@ -138,14 +139,14 @@ def main(argv: list[str]) -> int:
     """Run one listed command, pass its output through and log it.
 
     Args:
-        argv: The command name, then its arguments.
+        argv: The shim folder, the command name, then its arguments.
 
     Returns:
         The command's exit code: 127 when it is not installed, 128 plus the
         signal number when a signal ended it.
     """
-    name, args = argv[0], argv[1:]
-    real = _real_command(name)
+    shim_dir, name, args = argv[0], argv[1], argv[2:]
+    real = _real_command(shim_dir, name)
     log = os.environ.get(LOG_ENV)
     if os.environ.get(ACTIVE_ENV) or not log:
         if real is None:

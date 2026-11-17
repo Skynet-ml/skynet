@@ -1634,10 +1634,19 @@ def _shim_env(tmp_path: Path, names: list[str], log: Path | None) -> dict[str, s
     shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", names, sys.executable)
     env = {key: value for key, value in os.environ.items() if key != "APP_EXEC_LOG"}
     env.update({"PATH": f"{shim_dir}{os.pathsep}{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"})
-    env["APP_EXEC_SHIM_DIR"] = str(shim_dir)
     if log is not None:
         env["APP_EXEC_LOG"] = str(log)
     return env
+
+
+def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_path: Path) -> None:
+    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself."""
+    _fake_tool(tmp_path / "bin", "probe", "echo real; exit 5")
+    env = {key: value for key, value in _shim_env(tmp_path, ["probe"], None).items() if not key.startswith("APP_")}
+
+    done = subprocess.run(["probe"], env=env, capture_output=True, cwd=tmp_path, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout) == (5, b"real\n")
 
 
 def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:

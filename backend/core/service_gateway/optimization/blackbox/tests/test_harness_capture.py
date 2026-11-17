@@ -23,7 +23,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 
-from .. import harness_bridge
+from .. import harness_bridge, harness_capture
 from ..harness_bridge import SESSIONS_DIR, install_shim
 from ..harness_capture import HarnessCapture, restore_session, snapshot_session
 
@@ -239,13 +239,13 @@ def test_exec_shim_records_become_steps_before_the_next_model_call(step_log, tmp
     workspace.mkdir()
     session_dir.mkdir()
     log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
     log.write_text(
         json.dumps({"command": "make test", "exit_code": 2, "stdout": "FAIL\n", "stderr": "boom\n"})
         + "\nnot json\n[1]\n"
         + json.dumps({"command": "ls", "exit_code": 0, "stdout": "a\n", "stderr": ""})
         + "\n"
     )
-    capture = _capture(step_log, workspace, session_dir, exec_log=log)
 
     steps = capture.observe({"model": "m1", "messages": [{"role": "user", "content": "go"}]})
     assert [step_log.get_step(step)["body"] for step in steps] == [
@@ -279,13 +279,13 @@ def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
         "exec_commands": ["probe"],
         "output_format": "plain",
     }
+    capture = _capture(
+        step_log, workspace, session_dir, proposer=proposer, exec_log=session_dir / harness_bridge.EXEC_LOG
+    )
     harness_bridge.run_session(
         proposer, workspace=workspace, prompt="go", model="m1", session_dir=session_dir, api_key=KEY
     )
     assert KEY in (workspace / "copy.toml").read_text()
-    capture = _capture(
-        step_log, workspace, session_dir, proposer=proposer, exec_log=session_dir / harness_bridge.EXEC_LOG
-    )
 
     [shim_step] = capture.observe({"model": "m1", "messages": [{"role": "user", "content": "go"}]})
     [tool_step] = capture.observe(_tool_round("t1", f"curl -H 'x-api-key: {KEY}'", f"APP_API_KEY={KEY}"))
@@ -310,12 +310,32 @@ def test_a_listed_command_inside_a_model_tool_call_commits_once(step_log, tmp_pa
     workspace.mkdir()
     session_dir.mkdir()
     log = session_dir / harness_bridge.EXEC_LOG
-    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "ok\n", "stderr": ""}) + "\n")
     capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "ok\n", "stderr": ""}) + "\n")
 
     [step] = capture.observe(_tool_round("t1", "make", "ok"))
 
     assert step_log.get_step(step)["body"]["source"] == "tool_use"
+    assert capture.finish() == []
+
+
+def test_a_command_the_harness_ran_on_its_own_next_to_a_tool_call_is_dropped(step_log, tmp_path) -> None:
+    """The known gap, on purpose: a request with a new tool result drops every exec record of its interval."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(
+        json.dumps({"command": "make", "exit_code": 0, "stdout": "ok\n", "stderr": ""})
+        + "\n"
+        + json.dumps({"command": "git status", "exit_code": 0, "stdout": "clean\n", "stderr": ""})
+        + "\n"
+    )
+
+    steps = capture.observe(_tool_round("t1", "make", "ok"))
+
+    assert [step_log.get_step(step)["body"]["source"] for step in steps] == ["tool_use"]
     assert capture.finish() == []
 
 
@@ -325,7 +345,6 @@ def test_a_failed_snapshot_keeps_the_exec_records_for_the_next_commit(step_log, 
     workspace.mkdir()
     session_dir.mkdir()
     log = session_dir / harness_bridge.EXEC_LOG
-    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "", "stderr": ""}) + "\n")
     trees = TreeStore(step_log)
     failures = [OSError("disk full")]
 
@@ -352,6 +371,7 @@ def test_a_failed_snapshot_keeps_the_exec_records_for_the_next_commit(step_log, 
         route_key=KEY,
         exec_log=log,
     )
+    log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "", "stderr": ""}) + "\n")
 
     with pytest.raises(OSError, match="disk full"):
         capture.finish()
@@ -365,8 +385,9 @@ def test_a_restored_session_does_not_commit_old_exec_records_again(step_log, tmp
     workspace.mkdir()
     session_dir.mkdir(parents=True)
     log = session_dir / harness_bridge.EXEC_LOG
+    first_capture = _capture(step_log, workspace, session_dir, exec_log=log)
     log.write_text(json.dumps({"command": "make", "exit_code": 0, "stdout": "", "stderr": ""}) + "\n")
-    [first] = _capture(step_log, workspace, session_dir, exec_log=log).finish()
+    [first] = first_capture.finish()
     tree_id = step_log.get_step(first)["tree_id"]
 
     new_home, new_workspace = tmp_path / "home-2", tmp_path / "work-2"
@@ -375,6 +396,117 @@ def test_a_restored_session_does_not_commit_old_exec_records_again(step_log, tmp
     capture = _capture(step_log, new_workspace, new_session, exec_log=new_session / harness_bridge.EXEC_LOG, seq=1)
 
     assert capture.finish() == []
+
+
+def _record(command: str) -> str:
+    """Build one exec log line.
+
+    Args:
+        command: The command line.
+
+    Returns:
+        The JSON line, with its newline.
+    """
+    return json.dumps({"command": command, "exit_code": 0, "stdout": "", "stderr": ""}) + "\n"
+
+
+def test_a_capture_for_a_follow_up_turn_does_not_commit_the_earlier_turns_records(step_log, tmp_path) -> None:
+    """The exec log is per session; a new capture on the same session folder reads only the lines after its start."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    first = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text(_record("make"))
+    assert len(first.finish()) == 1
+
+    second = _capture(step_log, workspace, session_dir, exec_log=log, seq=1)
+    with log.open("a") as handle:
+        handle.write(_record("ls"))
+
+    [step] = second.finish()
+    assert step_log.get_step(step)["body"]["command"] == "ls"
+
+
+@pytest.mark.parametrize("to_device", [False, True])
+def test_an_exec_log_replaced_by_a_link_is_not_read(step_log, tmp_path, to_device) -> None:
+    """The agent can point the log at a host file or at ``/dev/zero``; the capture reads neither."""
+    workspace, session_dir, target = tmp_path / "work", tmp_path / "session", tmp_path / "host-log"
+    workspace.mkdir()
+    session_dir.mkdir()
+    target.write_text("")
+    log = session_dir / harness_bridge.EXEC_LOG
+    log.symlink_to("/dev/zero" if to_device else target)
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    target.write_text(_record("cat host-secret"))
+
+    assert capture.finish() == []
+
+
+def test_an_exec_log_replaced_by_a_pipe_does_not_hang_the_capture(step_log, tmp_path) -> None:
+    """A FIFO log with no writer is opened without blocking and read as empty."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    os.mkfifo(log)
+    result: list[list[str]] = []
+    worker = threading.Thread(
+        target=lambda: result.append(_capture(step_log, workspace, session_dir, exec_log=log).finish()), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=10)
+    try:
+        assert not worker.is_alive()
+    finally:
+        if worker.is_alive():
+            # A writer ends the blocked open, so the thread does not outlive the test.
+            with contextlib.suppress(OSError):
+                os.close(os.open(log, os.O_WRONLY | os.O_NONBLOCK))
+    assert result == [[]]
+
+
+def test_one_read_of_the_exec_log_takes_at_most_the_limit(step_log, tmp_path, monkeypatch) -> None:
+    """A large log commits over several calls, and a line longer than the limit is skipped whole."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    make, ls = _record("make"), _record("ls")
+    limit = len(make) + 5
+    monkeypatch.setattr(harness_capture, "_EXEC_READ_LIMIT", limit)
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    log.write_text("x" * limit + "\n" + make + ls)
+
+    assert capture.finish() == []
+    [first] = capture.finish()
+    [second] = capture.finish()
+    assert capture.finish() == []
+    assert [step_log.get_step(step)["body"]["command"] for step in (first, second)] == ["make", "ls"]
+
+
+def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> None:
+    """A tree deeper than the recursion limit does not break the snapshot; folders below the limit are left out."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    # Build by descriptor: the full path is longer than PATH_MAX.
+    fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(600):
+            os.close(os.open("f", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd))
+            os.mkdir("d", dir_fd=fd)
+            child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    finally:
+        os.close(fd)
+    trees = TreeStore(step_log)
+
+    files = _tree_files(trees, _snapshot(trees, workspace, session_dir))
+
+    assert max(path.count("/") for path in files) == harness_capture._MAX_DEPTH
+    assert "f" in files
 
 
 def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log, tmp_path) -> None:
