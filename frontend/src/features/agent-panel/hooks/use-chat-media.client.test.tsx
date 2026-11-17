@@ -613,6 +613,24 @@ void test("dropPaired drops a key's originals when a failed upload left fewer th
   await unmount();
 });
 
+void test("dropPaired keeps the original of a file that the leaving card's draft does not show yet", async () => {
+  const { draft, unmount } = await mountDraft();
+  await React.act(async () => void draft().addOriginals([pdf("a.pdf")]));
+  await flush();
+  // b.pdf came in after the last render, so the draft that dropPaired gets lacks it.
+  await React.act(async () => void draft().addOriginals([pdf("b.pdf")]));
+  await flush();
+  const before = deleted.length;
+  const [first, late] = documents(draft().ready()).map((m) => m.id);
+  await React.act(async () => draft().dropPaired([{ name: "a.pdf" }], new Set([0])));
+  assert.deepEqual(
+    documents(draft().ready()).map((m) => m.id),
+    [late],
+  );
+  assert.deepEqual(deleted.slice(before), [first]);
+  await unmount();
+});
+
 /** Run ``body`` with URL.revokeObjectURL recording the URLs it frees. */
 async function recordingRevokes(body: (revoked: string[]) => Promise<void>) {
   const revoked: string[] = [];

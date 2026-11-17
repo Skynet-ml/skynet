@@ -264,22 +264,35 @@ export function useChatMedia(): ChatMediaDraft {
   );
   const addOriginals = React.useCallback((files: File[]) => keepFiles(files, false), [keepFiles]);
 
-  const keepOriginals = React.useCallback(
-    (files: ReadonlyArray<{ name: string }>) => {
+  // Only the keys in ``only`` change, when it is given.
+  const keepKeys = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>, only?: ReadonlySet<string>) => {
+      const inScope = (name: string) => !only || only.has(nameKey(name));
       // An original a restore still loads counts as one the key holds. Else a
       // same-name file added meanwhile drops both originals.
+      const first = new Map<string, { name: string }>();
       const loading = [...loadingRef.current].flatMap(([key, places]) =>
-        places.map(() => ({ name: key })),
+        inScope(key)
+          ? places.map((_, i) => {
+              const late = { name: key };
+              if (!i) first.set(key, late);
+              return late;
+            })
+          : [],
       );
+      const scoped = originalsRef.current.filter((o) => inScope(o.name));
       const kept = new Set<{ name: string }>(
-        keptOriginals(files, [...loading, ...originalsRef.current]),
+        keptOriginals(
+          files.filter((f) => inScope(f.name)),
+          [...loading, ...scoped],
+        ),
       );
-      for (const key of loadingRef.current.keys()) {
-        if (!kept.has(loading.find((l) => l.name === key)!)) loadingRef.current.delete(key);
+      for (const [key, late] of first) {
+        if (!kept.has(late)) loadingRef.current.delete(key);
       }
-      const gone = originalsRef.current.filter((o) => !kept.has(o));
+      const gone = scoped.filter((o) => !kept.has(o));
       if (!gone.length) return;
-      syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
+      syncOriginals(originalsRef.current.filter((o) => !gone.includes(o)));
       for (const o of gone) {
         unshownRef.current.push(o.shown.url);
         if (o.serverId) void deleteChatMedia(o.serverId);
@@ -287,22 +300,28 @@ export function useChatMedia(): ChatMediaDraft {
     },
     [syncOriginals],
   );
+  const keepOriginals = React.useCallback(
+    (files: ReadonlyArray<{ name: string }>) => keepKeys(files),
+    [keepKeys],
+  );
 
   const dropPaired = React.useCallback(
     (files: ReadonlyArray<{ name: string }>, leaving: ReadonlySet<number>) => {
       // A failed upload leaves its key with fewer originals than files, so the
       // places would not line up: such a key drops all its originals first.
-      keepOriginals(files);
-      for (const [key, places] of pairedPlaces(files, leaving)) {
+      // Only the leaving keys: the files come from the last render, so a file
+      // added since then has an original but no block here.
+      const paired = pairedPlaces(files, leaving);
+      keepKeys(files, new Set(paired.keys()));
+      for (const [key, places] of paired) {
         // The restore's originals that still load come first in the key's pairs.
         const loading = loadingRef.current.get(key) ?? [];
         const loaded = originalsRef.current.filter((o) => nameKey(o.name) === key);
         const late = new Set(places.filter((p) => p < loading.length).map((p) => loading[p]));
         if (late.size) {
-          loadingRef.current.set(
-            key,
-            loading.filter((p) => !late.has(p)),
-          );
+          const left = loading.filter((p) => !late.has(p));
+          if (left.length) loadingRef.current.set(key, left);
+          else loadingRef.current.delete(key);
         }
         const gone = places.flatMap((p) => loaded[p - loading.length] ?? []);
         if (!gone.length) continue;
@@ -313,7 +332,7 @@ export function useChatMedia(): ChatMediaDraft {
         }
       }
     },
-    [keepOriginals, syncOriginals],
+    [keepKeys, syncOriginals],
   );
 
   const remove = React.useCallback(

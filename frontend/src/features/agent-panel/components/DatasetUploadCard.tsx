@@ -11,7 +11,7 @@ import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-data
 
 import { attachedFile, splitPastes, type AttachedFile } from "@/shared/ui/agent/pasted-text";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
-import { draftHasChip, putDatasetChip } from "../lib/dataset-chip";
+import { draftHasChip, putDatasetChip, sameFile } from "../lib/dataset-chip";
 import type { WizardState } from "../lib/types";
 import type { ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 
@@ -268,13 +268,13 @@ export function useDatasetDraft({
     (next: DraftDataset) => {
       const earlier = pendingRef.current;
       // The cards putDatasetChip takes out: the earlier card and each same
-      // card, such as one a fork restored. A tool card's click runs after the
-      // last render, so this draft is the one putDatasetChip changes.
+      // card, such as one a fork restored. This draft is the last render's;
+      // dropPaired changes only the leaving cards' keys, so a file added
+      // since then keeps its original.
       const files = splitPastes(draft).files;
-      const same = (a: AttachedFile, b: AttachedFile) => a.name === b.name && a.text === b.text;
       const leaving = new Set(
         files.flatMap((f, i) =>
-          same(f, next.chip) || (earlier && same(f, earlier.chip)) ? [i] : [],
+          sameFile(f, next.chip) || (earlier && sameFile(f, earlier.chip)) ? [i] : [],
         ),
       );
       if (leaving.size) onLeaveRef.current?.(files, leaving);
