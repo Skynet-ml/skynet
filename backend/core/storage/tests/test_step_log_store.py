@@ -23,7 +23,14 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from core.config import Settings, app_env, settings
-from core.storage.models import AgentStepModel, Base, JobModel, StoragePackModel, TreeObjectModel
+from core.storage.models import (
+    AgentConversationModel,
+    AgentStepModel,
+    Base,
+    JobModel,
+    StoragePackModel,
+    TreeObjectModel,
+)
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
 from core.storage.step_log_store import StepFenceError, StepLogStore
 
@@ -1182,13 +1189,12 @@ def postgres_engine() -> Iterator[Engine]:
     admin = create_engine(TEST_DB_URL)
     with admin.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema},public"})
+    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"})
     try:
-        # ``public`` is on the path so the ``jobs.conversation_id`` foreign key finds ``agent_conversations``, which
-        # only ``public`` has; a check would find our tables there and skip creating them here.
         Base.metadata.create_all(
             engine,
             tables=[
+                AgentConversationModel.__table__,
                 JobModel.__table__,
                 AgentStepModel.__table__,
                 StoragePackModel.__table__,

@@ -1553,7 +1553,7 @@ class AgentStepModel(Base):
     # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
     step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
     run_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False, index=True
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False
     )
     agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1582,7 +1582,7 @@ class TreeObjectModel(Base):
     __tablename__ = "tree_objects"
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
-    object_id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    object_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     pack_key: Mapped[str] = mapped_column(String(512), nullable=False)
     pack_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)

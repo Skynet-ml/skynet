@@ -71,7 +71,6 @@ def upgrade() -> None:
         sa.Column("pack_length", sa.BigInteger(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=_now()),
     )
-    op.create_index("ix_agent_steps_run_id", "agent_steps", ["run_id"])
     op.create_index("ux_agent_steps_run_agent_seq", "agent_steps", ["run_id", "agent_id", "seq"], unique=True)
     op.create_table(
         "tree_objects",
@@ -83,7 +82,6 @@ def upgrade() -> None:
         sa.Column("pack_length", sa.BigInteger(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=_now()),
     )
-    op.create_index("ix_tree_objects_object_id", "tree_objects", ["object_id"])
     op.create_table(
         "agent_effects",
         sa.Column(
