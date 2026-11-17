@@ -15,6 +15,7 @@ void it("ChatTranscript render tests pass", () => {
       encoding: "utf8",
       env: {
         ...process.env,
+        NODE_TEST_CONTEXT: undefined,
         JITI_JSX: "1",
         JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
       },
