@@ -34,6 +34,7 @@ from core.error_reporting import configure_error_reporting
 from core.notifications import configure_notification_preferences
 from core.service_gateway.embedding_pipeline import start_embedding_index_sweeper
 from core.storage import get_job_store
+from core.storage.tree_compactor import start_tree_compactor
 from core.worker.engine import get_worker
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -58,6 +59,9 @@ def run_worker() -> None:
     ]
     if settings.embeddings_enabled:
         sweepers.append(start_embedding_index_sweeper(job_store))
+    tree_compactor = start_tree_compactor(job_store.engine)
+    if tree_compactor is not None:
+        sweepers.append(tree_compactor)
     if pending_ids:
         logger.info("Re-queued %d pending jobs from previous run (local hint)", len(pending_ids))
 
