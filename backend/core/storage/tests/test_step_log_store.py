@@ -506,6 +506,115 @@ def test_a_pack_that_another_store_applied_fences_a_stale_retry_of_a_landed_step
     assert _step_rows(engine) == 1
 
 
+def test_durable_keeps_the_fence_verdict_when_the_step_is_committed_again(make_store, engine) -> None:
+    """A retry of a fenced step between the flush and ``durable``'s verdict read does not make ``durable`` succeed."""
+    store = make_store()
+    step_id = _commit(store)
+    waiter = store._waiters[(step_id, 1)]
+    wait = waiter.wait
+
+    def wait_then_commit_again(timeout: float | None = None) -> bool:
+        """Wait for the flush, then commit as the agent thread can before ``durable`` reads its verdict.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            Whether the flush set the waiter.
+        """
+        done = wait(timeout)
+        with pytest.raises(StepFenceError):
+            _commit(store, seq=2)
+        _commit(store)
+        return done
+
+    waiter.wait = wait_then_commit_again
+    _set_generation(engine, 2)
+    flusher = threading.Thread(target=store.flush)
+    flusher.start()
+    try:
+        store.durable(step_id, 1, timeout=5)
+    except StepFenceError:
+        pass
+    else:
+        pytest.fail("durable returned success for a fenced step")
+    finally:
+        flusher.join()
+
+
+def test_tree_objects_are_inserted_in_sorted_key_order(make_store, engine) -> None:
+    """Objects put in reverse id order reach the ``tree_objects`` insert sorted, so every flush locks them in one order."""
+    ids = [letter * 64 for letter in "fedcb"]
+    inserted: list[list[str]] = []
+
+    def capture_tree_insert(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Record the object ids of each ``tree_objects`` insert, in parameter order.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        if statement.startswith("INSERT INTO tree_objects"):
+            inserted.append([value for value in parameters if value in ids])
+
+    store = make_store()
+    for object_id in ids:
+        store.put_object("job-1", object_id, b"blob\0" + object_id.encode())
+    event.listen(engine, "before_cursor_execute", capture_tree_insert)
+    try:
+        store.flush()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_tree_insert)
+
+    assert inserted == [sorted(ids)]
+
+
+def test_recover_counts_only_the_packs_it_applied(make_store, engine, objects, monkeypatch) -> None:
+    """A pack that another store of the same worker applies while recovery reads it is not counted."""
+    store = make_store()
+    recovering = make_store()
+    other = make_store()
+    step_id = _commit(store)
+    put, get = objects.put, objects.get
+
+    def get_after_the_other_store_applies(key: str, *location: Any) -> bytes:
+        """Let the other store apply the pack first, then read the object.
+
+        Args:
+            key: The object key.
+            *location: The offset and length.
+
+        Returns:
+            The object bytes.
+        """
+        monkeypatch.setattr(objects, "get", get)
+        assert other.recover() == 1
+        return get(key, *location)
+
+    def put_then_recover(key: str, data: bytes) -> None:
+        """Write the pack, then recover it before this flush's transaction.
+
+        Args:
+            key: The object key.
+            data: The object bytes.
+        """
+        put(key, data)
+        monkeypatch.setattr(objects, "get", get_after_the_other_store_applies)
+        assert recovering.recover() == 0
+
+    monkeypatch.setattr(objects, "put", put_then_recover)
+    store.flush()
+
+    store.durable(step_id, 1, timeout=0)
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(StoragePackModel)) == 1
+    assert _step_rows(engine) == 1
+
+
 def test_a_failed_database_write_retries_once_per_window(make_store, engine, objects) -> None:
     """New commits after a failed flush do not start a retry early, so each window costs at most one pack PUT."""
     database_down = threading.Event()

@@ -151,6 +151,13 @@ class _Object:
     object_id: str
 
 
+class _Waiter(threading.Event):
+    """The durable barrier of one buffered step, with the fence verdict that its flush sets before it opens."""
+
+    # On the waiter, not only in a dict by key: a retry of the same key can replace the dict entry first.
+    failure: StepFenceError | None = None
+
+
 def _encode_body(body: dict[str, Any]) -> bytes:
     """Return the canonical JSON bytes of a step body.
 
@@ -246,7 +253,8 @@ class StepLogStore:
         # Keyed by run, so an unflushed object never reaches another account and each owner counts its own bytes.
         self._tree_objects: dict[tuple[str, str], bytes] = {}
         # Keyed by step id and generation: two generations of one step id get their own verdicts.
-        self._waiters: dict[tuple[str, int], threading.Event] = {}
+        self._waiters: dict[tuple[str, int], _Waiter] = {}
+        # For a ``durable`` call that comes after the flush removed the step's waiter.
         self._failures: dict[tuple[str, int], StepFenceError] = {}
         # Keyed by generation too, so a fenced old incarnation does not fail the resumed run's first commit.
         self._agent_failures: dict[tuple[str, str, int], StepFenceError] = {}
@@ -327,7 +335,7 @@ class StepLogStore:
             # A new commit of a fenced step at the same generation gets a new verdict at its own flush.
             self._failures.pop(key, None)
             versions[execution_generation] = (step, data)
-            self._waiters[key] = threading.Event()
+            self._waiters[key] = _Waiter()
             self._buffer(step, data)
         return step_id
 
@@ -392,12 +400,11 @@ class StepLogStore:
         key = (step_id, execution_generation)
         with self._cond:
             failure = self._failures.get(key)
-            event = self._waiters.get(key)
-        if failure is None and event is not None:
-            if not event.wait(timeout):
+            waiter = self._waiters.get(key)
+        if failure is None and waiter is not None:
+            if not waiter.wait(timeout):
                 raise TimeoutError(f"step {step_id} is not durable yet")
-            with self._cond:
-                failure = self._failures.get(key)
+            failure = waiter.failure
         elif failure is None:
             with Session(self._engine) as session:
                 row = session.get(AgentStepModel, step_id)
@@ -485,7 +492,7 @@ class StepLogStore:
                 pack, manifest = _build_pack(self._worker_id, batch)
                 key = f"{PACK_PREFIX}/{self._worker_id}/{time.time_ns():020d}-{uuid4().hex}.pack"
                 self._objects.put(key, pack)
-                stale = self._apply(key, len(pack), manifest)
+                _, stale = self._apply(key, len(pack), manifest)
             except Exception:
                 with self._cond:
                     self._pending = batch + self._pending
@@ -506,8 +513,10 @@ class StepLogStore:
                         versions.pop(item.execution_generation, None)
                         if not versions:
                             del self._steps[item.step_id]
-                    waiter = self._waiters.pop((item.step_id, item.execution_generation), None)
+                    step_key = (item.step_id, item.execution_generation)
+                    waiter = self._waiters.pop(step_key, None)
                     if waiter is not None:
+                        waiter.failure = self._failures.get(step_key)
                         waiter.set()
 
     def recover(self) -> int:
@@ -517,7 +526,8 @@ class StepLogStore:
         generation is current.
 
         Returns:
-            The number of packs applied.
+            The number of packs that this call applied; a pack that another
+            store applied first does not count.
         """
         with self._flush_lock:
             with Session(self._engine) as session:
@@ -531,8 +541,8 @@ class StepLogStore:
                 if key in recorded:
                     continue
                 pack = self._objects.get(key)
-                self._apply(key, len(pack), _read_manifest(pack))
-                applied += 1
+                claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
+                applied += claimed
             return applied
 
     def close(self) -> None:
@@ -543,7 +553,7 @@ class StepLogStore:
         self._thread.join()
         self.flush()
 
-    def _apply(self, pack_key: str, byte_size: int, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    def _apply(self, pack_key: str, byte_size: int, manifest: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
         """Record one pack's steps and objects in one transaction, behind the fence.
 
         The ``storage_packs`` row makes the apply happen once: a second apply
@@ -559,15 +569,16 @@ class StepLogStore:
             manifest: The pack's manifest.
 
         Returns:
-            The manifest entries of the steps that failed the fence, here or
-            in the store that applied the pack first.
+            Whether this call claimed and applied the pack, and the manifest
+            entries of the steps that failed the fence, here or in the store
+            that applied the pack first.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
         steps, objects = manifest["steps"], manifest["objects"]
         run_ids = sorted({entry["run_id"] for entry in steps + objects})
         with Session(self._engine) as session:
-            # A fixed lock order keeps two workers' flushes from deadlocking.
+            # One order of the ``jobs`` row locks keeps two flushes of the same runs from deadlocking.
             jobs = {
                 row.optimization_id: row
                 for row in session.execute(
@@ -595,7 +606,7 @@ class StepLogStore:
             if not claimed:
                 session.rollback()
                 # The store that applied this pack inserted every current step that had no row.
-                return stale + fresh
+                return False, stale + fresh
             if fresh:
                 session.execute(
                     insert(AgentStepModel)
@@ -619,6 +630,7 @@ class StepLogStore:
                 if entry["run_id"] in jobs
             }
             if owned:
+                # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
                 session.execute(
                     insert(TreeObjectModel)
                     .values(
@@ -632,13 +644,13 @@ class StepLogStore:
                                 "pack_length": entry["length"],
                                 "created_at": now,
                             }
-                            for (username, object_id), entry in owned.items()
+                            for (username, object_id), entry in sorted(owned.items())
                         ]
                     )
                     .on_conflict_do_nothing()
                 )
             session.commit()
-        return stale
+        return True, stale
 
     def _due(self) -> bool:
         """Return whether the pending batch must flush now; the caller holds the lock."""
