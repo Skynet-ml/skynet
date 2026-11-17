@@ -293,6 +293,7 @@ void test("a composer attach shows one loading toast until the newest read ends"
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  let remount: ReturnType<typeof createRoot> | null = null;
   try {
     await React.act(async () => root.render(<Probe chat="a" />));
 
@@ -321,6 +322,13 @@ void test("a composer attach shows one loading toast until the newest read ends"
     assert.equal(shown.size, 1, "a pick in the new chat shows a toast");
     await React.act(async () => root.unmount());
     assert.equal(shown.size, 0, "an unmount closes the toast");
+
+    // A shell swap remounts the panel while the old toast still closes.
+    remount = createRoot(container);
+    await React.act(async () => remount?.render(<Probe chat="b" />));
+    attach(slow);
+    assert.equal(shown.size, 1, "a pick after a remount shows a new toast");
+    await React.act(async () => remount?.unmount());
   } finally {
     Object.assign(toast, saved);
     container.remove();

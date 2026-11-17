@@ -78598,7 +78598,7 @@ const ui_zh_Hans: Partial<Record<MessageKey, string>> = {
   "agent.edited_files.show_more": "{count, plural, other {再显示 # 个文件}}",
   "agent.error.capacity": "模型当前繁忙。",
   "agent.error.context_too_long": "对话长度已超出模型的上下文窗口限制——请开启新对话或缩短消息内容",
-  "agent.error.insufficient_funds": "您的可用余额过低。正在进行的运行可能会预留部分余额。",
+  "agent.error.insufficient_funds": "你的可用余额过低。正在进行的运行可能会预留部分余额。",
   "agent.fork.failed": "无法分支此对话。请重试。",
   "agent.fork.in_history": "分支已保存。请从聊天记录中打开它。",
   "agent.generalist.first_placeholder": "询问你的优化、运行或设置…",

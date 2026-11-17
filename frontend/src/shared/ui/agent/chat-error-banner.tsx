@@ -41,15 +41,9 @@ export function ChatErrorBanner({
       )}
     >
       <XCircle className="size-3.5 shrink-0 text-[var(--danger)]" aria-hidden="true" />
-      {/* An action keeps the message on one line; narrow panes truncate it and
-          the title keeps the full text. */}
       <p
-        className={cn(
-          "min-w-0 flex-1 text-xs leading-[1.45] text-foreground/85",
-          action ? "truncate" : "max-h-32 overflow-y-auto break-words text-pretty",
-        )}
+        className="max-h-32 min-w-0 flex-1 overflow-y-auto break-words text-pretty text-xs leading-[1.45] text-foreground/85"
         dir="auto"
-        title={action && typeof message === "string" ? message : undefined}
       >
         {message}
       </p>

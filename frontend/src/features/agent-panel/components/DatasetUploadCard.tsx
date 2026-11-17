@@ -408,6 +408,12 @@ export function useLatestDatasetRead(
   }, []);
 }
 
+// A dismissed toast stays in the container until its exit ends, and
+// react-toastify drops a new toast with the same id meanwhile. So each loading
+// toast gets its own id. The counter is module-level so a remounted panel
+// (a desktop/mobile shell swap) does not reuse an id that is still closing.
+let composerToastCount = 0;
+
 /**
  * Read dataset files attached from the composer, with a toast while they read.
  *
@@ -425,10 +431,6 @@ export function useComposerDatasetAttach(
   resetKey: unknown,
   onRead: (confirmed: ConfirmedDataset, file: File) => void,
 ): (file: File) => void {
-  // A dismissed toast stays in the container until its exit ends, and
-  // react-toastify drops a new toast with the same id meanwhile. So each
-  // loading toast gets its own id.
-  const toastCount = React.useRef(0);
   const toastId = React.useRef<string | null>(null);
   const dismiss = React.useCallback(() => {
     if (toastId.current) toast.dismiss(toastId.current);
@@ -452,7 +454,7 @@ export function useComposerDatasetAttach(
   return React.useCallback(
     (file: File) => {
       if (!toastId.current) {
-        toastId.current = `composer-dataset-read-${++toastCount.current}`;
+        toastId.current = `composer-dataset-read-${++composerToastCount}`;
         toast.loading(msg("auto.features.agent.panel.components.datasetuploadcard.parsing"), {
           toastId: toastId.current,
         });

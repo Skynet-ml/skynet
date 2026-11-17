@@ -24,14 +24,15 @@ function messageTag(html: string): string {
 }
 
 void describe("ChatErrorBanner", () => {
-  void it("keeps the message on one line with the action at the end of the same row", () => {
+  void it("wraps the full message with the action at the end of the same row", () => {
     const html = renderToStaticMarkup(
       <ChatErrorBanner message={BALANCE} action={<button type="button">{ADD_FUNDS}</button>} />,
     );
     const p = messageTag(html);
-    assert.match(p, /\btruncate\b/);
-    assert.doesNotMatch(p, /break-words/);
-    assert.ok(p.includes(`title="${BALANCE}"`), p);
+    // A touch screen shows no title, so the message wraps instead of truncating.
+    assert.match(p, /break-words/);
+    assert.doesNotMatch(p, /\btruncate\b/);
+    assert.doesNotMatch(p, /title=/);
     // One rectangular row: the action follows the message inside the banner (SKY-783).
     assert.match(html, /^<div role="alert" class="flex [^"]*\brounded-md\b/);
     assert.match(html, /<\/p><button type="button">Add funds<\/button><\/div>$/);
