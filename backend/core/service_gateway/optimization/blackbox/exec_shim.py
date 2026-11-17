@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 LOG_ENV = "APP_EXEC_LOG"
 # Set for the children of a recorded command, so a nested listed command is
@@ -74,7 +75,10 @@ def _real_command(shim_dir: str, name: str) -> str | None:
     path = os.pathsep.join(
         part for part in os.environ.get("PATH", "").split(os.pathsep) if os.path.realpath(part) != shim_dir
     )
-    return shutil.which(name, path=path)
+    found = shutil.which(name, path=path)
+    # An empty entry gives a bare name. Popen would search PATH for it again
+    # and start the shim's own wrapper, which leads PATH, a second time.
+    return str(Path(found).absolute()) if found else None
 
 
 def _pump(source: io.BufferedReader, sink: int, tail: bytearray) -> None:

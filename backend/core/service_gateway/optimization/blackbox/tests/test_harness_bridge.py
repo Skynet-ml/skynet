@@ -1657,25 +1657,22 @@ def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_pa
 def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_entry(
     tmp_path: Path, logged: bool
 ) -> None:
-    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too."""
+    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once."""
     _fake_tool(tmp_path / "here", "probe", "echo real; exit 5")
     shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
+    # The wrapper counts its runs: a bare-name match would make Popen find the wrapper on PATH again.
+    calls, wrapper = tmp_path / "calls", shim_dir / "probe"
+    wrapper.write_text(wrapper.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\necho x >> {shlex.quote(str(calls))}\n"))
     log = tmp_path / "exec.jsonl"
     env = {key: value for key, value in os.environ.items() if not key.startswith("APP_")}
-    env["PATH"] = f"{os.pathsep}{os.environ['PATH']}"
+    env["PATH"] = f"{shim_dir}{os.pathsep}{os.pathsep}{os.environ['PATH']}"
     if logged:
         env["APP_EXEC_LOG"] = str(log)
 
-    done = subprocess.run(
-        [sys.executable, "-I", exec_shim.__file__, str(shim_dir), "probe"],
-        env=env,
-        cwd=tmp_path / "here",
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
+    done = subprocess.run(["probe"], env=env, cwd=tmp_path / "here", capture_output=True, timeout=10, check=False)
 
     assert (done.returncode, done.stdout, done.stderr) == (5, b"real\n", b"")
+    assert calls.read_text() == "x\n"
     if logged:
         [record] = [json.loads(line) for line in log.read_text().splitlines()]
         assert (record["command"], record["exit_code"]) == ("probe", 5)
