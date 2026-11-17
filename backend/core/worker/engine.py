@@ -128,7 +128,7 @@ from .repo_staging import (
     publish_improvement,
     stage_repository,
 )
-from .step_recovery import park_committed, park_run
+from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
 from .vercel_dspy import run_vercel_dspy
@@ -552,14 +552,19 @@ class BackgroundWorker:
             wake_at: When the orphan sweep makes the run claimable again.
 
         Returns:
-            Whether the run was parked; ``False`` when the worker does not
-            process the run, when this worker already parked the run, or
-            when another owner changed the run first.
-            When the park fails or raises, the worker state comes back. A
-            park that commits and then raises counts as parked: it logs the
-            error and returns ``True``. If
-            the worker finished the run during a failed park, the claim is
-            released and no state comes back.
+            ``True`` when the run left this worker, so the worker must stop
+            work on it. That is a park that succeeds, and also a park that
+            raises when this worker no longer owns the run or cannot read
+            whether it does; it logs the error. ``False`` when the worker
+            does not process the run, when this worker already parked the
+            run, or when another owner changed the run first; the worker
+            state then comes back. If the worker finished the run during a
+            failed park, the claim is released and no state comes back.
+
+        Raises:
+            Exception: The park's error, when the park raises and the run is
+                still validating or running at ``generation``. The worker
+                state then comes back.
         """
         pair = (worker_id, optimization_id)
         # The maps change before the park, so a thread that claims the woken run
@@ -583,15 +588,19 @@ class BackgroundWorker:
             # the maps are already clear, and a park that succeeds clears the lease itself.
             parked = park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at)
         except Exception:
-            # A park can commit and then raise. Restoring the maps then would let this thread's
-            # _mark_job_done release a later claim's lease, so a committed park counts as parked.
+            # A park can commit and raise, and the run can then wake and be claimed again before
+            # this read. Only a run still at this worker's generation gets its state back; in any
+            # other case a restore would let this thread's _mark_job_done release a later claim's
+            # lease. The pair stays, and a lease of this generation that nobody renews expires.
             try:
-                parked = park_committed(self._job_store.engine, optimization_id, generation)
+                owns = still_owns_run(self._job_store.engine, optimization_id, generation)
             except Exception:
-                logger.exception("Could not read whether the park of %s committed", optimization_id)
-            if not parked:
+                logger.exception("Could not read whether this worker still owns %s", optimization_id)
+                owns = False
+            if owns:
                 raise
-            logger.exception("park_run raised after its commit for %s; the run is parked", optimization_id)
+            parked = True
+            logger.exception("park_run raised for %s and this worker no longer owns the run", optimization_id)
         finally:
             if not parked:
                 self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)

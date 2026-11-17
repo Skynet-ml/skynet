@@ -32,7 +32,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
 from core.storage.step_log_store import StepFenceError, StepLogStore
 from core.worker.checkpoint_compat import checkpoint_manifest
-from core.worker.step_recovery import last_committed_step, open_step_log, park_run
+from core.worker.step_recovery import last_committed_step, open_step_log, park_run, still_owns_run
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 TREE = "c" * 64
@@ -415,6 +415,33 @@ def test_park_run_refuses_a_stale_generation(store: StepJobStore) -> None:
 
     assert not park_run(store.engine, RUN, expected_generation=generation - 1, wake_at=datetime.now(UTC))
     assert store.get_job(RUN)["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    ("status", "offset", "owns"),
+    [
+        ("running", 0, True),
+        ("validating", 0, True),
+        ("paused", 1, False),
+        ("pending", 2, False),
+        ("running", 3, False),
+    ],
+)
+def test_still_owns_run_is_true_only_for_an_active_run_at_the_owned_generation(
+    store: StepJobStore, status: str, offset: int, owns: bool
+) -> None:
+    """Only a run still active at the owned generation belongs to the worker; a parked, woken or reclaimed run does not."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    with Session(store.engine) as session:
+        session.execute(
+            update(JobModel)
+            .where(JobModel.optimization_id == RUN)
+            .values(status=status, execution_generation=generation + offset)
+        )
+        session.commit()
+
+    assert still_owns_run(store.engine, RUN, generation) is owns
 
 
 def test_park_run_refuses_a_wake_time_with_no_time_zone(store: StepJobStore) -> None:
