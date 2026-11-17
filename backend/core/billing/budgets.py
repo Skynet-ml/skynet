@@ -1281,6 +1281,61 @@ class BudgetService:
             operation.updated_at = budget.updated_at = now
             return self._operation_snapshot(session, operation, budget, wallet)
 
+    def release_unconfirmed(
+        self,
+        operation_id: str,
+        username: str,
+        *,
+        dispatched_before: datetime,
+        reason: str,
+    ) -> OperationSnapshot:
+        """Release, at no further charge, the hold of started work whose final bill never came.
+
+        A provider can answer without usage and then never confirm the bill.
+        Without this release the full ceiling stays held forever and blocks the
+        account (SKY-784). Usage already settled stays billed; only the rest of
+        the hold is released, and Skynet absorbs the unknown cost.
+
+        Args:
+            operation_id: Dispatched or pending attempt still waiting for its final usage.
+            username: Authenticated owner.
+            dispatched_before: Only work dispatched before this time is released.
+            reason: Why the final usage is still unknown; recorded as evidence.
+
+        Returns:
+            The released operation, or the unchanged one when it is not
+            unconfirmed started work older than ``dispatched_before``.
+        """
+        with self._transaction() as session:
+            wallet, budget, operation = self._operation(session, operation_id, username)
+            started = operation.dispatched_at or operation.created_at
+            # SQLite returns naive datetimes; every stored time is UTC.
+            started = started if started.tzinfo else started.replace(tzinfo=UTC)
+            if operation.state not in _DISPATCHED_STATES or started >= dispatched_before:
+                return self._operation_snapshot(session, operation, budget, wallet)
+            now = datetime.now(UTC)
+            document = {"reason": reason[:500], "dispatched_at": started.isoformat()}
+            session.add(
+                ExecutionUsageEvidenceModel(
+                    id=str(uuid4()),
+                    operation_id=operation_id,
+                    evidence_key=_identifier(f"unconfirmed:{operation_id}"),
+                    fingerprint=_fingerprint({"unconfirmed": document}),
+                    actual_units=operation.actual_units,
+                    actual_wallet_units=operation.actual_wallet_units,
+                    billed_cents=0,
+                    final=True,
+                    issue="unconfirmed",
+                    evidence=document,
+                    created_at=now,
+                )
+            )
+            budget.reserved_units -= operation.max_units - operation.actual_units
+            budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+            operation.state = "released"
+            operation.updated_at = budget.updated_at = now
+            return self._operation_snapshot(session, operation, budget, wallet)
+
     def extend_coverage(
         self,
         operation_id: str,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -13,6 +14,11 @@ from .model_dispatch import OpenRouterDispatcher
 from .operation_pricing import ChargePolicy, exact_nonnegative, json_fingerprint
 from .runtime import BudgetRuntime, UsagePendingError
 from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
+
+# A model call runs at most 10 minutes and OpenRouter confirms its bill soon
+# after. A bill still missing at 15 minutes is absorbed: the hold is released at
+# no charge, so the user never pays for it or waits on it (Gilad, SKY-784).
+UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
 
 
 def _stored_refusal(documents: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -151,10 +157,24 @@ class OpenRouterUsageReconciler:
             after_id=after_id,
         )
         results = []
+        dispatched_before = datetime.now(UTC) - UNCONFIRMED_RELEASE_AFTER
         for operation_id, username in attempts:
             try:
                 operation = self.reconcile(operation_id, username)
                 results.append(ReconciliationResult(operation_id, operation.state))
-            except (BudgetError, UsagePendingError) as error:
+            except UsagePendingError as error:
+                try:
+                    operation = self.service.release_unconfirmed(
+                        operation_id, username, dispatched_before=dispatched_before, reason=str(error)
+                    )
+                except BudgetError as release_error:
+                    results.append(ReconciliationResult(operation_id, "pending", str(release_error)))
+                    continue
+                results.append(
+                    ReconciliationResult(
+                        operation_id, operation.state, None if operation.state == "released" else str(error)
+                    )
+                )
+            except BudgetError as error:
                 results.append(ReconciliationResult(operation_id, "pending", str(error)))
         return ReconciliationPage(tuple(results), attempts[-1][0] if len(attempts) == limit else None)

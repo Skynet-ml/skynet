@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
@@ -310,6 +310,30 @@ def test_submission_consumes_setup_authority_after_pending_tests_finish(engine: 
     with pytest.raises(BudgetConflictError):
         _reserve(service, budget.id, "stale-tab")
     assert _reserve(service, budget.id, "run", phase="run").state == "reserved"
+
+
+def test_unconfirmed_release_keeps_partial_usage_billed_and_frees_the_rest(engine: Engine) -> None:
+    """Release only the unconfirmed rest of an old hold, and leave fresh work covered (SKY-784)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="draft")
+    operation = _reserve(service, budget.id)
+    service.mark_dispatched(operation.id, "alice", "provider-1")
+    service.settle(
+        operation.id, "alice", evidence_key="partial", actual_cents="2.2", evidence={"failed": True}, final=False
+    )
+    long_ago = datetime.now(UTC) - timedelta(days=1)
+    fresh = service.release_unconfirmed(operation.id, "alice", dispatched_before=long_ago, reason="no bill")
+    assert (fresh.state, fresh.budget.reserved_cents) == ("pending", Decimal("7.8"))
+    released = service.release_unconfirmed(
+        operation.id, "alice", dispatched_before=datetime.now(UTC) + timedelta(seconds=1), reason="no bill"
+    )
+    assert released.state == "released"
+    assert (released.budget.reserved_cents, released.budget.wallet_reserved_cents) == (0, 0)
+    assert (released.budget.setup_spent_cents, released.budget.billed_cents) == (Decimal("2.2"), 3)
+    again = service.release_unconfirmed(
+        operation.id, "alice", dispatched_before=datetime.now(UTC) + timedelta(seconds=1), reason="no bill"
+    )
+    assert (again.state, again.budget.billed_cents) == ("released", 3)
 
 
 def test_partial_failure_and_replay_settle_once(engine: Engine) -> None:
