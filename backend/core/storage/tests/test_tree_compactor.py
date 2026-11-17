@@ -23,7 +23,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, event, select, text, update
+from sqlalchemy import create_engine, delete, event, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -41,7 +41,7 @@ from core.storage.models import (
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_compactor import (
-    BROKEN_COMPACTOR_ID,
+    BROKEN_BYTE_SIZE,
     COMPACTED_PREFIX,
     COMPACTOR_ID,
     FULL_COMPACTOR_ID,
@@ -1036,7 +1036,7 @@ def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, stor
     assert make_compactor().merge() == 2
 
     with Session(engine) as session:
-        assert session.get(StoragePackModel, missing).worker_id == BROKEN_COMPACTOR_ID
+        assert session.get(StoragePackModel, missing).byte_size == BROKEN_BYTE_SIZE
         assert session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.pack_key == missing)).all()
     assert len(_pack_keys_of_rows(engine)) == 2
 
@@ -1078,12 +1078,49 @@ def test_a_short_pack_leaves_the_pass_and_shifts_no_offsets(engine, objects, sto
     assert make_compactor().merge() == 2
 
     with Session(engine) as session:
-        assert session.get(StoragePackModel, short).worker_id == BROKEN_COMPACTOR_ID
+        assert session.get(StoragePackModel, short).byte_size == BROKEN_BYTE_SIZE
         assert (
             len(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.pack_key == short)).all())
             == short_rows
         )
     _assert_all_readable(store, _without_pack(engine, written, short))
+
+
+def test_recovery_skips_a_short_pack_and_applies_a_later_unrecorded_pack(
+    engine, objects, store, make_compactor
+) -> None:
+    """A short flush pack keeps its worker id, so recovery counts it as recorded and goes on to a lost pack."""
+    _fill(store)
+    short = min(objects.list("packs/w1/"))
+    objects.put(short, objects.get(short)[:40])
+    assert make_compactor().merge() == 2
+    body = {"output": "after the merge"}
+    step_id = store.commit(
+        run_id=RUNS[0],
+        agent_id="agent-a",
+        seq=99,
+        kind="model",
+        execution_generation=1,
+        grant_list_id="grants-1",
+        body=body,
+    )
+    store.flush()
+    with Session(engine) as session:
+        lost = session.get(AgentStepModel, step_id).pack_key
+        # Take the flush's transaction back out, as a crash after its PUT leaves it.
+        session.execute(delete(AgentStepModel).where(AgentStepModel.pack_key == lost))
+        session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key == lost))
+        session.commit()
+    assert lost > short
+
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 1
+        assert recovering.get_step(step_id)["body"] == body
+    finally:
+        recovering.close()
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, short).worker_id == "w1"
 
 
 def test_slow_gets_do_not_use_the_half_grace_limit(engine, objects, store, make_compactor, monkeypatch) -> None:

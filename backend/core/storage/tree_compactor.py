@@ -76,9 +76,11 @@ COMPACTOR_ID = "compactor"
 # the candidate query leaves them out; otherwise they fill the oldest-first window and merging stops.
 # A step log worker id never holds "/", so recovery never selects these rows.
 FULL_COMPACTOR_ID = f"{COMPACTOR_ID}/full"
-# The worker id of a pack whose object is missing. Its rows stay on it, and it leaves the candidates, so
-# it does not hold the oldest-first window on every pass. Recovery never lists it: it has no object.
-BROKEN_COMPACTOR_ID = f"{COMPACTOR_ID}/broken"
+# The byte size of a pack whose object is missing or shorter than its rows. Its rows stay on it, and it
+# leaves the candidates, so it does not hold the oldest-first window on every pass. The mark is not a
+# worker id: a short flush pack still has its object under packs/<worker>/, and recovery counts a pack
+# as recorded only when its row keeps that worker's id. Only the candidate query reads this column.
+BROKEN_BYTE_SIZE = -1
 # PostgreSQL's lock_not_available: a NOWAIT lock found the row held by another transaction.
 _LOCK_NOT_AVAILABLE = "55P03"
 MIN_AGE_SECONDS = 600.0
@@ -228,7 +230,8 @@ class TreeCompactor:
                     StoragePackModel.created_at < datetime.now(UTC) - self._min_age,
                     # Over half the target is full: any two candidates fit in one pass.
                     StoragePackModel.byte_size * 2 <= self._target_bytes,
-                    StoragePackModel.worker_id.not_in((FULL_COMPACTOR_ID, BROKEN_COMPACTOR_ID)),
+                    StoragePackModel.byte_size != BROKEN_BYTE_SIZE,
+                    StoragePackModel.worker_id != FULL_COMPACTOR_ID,
                     _REFERENCED,
                 )
                 .order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
@@ -390,7 +393,7 @@ class TreeCompactor:
         return moved
 
     def _mark_broken(self, keys: set[str]) -> None:
-        """Take packs whose object is missing out of the candidates; their rows stay where they are.
+        """Take packs whose object is missing or short out of the candidates; their rows stay where they are.
 
         Args:
             keys: The pack keys.
@@ -400,7 +403,7 @@ class TreeCompactor:
                 session.execute(
                     update(StoragePackModel)
                     .where(StoragePackModel.pack_key.in_(chunk))
-                    .values(worker_id=BROKEN_COMPACTOR_ID)
+                    .values(byte_size=BROKEN_BYTE_SIZE)
                 )
             session.commit()
 
