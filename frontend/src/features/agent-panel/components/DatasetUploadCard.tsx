@@ -370,7 +370,7 @@ export async function readDatasetFile(file: File): Promise<ConfirmedDataset> {
  * Read composer-attached dataset files, and keep only the newest read.
  *
  * Args:
- *   resetKey: A new value (e.g. the conversation id) drops reads still under way.
+ *   resetKey: The open chat's session key. A new key drops reads still under way.
  *   onRead: Gets the read dataset and its file.
  *   onError: Runs when the newest file cannot be read.
  *

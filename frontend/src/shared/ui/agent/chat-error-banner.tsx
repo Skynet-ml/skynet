@@ -21,10 +21,9 @@ interface ChatErrorBannerProps {
   className?: string;
 }
 
-// Shared warm-toned error card for agent chat streams (auth/model/rate-limit
-// failures). Mirrors the icon-badge + text + action layout established by
-// SubmitSummaryCard/ApprovalCard so error state reads as a first-class card
-// instead of a cramped inline row.
+// Shared warm-toned error row for agent chat streams (auth/model/rate-limit
+// failures): one rectangular row with an icon, the message and an icon action
+// at the end (SKY-783).
 export function ChatErrorBanner({
   message,
   retryLabel,

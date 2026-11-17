@@ -116,6 +116,24 @@ test("an error after done leaves the next turn untouched", async () => {
   }
 });
 
+test("a new chat keeps its session key when it gets its id, and a chat switch changes it (SKY-783)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  try {
+    const first = agent().sessionKey;
+    await act(() => agent().send("one"));
+    await act(() =>
+      calls[0]!.handlers.onConversationMeta!({ conversation_id: "c1", title: "one" }),
+    );
+    assert.equal(agent().conversationId, "c1");
+    assert.equal(agent().sessionKey, first, "a dataset read survives the first reply");
+    await act(() => calls[0]!.handlers.onDone!(done));
+    await act(() => agent().newSession());
+    assert.notEqual(agent().sessionKey, first, "a new chat drops a dataset read");
+  } finally {
+    await unmount();
+  }
+});
+
 test("a late title event renames the row and leaves the next turn's edit, status and id alone", async () => {
   const { agent, calls, titles, act, unmount } = await mount();
   try {

@@ -216,7 +216,7 @@ const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_
 const NO_COMMENTS: readonly LineComment[] = [];
 const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset upload card instead of a file card. */
+/** Whether a composer file is read into dataset rows before it becomes a file card. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -985,11 +985,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // A fork during a manual /compact would copy the rows without the summary.
   const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
+  // A confirmed upload card renders nothing, so the turn must drop it, or it
+  // splits the steps around it (SKY-743). State, so the turn redraws.
+  const [confirmedUploadCalls, setConfirmedUploadCalls] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // A new key remounts a tool card whose dataset left the draft unsent, so
   // the user can pick again.
   const [reopenedCards, setReopenedCards] = React.useState<Record<string, number>>({});
   const reopenDatasetCard = React.useCallback((callId: string) => {
     confirmedDatasetCallsRef.current.delete(callId);
+    setConfirmedUploadCalls((calls) => {
+      if (!calls.has(callId)) return calls;
+      const next = new Set(calls);
+      next.delete(callId);
+      return next;
+    });
     setReopenedCards((cards) => ({ ...cards, [callId]: (cards[callId] ?? 0) + 1 }));
   }, []);
 
@@ -1021,7 +1032,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // A web chat must not stage rows or change the Mac's wizard.
       if (webChat) return;
       // A composer attach has no tool card to mark or reopen.
-      if (callId) confirmedDatasetCallsRef.current.add(callId);
+      if (callId) {
+        confirmedDatasetCallsRef.current.add(callId);
+        setConfirmedUploadCalls((calls) => new Set(calls).add(callId));
+      }
       // The file waits in the composer as a card, as a PDF does (SKY-780).
       const card = datasetDraft.attach(confirmed, callId);
       // The card keeps its original as every attached file does (SKY-782),
@@ -1173,6 +1187,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const renderToolCall = React.useCallback(
     (call: AgentToolCall, ctx: { isRetry: boolean }) => {
       if (call.tool === REQUEST_DATASET_TOOL) {
+        if (confirmedUploadCalls.has(call.id)) return null;
         // Intentionally NOT gated on ``streaming``: the agent's expected
         // flow is to call request_user_dataset and then submit in the
         // same turn, but MiniMax sometimes stops after the dataset
@@ -1219,7 +1234,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, reopenedCards, streaming, webChat, writeBefore],
+    [
+      confirmedUploadCalls,
+      handleDatasetConfirm,
+      handleLibraryPick,
+      reopenedCards,
+      streaming,
+      webChat,
+      writeBefore,
+    ],
   );
 
   // Every call is a step in the turn's activity group except the ones the
