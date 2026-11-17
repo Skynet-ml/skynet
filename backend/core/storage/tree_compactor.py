@@ -218,9 +218,9 @@ class TreeCompactor:
         """Merge the oldest small packs into one new pack, and move their rows to it in one transaction.
 
         Returns:
-            The number of old packs merged; ``0`` when fewer than two packs qualify, when missing
-            objects leave fewer than two packs, when another transaction holds a lock that the move
-            needs, or when another pass moved a row first.
+            The number of old packs merged; ``0`` when fewer than two packs qualify, when missing,
+            short or empty (broken) objects leave fewer than two packs, when another transaction
+            holds a lock that the move needs, or when another pass moved a row first.
 
         Raises:
             TimeoutError: When half the grace time passed before the commit; the new pack is deleted.
