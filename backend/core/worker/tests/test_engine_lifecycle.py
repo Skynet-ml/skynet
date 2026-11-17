@@ -820,6 +820,62 @@ def test_parked_thread_cleanup_keeps_a_later_claim_of_the_woken_run(tmp_path: Pa
     assert not w._parked_jobs
 
 
+def test_a_second_park_keeps_the_pair_so_a_later_claim_survives(tmp_path: Path) -> None:
+    """A second park of a parked run does nothing, so the worker's cleanup still leaves a later claim."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert not w.park_job(0, RUN, generation + 1, datetime.now(UTC))
+    assert w._parked_jobs == {(0, RUN)}
+    assert job_store._wake_waiting_runs() == 1
+    assert w._claim_job_from_store() == RUN
+
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+    assert not w._parked_jobs
+
+
+def test_a_park_that_fails_after_the_worker_finished_releases_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the worker finishes during a park that then fails, the undo releases the claim and restores nothing."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    def finish_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Let the worker finish the run during the park, then report that the park failed.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        w._mark_job_done(RUN, 0)
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", finish_then_fail)
+
+    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN not in w._claimed_jobs
+    assert RUN not in w._processing_jobs
+    assert RUN not in w._cancel_events
+    assert not w._parked_jobs
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by is None
+
+
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]
 _OUTCOME_OVERVIEW = {"optimization_type": "blackbox", "username": "alice", "optimizer_name": "gepa"}
 

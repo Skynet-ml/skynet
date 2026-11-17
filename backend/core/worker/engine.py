@@ -555,7 +555,8 @@ class BackgroundWorker:
         # adds it to the maps only after this pop. The activity lock keeps the
         # worker from finishing the run between the check and the pair.
         with self._queue_lock, self._activity_lock:
-            if self._thread_current_job.get(worker_id) != optimization_id:
+            # A second park of a parked run would fail and its undo would drop the pair.
+            if self._thread_current_job.get(worker_id) != optimization_id or pair in self._parked_jobs:
                 return False
             was_claimed = optimization_id in self._claimed_jobs
             was_processing = optimization_id in self._processing_jobs
