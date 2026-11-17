@@ -51,12 +51,14 @@ TREE_DIR = "tree"
 OUTPUTS_DIR = "outputs"
 METRIC_DIR = "metric"
 _IN_DIR = ".tree-in"
-_OUT_FILE = ".tree-out.b64"
+_OUT_DIR = ".tree-out"
 _TAR_FILE = ".tree-out.tgz"
 _MOVE_TIMEOUT_SECONDS = 600
-# The base64 text of the largest archive: 4 characters per 3 bytes, plus a line break per 76 on Linux.
+_MAX_OUT_PARTS = -(-MAX_ARCHIVE_BYTES // ARCHIVE_CHUNK_BYTES)
+# The base64 text of the largest archive: 4 characters per 3 bytes, plus a line break per 76 on Linux,
+# plus one padding group and one line break for each part, since each part is encoded on its own.
 _MAX_B64_CHARS = 4 * -(-MAX_ARCHIVE_BYTES // 3)
-_MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76)
+_MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_PARTS
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
 
@@ -378,13 +380,12 @@ class TreeSandbox:
         Raises:
             RuntimeError: When the archive does not unpack.
         """
-        parts = {
-            f"{_IN_DIR}/{folder}.{index:04d}.b64": base64.b64encode(
-                archive[start : start + ARCHIVE_CHUNK_BYTES]
-            ).decode("ascii")
-            for index, start in enumerate(range(0, len(archive), ARCHIVE_CHUNK_BYTES))
-        }
-        box.write_files(parts)
+        parts = []
+        for index, start in enumerate(range(0, len(archive), ARCHIVE_CHUNK_BYTES)):
+            name = f"{_IN_DIR}/{folder}.{index:04d}.b64"
+            # The broker caps one write request at 16 MiB in total, so each chunk is its own write.
+            box.write_files({name: base64.b64encode(archive[start : start + ARCHIVE_CHUNK_BYTES]).decode("ascii")})
+            parts.append(name)
         files = " ".join(shlex.quote(name) for name in parts)
         # A source can give back a used box, so old files in the folder must not join the tree.
         result = box.run(
@@ -413,9 +414,13 @@ class TreeSandbox:
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
             # The box checks the archive bytes against the archive limit first, so a normal oversized tree stops in the box.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
+            # The broker caps one read at 16 MiB, so the archive goes out in numbered base64 parts,
+            # one read each, and the command prints the part count.
             f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
             f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
-            f" base64 < {_TAR_FILE} > {_OUT_FILE}",
+            f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR}; split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
+            f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part"; i=$((i + 1)); done;'
+            " echo $i",
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if result.exit_code == _TOO_LARGE_EXIT:
@@ -424,13 +429,25 @@ class TreeSandbox:
             # The candidate's command controls the box state that the pack reads, and a box or provider
             # failure raises an exception, not an exit code. So a new box would fail the same way.
             raise BadArchiveError(f"The tree did not pack (exit code {result.exit_code}).")
-        text = box.read_file(_OUT_FILE)
-        if text is None:
-            raise RuntimeError(f"The tree could not be read back (exit code {result.exit_code}).")
-        # The candidate controls the box, so the file can grow after the check.
-        if len(text) > _MAX_OUT_FILE_BYTES:
-            raise BadArchiveError(f"The tree archive is larger than {_MAX_OUT_FILE_BYTES} base64 bytes.")
-        return tar_to_tree(self._trees, run_id, base64.b64decode(text))
+        try:
+            count = int(result.stdout.strip())
+        except ValueError:
+            count = 0
+        # The candidate controls the box, so the count is checked like any other box output.
+        if not 0 < count <= _MAX_OUT_PARTS:
+            raise BadArchiveError("The tree pack did not report a valid part count.")
+        texts = []
+        size = 0
+        for index in range(count):
+            text = box.read_file(f"{_OUT_DIR}/{index}.b64")
+            if text is None:
+                raise RuntimeError(f"Tree part {index} could not be read back.")
+            size += len(text)
+            # The candidate controls the box, so the parts can grow after the check.
+            if size > _MAX_OUT_FILE_BYTES:
+                raise BadArchiveError(f"The tree archive is larger than {_MAX_OUT_FILE_BYTES} base64 bytes.")
+            texts.append(text)
+        return tar_to_tree(self._trees, run_id, b"".join(base64.b64decode(text) for text in texts))
 
     def _commit(self, step: StepRef, grant_list_id: str, body: dict[str, Any], tree_id: str) -> None:
         """Commit one command step and wait until it is durable behind the fence.

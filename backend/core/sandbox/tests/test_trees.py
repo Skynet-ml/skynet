@@ -182,6 +182,66 @@ def _info(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> tarfi
     return info
 
 
+def _cut_last_member(*members: tuple[tarfile.TarInfo, bytes]) -> bytes:
+    """Build a plain archive whose last member's content ends early.
+
+    Args:
+        *members: Each regular-file header and its content; the last content is cut.
+
+    Returns:
+        The archive bytes, cut 10 bytes into the last member's content.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for info, content in members:
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    with tarfile.open(fileobj=io.BytesIO(buffer.getvalue()), mode="r:") as archive:
+        last = archive.getmembers()[-1]
+    return buffer.getvalue()[: last.offset_data + 10]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _archive((_info("a"), b"a\n"), (_info("../x"), b"x\n")),
+        _archive((_info("a"), b"a\n"), (_info("b", tarfile.LNKTYPE, "missing"), b"")),
+        _cut_last_member((_info("a"), b"a\n"), (_info("b"), b"b" * 600)),
+    ],
+    ids=["path-leaves-the-tree", "hard-link-to-nothing", "content-cut-short"],
+)
+def test_a_refused_archive_stores_no_blob(trees: TreeStore, monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    """A bad last member stops the archive before the good first member's blob is stored.
+
+    Args:
+        trees: The tree store.
+        monkeypatch: Pytest monkeypatch.
+        data: An archive whose last member is bad.
+    """
+    stored: list[bytes] = []
+    put_blob = trees.put_blob
+
+    def _recording_put_blob(run_id: str, content: bytes) -> str:
+        """Record the content, then store it.
+
+        Args:
+            run_id: The run.
+            content: The blob bytes.
+
+        Returns:
+            The blob id.
+        """
+        stored.append(bytes(content))
+        return put_blob(run_id, content)
+
+    monkeypatch.setattr(trees, "put_blob", _recording_put_blob)
+
+    with pytest.raises(BadArchiveError):
+        tar_to_tree(trees, RUN, data)
+
+    assert stored == []
+
+
 def test_an_absolute_member_name_lands_inside_the_tree(trees: TreeStore) -> None:
     """A leading ``/`` is dropped, so the member is a normal tree path."""
     tree_id = tar_to_tree(trees, RUN, _archive((_info("/etc/passwd"), b"x\n")))

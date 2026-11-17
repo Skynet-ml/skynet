@@ -13,7 +13,7 @@ import gzip
 import io
 import tarfile
 import zlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol, TypeVar
 
 from core.storage.tree_store import TreeEntry, TreeStore
@@ -318,53 +318,11 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
     """
     if len(data) > MAX_ARCHIVE_BYTES:
         raise BadArchiveError(f"The archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
-    raw = gzip.GzipFile(fileobj=io.BytesIO(data)) if data[:2] == _GZIP_MAGIC else io.BytesIO(data)
-    root: dict[str, object] = {}
-    members = total = 0
     try:
-        with tarfile.open(  # type: ignore[call-overload]
-            fileobj=_CountingReader(raw), mode="r:", tarinfo=_NoSparseTarInfo
-        ) as archive:
-            for member in archive:
-                members += 1
-                if members > MAX_TREE_MEMBERS:
-                    raise BadArchiveError(f"The archive has more than {MAX_TREE_MEMBERS} members.")
-                if _byte_length(member.name) > MAX_NAME_BYTES or _byte_length(member.linkname) > MAX_NAME_BYTES:
-                    raise BadArchiveError(f"An archive member name is longer than {MAX_NAME_BYTES} bytes.")
-                parts = _parts(member.name)
-                if not parts:
-                    continue
-                if len(parts) > MAX_TREE_DEPTH:
-                    raise BadArchiveError(f"An archive member path is deeper than {MAX_TREE_DEPTH} levels.")
-                folder = root
-                for part in parts[:-1]:
-                    folder = folder.setdefault(part, {})  # type: ignore[assignment]
-                    if not isinstance(folder, dict):
-                        raise BadArchiveError(f"Archive member {member.name!r} is under a file.")
-                name = parts[-1]
-                if member.isdir():
-                    if not isinstance(folder.setdefault(name, {}), dict):
-                        raise BadArchiveError(f"Archive member {member.name!r} is a file and a folder.")
-                    continue
-                if not (member.issym() or member.islnk() or member.isreg()):
-                    # The tree format has no device, pipe or socket entry, so a box's
-                    # special files do not survive a step.
-                    continue
-                if isinstance(folder.get(name), dict):
-                    raise BadArchiveError(f"Archive member {member.name!r} is a folder and a file.")
-                if member.issym():
-                    folder[name] = ("symlink", store.put_blob(run_id, member.linkname.encode("utf-8")))
-                elif member.islnk():
-                    # The target's stored entry, so a missing target is a bad archive, not a KeyError.
-                    folder[name] = _stored_file(root, member)
-                else:
-                    # The header size is what the read returns, so the check comes before the read.
-                    total += member.size
-                    if total > MAX_TREE_BYTES:
-                        raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
-                    mode = "exec" if member.mode & 0o111 else "file"
-                    folder[name] = (mode, store.put_blob(run_id, _read_member(archive, member)))
-        return _put_folder(store, run_id, root)
+        # The first pass reads only the headers and stores nothing, so a refused archive leaves
+        # no blob in the step log that no tree names. The archive is in memory, so it reads twice.
+        _read_folder(data, None)
+        return _put_folder(store, run_id, _read_folder(data, lambda content: store.put_blob(run_id, content)))
     except BadArchiveError:
         raise
     except (tarfile.TarError, EOFError, OSError, zlib.error) as error:
@@ -376,6 +334,72 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
     except ValueError as error:
         # tarfile keeps a name that is not UTF-8 as surrogates, which the tree store cannot encode.
         raise BadArchiveError(f"The archive does not store ({type(error).__name__}).") from error
+
+
+def _read_folder(data: bytes, put: Callable[[bytes | bytearray], str] | None) -> dict[str, object]:
+    """Read an archive into nested folders and check it, and store each file's content when ``put`` is given.
+
+    Args:
+        data: A tar archive, plain or gzip, at most the archive size limit.
+        put: Stores one file's content and returns its blob id; ``None`` reads no content and stores nothing.
+
+    Returns:
+        Maps each name to a subfolder dict or a ``(mode, blob id)`` pair; without ``put`` the blob id is empty.
+
+    Raises:
+        BadArchiveError: When the archive breaks a limit or a tree rule (see :func:`tar_to_tree`).
+        ValueError: When a name is not UTF-8.
+    """
+    raw = gzip.GzipFile(fileobj=io.BytesIO(data)) if data[:2] == _GZIP_MAGIC else io.BytesIO(data)
+    root: dict[str, object] = {}
+    members = total = 0
+    with tarfile.open(  # type: ignore[call-overload]
+        fileobj=_CountingReader(raw), mode="r:", tarinfo=_NoSparseTarInfo
+    ) as archive:
+        for member in archive:
+            members += 1
+            if members > MAX_TREE_MEMBERS:
+                raise BadArchiveError(f"The archive has more than {MAX_TREE_MEMBERS} members.")
+            if _byte_length(member.name) > MAX_NAME_BYTES or _byte_length(member.linkname) > MAX_NAME_BYTES:
+                raise BadArchiveError(f"An archive member name is longer than {MAX_NAME_BYTES} bytes.")
+            # The tree store encodes names as strict UTF-8, after blobs are stored; the first pass must refuse first.
+            member.name.encode("utf-8")
+            member.linkname.encode("utf-8")
+            parts = _parts(member.name)
+            if not parts:
+                continue
+            if len(parts) > MAX_TREE_DEPTH:
+                raise BadArchiveError(f"An archive member path is deeper than {MAX_TREE_DEPTH} levels.")
+            folder = root
+            for part in parts[:-1]:
+                folder = folder.setdefault(part, {})  # type: ignore[assignment]
+                if not isinstance(folder, dict):
+                    raise BadArchiveError(f"Archive member {member.name!r} is under a file.")
+            name = parts[-1]
+            if member.isdir():
+                if not isinstance(folder.setdefault(name, {}), dict):
+                    raise BadArchiveError(f"Archive member {member.name!r} is a file and a folder.")
+                continue
+            if not (member.issym() or member.islnk() or member.isreg()):
+                # The tree format has no device, pipe or socket entry, so a box's
+                # special files do not survive a step.
+                continue
+            if isinstance(folder.get(name), dict):
+                raise BadArchiveError(f"Archive member {member.name!r} is a folder and a file.")
+            if member.issym():
+                folder[name] = ("symlink", put(member.linkname.encode("utf-8")) if put else "")
+            elif member.islnk():
+                # The target's stored entry, so a missing target is a bad archive, not a KeyError.
+                folder[name] = _stored_file(root, member)
+            else:
+                # The header size is what the read returns, so the check comes before the read.
+                total += member.size
+                if total > MAX_TREE_BYTES:
+                    raise BadArchiveError(f"The archive unpacks to more than {MAX_TREE_BYTES} bytes.")
+                mode = "exec" if member.mode & 0o111 else "file"
+                # Without a read, tarfile's next() still finds a member cut short at the end of the data.
+                folder[name] = (mode, put(_read_member(archive, member)) if put else "")
+    return root
 
 
 def _byte_length(name: str) -> int:

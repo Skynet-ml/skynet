@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import random
 import tarfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -496,9 +497,9 @@ class _FakeBox:
             **options: Not used.
 
         Returns:
-            An empty successful result.
+            A successful result that prints ``1``, which the pack reads as one part.
         """
-        return CommandResult(exit_code=0, stdout="", stderr="")
+        return CommandResult(exit_code=0, stdout="1\n", stderr="")
 
     def read_file(self, path: str) -> str | None:
         """Return the chosen text.
@@ -951,6 +952,109 @@ def test_an_archive_that_grows_after_the_box_check_is_refused_by_the_worker(
         sandbox.run(_step(), _tree(trees, {}), "true", [])
 
     assert source.released == [False]
+
+
+def test_a_tree_part_that_does_not_read_back_after_a_good_pack_is_a_box_failure(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A missing part after a pack that exits 0 is a box problem, so the step retries on a new box."""
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(read_back=None))
+
+    with pytest.raises(BoxFailureError) as raised:
+        sandbox.run(_step(), _tree(trees, {}), "true", [])
+
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
+    assert source.released == [False]
+
+
+class _CappedSession(_DyingSession):
+    """Wrap a local box that refuses a write request or a read response over a size cap, as the broker does."""
+
+    cap = 4500
+
+    def write_files(self, files: Mapping[str, str]) -> None:
+        """Refuse a request over the cap, else write.
+
+        Args:
+            files: Relative path to text.
+
+        Raises:
+            SandboxInfraError: When the request is over the cap.
+        """
+        if sum(len(text) for text in files.values()) > self.cap:
+            raise SandboxInfraError("The write request is too large.")
+        self._inner.write_files(files)
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Run the command in the inner box.
+
+        Args:
+            command: The shell command.
+            **options: The run options.
+
+        Returns:
+            The inner box's result.
+        """
+        return self._inner.run(command, **options)
+
+    def read_file(self, path: str) -> str | None:
+        """Refuse a response over the cap, else read.
+
+        Args:
+            path: Relative path.
+
+        Returns:
+            The text, or ``None``.
+
+        Raises:
+            SandboxInfraError: When the response is over the cap.
+        """
+        text = self._inner.read_file(path)
+        if text is not None and len(text) > self.cap:
+            raise SandboxInfraError("The read response is too large.")
+        return text
+
+
+def test_a_tree_larger_than_one_request_moves_in_and_out_in_parts(
+    trees: TreeStore, step_log: StepLogStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each archive chunk is one write and each packed part is one read, so no request is over the broker cap.
+
+    Random bytes do not compress, so both archives are several chunks long.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(tree_sandbox, "ARCHIVE_CHUNK_BYTES", 3000)
+
+    class _CappedSource(_Source):
+        """Give boxes with a request size cap."""
+
+        def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+            """Open a box and wrap it.
+
+            Args:
+                agent_id: The agent.
+                grants: The grants.
+
+            Returns:
+                The wrapped box.
+            """
+            return _CappedSession(super().acquire(agent_id, grants))  # type: ignore[return-value]
+
+    source = _CappedSource(_Runtime())
+    sandbox = TreeSandbox(trees, step_log, source, source)
+    content = random.Random(0).randbytes(12_000)
+    start = trees.put_tree(RUN, [TreeEntry("in.bin", "file", trees.put_blob(RUN, content))])
+
+    _, new_tree = sandbox.run(_step(), start, "head -c 12000 /dev/urandom > out.bin", [])
+
+    files = _files(trees, new_tree)
+    assert files["in.bin"] == content
+    assert len(files["out.bin"]) == 12_000
+    assert source.released == [True]
 
 
 def test_a_box_tree_with_too_many_files_is_refused_not_retried(
