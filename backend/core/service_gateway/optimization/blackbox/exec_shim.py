@@ -57,22 +57,24 @@ def _real_command(shim_dir: str, name: str) -> str | None:
 def _pump(source: io.BufferedReader, sink: BinaryIO, tail: bytearray) -> None:
     """Copy each chunk of one child stream to the shim's stream at once, keeping its tail.
 
+    When the reader closes early (``cmd | head``), the shim closes its end of
+    the child's pipe, so the child's next write gets SIGPIPE or EPIPE, as it
+    would with no shim. Without that, a command that writes forever never ends.
+
     Args:
         source: The child's pipe.
         sink: The shim's own stdout or stderr.
         tail: Holds the last ``OUTPUT_LIMIT`` bytes of the stream.
     """
-    forward = True
     while chunk := source.read1(OUTPUT_LIMIT):
         tail += chunk
         del tail[:-OUTPUT_LIMIT]
-        if forward:
-            try:
-                sink.write(chunk)
-                sink.flush()
-            # A reader that closed early (``cmd | head``) must not stop the drain, or the child blocks.
-            except OSError:
-                forward = False
+        try:
+            sink.write(chunk)
+            sink.flush()
+        except OSError:
+            source.close()
+            return
 
 
 def _spawn(real: str, name: str, args: list[str]) -> subprocess.Popen[bytes]:
@@ -110,6 +112,11 @@ def _exec(real: str, name: str, args: list[str]) -> int:
     Returns:
         126 when the command cannot run; otherwise it does not return.
     """
+    # Python ignores SIGPIPE and SIGXFSZ at startup, and an exec keeps an
+    # ignore; the shell would start the command with them at their defaults.
+    # This is Python's own ignore, not one the caller set, so it is not kept.
+    for number in (signal.SIGPIPE, signal.SIGXFSZ):
+        signal.signal(number, signal.SIG_DFL)
     try:
         try:
             os.execv(real, [name, *args])

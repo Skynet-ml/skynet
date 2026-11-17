@@ -56,7 +56,8 @@ _MAX_DEPTH = 64
 # file of any size; past these caps a file is left out and the step names it.
 _FILE_SIZE_LIMIT = 8 << 20
 _TOTAL_SIZE_LIMIT = 64 << 20
-_FILE_COUNT_LIMIT = 5000
+# Files, links, folders and every other entry the walk looks at count, so the walk itself has a limit.
+_ENTRY_COUNT_LIMIT = 5000
 # A step names at most this many left-out paths, and counts all of them.
 _SKIPPED_LISTED = 100
 
@@ -73,7 +74,7 @@ class Snapshot(NamedTuple):
 class _Budget:
     """What one snapshot stored so far, and what the caps left out."""
 
-    files: int = 0
+    entries: int = 0
     size: int = 0
     skipped: list[str] = field(default_factory=list)
     skipped_count: int = 0
@@ -150,7 +151,13 @@ class HarnessCapture:
         Returns:
             The new step ids, in commit order.
         """
-        pairs = [(body, None) for body in _tool_pairs(request) if body["tool_use_id"] not in self._committed]
+        pairs: list[tuple[dict[str, Any], int | None]] = []
+        seen = set(self._committed)
+        # The agent writes the request, so one id can have two results; the first one is the step.
+        for body in _tool_pairs(request):
+            if body["tool_use_id"] not in seen:
+                seen.add(body["tool_use_id"])
+                pairs.append((body, None))
         if not pairs:
             return self._drain(commit=True)
         step_ids = self._commit(pairs)
@@ -344,25 +351,30 @@ def _drop_cut_key(text: str, route_key: str) -> str:
     Returns:
         The tail, without its first ``len(route_key) - 1`` characters when it may be cut.
     """
-    if not route_key or len(text.encode("utf-8")) < OUTPUT_LIMIT:
+    # The agent can write a lone surrogate into the log; ``_redact`` makes it safe later, and here it only counts.
+    if not route_key or len(text.encode("utf-8", "surrogatepass")) < OUTPUT_LIMIT:
         return text
     return text[len(route_key) - 1 :]
 
 
 def _redact(value: Any, route_key: str) -> Any:
-    """Replace every exact copy of the route key in a JSON value with ``KEY_TOKEN``.
+    """Replace every exact copy of the route key in a JSON value with ``KEY_TOKEN``, and make it UTF-8 safe.
+
+    A lone surrogate (a non-UTF-8 argv byte from the shim, or ``\\ud800`` in a
+    model request) cannot be encoded, and the step log stores UTF-8: one such
+    body would fail its commit every time and block the records after it. It
+    becomes its ``backslashreplace`` text (``\\udcff``) before the key check.
 
     Args:
         value: A step body or a part of it.
         route_key: The key; an empty key replaces nothing.
 
     Returns:
-        The value with each string, object key included, redacted.
+        The value with each string, object key included, redacted and encodable.
     """
-    if not route_key:
-        return value
     if isinstance(value, str):
-        return value.replace(route_key, KEY_TOKEN)
+        text = value.encode("utf-8", "backslashreplace").decode("utf-8")
+        return text.replace(route_key, KEY_TOKEN) if route_key else text
     if isinstance(value, dict):
         return {_redact(key, route_key): _redact(item, route_key) for key, item in value.items()}
     if isinstance(value, list):
@@ -468,8 +480,8 @@ def snapshot_session(
     Left out: the launch files (``harness_bridge.workspace_files``), which hold
     the key; a workspace entry named ``SESSIONS_DIR``, whose slot holds the
     real session folder; the session folder's logs (``_SESSION_LOGS``); files
-    that cannot be read; and files past the size and count caps, which the
-    result names.
+    that cannot be read; and files past the size caps and entries past the
+    count cap, which the result names.
 
     Args:
         trees: The worker's tree store.
@@ -563,7 +575,7 @@ def _put_directory(
         route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
         depth: The folder's depth below the root; its subfolders are left
             out at ``_MAX_DEPTH``.
-        budget: The snapshot's caps; a file or link past the count cap is left out.
+        budget: The snapshot's caps; an entry past the count cap is left out.
 
     Returns:
         The folder's tree entries. Sockets, pipes and devices are left out.
@@ -572,18 +584,20 @@ def _put_directory(
     for name in sorted(os.listdir(folder_fd)):
         if skip(prefix + name) or (route_key and route_key in name) or not _is_utf8(name):
             continue
+        # Past the cap no entry gets an lstat, and no folder is opened, so a
+        # million empty folders cost one name each.
+        if budget.entries >= _ENTRY_COUNT_LIMIT:
+            budget.skip(prefix + name)
+            continue
+        budget.entries += 1
         # A background job can delete a file during the walk, and the agent can
         # make a file unreadable; the tree then holds what can still be read.
         try:
             info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
-            is_blob = stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode)
-            if is_blob and budget.files >= _FILE_COUNT_LIMIT:
-                budget.skip(prefix + name)
-            elif stat.S_ISLNK(info.st_mode):
+            if stat.S_ISLNK(info.st_mode):
                 # readlink reads the link itself and never follows it.
                 target = _redact_bytes(os.fsencode(os.readlink(name, dir_fd=folder_fd)), route_key)
                 entries.append(TreeEntry(name, "symlink", trees.put_blob(run_id, target)))
-                budget.files += 1
             elif (stat.S_ISDIR(info.st_mode) and depth < _MAX_DEPTH) or stat.S_ISREG(info.st_mode):
                 entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key, depth, budget)
                 if entry is not None:
@@ -674,7 +688,6 @@ def _put_opened(
         if opened.st_size > room or size > room:
             budget.skip(prefix + name)
             return None
-        budget.files += 1
         budget.size += size
         mode = "exec" if opened.st_mode & 0o111 else "file"
         return TreeEntry(name, mode, trees.put_blob(run_id, _redact_bytes(b"".join(chunks), route_key)))

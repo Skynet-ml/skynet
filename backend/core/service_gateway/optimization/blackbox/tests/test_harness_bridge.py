@@ -1781,3 +1781,38 @@ def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Pat
     assert (done.returncode, done.stdout) == (0, b"True\n"), done.stderr
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     assert record["stdout"] == "True\n"
+
+
+def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp_path: Path) -> None:
+    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141."""
+    _fake_tool(tmp_path / "bin", "inf", "exec yes")
+    log = tmp_path / "exec.jsonl"
+    process = subprocess.Popen(
+        ["/bin/sh", "-c", "inf | head -c 5 >/dev/null; echo ok"],
+        env=_shim_env(tmp_path, ["inf"], log),
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, _ = process.communicate(timeout=10)
+    finally:
+        # A shim that keeps the pipe open never ends; stop its whole group so the test fails and leaves nothing.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+    assert stdout == b"ok\n"
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["exit_code"] == 128 + signal.SIGPIPE
+
+
+def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
+    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "pp").write_text('#!/bin/bash\nyes | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"\n')
+    (tmp_path / "bin" / "pp").chmod(0o755)
+
+    env = _shim_env(tmp_path, ["pp"], None)
+    done = subprocess.run(["pp"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"status 141 0\n", b"")

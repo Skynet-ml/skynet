@@ -671,6 +671,55 @@ def test_a_tool_call_with_an_input_too_deep_to_redact_commits_with_no_input(step
     assert capture.observe(request) == []
 
 
+def test_an_exec_record_with_a_lone_surrogate_commits_as_escaped_text_and_the_next_one_commits(
+    step_log, tmp_path
+) -> None:
+    """The shim logs a non-UTF-8 argv byte as a lone surrogate; it commits as ``\\udcff`` text and blocks nothing."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    log = session_dir / harness_bridge.EXEC_LOG
+    capture = _capture(step_log, workspace, session_dir, exec_log=log)
+    bad = {"command": "probe 'a\udcffb'", "exit_code": 0, "stdout": "\ud800", "stderr": ""}
+    good = {"command": "ok", "exit_code": 0, "stdout": "", "stderr": ""}
+    log.write_text(json.dumps(bad) + "\n" + json.dumps(good) + "\n")
+
+    steps = capture.finish()
+
+    bodies = [step_log.get_step(step)["body"] for step in steps]
+    assert [(body["command"], body["stdout"]) for body in bodies] == [("probe 'a\\udcffb'", "\\ud800"), ("ok", "")]
+    assert capture.finish() == []
+
+
+def test_a_tool_call_with_a_lone_surrogate_commits_as_escaped_text_and_the_next_one_commits(step_log, tmp_path) -> None:
+    """A ``\\ud800`` in a model request commits as text, and the next tool call still commits."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+
+    [first] = capture.observe(_tool_round("t1", "echo \ud800", "out \udcff"))
+    [second] = capture.observe(_tool_round("t2", "ls", "a"))
+
+    body = step_log.get_step(first)["body"]
+    assert (body["command"], body["output"]) == ({"command": "echo \\ud800"}, "out \\udcff")
+    assert step_log.get_step(second)["body"]["command"] == {"command": "ls"}
+
+
+def test_two_results_with_one_tool_use_id_in_one_request_commit_one_step(step_log, tmp_path) -> None:
+    """The agent writes the request, so a repeated result id commits only its first result."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "session"
+    workspace.mkdir()
+    session_dir.mkdir()
+    capture = _capture(step_log, workspace, session_dir)
+    request = _tool_round("t1", "ls", "first")
+    request["messages"][2]["content"].append({"type": "tool_result", "tool_use_id": "t1", "content": "second"})
+
+    [step] = capture.observe(request)
+
+    assert step_log.get_step(step)["body"]["output"] == "first"
+
+
 def test_a_route_key_cut_at_the_start_of_an_output_tail_is_not_stored(step_log, tmp_path) -> None:
     """The shim keeps the last bytes of a stream; a key part at the start of a full tail is dropped."""
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
@@ -801,24 +850,44 @@ def test_files_past_the_total_size_cap_are_left_out_and_smaller_ones_still_fit(s
     assert (snapshot.skipped, snapshot.skipped_count) == (["b.txt"], 1)
 
 
-def test_files_and_links_past_the_count_cap_are_left_out_and_all_counted(step_log, tmp_path, monkeypatch) -> None:
-    """Past the file count cap each file and link is left out; the result lists the first few and counts them all."""
-    monkeypatch.setattr(harness_capture, "_FILE_COUNT_LIMIT", 2)
+def test_entries_past_the_count_cap_are_left_out_with_no_lstat_and_all_counted(step_log, tmp_path, monkeypatch) -> None:
+    """Files, links and folders all count; past the cap no entry gets an lstat, and the result counts every one."""
+    monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 3)
     monkeypatch.setattr(harness_capture, "_SKIPPED_LISTED", 2)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
-    (workspace / "src").mkdir(parents=True)
+    for index in range(10):
+        (workspace / "dirs" / f"d{index}").mkdir(parents=True)
     session_dir.mkdir()
-    for name in ("a.txt", "b.txt", "src/c.txt"):
-        (workspace / name).write_text(name)
-    (workspace / "d.link").symlink_to("a.txt")
+    (workspace / "a.txt").write_text("a")
+    (workspace / "b.link").symlink_to("a.txt")
     (session_dir / "e.txt").write_text("e")
+    looked_at: list[str] = []
+    real_stat = os.stat
+
+    def counted_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        """Record each walk lstat, then run it.
+
+        Args:
+            path: The path.
+            *args: Positional stat arguments.
+            **kwargs: Keyword stat arguments.
+
+        Returns:
+            The stat result.
+        """
+        if kwargs.get("follow_symlinks") is False:
+            looked_at.append(str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(harness_capture.os, "stat", counted_stat)
     trees = TreeStore(step_log)
 
     snapshot = _snapshot(trees, workspace, session_dir)
 
-    assert set(_tree_files(trees, snapshot.tree_id)) == {"a.txt", "b.txt"}
-    assert snapshot.skipped == ["d.link", "src/c.txt"]
-    assert snapshot.skipped_count == 3
+    assert set(_tree_files(trees, snapshot.tree_id)) == {"a.txt", "b.link"}
+    assert looked_at == ["a.txt", "b.link", "dirs"]
+    assert snapshot.skipped == ["dirs/d0", "dirs/d1"]
+    assert snapshot.skipped_count == 11
 
 
 def test_each_step_names_the_files_the_snapshot_caps_left_out(step_log, tmp_path, monkeypatch) -> None:
