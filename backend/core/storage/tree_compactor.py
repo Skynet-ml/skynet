@@ -34,11 +34,13 @@ rows commit in the same transaction as the moved rows.
 A compacted pack of at most half of ``target_bytes`` is a candidate again, so
 a byte can be copied in more than one pass. This is acceptable: a pass copies
 at most ``target_bytes`` and runs at most once an interval on each replica.
-A pack leaves the candidates once it holds more than half of ``target_bytes``
-or more than half of ``MAX_ROWS_PER_PASS`` rows. Two such packs never fit in
-one pass, so any two candidates do, and an old large pack cannot stop the
-merges of the newer ones. Size tiers are a later change if the copy volume
-shows a need.
+A pack leaves the candidates once it holds more than half of
+``target_bytes``, so any two candidates fit in the bytes of one pass, and an
+old large pack cannot stop the merges of the newer ones. The row rule applies
+only to compacted packs: a compacted pack with more than half of
+``MAX_ROWS_PER_PASS`` rows also leaves the candidates. A flush pack has no
+such mark, so a pass skips a flush pack whose rows do not fit and goes on.
+Size tiers are a later change if the copy volume shows a need.
 """
 
 from __future__ import annotations
@@ -168,7 +170,8 @@ class TreeCompactor:
             delete_object: Deletes one object by key; a missing object is not an error.
             min_age_seconds: A pack is merged only when it is older than this.
             grace_seconds: A pack that no row points at is deleted only when it was retired longer ago than this.
-            target_bytes: A pack of this size or more is not merged; a pass stops adding packs at this size.
+            target_bytes: A pack over half of this size is not a merge candidate. A pass skips a
+                candidate that would take the new pack past this size, and goes on to the next one.
             interval_seconds: The wait between two passes of the background thread.
         """
         self._engine = engine
@@ -268,34 +271,46 @@ class TreeCompactor:
                 row_count += rows
             if len(keys) < 2:
                 return 0
-        # The new key is made only now, so its time is not older than the PUT.
-        key_ns = time.time_ns()
-        new_key = f"{COMPACTED_PREFIX}/{key_ns:020d}-{uuid4().hex}.pack"
         data = bytearray()
         step_moves: list[tuple[Any, int]] = []
         object_moves: list[tuple[Any, int]] = []
         broken: set[str] = set()
         pack_key, pack = None, b""
+        starts = (0, 0, 0)
         # Sorted by pack, so each old pack is read once and only one is in memory at a time.
         for row in sorted([*steps, *tree_objects], key=lambda row: (row.pack_key, row.pack_offset)):
             if row.pack_key in broken:
                 continue
             if row.pack_key != pack_key:
                 pack_key = row.pack_key
+                starts = (len(data), len(step_moves), len(object_moves))
                 try:
                     pack = self._objects.get(pack_key)
                 except KeyError:
                     logger.exception("Pack %s is missing; its rows stay on it and it leaves the candidates", pack_key)
                     broken.add(pack_key)
                     continue
+            piece = pack[row.pack_offset : row.pack_offset + row.pack_length]
+            # A short pack would shift the offsets of every later row, so its rows leave the pass.
+            if len(piece) != row.pack_length:
+                logger.error(
+                    "Pack %s is shorter than its rows; its rows stay on it and it leaves the candidates", pack_key
+                )
+                broken.add(pack_key)
+                del data[starts[0] :], step_moves[starts[1] :], object_moves[starts[2] :]
+                continue
             (step_moves if "step_id" in row._fields else object_moves).append((row, len(data)))
-            data += pack[row.pack_offset : row.pack_offset + row.pack_length]
+            data += piece
         del pack
         if broken:
             self._mark_broken(broken)
             keys = [key for key in keys if key not in broken]
             if len(keys) < 2:
                 return 0
+        # The new key is made after the GETs, so slow GETs do not use the half-grace limit, and its time
+        # is not older than the PUT.
+        key_ns = time.time_ns()
+        new_key = f"{COMPACTED_PREFIX}/{key_ns:020d}-{uuid4().hex}.pack"
         self._objects.put(new_key, data)
         byte_size = len(data)
         del data
@@ -311,9 +326,10 @@ class TreeCompactor:
             session.add(
                 StoragePackModel(pack_key=new_key, worker_id=worker_id, byte_size=byte_size, created_at=retired_at)
             )
-            session.execute(
-                update(StoragePackModel).where(StoragePackModel.pack_key.in_(keys)).values(created_at=retired_at)
-            )
+            for chunk in _chunks(keys):
+                session.execute(
+                    update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(created_at=retired_at)
+                )
             # Another replica deletes a new pack with no row once its key time is older than the grace time.
             if time.time_ns() - key_ns > self._grace_seconds * 1e9 / 2:
                 session.rollback()

@@ -308,6 +308,43 @@ def _pack_rows(engine: Engine) -> set[str]:
         return set(session.scalars(select(StoragePackModel.pack_key)))
 
 
+def _rows_of_packs(engine: Engine) -> list[str]:
+    """Return the pack key of each step and tree object row.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        One pack key for each row.
+    """
+    with Session(engine) as session:
+        return [*session.scalars(select(AgentStepModel.pack_key)), *session.scalars(select(TreeObjectModel.pack_key))]
+
+
+def _without_pack(engine: Engine, written: dict[str, Any], pack_key: str) -> dict[str, Any]:
+    """Leave out of what :func:`_fill` wrote the steps and trees that need a row of one pack.
+
+    Args:
+        engine: The test engine.
+        written: What :func:`_fill` wrote.
+        pack_key: The pack to leave out.
+
+    Returns:
+        The steps and trees that do not read from the pack.
+    """
+    with Session(engine) as session:
+        steps = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.pack_key == pack_key)))
+        object_ids = set(session.scalars(select(TreeObjectModel.object_id).where(TreeObjectModel.pack_key == pack_key)))
+    return {
+        "bodies": {step_id: body for step_id, body in written["bodies"].items() if step_id not in steps},
+        "trees": {
+            (run_id, tree_id): entries
+            for (run_id, tree_id), entries in written["trees"].items()
+            if tree_id not in object_ids and not any(entry.object_id in object_ids for entry in entries)
+        },
+    }
+
+
 def test_merge_puts_old_packs_into_one_object_and_moves_every_row(engine, objects, store, make_compactor) -> None:
     """Three flush packs become one compacted pack; every step and tree reads from it."""
     written = _fill(store)
@@ -1004,6 +1041,132 @@ def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, stor
     assert len(_pack_keys_of_rows(engine)) == 2
 
 
+def test_a_missing_pack_in_the_window_leaves_the_other_packs_merged(engine, objects, store, make_compactor) -> None:
+    """The last pack by key has no object; the pass merges the other two and keeps every row of it on it."""
+    written = _fill(store)
+    missing = max(objects.list("packs/w1/"))
+    objects._path(missing).unlink()
+    with Session(engine) as session:
+        missing_rows = len(
+            session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.pack_key == missing)).all()
+        )
+        missing_rows += len(
+            session.scalars(select(TreeObjectModel.object_id).where(TreeObjectModel.pack_key == missing)).all()
+        )
+    assert missing_rows >= 2
+
+    assert make_compactor().merge() == 2
+
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert Counter(_rows_of_packs(engine)) == {missing: missing_rows, compacted: 2 * missing_rows}
+    _assert_all_readable(store, _without_pack(engine, written, missing))
+
+
+def test_a_short_pack_leaves_the_pass_and_shifts_no_offsets(engine, objects, store, make_compactor) -> None:
+    """A pack object shorter than its rows is broken; its rows stay on it, and the other two packs read back."""
+    written = _fill(store)
+    short = min(objects.list("packs/w1/"))
+    with Session(engine) as session:
+        short_rows = len(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.pack_key == short)).all())
+        last = max(
+            *session.scalars(select(AgentStepModel.pack_offset).where(AgentStepModel.pack_key == short)),
+            *session.scalars(select(TreeObjectModel.pack_offset).where(TreeObjectModel.pack_key == short)),
+        )
+    # Cut inside the last row, so the rows before it copy in full and must be taken back out.
+    objects.put(short, objects.get(short)[: last + 1])
+
+    assert make_compactor().merge() == 2
+
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, short).worker_id == BROKEN_COMPACTOR_ID
+        assert (
+            len(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.pack_key == short)).all())
+            == short_rows
+        )
+    _assert_all_readable(store, _without_pack(engine, written, short))
+
+
+def test_slow_gets_do_not_use_the_half_grace_limit(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """The GETs together take longer than half the grace time; the merge still commits."""
+    written = _fill(store)
+    get = objects.get
+
+    def slow_get(key: str, *args: Any) -> bytes:
+        """Wait before a whole-object read, as the merge does, then read the object.
+
+        Args:
+            key: The object key.
+            *args: The range arguments.
+
+        Returns:
+            The object bytes.
+        """
+        if not args:
+            time.sleep(0.4)
+        return get(key, *args)
+
+    monkeypatch.setattr(objects, "get", slow_get)
+
+    assert make_compactor(grace_seconds=1.0).merge() == 3
+    _assert_all_readable(store, written)
+
+
+def test_a_lock_error_other_than_lock_not_available_is_raised(engine, objects, store, make_compactor) -> None:
+    """An OperationalError at the lock step that is not 55P03 leaves the merge as an error, and no row moves."""
+    _fill(store)
+    old = _pack_keys_of_rows(engine)
+
+    def fail_the_job_lock(connection: object, cursor: object, statement: str, *args: object) -> None:
+        """Fail the job lock query as a lost connection does.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+
+        Raises:
+            OperationalError: For the job lock query.
+        """
+        if "FROM jobs" in statement:
+            raise OperationalError(statement, {}, Exception("server closed the connection"))
+
+    event.listen(engine, "before_cursor_execute", fail_the_job_lock)
+    try:
+        with pytest.raises(OperationalError):
+            make_compactor().merge()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_the_job_lock)
+    assert _pack_keys_of_rows(engine) == old
+
+
+@pytest.mark.parametrize(("extra", "mark"), [(0, COMPACTOR_ID), (-1, FULL_COMPACTOR_ID)])
+def test_the_full_mark_needs_more_than_half_the_row_cap(
+    engine, objects, store, make_compactor, monkeypatch, extra, mark
+) -> None:
+    """A merge of exactly half the row cap is not full; one row over half is."""
+    _fill(store, flushes=2)
+    moved = 2 * _rows_per_pack(engine)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * moved + extra)
+
+    assert make_compactor().merge() == 2
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    with Session(engine) as session:
+        assert session.get(StoragePackModel, compacted).worker_id == mark
+
+
+def test_the_retire_time_is_set_in_chunks(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """The retire time of the old packs is set with one UPDATE for each chunk of keys."""
+    written = _fill(store)
+    monkeypatch.setattr(tree_compactor, "CHUNK_SIZE", 2)
+    statements = _record_statements(engine)
+
+    assert make_compactor().merge() == 3
+
+    assert sum(statement.startswith("UPDATE storage_packs") for statement, _ in statements) == 2
+    _assert_all_readable(store, written)
+
+
 def test_a_delete_that_always_fails_does_not_stop_the_removal(engine, objects, store, make_compactor) -> None:
     """One retired pack whose delete fails keeps its row; the other retired packs and their rows go."""
     _fill(store)
@@ -1308,8 +1471,19 @@ def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
     at_move = threading.Event()
     release = threading.Event()
 
-    def hold_at_move(conn, cursor, statement, parameters, context, executemany) -> None:
-        """Stop the merge at its first row move until the test releases it."""
+    def hold_at_move(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Stop the merge at its first row move until the test releases it.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+        """
         if statement.startswith("UPDATE agent_steps") and not at_move.is_set():
             at_move.set()
             release.wait(30)
