@@ -212,7 +212,7 @@ export function useChatMedia(): ChatMediaDraft {
 
   const keepFiles = React.useCallback(
     (files: File[], first: boolean) => {
-      if (closedRef.current) return [];
+      if (closedRef.current) return;
       // The server takes no original over the file limit, so a larger file
       // keeps only its text and is not uploaded for nothing.
       const fits = files.filter((file) => file.size <= MAX_ATTACHMENT_MB * 1024 * 1024);
@@ -290,9 +290,19 @@ export function useChatMedia(): ChatMediaDraft {
 
   const keepOriginals = React.useCallback(
     (files: ReadonlyArray<{ name: string }>) => {
-      const kept = new Set(keptOriginals(files, originalsRef.current));
-      if (kept.size === originalsRef.current.length) return;
+      // An original a restore still loads counts as one the key holds. Else a
+      // same-name file added meanwhile drops both originals.
+      const loading = [...loadingRef.current].flatMap(([key, places]) =>
+        places.map(() => ({ name: key })),
+      );
+      const kept = new Set<{ name: string }>(
+        keptOriginals(files, [...loading, ...originalsRef.current]),
+      );
+      for (const key of loadingRef.current.keys()) {
+        if (!kept.has(loading.find((l) => l.name === key)!)) loadingRef.current.delete(key);
+      }
       const gone = originalsRef.current.filter((o) => !kept.has(o));
+      if (!gone.length) return;
       syncOriginals(originalsRef.current.filter((o) => kept.has(o)));
       for (const o of gone) {
         unshownRef.current.push(o.shown.url);

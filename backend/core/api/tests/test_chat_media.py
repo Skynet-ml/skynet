@@ -406,12 +406,15 @@ def test_the_name_field_gives_the_viewers_key(harness: SimpleNamespace) -> None:
     assert (body["name"], body["mime_type"]) == ("notes.pdf%22", "application/octet-stream")
 
 
-def test_a_long_pdf_name_keeps_its_drawn_type(harness: SimpleNamespace) -> None:
-    """A name cut at 255 characters for storage keeps the type the viewer sees in its full name."""
-    body = _upload_original(harness.client, _PDF, "a" * 300 + ".pdf").json()
+@pytest.mark.parametrize("name", ["a" * 300 + ".pdf", "a" * 300 + ".csv"])
+def test_an_original_whose_cut_name_changes_its_key_is_refused(harness: SimpleNamespace, name: str) -> None:
+    """History names an original by its stored name, so a cut name would pair with no file after a reload."""
+    assert _upload_original(harness.client, _PDF, name).status_code == 422
+    with Session(harness.store.engine) as session:
+        assert session.scalars(select(ChatMediaModel)).all() == []
+    body = _upload_original(harness.client, _PDF, "a" * 251 + ".pdf").json()
+    assert body["name"] == "a" * 251 + ".pdf"
     assert body["mime_type"] == "application/pdf"
-    assert len(body["name"]) == 255
-    assert body["name"].endswith(".pdf")
 
 
 def test_the_stored_name_trims_only_what_the_viewer_trims(harness: SimpleNamespace) -> None:

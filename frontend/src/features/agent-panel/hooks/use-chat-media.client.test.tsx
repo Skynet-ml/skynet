@@ -69,6 +69,8 @@ globalThis.fetch = (async (_url: string, init?: RequestInit) => {
 const { createRoot } = await import("react-dom/client");
 const { ToastContainer, toast } = await import("react-toastify");
 const { useChatMedia } = await import("./use-chat-media");
+const { useDatasetDraft } = await import("../components/DatasetUploadCard");
+const { splitPastes } = await import("@/shared/ui/agent/pasted-text");
 const { MAX_MEDIA_PER_MESSAGE, freeChatMediaUrls } = await import("../lib/chat-media");
 
 const errors: unknown[] = [];
@@ -509,6 +511,88 @@ void test("dropPaired counts the loading originals first, then the loaded ones",
   assert.equal(left.length, 1);
   assert.notEqual(left[0]!.id, own);
   await unmount();
+});
+
+void test("keepOriginals counts an original a restore still loads, so a same-name file keeps its own", async () => {
+  const { draft, unmount } = await mountDraft();
+  let release!: () => void;
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () =>
+    draft().restore([{ id: "sent-a", name: "a.csv", kind: "document", url: "" }]),
+  );
+  const csv = new File(["a,b\n"], "a.csv", { type: "text/csv" });
+  await React.act(async () => void draft().addOriginals([csv]));
+  await React.act(async () => draft().keepOriginals([{ name: "a.csv" }, { name: "a.csv" }]));
+  heldReads = null;
+  release();
+  await flush();
+  await React.act(async () => draft().keepOriginals([{ name: "a.csv" }, { name: "a.csv" }]));
+  assert.equal(documents(draft().ready()).length, 2);
+  await unmount();
+});
+
+void test("keepOriginals drops an original a restore still loads when its key's counts differ", async () => {
+  const { draft, unmount } = await mountDraft();
+  let release!: () => void;
+  heldReads = new Promise<void>((resolve) => (release = resolve));
+  await React.act(async () =>
+    draft().restore([{ id: "sent-a", name: "a.csv", kind: "document", url: "" }]),
+  );
+  await React.act(async () => draft().keepOriginals([]));
+  heldReads = null;
+  release();
+  await flush();
+  assert.deepEqual(documents(draft().ready()), []);
+  await unmount();
+});
+
+void test("a dataset card wired as the panel wires it keeps one original, its own", async () => {
+  let media: ReturnType<typeof useChatMedia> | null = null;
+  let api: ReturnType<typeof useDatasetDraft> | null = null;
+  let text = "";
+  function Panel() {
+    const [draft, setDraft] = React.useState("my text");
+    text = draft;
+    media = useChatMedia();
+    api = useDatasetDraft({
+      draft,
+      setDraft,
+      stage: async () => "staged",
+      wizard: null,
+      onLeave: media.dropPaired,
+    });
+    const files = React.useMemo(() => splitPastes(draft).files, [draft]);
+    const keep = media.keepOriginals;
+    React.useEffect(() => keep(files), [files, keep]);
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await React.act(async () => root.render(<Panel />));
+  const before = deleted.length;
+  const confirm = async (rowCount: number) => {
+    const file = new File(["q,a\n"], "qa.csv", { type: "text/csv" });
+    const dataset = {
+      fileName: "qa.csv",
+      rows: [{ q: "1", a: "2" }],
+      rowCount,
+      columns: ["q", "a"],
+    };
+    // The panel's handleDatasetConfirm: the card first, then its original.
+    await React.act(async () => {
+      api!.attach(dataset);
+      media!.addOriginals([file]);
+    });
+    await flush();
+  };
+  await confirm(1);
+  const [first] = documents(media!.ready()).map((m) => m.id);
+  await confirm(2);
+  assert.equal(splitPastes(text).files.length, 1);
+  const left = documents(media!.ready()).map((m) => m.id);
+  assert.equal(left.length, 1);
+  assert.notEqual(left[0], first);
+  assert.deepEqual(deleted.slice(before), [first]);
+  await React.act(async () => root.unmount());
 });
 
 /** Run ``body`` with URL.revokeObjectURL recording the URLs it frees. */
