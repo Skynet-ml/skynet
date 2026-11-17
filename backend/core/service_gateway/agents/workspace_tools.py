@@ -97,7 +97,7 @@ How to write the run's files:
   whole file), or change part of one with ``{EDIT_FILE_TOOL}``. Each write goes into the editor at once. The run
   uses your repository files in place of the repository's own; the user's repository stays unchanged. Change
   other repository files only when the run needs it, and tell the user which files you changed.
-* You can write every file of the repository, also the files under ``[paths] protected`` and the metric's
+* You can write the repository's files, also the files under ``[paths] protected`` and the metric's
   files, for example ``evaluation/``. That protection binds only the candidate versions during a run: no
   version can change those files. In setup, the signed-in user owns the run. When the user asks you to change
   one of those files, make the change and tell the user what you changed. Never ask who the user is.
