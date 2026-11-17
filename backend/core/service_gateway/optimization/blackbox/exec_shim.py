@@ -13,6 +13,7 @@ maps do not ship it yet.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import io
 import json
@@ -122,7 +123,14 @@ def _exec(real: str, name: str, args: list[str]) -> int:
 
 
 def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
-    """Run the real command, stream its output through and forward SIGTERM and SIGINT to it.
+    """Run the real command, stream its output through and forward SIGTERM to it.
+
+    A signal the shim inherited as ignored stays ignored, so the child
+    inherits that too (``cmd &`` under a non-interactive ``sh`` ignores
+    SIGINT). The child is in the shim's process group, so a SIGINT from the
+    terminal already reaches it: the shim only stays alive for it and does
+    not send it a second time. A SIGINT sent to the shim alone does not reach
+    the child, except one that comes before the child starts.
 
     Args:
         real: The command's path.
@@ -145,13 +153,14 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
             signum: The signal number.
             _frame: The interrupted frame.
         """
-        if started:
-            started[0].send_signal(signum)
-        else:
+        if not started:
             pending.append(signum)
+        elif signum != signal.SIGINT:
+            started[0].send_signal(signum)
 
     for number in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(number, forward)
+        if signal.getsignal(number) is not signal.SIG_IGN:
+            signal.signal(number, forward)
     try:
         process = _spawn(real, name, args)
     except OSError as error:
@@ -230,9 +239,12 @@ def main(argv: list[str]) -> int:
         sys.stderr.buffer.flush()
     else:
         stdout, stderr, code = _run(real, name, args)
-    _append(
-        log, {"command": shlex.join([name, *args]), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
-    )
+    record = {"command": shlex.join([name, *args]), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}
+    # The command already ran. A log that cannot be written (a read-only
+    # folder, a full disk, a folder at the path) loses the record, but the
+    # caller still gets the real exit code, and no extra stderr text.
+    with contextlib.suppress(OSError):
+        _append(log, record)
     return code
 
 

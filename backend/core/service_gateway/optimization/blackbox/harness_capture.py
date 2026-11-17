@@ -34,9 +34,10 @@ import os
 import shutil
 import stat
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ....storage.step_log_store import StepLogStore
 from ....storage.tree_store import TreeEntry, TreeStore
@@ -51,6 +52,43 @@ _SESSION_LOGS = ("run-*.stdout", "run-*.stderr", EXEC_LOG, EXEC_SHIM_DIR)
 _EXEC_READ_LIMIT = 8 << 20
 # Deeper folders are left out of a snapshot: the walk recurses and holds one descriptor per level.
 _MAX_DEPTH = 64
+# The snapshot holds each file in memory, and the agent can write a sparse
+# file of any size; past these caps a file is left out and the step names it.
+_FILE_SIZE_LIMIT = 8 << 20
+_TOTAL_SIZE_LIMIT = 64 << 20
+_FILE_COUNT_LIMIT = 5000
+# A step names at most this many left-out paths, and counts all of them.
+_SKIPPED_LISTED = 100
+
+
+class Snapshot(NamedTuple):
+    """One stored session tree, and the files the caps left out of it."""
+
+    tree_id: str
+    skipped: list[str]
+    skipped_count: int
+
+
+@dataclass
+class _Budget:
+    """What one snapshot stored so far, and what the caps left out."""
+
+    files: int = 0
+    size: int = 0
+    skipped: list[str] = field(default_factory=list)
+    skipped_count: int = 0
+    # The current root's path in the snapshot tree, with a trailing ``/``.
+    label: str = ""
+
+    def skip(self, path: str) -> None:
+        """Record one path that a cap left out.
+
+        Args:
+            path: The root-relative POSIX path.
+        """
+        self.skipped_count += 1
+        if len(self.skipped) < _SKIPPED_LISTED:
+            self.skipped.append(self.label + path)
 
 
 class HarnessCapture:
@@ -64,7 +102,7 @@ class HarnessCapture:
         agent_id: str,
         execution_generation: int,
         grant_list_id: str,
-        snapshot: Callable[[], str],
+        snapshot: Callable[[], Snapshot],
         route_key: str,
         exec_log: Path | None = None,
         seq: int = 0,
@@ -78,7 +116,8 @@ class HarnessCapture:
             execution_generation: The run generation the agent works under.
             grant_list_id: The grant list the commands ran with.
             snapshot: Store the current workspace and session folder and
-                return the tree id (for example :func:`snapshot_session`).
+                return the tree id and the left-out files (for example
+                :func:`snapshot_session`).
             route_key: The key the harness routes with; step bodies never hold it.
             exec_log: The session's exec shim log, when the launch records
                 commands. The capture reads only what is written after it starts.
@@ -158,7 +197,9 @@ class HarnessCapture:
 
         The capture records each step right after its commit (its tool call
         id, or its exec log position), so a retry after a failed commit does
-        not commit the earlier ones again.
+        not commit the earlier ones again. When the snapshot caps left files
+        out of the tree, each body names them in ``snapshot_skipped`` (at most
+        ``_SKIPPED_LISTED``) and counts them in ``snapshot_skipped_count``.
 
         Args:
             items: Step bodies, in the order the commands ran, each with the
@@ -169,7 +210,13 @@ class HarnessCapture:
         """
         if not items:
             return []
-        tree_id = self._snapshot()
+        snapshot = self._snapshot()
+        skipped: dict[str, Any] = {}
+        if snapshot.skipped_count:
+            skipped = {
+                "snapshot_skipped": _redact(snapshot.skipped, self._route_key),
+                "snapshot_skipped_count": snapshot.skipped_count,
+            }
         step_ids = []
         for body, end in items:
             try:
@@ -194,8 +241,8 @@ class HarnessCapture:
                     kind="command",
                     execution_generation=self._generation,
                     grant_list_id=self._grant_list_id,
-                    body=redacted,
-                    tree_id=tree_id,
+                    body={**redacted, **skipped},
+                    tree_id=snapshot.tree_id,
                 )
             )
             self._seq += 1
@@ -415,13 +462,14 @@ def snapshot_session(
     *,
     proposer: dict[str, Any],
     route_key: str,
-) -> str:
+) -> Snapshot:
     """Store the workspace and the session folder as one tree, with no copy of the route key.
 
     Left out: the launch files (``harness_bridge.workspace_files``), which hold
     the key; a workspace entry named ``SESSIONS_DIR``, whose slot holds the
-    real session folder; the session folder's logs (``_SESSION_LOGS``); and
-    files that cannot be read.
+    real session folder; the session folder's logs (``_SESSION_LOGS``); files
+    that cannot be read; and files past the size and count caps, which the
+    result names.
 
     Args:
         trees: The worker's tree store.
@@ -432,10 +480,12 @@ def snapshot_session(
         route_key: The key the harness routes with.
 
     Returns:
-        The root tree id.
+        The root tree id, and the paths the caps left out. A session-folder
+        path starts with ``SESSIONS_DIR/<session id>/``.
     """
     launch_files = {*workspace_files(proposer), SESSIONS_DIR}
-    entries = _put_root(trees, run_id, workspace, launch_files.__contains__, route_key)
+    budget = _Budget()
+    entries = _put_root(trees, run_id, workspace, "", launch_files.__contains__, route_key, budget)
 
     def is_log(relative: str) -> bool:
         """Tell whether a session-folder path is a log of this box.
@@ -448,13 +498,21 @@ def snapshot_session(
         """
         return any(fnmatchcase(relative, pattern) for pattern in _SESSION_LOGS)
 
-    session = trees.put_tree(run_id, _put_root(trees, run_id, session_dir, is_log, route_key))
+    session_prefix = f"{SESSIONS_DIR}/{session_dir.name}/"
+    session = trees.put_tree(run_id, _put_root(trees, run_id, session_dir, session_prefix, is_log, route_key, budget))
     sessions = trees.put_tree(run_id, [TreeEntry(session_dir.name, "tree", session)])
-    return trees.put_tree(run_id, [*entries, TreeEntry(SESSIONS_DIR, "tree", sessions)])
+    tree_id = trees.put_tree(run_id, [*entries, TreeEntry(SESSIONS_DIR, "tree", sessions)])
+    return Snapshot(tree_id, budget.skipped, budget.skipped_count)
 
 
 def _put_root(
-    trees: TreeStore, run_id: str, folder: Path, skip: Callable[[str], bool], route_key: str
+    trees: TreeStore,
+    run_id: str,
+    folder: Path,
+    label: str,
+    skip: Callable[[str], bool],
+    route_key: str,
+    budget: _Budget,
 ) -> list[TreeEntry]:
     """Store everything below one root folder, which must not be a link.
 
@@ -462,15 +520,19 @@ def _put_root(
         trees: The tree store.
         run_id: The job that owns the objects.
         folder: The root folder.
+        label: The root's path in the snapshot tree, with a trailing ``/``,
+            for the left-out paths.
         skip: Tell whether a root-relative POSIX path is left out.
         route_key: The key to redact.
+        budget: The snapshot's caps, shared by both roots.
 
     Returns:
         The folder's tree entries.
     """
+    budget.label = label
     folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        return _put_directory(trees, run_id, folder_fd, "", skip, route_key, 0)
+        return _put_directory(trees, run_id, folder_fd, "", skip, route_key, 0, budget)
     finally:
         os.close(folder_fd)
 
@@ -483,6 +545,7 @@ def _put_directory(
     skip: Callable[[str], bool],
     route_key: str,
     depth: int,
+    budget: _Budget,
 ) -> list[TreeEntry]:
     """Store every file, link and folder in an open folder and return its entries.
 
@@ -500,6 +563,7 @@ def _put_directory(
         route_key: Each copy in a blob becomes ``KEY_TOKEN``; a name that holds it is left out.
         depth: The folder's depth below the root; its subfolders are left
             out at ``_MAX_DEPTH``.
+        budget: The snapshot's caps; a file or link past the count cap is left out.
 
     Returns:
         The folder's tree entries. Sockets, pipes and devices are left out.
@@ -512,12 +576,16 @@ def _put_directory(
         # make a file unreadable; the tree then holds what can still be read.
         try:
             info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
-            if stat.S_ISLNK(info.st_mode):
+            is_blob = stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode)
+            if is_blob and budget.files >= _FILE_COUNT_LIMIT:
+                budget.skip(prefix + name)
+            elif stat.S_ISLNK(info.st_mode):
                 # readlink reads the link itself and never follows it.
                 target = _redact_bytes(os.fsencode(os.readlink(name, dir_fd=folder_fd)), route_key)
                 entries.append(TreeEntry(name, "symlink", trees.put_blob(run_id, target)))
+                budget.files += 1
             elif (stat.S_ISDIR(info.st_mode) and depth < _MAX_DEPTH) or stat.S_ISREG(info.st_mode):
-                entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key, depth)
+                entry = _put_opened(trees, run_id, folder_fd, prefix, name, info, skip, route_key, depth, budget)
                 if entry is not None:
                     entries.append(entry)
         except OSError:
@@ -554,8 +622,13 @@ def _put_opened(
     skip: Callable[[str], bool],
     route_key: str,
     depth: int,
+    budget: _Budget,
 ) -> TreeEntry | None:
     """Open one file or folder without following a link and store it, if it is still what ``lstat`` saw.
+
+    A file is read in chunks and only up to ``_FILE_SIZE_LIMIT``, so a sparse
+    or growing file cannot fill the memory. A file over that cap, or one that
+    would take the snapshot past ``_TOTAL_SIZE_LIMIT``, is left out and recorded.
 
     Args:
         trees: The tree store.
@@ -567,9 +640,11 @@ def _put_opened(
         skip: Tell whether a root-relative POSIX path is left out.
         route_key: The key to redact.
         depth: The parent's depth below the root.
+        budget: The snapshot's caps.
 
     Returns:
-        The entry, or ``None`` when the opened file is another file or type.
+        The entry, or ``None`` when the opened file is another file or type,
+        or a cap leaves it out.
 
     Raises:
         OSError: When the open fails, for example ``ELOOP`` on a link.
@@ -585,12 +660,22 @@ def _put_opened(
             return None
         if stat.S_ISDIR(opened.st_mode):
             subtree = trees.put_tree(
-                run_id, _put_directory(trees, run_id, fd, f"{prefix}{name}/", skip, route_key, depth + 1)
+                run_id, _put_directory(trees, run_id, fd, f"{prefix}{name}/", skip, route_key, depth + 1, budget)
             )
             return TreeEntry(name, "tree", subtree)
-        chunks = []
-        while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
+        room = min(_FILE_SIZE_LIMIT, _TOTAL_SIZE_LIMIT - budget.size)
+        chunks: list[bytes] = []
+        size = 0
+        if opened.st_size <= room:
+            # One byte past the room tells a file that grew during the read.
+            while size <= room and (chunk := os.read(fd, min(1 << 20, room + 1 - size))):
+                chunks.append(chunk)
+                size += len(chunk)
+        if opened.st_size > room or size > room:
+            budget.skip(prefix + name)
+            return None
+        budget.files += 1
+        budget.size += size
         mode = "exec" if opened.st_mode & 0o111 else "file"
         return TreeEntry(name, mode, trees.put_blob(run_id, _redact_bytes(b"".join(chunks), route_key)))
     finally:

@@ -1752,3 +1752,32 @@ def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> Non
     assert done.stderr.startswith(b"broken: ")
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     assert (record["command"], record["exit_code"]) == ("broken", 126)
+
+
+def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_written(tmp_path: Path) -> None:
+    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback."""
+    _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
+    log = tmp_path / "log-folder"
+    log.mkdir()
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["probe"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (4, b"out\n", b"err\n")
+    assert list(log.iterdir()) == []
+
+
+def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Path) -> None:
+    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore."""
+    probe = "import signal; print(signal.getsignal(signal.SIGINT) is signal.SIG_IGN)"
+    _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(
+        ["/bin/sh", "-c", 'trap "" INT; exec probe'], env=env, capture_output=True, timeout=10, check=False
+    )
+
+    assert (done.returncode, done.stdout) == (0, b"True\n"), done.stderr
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["stdout"] == "True\n"
