@@ -1526,9 +1526,17 @@ class StoragePackModel(Base):
     The row commits in the same transaction as the pack's steps and tree
     objects, so a pack without a row is a flush that crashed after its PUT;
     recovery applies it.
+
+    ``byte_size = -1`` marks a broken pack: the tree compactor found its object
+    missing or shorter than its rows (SKY-716). Its rows stay on it, and the
+    compactor no longer merges it. ``created_at`` is the write time, and for a
+    pack that the compactor merged, the retire time.
     """
 
     __tablename__ = "storage_packs"
+    # The compactor's candidate and retired-pack queries filter on created_at and sort by
+    # (created_at, pack_key) with a LIMIT (SKY-802).
+    __table_args__ = (Index("ix_storage_packs_created_at_pack_key", "created_at", "pack_key"),)
 
     pack_key: Mapped[str] = mapped_column(String(512), primary_key=True)
     worker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -1548,7 +1556,11 @@ class AgentStepModel(Base):
     """
 
     __tablename__ = "agent_steps"
-    __table_args__ = (Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),)
+    __table_args__ = (
+        Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),
+        # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+        Index("ix_agent_steps_pack_key", "pack_key"),
+    )
 
     # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
     step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
@@ -1580,6 +1592,8 @@ class TreeObjectModel(Base):
     """
 
     __tablename__ = "tree_objects"
+    # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+    __table_args__ = (Index("ix_tree_objects_pack_key", "pack_key"),)
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
     object_id: Mapped[str] = mapped_column(String(64), primary_key=True)

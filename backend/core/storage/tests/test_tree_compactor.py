@@ -1675,3 +1675,68 @@ def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
 
     assert results == [3]
     _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_the_compactor_queries_use_their_indexes(tmp_path, postgres_engine, objects, postgres_store) -> None:
+    """EXPLAIN of each compactor read, as the compactor sent it, names the index that serves it (SKY-802)."""
+    _fill(postgres_store)
+    reads: list[tuple[str, Any]] = []
+
+    def record(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Record each SELECT with its parameters.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+        """
+        if statement.startswith("SELECT") and "FOR " not in statement:
+            reads.append((statement, parameters))
+
+    delete_object = _deleter(tmp_path / "objects", [])
+    merger = TreeCompactor(postgres_engine, objects, delete_object, min_age_seconds=0.0)
+    # A zero grace time lets the removals find the packs at once; a merge with it would give up.
+    remover = TreeCompactor(postgres_engine, objects, delete_object, grace_seconds=0.0)
+    event.listen(postgres_engine, "before_cursor_execute", record)
+    try:
+        assert merger.merge() == 3
+        assert remover.remove_retired() == 3
+        objects.put(f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack", b"x")
+        assert remover.remove_unrecorded() == 1
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", record)
+
+    def plan(prefix: str) -> str:
+        """Return the plan of the first recorded read that starts with a prefix, with sequential scans off.
+
+        A few test rows make a sequential scan the cheapest plan, so the test turns it off to show
+        that the index can serve the query.
+
+        Args:
+            prefix: The start of the SQL text.
+
+        Returns:
+            The plan text.
+        """
+        statement, parameters = next(read for read in reads if read[0].startswith(prefix))
+        with postgres_engine.connect() as connection:
+            connection.execute(text("SET enable_seqscan = off"))
+            return "\n".join(row[0] for row in connection.exec_driver_sql(f"EXPLAIN {statement}", parameters))
+
+    candidates = plan("SELECT storage_packs.pack_key, storage_packs.byte_size")
+    retired = plan("SELECT storage_packs.pack_key \nFROM storage_packs \nWHERE storage_packs.created_at")
+    for query in (candidates, retired):
+        assert "ix_storage_packs_created_at_pack_key" in query
+        assert "ix_agent_steps_pack_key" in query
+        assert "ix_tree_objects_pack_key" in query
+    assert "ix_agent_steps_pack_key" in plan("SELECT agent_steps.step_id")
+    assert "ix_tree_objects_pack_key" in plan("SELECT tree_objects.username")
+    assert "storage_packs_pkey" in plan(
+        "SELECT storage_packs.pack_key \nFROM storage_packs \nWHERE storage_packs.pack_key IN"
+    )
