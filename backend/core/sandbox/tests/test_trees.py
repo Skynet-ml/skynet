@@ -201,14 +201,29 @@ def _cut_last_member(*members: tuple[tarfile.TarInfo, bytes]) -> bytes:
     return buffer.getvalue()[: last.offset_data + 10]
 
 
+def _pax_named(name: str) -> tarfile.TarInfo:
+    """Return a regular-file header whose path comes only from a pax header.
+
+    Args:
+        name: The path, which may hold bytes a USTAR header cannot.
+
+    Returns:
+        The header.
+    """
+    info = _info("placeholder")
+    info.pax_headers = {"path": name}
+    return info
+
+
 @pytest.mark.parametrize(
     "data",
     [
         _archive((_info("a"), b"a\n"), (_info("../x"), b"x\n")),
         _archive((_info("a"), b"a\n"), (_info("b", tarfile.LNKTYPE, "missing"), b"")),
         _cut_last_member((_info("a"), b"a\n"), (_info("b"), b"b" * 600)),
+        _archive((_info("a"), b"a\n"), (_pax_named("b\0c"), b"x\n")),
     ],
-    ids=["path-leaves-the-tree", "hard-link-to-nothing", "content-cut-short"],
+    ids=["path-leaves-the-tree", "hard-link-to-nothing", "content-cut-short", "pax-nul-name"],
 )
 def test_a_refused_archive_stores_no_blob(trees: TreeStore, monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
     """A bad last member stops the archive before the good first member's blob is stored.

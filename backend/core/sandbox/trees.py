@@ -312,7 +312,7 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
 
     Raises:
         BadArchiveError: When the archive is over a size limit, does not
-            read, a member path leaves the top level or is too deep, a name
+            read, a member path leaves the top level, is too deep or holds a NUL byte, a name
             is both a file and a folder, a name is too long or not UTF-8, or
             a hard link names no earlier file.
     """
@@ -454,11 +454,14 @@ def _parts(name: str) -> list[str]:
         The names, without empty and ``.`` parts.
 
     Raises:
-        BadArchiveError: When the path holds ``..``.
+        BadArchiveError: When the path holds ``..`` or a NUL byte.
     """
     parts = [part for part in name.split("/") if part not in {"", "."}]
     if ".." in parts:
         raise BadArchiveError(f"Archive member {name!r} leaves the tree.")
+    # A pax header can carry a NUL that the tree store refuses only after the blobs are stored.
+    if "\0" in name:
+        raise BadArchiveError(f"Archive member {name!r} holds a NUL byte.")
     return parts
 
 

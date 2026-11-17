@@ -467,15 +467,17 @@ def test_a_box_that_does_not_open_is_a_box_failure(trees: TreeStore, step_log: S
 class _FakeBox:
     """A box that raises a chosen error on its first file write, or answers every call."""
 
-    def __init__(self, error: BaseException | None = None, read_back: str | None = None) -> None:
+    def __init__(self, error: BaseException | None = None, read_back: str | None = None, stdout: str = "1\n") -> None:
         """Set what the box does.
 
         Args:
             error: Raised by the first file write; ``None`` writes nothing and goes on.
             read_back: What every file read returns.
+            stdout: What every command prints; the pack reads it as the part count.
         """
         self.error = error
         self.read_back = read_back
+        self.stdout = stdout
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Raise the chosen error, if any.
@@ -497,9 +499,9 @@ class _FakeBox:
             **options: Not used.
 
         Returns:
-            A successful result that prints ``1``, which the pack reads as one part.
+            A successful result that prints the chosen stdout.
         """
-        return CommandResult(exit_code=0, stdout="1\n", stderr="")
+        return CommandResult(exit_code=0, stdout=self.stdout, stderr="")
 
     def read_file(self, path: str) -> str | None:
         """Return the chosen text.
@@ -951,6 +953,49 @@ def test_an_archive_that_grows_after_the_box_check_is_refused_by_the_worker(
     with pytest.raises(TreeRejectedError):
         sandbox.run(_step(), _tree(trees, {}), "true", [])
 
+    assert source.released == [False]
+
+
+def test_parts_that_grow_past_the_size_limit_together_are_refused(
+    trees: TreeStore, step_log: StepLogStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The size limit counts all parts, so two parts each under it are refused together.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(tree_sandbox, "_MAX_OUT_FILE_BYTES", 10)
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(read_back="A" * 6, stdout="2\n"))
+
+    with pytest.raises(TreeRejectedError):
+        sandbox.run(_step(), _tree(trees, {}), "true", [])
+
+    assert source.released == [False]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["", "0", "x", str(tree_sandbox._MAX_OUT_PARTS + 1)],
+    ids=["empty", "zero", "not-a-number", "over-the-limit"],
+)
+def test_a_bad_part_count_from_the_pack_is_refused_not_retried(
+    trees: TreeStore, step_log: StepLogStore, stdout: str
+) -> None:
+    """The candidate controls what the pack prints, so a bad part count is a tree rejection.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        stdout: The part count the pack prints.
+    """
+    sandbox, source = _fake_sandbox(trees, step_log, _FakeBox(read_back=None, stdout=stdout))
+
+    with pytest.raises(TreeRejectedError) as raised:
+        sandbox.run(_step(), _tree(trees, {}), "true", [])
+
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
     assert source.released == [False]
 
 
