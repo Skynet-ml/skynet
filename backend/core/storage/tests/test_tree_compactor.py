@@ -697,6 +697,115 @@ def test_remove_unrecorded_reads_no_rows_for_young_keys(engine, objects, store, 
     assert statements == []
 
 
+def _record_statements(engine: Engine) -> list[tuple[str, bool]]:
+    """Record each SQL statement that the engine runs from now on, with its executemany flag.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        The list that gets each statement and flag.
+    """
+    statements: list[tuple[str, bool]] = []
+
+    def record(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Record one statement.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+        """
+        statements.append((statement, executemany))
+
+    event.listen(engine, "before_cursor_execute", record)
+    return statements
+
+
+def test_remove_retired_holds_no_connection_during_the_deletes(engine, objects, store, make_compactor) -> None:
+    """Each object delete runs with no database connection checked out, so no transaction stays open."""
+    _fill(store)
+    make_compactor().merge()
+    checked_out: list[int] = []
+
+    def delete_object(key: str) -> None:
+        """Record the checked-out connections, then delete the object.
+
+        Args:
+            key: The pack key.
+        """
+        checked_out.append(engine.pool.checkedout())
+        objects._path(key).unlink()
+
+    assert make_compactor(grace_seconds=0.0, delete_object=delete_object).remove_retired() == 3
+    assert checked_out == [0, 0, 0]
+    assert objects.list("packs/") == []
+    assert _pack_rows(engine) == set(objects.list(f"{COMPACTED_PREFIX}/"))
+
+
+def test_the_merge_moves_the_rows_with_one_statement_for_each_chunk(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """The rows move in one UPDATE for each chunk, with no executemany and no count query."""
+    written = _fill(store)
+    with Session(engine) as session:
+        step_rows = len(session.scalars(select(AgentStepModel.step_id)).all())
+        object_rows = len(session.scalars(select(TreeObjectModel.object_id)).all())
+    monkeypatch.setattr(tree_compactor, "CHUNK_SIZE", 4)
+    statements = _record_statements(engine)
+
+    assert make_compactor().merge() == 3
+
+    assert not any(executemany for _, executemany in statements)
+    assert not any("count(" in statement.lower() for statement, _ in statements)
+    assert sum(statement.startswith("UPDATE agent_steps") for statement, _ in statements) == -(-step_rows // 4)
+    assert sum(statement.startswith("UPDATE tree_objects") for statement, _ in statements) == -(-object_rows // 4)
+    _assert_all_readable(store, written)
+
+
+def test_the_row_cap_ends_the_pass_early(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """A pass stops adding packs once it reaches the row cap, but always merges two packs."""
+    written = _fill(store)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 1)
+
+    assert make_compactor().merge() == 2
+    assert len(_pack_keys_of_rows(engine)) == 2
+    _assert_all_readable(store, written)
+
+
+def test_remove_unrecorded_skips_a_key_with_no_write_time(engine, objects, make_compactor) -> None:
+    """A key under the prefix that does not start with a write time is kept; the other orphans still go."""
+    bad = f"{COMPACTED_PREFIX}/not-a-pack"
+    orphan = f"{COMPACTED_PREFIX}/{1:020d}-a.pack"
+    objects.put(bad, b"x")
+    objects.put(orphan, b"x")
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+    assert objects.list(f"{COMPACTED_PREFIX}/") == [bad]
+
+
+def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """The recorded check runs one query for each chunk of old keys and keeps the recorded pack."""
+    _fill(store)
+    make_compactor().merge()
+    (recorded,) = objects.list(f"{COMPACTED_PREFIX}/")
+    orphans = [f"{COMPACTED_PREFIX}/{n:020d}-a.pack" for n in range(1, 5)]
+    for key in orphans:
+        objects.put(key, b"x")
+    monkeypatch.setattr(tree_compactor, "CHUNK_SIZE", 2)
+    statements = _record_statements(engine)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 4
+
+    assert sum("FROM storage_packs" in statement for statement, _ in statements) == 3
+    assert objects.list(f"{COMPACTED_PREFIX}/") == [recorded]
+
+
 def _kill_child(database: str, root: str, marker: str) -> None:
     """Run a merge that hangs inside its commit until the parent kills the process.
 

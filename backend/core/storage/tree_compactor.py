@@ -42,12 +42,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import bindparam, delete, exists, func, or_, select, update
+from sqlalchemy import ColumnElement, Table, Update, and_, case, delete, exists, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -70,6 +71,10 @@ MIN_AGE_SECONDS = 600.0
 GRACE_SECONDS = 600.0
 TARGET_BYTES = 64 * 1024 * 1024
 MAX_PACKS_PER_PASS = 1000
+# A pass must commit inside half the grace time, so the rows it moves are capped as well as its bytes.
+MAX_ROWS_PER_PASS = 100_000
+# Rows in one UPDATE or keys in one IN query; at most 6 binds a row stays far below the SQLite bind limit.
+CHUNK_SIZE = 200
 INTERVAL_SECONDS = 60.0
 
 _REFERENCED = or_(
@@ -78,21 +83,51 @@ _REFERENCED = or_(
 )
 _STEPS = AgentStepModel.__table__
 _OBJECTS = TreeObjectModel.__table__
-# Bind names must differ from the column names: SQLAlchemy keeps those for the SET clause.
-_MOVE_STEP = (
-    update(_STEPS)
-    .where(_STEPS.c.step_id == bindparam("b_step_id"), _STEPS.c.pack_key == bindparam("b_old_key"))
-    .values(pack_key=bindparam("b_new_key"), pack_offset=bindparam("b_new_offset"))
-)
-_MOVE_OBJECT = (
-    update(_OBJECTS)
-    .where(
-        _OBJECTS.c.username == bindparam("b_username"),
-        _OBJECTS.c.object_id == bindparam("b_object_id"),
-        _OBJECTS.c.pack_key == bindparam("b_old_key"),
+_KEY_TIME_START = len(COMPACTED_PREFIX) + 1
+
+
+def _chunks(items: list[Any]) -> list[list[Any]]:
+    """Split a list into chunks of at most ``CHUNK_SIZE`` items.
+
+    Args:
+        items: The list.
+
+    Returns:
+        The chunks, in order.
+    """
+    return [items[start : start + CHUNK_SIZE] for start in range(0, len(items), CHUNK_SIZE)]
+
+
+def _move_chunk(table: Table, id_names: tuple[str, ...], chunk: list[tuple[Any, int]], new_key: str) -> Update:
+    """Build one UPDATE that points each row of a chunk at its offset in the new pack.
+
+    Args:
+        table: ``agent_steps`` or ``tree_objects``.
+        id_names: The primary key columns of the table.
+        chunk: Each row with its offset in the new pack.
+        new_key: The new pack key.
+
+    Returns:
+        The statement.
+    """
+
+    def matches(row: Any) -> ColumnElement[bool]:
+        """Match one row by its primary key.
+
+        Args:
+            row: The row as read.
+
+        Returns:
+            The condition.
+        """
+        return and_(*(table.c[name] == getattr(row, name) for name in id_names))
+
+    # The old pack key in each condition leaves a row that another pass moved first where it is.
+    return (
+        update(table)
+        .where(or_(*(and_(matches(row), table.c.pack_key == row.pack_key) for row, _ in chunk)))
+        .values(pack_key=new_key, pack_offset=case(*((matches(row), offset) for row, offset in chunk)))
     )
-    .values(pack_key=bindparam("b_new_key"), pack_offset=bindparam("b_new_offset"))
-)
 
 
 class TreeCompactor:
@@ -200,24 +235,31 @@ class TreeCompactor:
                     _OBJECTS.c.pack_length,
                 ).where(_OBJECTS.c.pack_key.in_(keys))
             ).all()
+        rows_of = Counter(row.pack_key for row in [*steps, *tree_objects])
+        kept: list[str] = []
+        row_count = 0
+        for key in keys:
+            if row_count >= MAX_ROWS_PER_PASS and len(kept) >= 2:
+                break
+            kept.append(key)
+            row_count += rows_of[key]
+        keys = kept
+        steps = [row for row in steps if row.pack_key in kept]
+        tree_objects = [row for row in tree_objects if row.pack_key in kept]
         # The new key is made only now, so its time is not older than the PUT.
         key_ns = time.time_ns()
         new_key = f"{COMPACTED_PREFIX}/{key_ns:020d}-{uuid4().hex}.pack"
         parts: list[bytes] = []
         offset = 0
-        step_moves: list[dict[str, Any]] = []
-        object_moves: list[dict[str, Any]] = []
+        step_moves: list[tuple[Any, int]] = []
+        object_moves: list[tuple[Any, int]] = []
         pack_key, pack = None, b""
         # Sorted by pack, so each old pack is read once and only one is in memory at a time.
         for row in sorted([*steps, *tree_objects], key=lambda row: (row.pack_key, row.pack_offset)):
             if row.pack_key != pack_key:
                 pack_key, pack = row.pack_key, self._objects.get(row.pack_key)
             parts.append(pack[row.pack_offset : row.pack_offset + row.pack_length])
-            move = {"b_old_key": row.pack_key, "b_new_key": new_key, "b_new_offset": offset}
-            if "step_id" in row._fields:
-                step_moves.append({**move, "b_step_id": row.step_id})
-            else:
-                object_moves.append({**move, "b_username": row.username, "b_object_id": row.object_id})
+            (step_moves if "step_id" in row._fields else object_moves).append((row, offset))
             offset += row.pack_length
         del pack
         data = b"".join(parts)
@@ -234,14 +276,10 @@ class TreeCompactor:
             ).all()
             moved = 0
             if len(locked) == len(keys):
-                # The old pack key in each WHERE leaves a row that another pass moved first where it is.
-                if step_moves:
-                    session.execute(_MOVE_STEP, step_moves)
-                if object_moves:
-                    session.execute(_MOVE_OBJECT, object_moves)
-                moved = session.scalar(
-                    select(func.count()).select_from(_STEPS).where(_STEPS.c.pack_key == new_key)
-                ) + session.scalar(select(func.count()).select_from(_OBJECTS).where(_OBJECTS.c.pack_key == new_key))
+                for chunk in _chunks(step_moves):
+                    moved += session.execute(_move_chunk(_STEPS, ("step_id",), chunk, new_key)).rowcount
+                for chunk in _chunks(object_moves):
+                    moved += session.execute(_move_chunk(_OBJECTS, ("username", "object_id"), chunk, new_key)).rowcount
             if moved != len(step_moves) + len(object_moves):
                 session.rollback()
                 self._discard(new_key)
@@ -279,22 +317,26 @@ class TreeCompactor:
         Returns:
             The number of packs deleted.
         """
-        cutoff = datetime.now(UTC) - timedelta(seconds=self._grace_seconds)
+        retired = and_(
+            StoragePackModel.created_at < datetime.now(UTC) - timedelta(seconds=self._grace_seconds), ~_REFERENCED
+        )
+        # No lock: no new row ever points at a retired pack, and both deletes are idempotent.
         with Session(self._engine) as session:
             keys = list(
                 session.scalars(
                     select(StoragePackModel.pack_key)
-                    .where(StoragePackModel.created_at < cutoff, ~_REFERENCED)
+                    .where(retired)
                     .order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
                     .limit(MAX_PACKS_PER_PASS)
-                    .with_for_update(skip_locked=True, of=StoragePackModel)
                 )
             )
-            # The object goes before its row: recovery applies a pack object that has no row.
-            for key in keys:
-                self._delete_object(key)
-            if keys:
-                session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key.in_(keys)))
+        # The object goes before its row: recovery applies a pack object that has no row.
+        for key in keys:
+            self._delete_object(key)
+        if keys:
+            with Session(self._engine) as session:
+                for chunk in _chunks(keys):
+                    session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), retired))
                 session.commit()
         return len(keys)
 
@@ -305,15 +347,27 @@ class TreeCompactor:
             The number of packs deleted.
         """
         # List before the row read: a new pack that commits between the two has its row in the read.
+        # The whole prefix is listed each pass: ObjectStore.list has no start-after option.
         listed = self._objects.list(f"{COMPACTED_PREFIX}/")
         # The key starts with its write time, so a pass that is still before its commit keeps its new pack.
         cutoff_ns = time.time_ns() - int(self._grace_seconds * 1e9)
-        start = len(COMPACTED_PREFIX) + 1
-        old = [key for key in listed if int(key[start : start + 20]) < cutoff_ns]
+        old: list[str] = []
+        for key in listed:
+            try:
+                written_ns = int(key[_KEY_TIME_START : _KEY_TIME_START + 20])
+            except ValueError:
+                logger.warning("Skipping %s: its key does not start with a write time", key)
+                continue
+            if written_ns < cutoff_ns:
+                old.append(key)
         if not old:
             return 0
+        recorded: set[str] = set()
         with Session(self._engine) as session:
-            recorded = set(session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.in_(old))))
+            for chunk in _chunks(old):
+                recorded.update(
+                    session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.in_(chunk)))
+                )
         unrecorded = [key for key in old if key not in recorded]
         for key in unrecorded:
             self._delete_object(key)
