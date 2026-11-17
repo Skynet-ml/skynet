@@ -28,7 +28,6 @@ interface DatasetUploadCardProps {
    *  attaches proactively from the composer's + button. */
   call?: AgentToolCall;
   disabled?: boolean;
-  alreadyConfirmed?: boolean;
   /** The picked file goes too, so the chat can keep its original for the viewer. */
   onConfirm: (confirmed: ConfirmedDataset, file: File) => void;
 }
@@ -370,7 +369,7 @@ export async function readDatasetFile(file: File): Promise<ConfirmedDataset> {
  * Read composer-attached dataset files, and keep only the newest read.
  *
  * Args:
- *   resetKey: The open chat's session key. A new key drops reads still under way.
+ *   resetKey: A key for the open chat and its mode. A new key drops reads still under way.
  *   onRead: Gets the read dataset and its file.
  *   onError: Runs when the newest file cannot be read.
  *
@@ -421,7 +420,7 @@ let composerToastCount = 0;
  * newest read ends. A read that fails shows the parse error instead.
  *
  * Args:
- *   resetKey: The open chat's key. A new key drops the read and its toast.
+ *   resetKey: A key for the open chat and its mode. A new key drops the read and its toast.
  *   onRead: Gets the read dataset and its file.
  *
  * Returns:
@@ -465,18 +464,13 @@ export function useComposerDatasetAttach(
   );
 }
 
-export function DatasetUploadCard({
-  call,
-  disabled,
-  alreadyConfirmed,
-  onConfirm,
-}: DatasetUploadCardProps) {
+export function DatasetUploadCard({ call, disabled, onConfirm }: DatasetUploadCardProps) {
   const reduceMotion = useReducedMotion();
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const [parsing, setParsing] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const [parseError, setParseError] = React.useState<string | null>(null);
-  const [confirmed, setConfirmed] = React.useState(!!alreadyConfirmed);
+  const [confirmed, setConfirmed] = React.useState(false);
   const onConfirmRef = React.useRef(onConfirm);
   React.useEffect(() => {
     onConfirmRef.current = onConfirm;
@@ -487,10 +481,6 @@ export function DatasetUploadCard({
   React.useEffect(() => {
     disabledRef.current = disabled;
   }, [disabled]);
-
-  React.useEffect(() => {
-    if (alreadyConfirmed) setConfirmed(true);
-  }, [alreadyConfirmed]);
 
   // Each read gets a number; a newer read or an unmount drops an older one,
   // so a closed card attaches nothing.

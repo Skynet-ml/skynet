@@ -1045,8 +1045,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [webChat, datasetDraft, addOriginals],
   );
 
+  // A switch to a hosted chat also drops a read under way, so its toast closes
+  // instead of the file vanishing in handleDatasetConfirm.
   const attachComposerDataset = useComposerDatasetAttach(
-    agent.sessionKey,
+    `${agent.sessionKey}:${webChat}`,
     React.useCallback(
       (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
       [handleDatasetConfirm],
@@ -1201,7 +1203,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             disabled={webChat}
-            alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(confirmed, file) => handleDatasetConfirm(call.id, confirmed, file)}
           />
         );

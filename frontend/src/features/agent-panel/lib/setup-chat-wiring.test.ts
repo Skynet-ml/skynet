@@ -857,6 +857,11 @@ test("a confirmed dataset card stores its file's original under the card's id (S
     assert.deepEqual([...uploads], webChat ? [] : ["call-1"]);
   }
   assert.match(source(panel), /if \(confirmedUploadCalls\.has\(call\.id\)\) return null;/);
+  // A switch to a hosted chat drops a composer read under way, as a chat switch does.
+  assert.match(
+    source(panel),
+    /useComposerDatasetAttach\(\s*`\$\{agent\.sessionKey\}:\$\{webChat\}`/,
+  );
 });
 
 // Run the panel's handleSubmit with a pending dataset card (SKY-780).
