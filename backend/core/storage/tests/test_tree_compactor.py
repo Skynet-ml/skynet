@@ -976,8 +976,17 @@ def test_a_later_smaller_pack_fills_the_target_exactly(engine, objects, store, m
     assert _pack_keys_of_rows(engine) == {skipped, compacted}
 
 
-def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """A GET that fails with an error other than a missing object fails the merge and marks no pack."""
+class _SlowDownError(OSError):
+    """Carry the response shape of a boto3 ClientError for an S3 error other than InvalidRange."""
+
+    response = {"Error": {"Code": "SlowDown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("connection reset"), _SlowDownError("SlowDown")], ids=["oserror", "slowdown"]
+)
+def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_compactor, monkeypatch, error) -> None:
+    """A GET that fails with an error other than a missing object or an empty range fails the merge and marks no pack."""
     _fill(store)
     failing = min(objects.list("packs/w1/"))
     with Session(engine) as session:
@@ -986,7 +995,7 @@ def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_comp
     get = objects.get
 
     def flaky_get(key: str, *args: Any) -> bytes:
-        """Fail for one pack, as a network error does.
+        """Fail for one pack, as a network or S3 error does.
 
         Args:
             key: The object key.
@@ -999,16 +1008,17 @@ def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_comp
             OSError: For the failing pack.
         """
         if key == failing:
-            raise OSError("connection reset")
+            raise error
         return get(key, *args)
 
     monkeypatch.setattr(objects, "get", flaky_get)
 
-    with pytest.raises(OSError):
+    with pytest.raises(type(error)):
         make_compactor().merge()
     assert objects.list(f"{COMPACTED_PREFIX}/") == []
     with Session(engine) as session:
         assert session.get(StoragePackModel, failing).byte_size == size
+        assert BROKEN_BYTE_SIZE not in session.scalars(select(StoragePackModel.byte_size)).all()
 
 
 def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine, objects, make_compactor) -> None:
