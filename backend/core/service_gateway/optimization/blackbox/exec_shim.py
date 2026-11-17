@@ -86,6 +86,18 @@ def _pump(source: io.BufferedReader, sink: int, tail: bytearray) -> None:
             return
 
 
+def _write_stderr(message: bytes) -> None:
+    """Write a message to fd 2, and drop it when fd 2 is closed or broken.
+
+    Args:
+        message: The bytes to write.
+    """
+    with contextlib.suppress(OSError):
+        view = memoryview(message)
+        while view:
+            view = view[os.write(2, view) :]
+
+
 def _spawn(real: str, name: str, args: list[str]) -> subprocess.Popen[bytes]:
     """Start the real command with piped output, as the shell would start it.
 
@@ -101,13 +113,17 @@ def _spawn(real: str, name: str, args: list[str]) -> subprocess.Popen[bytes]:
         OSError: When the command cannot run.
     """
     env = {**os.environ, ACTIVE_ENV: "1"}
+    # The shell passes fds 3 and up through (``<(cmd)``, ``3>&1``, a make
+    # jobserver), so the child keeps them. The shim's own fds are
+    # non-inheritable (PEP 446), so none of them reach the child.
+    pipe = subprocess.PIPE
     try:
-        return subprocess.Popen([name, *args], executable=real, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        return subprocess.Popen([name, *args], executable=real, stdout=pipe, stderr=pipe, env=env, close_fds=False)
     except OSError as error:
         if error.errno != errno.ENOEXEC:
             raise
     # A script with no shebang line: the shell runs it with sh, so the shim does too.
-    return subprocess.Popen(["/bin/sh", real, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    return subprocess.Popen(["/bin/sh", real, *args], stdout=pipe, stderr=pipe, env=env, close_fds=False)
 
 
 def _exec(real: str, name: str, args: list[str]) -> int:
@@ -181,8 +197,7 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
         process = _spawn(real, name, args)
     except OSError as error:
         message = f"{name}: {error.strerror}\n".encode()
-        sys.stderr.buffer.write(message)
-        sys.stderr.buffer.flush()
+        _write_stderr(message)
         return b"", message, _CANNOT_RUN
     started.append(process)
     for number in pending:
@@ -191,8 +206,11 @@ def _run(real: str, name: str, args: list[str]) -> tuple[bytes, bytes, int]:
     pumps = [
         threading.Thread(target=_pump, args=(stream, sink, tail), daemon=True)
         for stream, sink, tail in (
-            (process.stdout, sys.stdout.fileno(), tails[0]),
-            (process.stderr, sys.stderr.fileno(), tails[1]),
+            # Fixed fd numbers: with fd 1 or 2 closed at start, ``sys.stdout``
+            # or ``sys.stderr`` is None, and a write to the closed fd fails
+            # with an OSError that ``_pump`` handles.
+            (process.stdout, 1, tails[0]),
+            (process.stderr, 2, tails[1]),
         )
     ]
     for pump in pumps:
@@ -216,7 +234,7 @@ def _tail(data: bytes) -> str:
 
 
 def _command(name: str, args: list[str]) -> str:
-    """Quote the command line for the log, cut to its first ``COMMAND_LIMIT`` argv bytes.
+    """Quote the command line for the log, cut to the first ``COMMAND_LIMIT`` bytes of the quoted line.
 
     Args:
         name: The command name.
@@ -267,8 +285,7 @@ def main(argv: list[str]) -> int:
         return _exec(real, name, args)
     if real is None:
         stdout, stderr, code = b"", f"{name}: command not found\n".encode(), _NOT_FOUND
-        sys.stderr.buffer.write(stderr)
-        sys.stderr.buffer.flush()
+        _write_stderr(stderr)
     else:
         stdout, stderr, code = _run(real, name, args)
     record = {"command": _command(name, args), "exit_code": code, "stdout": _tail(stdout), "stderr": _tail(stderr)}

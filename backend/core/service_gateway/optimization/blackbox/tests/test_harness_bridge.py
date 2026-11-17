@@ -1809,7 +1809,7 @@ def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp
 def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_line_into_a_closed_reader(
     tmp_path: Path,
 ) -> None:
-    """Small writes stay in the shim's stdout buffer after EPIPE; the shim still exits 141 and prints nothing more."""
+    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr."""
     _fake_tool(tmp_path / "bin", "lines", "while true; do echo hi; sleep 0.01; done")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(
@@ -1848,6 +1848,44 @@ def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(t
     head = command[: -len(exec_shim.COMMAND_CUT)].encode("utf-8", "surrogateescape")
     assert len(head) == exec_shim.COMMAND_LIMIT
     assert head.startswith(b"probe '\xff")
+
+
+def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(tmp_path: Path) -> None:
+    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's."""
+    probe = (
+        "import os\n"
+        "os.write(3, b'sub\\n')\n"
+        "open_fds = []\n"
+        "for fd in range(3, 256):\n"
+        "    try:\n"
+        "        os.fstat(fd)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    open_fds.append(fd)\n"
+        "print(open_fds)\n"
+    )
+    _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["/bin/sh", "-c", "probe 3>&1"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"sub\n[3]\n", b"")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["exit_code"], record["stdout"]) == (0, "[3]\n")
+
+
+def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_the_record(tmp_path: Path) -> None:
+    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback."""
+    _fake_tool(tmp_path / "bin", "probe", "echo err >&2; exit 4")
+    log = tmp_path / "exec.jsonl"
+
+    env = _shim_env(tmp_path, ["probe"], log)
+    done = subprocess.run(["/bin/sh", "-c", "probe >&-"], env=env, capture_output=True, timeout=10, check=False)
+
+    assert (done.returncode, done.stderr) == (4, b"err\n")
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (record["command"], record["exit_code"], record["stderr"]) == ("probe", 4, "err\n")
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
