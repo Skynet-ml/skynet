@@ -33,6 +33,7 @@ from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
+from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
 from core.sandbox.pacing import SYSTEM_CLOCK
 from core.sandbox.providers import vercel
 from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_confirmed
@@ -1746,6 +1747,75 @@ def test_policy_confirmed_rules() -> None:
     assert policy_confirmed(open_policy, readback("allow-all"))
     assert policy_confirmed(open_policy, readback("custom", ("*",)))
     assert not policy_confirmed(open_policy, readback("deny-all"))
+
+
+GRANT_TOKEN = "Bearer fake-token-not-a-secret"
+GRANT_REGISTRY = {"api.github.example": {"Authorization": GRANT_TOKEN}}
+
+
+def _granted(*grants: Grant) -> dict[str, Any]:
+    """Resolve grants against the test registry into spec fields.
+
+    Args:
+        grants: The grants of the box.
+
+    Returns:
+        The egress fields of a spec that the resolved policy set.
+    """
+    spec = resolve_grants(grants, GRANT_REGISTRY).apply(SandboxSpec(lifetime_seconds=300))
+    return {
+        "network_disabled": spec.network_disabled,
+        "allowed_hosts": spec.allowed_hosts,
+        "inject_headers": spec.inject_headers,
+    }
+
+
+async def test_a_box_with_no_grants_is_created_with_no_network(client: FakeClient, log: list[str]) -> None:
+    """Check that the metric-box default grants create a deny-all box."""
+    client.readback = readback("deny-all")
+    env = make_env(client, log, **_granted(*METRIC_BOX_GRANTS))
+    await env.start()
+    assert client.create_kwargs[0]["network_policy"].mode == "deny-all"
+    assert env.usage.request["network_disabled"] is True
+    await env.stop()
+
+
+async def test_granted_headers_reach_only_the_credential_host(client: FakeClient, log: list[str]) -> None:
+    """Check that the create policy allows the granted hosts and injects only the credential."""
+    hosts = ("api.github.example", "files.example.org")
+    client.readback = readback("custom", hosts)
+    env = make_env(
+        client,
+        log,
+        protected=False,
+        **_granted(Grant("api.github.example", credential=True), Grant("files.example.org")),
+    )
+    await env.start()
+    policy = client.create_kwargs[0]["network_policy"]
+    assert policy.mode == "custom"
+    assert set(policy.allow) == set(hosts)
+    assert policy.allow["files.example.org"] == ()
+    (rule,) = policy.allow["api.github.example"]
+    assert [dict(transform.headers) for transform in rule.transform] == [{"Authorization": GRANT_TOKEN}]
+    await env.stop()
+
+
+def test_a_protected_box_refuses_a_credential_grant(client: FakeClient, log: list[str]) -> None:
+    """Check that a protected box still injects no headers, even when a grant asks for one."""
+    with pytest.raises(SandboxSpecError, match="inject egress headers"):
+        make_env(client, log, **_granted(Grant("api.github.example", credential=True)))
+    assert client.create_kwargs == []
+
+
+async def test_a_protected_box_with_plain_grants_injects_no_header(client: FakeClient, log: list[str]) -> None:
+    """Check that a protected box opens its plain grant hosts with no header rule."""
+    client.readback = readback("custom", ("api.github.example",))
+    env = make_env(client, log, **_granted(Grant("api.github.example")))
+    await env.start()
+    policy = client.create_kwargs[0]["network_policy"]
+    assert dict(policy.allow) == {"api.github.example": ()}
+    assert env.usage.request["allowed_hosts"] == ["api.github.example"]
+    await env.stop()
 
 
 async def test_phase_timings_recorded_per_box(client: FakeClient, log: list[str]) -> None:
