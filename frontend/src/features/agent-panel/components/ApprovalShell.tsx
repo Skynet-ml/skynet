@@ -109,7 +109,7 @@ export function ApprovalShell({ icon: Icon, title, entries, styles, className, c
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           aria-controls={panelId}
-          className={cn(headClass, "cursor-pointer text-start transition-colors hover:bg-accent/40")}
+          className={cn(headClass, "cursor-pointer text-start transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40")}
         >
           {head}
           <span className={cn("inline-flex shrink-0 items-center gap-1 text-[0.6875rem]", styles.descText)}>
