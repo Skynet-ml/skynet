@@ -135,3 +135,33 @@ def park_run(engine: Engine, optimization_id: str, *, expected_generation: int, 
         }
         session.commit()
     return True
+
+
+def park_committed(engine: Engine, optimization_id: str, expected_generation: int) -> bool:
+    """Return whether a park of the run at ``expected_generation`` reached the database.
+
+    A park can commit and then raise, for example when the connection drops
+    after the commit. This read tells the caller which happened.
+
+    Args:
+        engine: Engine with the jobs table.
+        optimization_id: The run that the caller tried to park.
+        expected_generation: The generation the parking worker owned.
+
+    Returns:
+        ``True`` when the run is waiting at the generation that the park set.
+    """
+    with Session(engine) as session:
+        row = session.execute(
+            select(JobModel.status, JobModel.execution_generation, JobModel.recovery).where(
+                JobModel.optimization_id == optimization_id
+            )
+        ).one_or_none()
+    if row is None:
+        return False
+    recovery = row.recovery if isinstance(row.recovery, dict) else {}
+    return (
+        row.status == "paused"
+        and row.execution_generation == expected_generation + 1
+        and recovery.get("phase") == WAITING_PHASE
+    )

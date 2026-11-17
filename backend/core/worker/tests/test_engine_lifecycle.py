@@ -737,6 +737,35 @@ def test_a_park_that_raises_gives_the_worker_state_back(tmp_path: Path, monkeypa
     assert job_store.get_job(RUN)["status"] == "running"
 
 
+def test_a_park_that_commits_then_raises_counts_as_parked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the park commits and then raises, the maps stay clear and the pair stays, so no later lease is released."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    real_park = engine_module.park_run
+
+    def commit_then_raise(*args: Any, **kwargs: Any) -> bool:
+        """Park for real, then fail as a connection that drops after the commit would.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Raises:
+            RuntimeError: Always, after the real park commits.
+        """
+        assert real_park(*args, **kwargs)
+        raise RuntimeError("connection dropped after commit")
+
+    monkeypatch.setattr(engine_module, "park_run", commit_then_raise)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN not in w._claimed_jobs
+    assert RUN not in w._processing_jobs
+    assert RUN not in w._cancel_events
+    assert w._parked_jobs == {(0, RUN)}
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
 def test_a_slow_park_holds_no_worker_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """While the park waits on the database, other threads take the queue and activity locks."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)

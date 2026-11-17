@@ -128,7 +128,7 @@ from .repo_staging import (
     publish_improvement,
     stage_repository,
 )
-from .step_recovery import park_run
+from .step_recovery import park_committed, park_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
 from .vercel_dspy import run_vercel_dspy
@@ -555,7 +555,9 @@ class BackgroundWorker:
             Whether the run was parked; ``False`` when the worker does not
             process the run, when this worker already parked the run, or
             when another owner changed the run first.
-            When the park fails or raises, the worker state comes back. If
+            When the park fails or raises, the worker state comes back. A
+            park that commits and then raises counts as parked: it logs the
+            error and returns ``True``. If
             the worker finished the run during a failed park, the claim is
             released and no state comes back.
         """
@@ -580,6 +582,16 @@ class BackgroundWorker:
             # If the worker finishes the run now, its _mark_job_done takes the pair and does nothing:
             # the maps are already clear, and a park that succeeds clears the lease itself.
             parked = park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at)
+        except Exception:
+            # A park can commit and then raise. Restoring the maps then would let this thread's
+            # _mark_job_done release a later claim's lease, so a committed park counts as parked.
+            try:
+                parked = park_committed(self._job_store.engine, optimization_id, generation)
+            except Exception:
+                logger.exception("Could not read whether the park of %s committed", optimization_id)
+            if not parked:
+                raise
+            logger.exception("park_run raised after its commit for %s; the run is parked", optimization_id)
         finally:
             if not parked:
                 self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)

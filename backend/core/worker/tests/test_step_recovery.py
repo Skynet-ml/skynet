@@ -624,6 +624,31 @@ def test_a_bad_wake_at_is_skipped_and_other_runs_still_wake(store: StepJobStore,
     assert store.get_job("good")["status"] == "pending"
 
 
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        None,
+        {"wake_at": "2020-01-01T00:00:00+00:00"},
+        {"state": "recovering", "phase": "waiting_for_usage", "wake_at": "2020-01-01T00:00:00+00:00"},
+    ],
+)
+def test_the_wake_leaves_a_run_that_is_not_waiting_alone(store: StepJobStore, recovery: dict[str, str] | None) -> None:
+    """A paused run with no waiting phase stays paused, even with a past ``wake_at``, while a waiting run wakes."""
+    waiting = {"state": "recovering", "phase": "waiting", "wake_at": "2020-01-01T00:00:00+00:00"}
+    for identifier, value in (("user-paused", recovery), ("waiting", waiting)):
+        store.create_job(identifier)
+        with Session(store.engine) as session:
+            session.execute(
+                update(JobModel).where(JobModel.optimization_id == identifier).values(status="paused", recovery=value)
+            )
+            session.commit()
+
+    store.recover_orphaned_jobs()
+
+    assert store.get_job("user-paused")["status"] == "paused"
+    assert store.get_job("waiting")["status"] == "pending"
+
+
 def _save_checkpoint(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the run a GEPA payload and a real checkpoint pinned to the current worker version.
 

@@ -2573,8 +2573,10 @@ class RemoteDBJobStore:
 
         Each move is a compare-and-set on the status and the generation, and
         it bumps the generation, so two sweeps wake a run once. A run whose
-        checkpoint needs a worker version that is gone fails instead, as in
-        ``requeue_for_resume``, because no worker would ever claim it.
+        checkpoint pins a worker version other than this pod's version fails
+        instead. This is the same rule as ``requeue_for_resume``. The check
+        uses this pod's version only, so during a rollout an old pod can fail
+        a run that a new pod could claim.
 
         Returns:
             The number of runs woken.
@@ -2600,7 +2602,9 @@ class RemoteDBJobStore:
                     is not None
                 )
                 # Same rule as requeue_for_resume: only a checkpoint without a pinned
-                # sandbox image ties the run to one worker version.
+                # sandbox image ties the run to one worker version. The check compares
+                # with this pod's version, so a rollout can fail a run that a newer pod
+                # could claim; the orphan requeue accepts the same risk.
                 pinned = has_checkpoint and row.sandbox_image is None
                 if pinned and row.code_version != self._current_code_version:
                     reason = "No compatible worker version is available for this checkpoint."
