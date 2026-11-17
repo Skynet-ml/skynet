@@ -7,6 +7,10 @@ metric tree, so no candidate code reaches it. Each call commits one step to
 the step log and returns only once that step is durable behind the run's
 fence. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
 it opens a new box for each acquire and closes it at release.
+:class:`RuntimeBoxLease` keeps one warm box for each agent on the provider
+that placement picks (SKY-732). A metric lease must use ``keep_warm=False``:
+no wipe resets /tmp, $HOME and stray processes on every provider, so each
+score gets a new box.
 
 :meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
 one box from a :class:`BoxSource`, starts it from a state, and gives the
@@ -35,7 +39,9 @@ from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
+from ....sandbox.box_lease import BoxLease
 from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ....sandbox.placement import VERCEL, Placement, gpu_type, network_grants
 from ....sandbox.trees import (
     MAX_ARCHIVE_BYTES,
     BadArchiveError,
@@ -71,6 +77,7 @@ _MAX_B64_CHARS = 4 * -(-MAX_ARCHIVE_BYTES // 3)
 _MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_PARTS
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
+_CHECK_TIMEOUT_SECONDS = 30
 
 _Result = TypeVar("_Result")
 
@@ -123,13 +130,125 @@ class RuntimeBoxSource:
         Raises:
             BudgetReached: And the other budget errors, from the close's settlement.
         """
-        try:
-            box.close()
-        except _BUDGET_ERRORS:
-            raise
-        except Exception as error:
-            # Only the type: the provider's text can name the box.
-            logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
+        _close_box(box)
+
+
+class RuntimeBoxLease(BoxLease[SandboxSession]):
+    """Keep one warm box for each agent on the runtime of its placed provider (SKY-732)."""
+
+    def __init__(
+        self,
+        runtimes: Mapping[str, SandboxRuntime],
+        spec: SandboxSpec,
+        registry: Mapping[str, Mapping[str, str]] | None = None,
+        **options: Any,
+    ) -> None:
+        """Bind the lease to one runtime for each provider and the spec of its boxes.
+
+        Args:
+            runtimes: Maps each provider name that placement can pick to the runtime that opens its boxes.
+            spec: The box spec; the network grants replace its network fields.
+            registry: Maps each capability host to the headers that the edge
+                injects for it; ``None`` holds no credential.
+            **options: The :class:`BoxLease` options, such as ``vercel_cap`` and ``keep_warm``.
+
+        Raises:
+            ValueError: When the cap or the spill provider is not valid, or no
+                runtime opens the Vercel boxes or the spill provider's boxes.
+            TypeError: When keep_warm is not a bool, or a function option is not callable.
+        """
+        self._runtimes = runtimes
+        self._spec = spec
+        self._registry = registry or {}
+        # The lease checks the options first, so the spill provider below is a valid name.
+        super().__init__(self._open_on_runtime, _close_box, check=_box_alive, **options)
+        # Checked now: a missing spill runtime would fail only at the cap, as a retryable box failure.
+        missing = sorted({VERCEL, self._spill} - set(runtimes))
+        if missing:
+            raise ValueError(f"The lease needs a runtime for each provider it can place on: {', '.join(missing)}.")
+
+    @property
+    def registry(self) -> Mapping[str, Mapping[str, str]]:
+        """Return the capability registry that this lease resolves grants against."""
+        return self._registry
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Return the agent's warm box, or open a new one; refuse a GPU box or a denied grant first.
+
+        Args:
+            agent_id: The agent.
+            grants: The box's grants.
+
+        Returns:
+            The box.
+
+        Raises:
+            GrantError: When the box needs a GPU, or the network grants do not resolve.
+        """
+        # Both refusals come before the claim, so the agent keeps its warm box and no start is spent.
+        gpu = gpu_type(grants)
+        if gpu is not None:
+            # The blackbox spec has no GPU field, so a runtime here would open the box without the GPU.
+            raise GrantError(f"No tree sandbox runtime opens a box with a {gpu} GPU.")
+        resolve_grants(network_grants(grants), self._registry)
+        return super().acquire(agent_id, grants)
+
+    def _open_on_runtime(self, placement: Placement, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new box on the placed provider's runtime.
+
+        Args:
+            placement: The provider of the box; :meth:`acquire` refuses a GPU first.
+            grants: The box's grants.
+
+        Returns:
+            The open box.
+
+        Raises:
+            GrantError: When the network grants do not resolve.
+            LookupError: When no runtime opens the placed provider's boxes.
+        """
+        runtime = self._runtimes.get(placement.provider)
+        if runtime is None:
+            raise LookupError(f"No runtime opens {placement.provider} boxes.")
+        return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
+
+
+def _close_box(box: SandboxSession) -> None:
+    """Close a box, and log only the type of a close failure.
+
+    Args:
+        box: The box.
+
+    Raises:
+        BudgetReached: And the other budget errors, from the close's settlement.
+    """
+    try:
+        box.close()
+    except _BUDGET_ERRORS:
+        raise
+    except Exception as error:
+        # Only the type: the provider's text can name the box.
+        logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
+
+
+def _box_alive(box: SandboxSession) -> bool:
+    """Return whether a warm box still runs a command.
+
+    Args:
+        box: The box.
+
+    Returns:
+        False when the box fails or dies.
+
+    Raises:
+        BudgetReached: And the other budget errors; the run stops.
+    """
+    try:
+        return box.run("true", timeout_seconds=_CHECK_TIMEOUT_SECONDS).ok
+    except _BUDGET_ERRORS:
+        raise
+    except Exception:
+        return False
 
 
 class BoxSession:
@@ -276,7 +395,8 @@ class TreeSandbox:
             timeout_seconds: The limit of one command or metric.
 
         Raises:
-            ValueError: When a runtime box source has another registry.
+            ValueError: When a runtime box source has another registry, or
+                the metric boxes come from a lease that keeps boxes warm.
         """
         self._trees = trees
         self._step_log = step_log
@@ -284,9 +404,13 @@ class TreeSandbox:
         self._metrics = metrics
         self._registry = registry or {}
         self._timeout = timeout_seconds
+        if isinstance(metrics, BoxLease) and metrics.keeps_warm:
+            # A warm box keeps /tmp, $HOME and stray processes from the last score or candidate,
+            # and no wipe clears them on every provider, so each score needs a new box.
+            raise ValueError("The metric boxes must come from a lease with keep_warm=False.")
         for source in (candidates, metrics):
             # The layer records the grant list that it resolves, so a box must open with the same registry.
-            if isinstance(source, RuntimeBoxSource) and source.registry != self._registry:
+            if isinstance(source, (RuntimeBoxSource, RuntimeBoxLease)) and source.registry != self._registry:
                 raise ValueError("A runtime box source must use the same capability registry as the tree sandbox.")
 
     @staticmethod
@@ -464,7 +588,8 @@ class TreeSandbox:
             GrantDeniedError: When the grants do not resolve.
         """
         try:
-            return resolve_grants(grants, self._registry).grant_list_id
+            # A gpu:<type> grant places the box; it is not a network grant.
+            return resolve_grants(network_grants(grants), self._registry).grant_list_id
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
 
