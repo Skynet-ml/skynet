@@ -876,6 +876,46 @@ def test_a_park_that_fails_after_the_worker_finished_releases_the_claim(
         assert row.claimed_by is None
 
 
+def test_a_failed_park_keeps_the_cancel_event_of_a_claim_made_during_the_park(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When another thread claims the requeued run during a failed park, the undo keeps that claim's cancel event."""
+    w, job_store, generation, old_cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    claimed: list[str | None] = []
+
+    def requeue_claim_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Requeue the run as the lease sweep does, claim it on a second thread, then report a failed park.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        with Session(job_store.engine) as session:
+            row = session.get(JobModel, RUN)
+            assert row is not None
+            row.status = "pending"
+            row.claimed_by = None
+            row.lease_expires_at = None
+            session.commit()
+        other = threading.Thread(target=lambda: claimed.append(w._claim_job_from_store()))
+        other.start()
+        other.join()
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", requeue_claim_then_fail)
+
+    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert claimed == [RUN]
+    assert w._cancel_events[RUN] is not old_cancel
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert not w._parked_jobs
+
+
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]
 _OUTCOME_OVERVIEW = {"optimization_type": "blackbox", "username": "alice", "optimizer_name": "gepa"}
 

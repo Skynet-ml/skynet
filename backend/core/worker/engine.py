@@ -548,7 +548,9 @@ class BackgroundWorker:
         Returns:
             Whether the run was parked; ``False`` when the worker does not
             process the run, or when another owner changed the run first.
-            When the park fails or raises, the worker state comes back.
+            When the park fails or raises, the worker state comes back. If
+            the worker finished the run during a failed park, the claim is
+            released and no state comes back.
         """
         pair = (worker_id, optimization_id)
         # The maps change before the park, so a thread that claims the woken run
@@ -600,8 +602,9 @@ class BackgroundWorker:
                     self._claimed_jobs.add(optimization_id)
                 if was_processing:
                     self._processing_jobs.add(optimization_id)
+                # A claim made during the unlocked park owns the newer event; keep it so a cancel reaches that worker.
                 if cancel is not None:
-                    self._cancel_events[optimization_id] = cancel
+                    self._cancel_events.setdefault(optimization_id, cancel)
         if finished and was_claimed:
             try:
                 self._job_store.release_job(optimization_id, self._pod_name)
