@@ -1,16 +1,10 @@
 "use client";
 
-import * as React from "react";
-import { CaretDown } from "@/shared/ui/icons";
-import { msg } from "@/shared/lib/messages";
-
-import { cn } from "@/shared/lib/utils";
-
 import { ApprovalChoices } from "./ApprovalChoices";
+import { ApprovalShell, SEVERITY_STYLES } from "./ApprovalShell";
 import { AutoReviewDeniedRow } from "./AutoReviewDeniedRow";
-import { EntryRow } from "./EntryRow";
 import { SecretRequestCard } from "./SecretRequestCard";
-import { getToolMeta, type ApprovalSeverity } from "../lib/tool-meta";
+import { getToolMeta } from "../lib/tool-meta";
 import type { ApprovalChoice, PendingApprovalPayload } from "../lib/types";
 
 interface ApprovalCardProps {
@@ -19,145 +13,33 @@ interface ApprovalCardProps {
   className?: string;
 }
 
-const SEVERITY_STYLES: Record<
-  ApprovalSeverity,
-  {
-    border: string;
-    bg: string;
-    headerBorder: string;
-    iconBg: string;
-    iconText: string;
-    titleText: string;
-    descText: string;
-    footerBg: string;
-    footerBorder: string;
-  }
-> = {
-  destructive: {
-    border: "border-[#9B2C1F]/30 dark:border-[#ec7764]/30",
-    bg: "bg-white dark:bg-card",
-    headerBorder: "border-[#9B2C1F]/20 dark:border-[#ec7764]/20",
-    iconBg: "bg-[#9B2C1F]/15",
-    iconText: "text-[#9B2C1F] dark:text-[#ffa595]",
-    titleText: "text-[#7A1E13] dark:text-[#ffb2a0]",
-    descText: "text-[#7A1E13]/80 dark:text-[#ffb2a0]/80",
-    footerBg: "bg-white dark:bg-card",
-    footerBorder: "border-[#9B2C1F]/15 dark:border-[#ec7764]/15",
-  },
-  warning: {
-    border: "border-[#A85A1A]/25",
-    bg: "bg-white dark:bg-card",
-    headerBorder: "border-[#A85A1A]/15",
-    iconBg: "bg-[#A85A1A]/15",
-    iconText: "text-[#A85A1A] dark:text-[#faa871]",
-    titleText: "text-[#7A3E12] dark:text-[#fdb68c]",
-    descText: "text-[#7A3E12]/80 dark:text-[#fdb68c]/80",
-    footerBg: "bg-white dark:bg-card",
-    footerBorder: "border-[#A85A1A]/10",
-  },
-  info: {
-    border: "border-border/50",
-    bg: "bg-white dark:bg-card",
-    headerBorder: "border-border/40",
-    iconBg: "bg-foreground/10",
-    iconText: "text-foreground/70",
-    titleText: "text-foreground",
-    descText: "text-muted-foreground",
-    footerBg: "bg-white dark:bg-card",
-    footerBorder: "border-border/40",
-  },
-};
-
 /**
  * Approval prompt rendered inline in the chat thread when the agent is
  * about to run a gated MCP tool. Translates the technical tool name and
- * arguments into Hebrew plain-language copy, with the raw technical
- * details tucked behind a disclosure toggle.
+ * arguments into Hebrew plain-language copy. The header shows the title
+ * only and opens the raw arguments (SKY-799).
  */
 export function ApprovalCard({ payload, onResolve, className }: ApprovalCardProps) {
   if (payload.tool === "request_secret") {
     return <SecretRequestCard payload={payload} onResolve={onResolve} className={className} />;
   }
   if (payload.auto_review?.denied) {
-    return <AutoReviewDeniedRow payload={payload} onResolve={onResolve} />;
+    return <AutoReviewDeniedRow payload={payload} onResolve={onResolve} className={className} />;
   }
   return <ToolApprovalCard payload={payload} onResolve={onResolve} className={className} />;
 }
 
 function ToolApprovalCard({ payload, onResolve, className }: ApprovalCardProps) {
-  const [showDetails, setShowDetails] = React.useState(false);
-
   const meta = getToolMeta(payload.tool);
-  const styles = SEVERITY_STYLES[meta.severity];
-  const Icon = meta.icon;
-  const entries = Object.entries(payload.arguments ?? {});
-  const hasArgs = entries.length > 0;
-
   return (
-    <div
-      className={cn(
-        "rounded-md border overflow-hidden",
-        styles.border,
-        styles.bg,
-        className,
-      )}
+    <ApprovalShell
+      icon={meta.icon}
+      title={meta.title}
+      entries={Object.entries(payload.arguments ?? {})}
+      styles={SEVERITY_STYLES[meta.severity]}
+      className={className}
     >
-      <div className={cn("flex items-start gap-2.5 px-4 py-3 border-b", styles.headerBorder)}>
-        <span
-          className={cn(
-            "inline-flex size-8 shrink-0 items-center justify-center rounded-full",
-            styles.iconBg,
-            styles.iconText,
-          )}
-        >
-          <Icon className="size-4" aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className={cn("text-[0.875rem] font-semibold leading-tight", styles.titleText)}>
-            {meta.title}
-          </div>
-          <div className={cn("text-[0.75rem] mt-1 leading-snug", styles.descText)}>
-            {meta.description}
-          </div>
-        </div>
-      </div>
-
-      {hasArgs && (
-        <div className="px-4 py-2">
-          <button
-            type="button"
-            onClick={() => setShowDetails((v) => !v)}
-            className={cn(
-              "inline-flex items-center gap-1 text-[0.6875rem] transition-opacity hover:opacity-75 cursor-pointer",
-              styles.descText,
-            )}
-            aria-expanded={showDetails}
-          >
-            <CaretDown
-              className={cn("size-3 transition-transform", showDetails && "rotate-180")}
-              aria-hidden="true"
-            />
-            {showDetails
-              ? msg("auto.features.agent.panel.components.approvalcard.literal.1")
-              : msg("auto.features.agent.panel.components.approvalcard.literal.2")}
-          </button>
-          {showDetails && (
-            <dl className="mt-2 space-y-2 text-[0.75rem]">
-              {entries.map(([key, value]) => (
-                <EntryRow key={key} argKey={key} value={value} labelClassName={styles.descText} />
-              ))}
-            </dl>
-          )}
-        </div>
-      )}
-
-      <div className={cn("px-2 py-2 border-t", styles.footerBg, styles.footerBorder)}>
-        <ApprovalChoices
-          allowLabel={meta.confirmLabel}
-          chatRule={payload.chat_rule === true}
-          onResolve={onResolve}
-        />
-      </div>
-    </div>
+      <ApprovalChoices allowLabel={meta.confirmLabel} chatRule={payload.chat_rule === true} onResolve={onResolve} />
+    </ApprovalShell>
   );
 }
