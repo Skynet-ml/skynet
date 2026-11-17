@@ -2,7 +2,7 @@
 
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { Database, Gauge, GitBranch, Lightbulb, Target } from "@/shared/ui/icons";
+import { GitBranch } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   Dialog,
@@ -14,15 +14,8 @@ import {
 } from "@/shared/ui/primitives/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 
+import { WIZARD_STAGE_ICONS } from "../constants";
 import { wizardSteps, type WizardV2State } from "../lib/wizard-v2";
-
-// The same icons the run overview shows for each part of a setup.
-const STEP_ICONS: Record<string, typeof Lightbulb> = {
-  task: Lightbulb,
-  inputs: Database,
-  optimizer: Target,
-  metric: Gauge,
-};
 
 /**
  * The offer of a run setup the user left: its name, repository and how far it
@@ -85,7 +78,7 @@ export function SetupDraftDialog({
             className="flex items-center"
           >
             {steps.map((step, i) => {
-              const Icon = STEP_ICONS[step] ?? Lightbulb;
+              const Icon = WIZARD_STAGE_ICONS[step];
               const label = msg(`submit.v2.stage.${step}` as MessageKey);
               const isCurrent = i === current;
               // Pre-attentive cues set the current step apart at a glance: it

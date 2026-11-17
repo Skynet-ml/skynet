@@ -1,6 +1,7 @@
 import type { ModelConfig } from "@/shared/types/api";
 import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
 import { msg } from "@/shared/lib/messages";
+import { Database, Gauge, Lightbulb, Target, type Icon } from "@/shared/ui/icons";
 
 import { WIZARD_STAGE_ORDER, type WizardStageId } from "./lib/wizard-steps";
 
@@ -21,6 +22,14 @@ const STAGE_LABELS: Record<WizardStageId, () => string> = {
   inputs: () => msg("submit.v2.stage.inputs" as MessageKey),
   optimizer: () => msg("submit.v2.stage.optimizer" as MessageKey),
   metric: () => msg("submit.v2.stage.metric" as MessageKey),
+};
+
+// The stepper and the setup draft dialog show the same icon for each step.
+export const WIZARD_STAGE_ICONS: Record<WizardStageId, Icon> = {
+  task: Lightbulb,
+  inputs: Database,
+  optimizer: Target,
+  metric: Gauge,
 };
 
 export const WIZARD_STAGES: ReadonlyArray<{ id: WizardStageId; label: () => string }> =

@@ -2,11 +2,12 @@
 
 import { useId } from "react";
 import { motion } from "framer-motion";
-import { Check } from "@/shared/ui/icons";
+import { Check, type Icon } from "@/shared/ui/icons";
 import { cn } from "@/shared/lib/utils";
 
 /**
- * Numbered step indicator at the top of a multi-step wizard. Each connector
+ * Step indicator at the top of a multi-step wizard. A step with an icon shows
+ * it in place of its number, filled once the step is done. Each connector
  * runs between two circle edges and fills once its step is passed.
  */
 export function WizardStepper({
@@ -18,7 +19,7 @@ export function WizardStepper({
   locked = false,
   tutorial,
 }: {
-  steps: ReadonlyArray<{ id: string; label: string }>;
+  steps: ReadonlyArray<{ id: string; label: string; icon?: Icon }>;
   step: number;
   maxReachableStep: number;
   validateStep: (index: number) => boolean;
@@ -39,6 +40,7 @@ export function WizardStepper({
           const clickable = i <= step || reachable;
           const isLast = i === steps.length - 1;
           const segmentDone = i + 1 <= step;
+          const StepIcon = s.icon;
           return (
             <div key={s.id} className="flex flex-col items-center relative z-10 flex-1">
               {!isLast ? (
@@ -78,7 +80,17 @@ export function WizardStepper({
                         : "bg-muted/50 text-muted-foreground/30 cursor-not-allowed",
                 )}
               >
-                {completed ? <Check className="size-4" /> : i + 1}
+                {StepIcon ? (
+                  <StepIcon
+                    className="size-5"
+                    weight={completed ? "fill" : undefined}
+                    aria-hidden
+                  />
+                ) : completed ? (
+                  <Check className="size-4" />
+                ) : (
+                  i + 1
+                )}
                 {active && (
                   <motion.span
                     layoutId={`${ringId}-step-ring`}
