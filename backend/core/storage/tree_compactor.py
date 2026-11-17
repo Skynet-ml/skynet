@@ -266,7 +266,8 @@ class TreeCompactor:
                     ).where(_OBJECTS.c.pack_key == key)
                 ).all()
                 rows = len(pack_steps) + len(pack_objects)
-                # No rows: another pass merged the pack after the candidate read. A pack at the row cap is full.
+                # No rows: another pass merged the pack, or a delete removed its rows, after the candidate read.
+                # A pack at the row cap is full.
                 if rows == 0 or rows >= MAX_ROWS_PER_PASS or row_count + rows > MAX_ROWS_PER_PASS:
                     continue
                 keys.append(key)
