@@ -648,13 +648,45 @@ def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects,
 
     assert results == [3, 0]
     assert [r.getMessage() for r in caplog.records if "gave up" in r.getMessage()] == [
-        f"Tree compaction gave up a pass of 3 packs and {rows} rows: another pass moved "
-        f"{rows} of the rows first; the next pass tries again"
+        f"Tree compaction gave up a pass of 3 packs and {rows} rows: another pass moved or a delete "
+        f"removed {rows} of the rows first; the next pass tries again"
     ]
     (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
     assert _pack_keys_of_rows(engine) == {compacted}
     assert compacted in _pack_rows(engine)
     _assert_all_readable(store, written)
+
+
+def test_a_merge_whose_steps_a_job_delete_removed_first_moves_nothing(
+    engine, objects, store, make_compactor, caplog
+) -> None:
+    """A job delete removes one run's steps during the PUT; the merge moves no row and drops its new pack."""
+    caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
+    _fill(store)
+    old = _pack_keys_of_rows(engine)
+    rows = len(_rows_of_packs(engine))
+    removed: list[int] = []
+
+    def delete_job_steps(key: str) -> None:
+        """Delete one run's step rows, as the job delete's cascade does, between the PUT and the move.
+
+        Args:
+            key: The merge's new pack key.
+        """
+        with Session(engine) as session:
+            removed.append(session.execute(delete(AgentStepModel).where(AgentStepModel.run_id == RUNS[1])).rowcount)
+            session.commit()
+
+    objects.on_compacted_put = delete_job_steps
+
+    assert make_compactor().merge() == 0
+    assert removed[0] > 0
+    assert [r.getMessage() for r in caplog.records if "gave up" in r.getMessage()] == [
+        f"Tree compaction gave up a pass of 3 packs and {rows} rows: another pass moved or a delete "
+        f"removed {removed[0]} of the rows first; the next pass tries again"
+    ]
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert _pack_keys_of_rows(engine) == old
 
 
 def test_the_merge_holds_no_connection_during_the_object_io(

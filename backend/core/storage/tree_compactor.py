@@ -14,8 +14,8 @@ The order makes a kill at any point safe:
    later pass deletes once its key time is older than the grace time.
 2. A short transaction locks the jobs of the moved steps and the old packs,
    each in key order with NOWAIT, and moves each row only while it still
-   points at its old pack. When a lock is held by another transaction or a
-   row moved, the pass rolls back and deletes its new pack.
+   points at its old pack. When a lock is held by another transaction, or a
+   row moved or was deleted, the pass rolls back and deletes its new pack.
    It also gives up when half the grace time passed since the key time, so
    another replica never deletes a new pack that is about to commit.
 3. The same transaction adds the new pack's ``storage_packs`` row and sets
@@ -220,7 +220,7 @@ class TreeCompactor:
         Returns:
             The number of old packs merged; ``0`` when fewer than two packs qualify, when missing,
             short or empty (broken) objects leave fewer than two packs, when another transaction
-            holds a lock that the move needs, or when another pass moved a row first.
+            holds a lock that the move needs, or when another pass moved or a delete removed a row first.
 
         Raises:
             TimeoutError: When half the grace time passed before the commit; the new pack is deleted.
@@ -340,8 +340,8 @@ class TreeCompactor:
                 )
             elif moved != expected:
                 logger.warning(
-                    "Tree compaction gave up a pass of %d packs and %d rows: another pass moved %d of the rows "
-                    "first; the next pass tries again",
+                    "Tree compaction gave up a pass of %d packs and %d rows: another pass moved or a delete "
+                    "removed %d of the rows first; the next pass tries again",
                     len(keys),
                     expected,
                     expected - moved,
