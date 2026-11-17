@@ -704,6 +704,23 @@ def test_waking_a_run_with_a_checkpoint_keeps_the_worker_version(store: StepJobS
     assert job["code_version"] == "old-version"
 
 
+def test_waking_a_sandbox_image_run_with_a_checkpoint_unpins_the_worker_version(store: StepJobStore) -> None:
+    """A woken run with a pinned sandbox image runs on any worker version, so its checkpoint does not pin it."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    _set_job(store, code_version="old-version", sandbox_image="fixture@sha256:" + "a" * 64)
+    with Session(store.engine) as session:
+        session.add(GepaCheckpointModel(optimization_id=RUN, data=b"state"))
+        session.commit()
+
+    assert store._wake_waiting_runs() == 1
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert job["code_version"] is None
+
+
 def test_a_failed_wake_does_not_stop_the_orphan_recovery(
     store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

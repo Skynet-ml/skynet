@@ -2594,8 +2594,12 @@ class RemoteDBJobStore:
                     .first()
                     is not None
                 )
-                if not has_checkpoint:
-                    # A checkpoint ties the run to one worker version; without one, any worker may resume it.
+                sandbox_image = (
+                    session.query(JobModel.sandbox_image).filter(JobModel.optimization_id == identifier).scalar()
+                )
+                if not has_checkpoint or sandbox_image is not None:
+                    # Same rule as requeue_for_resume: only a checkpoint without a pinned
+                    # sandbox image ties the run to one worker version.
                     values[JobModel.code_version] = None
                 woken += (
                     session.query(JobModel)

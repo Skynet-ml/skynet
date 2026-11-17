@@ -684,7 +684,7 @@ def test_park_job_frees_the_claim_so_the_heartbeat_does_not_cancel_the_run(tmp_p
     """A parked run leaves the worker's claims, and the next heartbeat does not treat it as stolen."""
     w, job_store, generation, cancel = _claimed_worker(tmp_path)
 
-    assert w.park_job(RUN, generation, datetime.now(UTC) + timedelta(hours=1))
+    assert w.park_job(0, RUN, generation, datetime.now(UTC) + timedelta(hours=1))
     assert RUN not in w._claimed_jobs
     w._touch_activity(0)
     assert not cancel.is_set()
@@ -695,17 +695,35 @@ def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
     """A worker that lost the generation does not park the run and keeps its claim for the heartbeat."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)
 
-    assert not w.park_job(RUN, generation - 1, datetime.now(UTC))
+    assert not w.park_job(0, RUN, generation - 1, datetime.now(UTC))
     assert RUN in w._claimed_jobs
     assert job_store.get_job(RUN)["status"] == "running"
 
 
+def test_park_job_refuses_a_worker_that_does_not_process_the_run(tmp_path: Path) -> None:
+    """A park for a worker that does not process the run leaves the run, the claim and the lease as they are."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+
+    assert not w.park_job(1, RUN, generation, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert not w._parked_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
+
+
 def test_parked_thread_cleanup_keeps_a_later_claim_of_the_woken_run(tmp_path: Path) -> None:
-    """The parked thread's ``_mark_job_done`` leaves a later thread's claim and lease on the woken run."""
+    """A park from a helper thread still makes the worker's ``_mark_job_done`` leave a later claim and lease."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)
     w._processing_jobs.add(RUN)
+    parked: list[bool] = []
 
-    assert w.park_job(RUN, generation, datetime.now(UTC))
+    def park_on_helper_thread() -> None:
+        """Park the run for worker 0 from a thread that is not the worker's own."""
+        parked.append(w.park_job(0, RUN, generation, datetime.now(UTC)))
+
+    helper = threading.Thread(target=park_on_helper_thread)
+    helper.start()
+    helper.join()
+    assert parked == [True]
     assert job_store._wake_waiting_runs() == 1
     claimed: list[str | None] = []
 
@@ -718,7 +736,7 @@ def test_parked_thread_cleanup_keeps_a_later_claim_of_the_woken_run(tmp_path: Pa
     other.join()
     assert claimed == [RUN]
 
-    w._mark_job_done(RUN)
+    w._mark_job_done(RUN, 0)
 
     assert RUN in w._claimed_jobs
     assert RUN in w._processing_jobs
