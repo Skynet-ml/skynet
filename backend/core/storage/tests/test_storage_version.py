@@ -1,8 +1,8 @@
 """Tests for the lazy per-workspace data migration on ``workspaces.storage_version``.
 
-Most tests use a SQLite file. SQLite has no row locks, so the two-workers
-test runs only when ``APP_TEST_DB_URL`` names a disposable PostgreSQL
-database, in its own schema that it drops after.
+Most tests use a SQLite file. SQLite has no row locks, so the PostgreSQL
+tests run only when ``APP_TEST_DB_URL`` names a disposable PostgreSQL
+database, each in its own schema that it drops after.
 """
 
 from __future__ import annotations

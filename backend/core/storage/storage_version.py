@@ -34,8 +34,6 @@ from sqlalchemy.orm import Session
 from .models import WorkspaceModel
 
 BASE_VERSION = 1
-# A step gets the upgrade session and the workspace id. It must not commit or roll back the session:
-# ensure_current ends the transaction, so the row lock holds until the version update.
 UpgradeStep = Callable[[Session, str], None]
 UPGRADES: tuple[UpgradeStep, ...] = ()
 
