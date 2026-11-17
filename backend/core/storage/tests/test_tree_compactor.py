@@ -14,6 +14,7 @@ import threading
 import time
 import types
 import uuid
+from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -768,13 +769,88 @@ def test_the_merge_moves_the_rows_with_one_statement_for_each_chunk(
     _assert_all_readable(store, written)
 
 
+def _rows_per_pack(engine: Engine) -> int:
+    """Return the number of rows in each pack that :func:`_fill` wrote; every pack has the same number.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        The row count of one pack.
+    """
+    with Session(engine) as session:
+        keys = [*session.scalars(select(AgentStepModel.pack_key)), *session.scalars(select(TreeObjectModel.pack_key))]
+    (count,) = set(Counter(keys).values())
+    return count
+
+
 def test_the_row_cap_ends_the_pass_early(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """A pass stops adding packs once it reaches the row cap, but always merges two packs."""
+    """A pass stops adding packs when the next pack does not fit under the row cap."""
     written = _fill(store)
-    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 1)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
 
     assert make_compactor().merge() == 2
     assert len(_pack_keys_of_rows(engine)) == 2
+    _assert_all_readable(store, written)
+
+
+def test_two_packs_over_the_row_cap_are_not_merged(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """When no two packs fit under the row cap together, the pass merges nothing and writes no pack."""
+    _fill(store)
+    old = _pack_keys_of_rows(engine)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine) - 1)
+
+    assert make_compactor().merge() == 0
+    assert objects.list(f"{COMPACTED_PREFIX}/") == []
+    assert _pack_keys_of_rows(engine) == old
+
+
+def test_a_pack_at_the_row_cap_is_full(engine, objects, store, make_compactor, monkeypatch) -> None:
+    """The oldest pack has the cap's rows; the pass skips it, as a pack at the target size, and merges the next two."""
+    written = _fill(store, flushes=4)
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
+    assert make_compactor().merge() == 2
+    (full,) = objects.list(f"{COMPACTED_PREFIX}/")
+    with Session(engine) as session:
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key == full)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        session.commit()
+
+    assert make_compactor().merge() == 2
+    assert full in _pack_keys_of_rows(engine)
+    assert len(_pack_keys_of_rows(engine)) == 2
+    _assert_all_readable(store, written)
+
+
+def test_packs_merged_after_the_candidate_read_write_no_empty_pack(engine, objects, store, make_compactor) -> None:
+    """Another pass merges the packs between this pass's candidate read and row read; this pass writes nothing."""
+    written = _fill(store)
+    old = set(objects.list("packs/w1/"))
+    results: list[int] = []
+
+    def merge_first(connection: object, cursor: object, statement: str, *args: object) -> None:
+        """Run the whole second merge once, just before the first row read.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        if statement.startswith("SELECT agent_steps") and not results:
+            results.append(-1)
+            results.append(make_compactor().merge())
+
+    event.listen(engine, "before_cursor_execute", merge_first)
+    first = make_compactor().merge()
+    event.remove(engine, "before_cursor_execute", merge_first)
+
+    assert (first, results[1]) == (0, 3)
+    (compacted,) = objects.list(f"{COMPACTED_PREFIX}/")
+    assert _pack_rows(engine) == old | {compacted}
     _assert_all_readable(store, written)
 
 

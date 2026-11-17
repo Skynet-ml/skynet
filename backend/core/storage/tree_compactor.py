@@ -42,7 +42,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -72,6 +71,8 @@ GRACE_SECONDS = 600.0
 TARGET_BYTES = 64 * 1024 * 1024
 MAX_PACKS_PER_PASS = 1000
 # A pass must commit inside half the grace time, so the rows it moves are capped as well as its bytes.
+# A pass adds a pack only when its rows fit under the cap. A pack with this many rows is full, as a
+# pack at the target size is: it is never merged again.
 MAX_ROWS_PER_PASS = 100_000
 # Rows in one UPDATE or keys in one IN query; at most 6 binds a row stays far below the SQLite bind limit.
 CHUNK_SIZE = 200
@@ -213,39 +214,38 @@ class TreeCompactor:
                 .limit(MAX_PACKS_PER_PASS)
             ).all()
             keys: list[str] = []
-            total = 0
+            steps: list[Any] = []
+            tree_objects: list[Any] = []
+            total = row_count = 0
+            # Rows are read one pack at a time, so a pack that does not fit uses none of the byte or row budget.
             for key, size in candidates:
-                if total >= self._target_bytes:
+                if total >= self._target_bytes or row_count >= MAX_ROWS_PER_PASS:
                     break
+                pack_steps = session.execute(
+                    select(_STEPS.c.step_id, _STEPS.c.pack_key, _STEPS.c.pack_offset, _STEPS.c.pack_length).where(
+                        _STEPS.c.pack_key == key
+                    )
+                ).all()
+                pack_objects = session.execute(
+                    select(
+                        _OBJECTS.c.username,
+                        _OBJECTS.c.object_id,
+                        _OBJECTS.c.pack_key,
+                        _OBJECTS.c.pack_offset,
+                        _OBJECTS.c.pack_length,
+                    ).where(_OBJECTS.c.pack_key == key)
+                ).all()
+                rows = len(pack_steps) + len(pack_objects)
+                # No rows: another pass merged the pack after the candidate read. A pack at the row cap is full.
+                if rows == 0 or rows >= MAX_ROWS_PER_PASS or row_count + rows > MAX_ROWS_PER_PASS:
+                    continue
                 keys.append(key)
+                steps += pack_steps
+                tree_objects += pack_objects
                 total += size
+                row_count += rows
             if len(keys) < 2:
                 return 0
-            steps = session.execute(
-                select(_STEPS.c.step_id, _STEPS.c.pack_key, _STEPS.c.pack_offset, _STEPS.c.pack_length).where(
-                    _STEPS.c.pack_key.in_(keys)
-                )
-            ).all()
-            tree_objects = session.execute(
-                select(
-                    _OBJECTS.c.username,
-                    _OBJECTS.c.object_id,
-                    _OBJECTS.c.pack_key,
-                    _OBJECTS.c.pack_offset,
-                    _OBJECTS.c.pack_length,
-                ).where(_OBJECTS.c.pack_key.in_(keys))
-            ).all()
-        rows_of = Counter(row.pack_key for row in [*steps, *tree_objects])
-        kept: list[str] = []
-        row_count = 0
-        for key in keys:
-            if row_count >= MAX_ROWS_PER_PASS and len(kept) >= 2:
-                break
-            kept.append(key)
-            row_count += rows_of[key]
-        keys = kept
-        steps = [row for row in steps if row.pack_key in kept]
-        tree_objects = [row for row in tree_objects if row.pack_key in kept]
         # The new key is made only now, so its time is not older than the PUT.
         key_ns = time.time_ns()
         new_key = f"{COMPACTED_PREFIX}/{key_ns:020d}-{uuid4().hex}.pack"
