@@ -51,7 +51,7 @@ void describe("WizardStepper", () => {
     );
     assert.equal(
       active.match(/<svg.*<\/svg>/s)?.[0],
-      renderToStaticMarkup(<Database className="size-5" weight="regular" aria-hidden />),
+      renderToStaticMarkup(<Database className="size-5" weight="bold" aria-hidden />),
     );
   });
 

@@ -99,7 +99,7 @@ export function SetupDraftDialog({
                 >
                   <Icon
                     className={isCurrent ? "size-4" : "size-3.5"}
-                    weight={i < current ? "fill" : undefined}
+                    weight={i < current ? "fill" : "bold"}
                     aria-hidden
                   />
                 </span>
