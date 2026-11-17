@@ -69,8 +69,10 @@ def _real_command(shim_dir: str, name: str) -> str | None:
         The path of the first match on ``PATH`` outside the shim folder, or ``None``.
     """
     shim_dir = os.path.realpath(shim_dir)
+    # An empty entry is the current folder, for the shell and for ``which``,
+    # so it stays unless the current folder is the shim folder.
     path = os.pathsep.join(
-        part for part in os.environ.get("PATH", "").split(os.pathsep) if part and os.path.realpath(part) != shim_dir
+        part for part in os.environ.get("PATH", "").split(os.pathsep) if os.path.realpath(part) != shim_dir
     )
     return shutil.which(name, path=path)
 

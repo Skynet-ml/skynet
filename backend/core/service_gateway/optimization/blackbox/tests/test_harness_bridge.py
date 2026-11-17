@@ -1653,6 +1653,57 @@ def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_pa
     assert (done.returncode, done.stdout) == (5, b"real\n")
 
 
+@pytest.mark.parametrize("logged", [True, False])
+def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_entry(
+    tmp_path: Path, logged: bool
+) -> None:
+    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too."""
+    _fake_tool(tmp_path / "here", "probe", "echo real; exit 5")
+    shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
+    log = tmp_path / "exec.jsonl"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("APP_")}
+    env["PATH"] = f"{os.pathsep}{os.environ['PATH']}"
+    if logged:
+        env["APP_EXEC_LOG"] = str(log)
+
+    done = subprocess.run(
+        [sys.executable, "-I", exec_shim.__file__, str(shim_dir), "probe"],
+        env=env,
+        cwd=tmp_path / "here",
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert (done.returncode, done.stdout, done.stderr) == (5, b"real\n", b"")
+    if logged:
+        [record] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert (record["command"], record["exit_code"]) == ("probe", 5)
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", "..", ".", "", "x\0y"])
+def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_outside(
+    tmp_path: Path, name: str
+) -> None:
+    """A command name with a path part, or a NUL, raises ValueError before any file is written."""
+    shim_dir = tmp_path / "shim"
+
+    with pytest.raises(ValueError, match="plain name"):
+        harness_bridge.install_exec_shim(shim_dir, [name], sys.executable)
+
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")) == ["shim"]
+
+
+def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, monkeypatch) -> None:
+    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper."""
+    monkeypatch.setattr(harness_bridge, "__file__", str(tmp_path / "bridge" / "harness_bridge.py"))
+
+    with pytest.raises(FileNotFoundError, match="exec shim not found"):
+        harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
+
+    assert not (tmp_path / "shim").exists()
+
+
 def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:
     """The caller gets the full output; the log keeps its tail."""
     _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")

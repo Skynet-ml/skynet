@@ -678,7 +678,7 @@ def _put_directory(
 def _is_utf8(name: str) -> bool:
     """Tell whether a file name can be stored in a tree.
 
-    ``os.listdir`` returns a name that is not valid UTF-8 with surrogate
+    ``os.scandir`` returns a name that is not valid UTF-8 with surrogate
     escapes, and ``encode_tree`` cannot encode it.
 
     Args:
