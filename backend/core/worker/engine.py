@@ -548,20 +548,64 @@ class BackgroundWorker:
         Returns:
             Whether the run was parked; ``False`` when the worker does not
             process the run, or when another owner changed the run first.
+            When the park fails or raises, the worker state comes back.
         """
-        # The queue lock makes a thread that claims the woken run add it to the maps only after this pop.
-        # The activity lock keeps the worker from finishing the run before the park records it.
+        pair = (worker_id, optimization_id)
+        # The maps change before the park, so a thread that claims the woken run
+        # adds it to the maps only after this pop. The activity lock keeps the
+        # worker from finishing the run between the check and the pair.
         with self._queue_lock, self._activity_lock:
             if self._thread_current_job.get(worker_id) != optimization_id:
                 return False
-            if not park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at):
-                return False
-            # The run has no lease now: a heartbeat would find no claim and cancel the job as stolen.
+            was_claimed = optimization_id in self._claimed_jobs
+            was_processing = optimization_id in self._processing_jobs
+            cancel = self._cancel_events.pop(optimization_id, None)
+            # The run has no lease after the park: a heartbeat would find no claim and cancel the job as stolen.
             self._claimed_jobs.discard(optimization_id)
             self._processing_jobs.discard(optimization_id)
-            self._cancel_events.pop(optimization_id, None)
-            self._parked_jobs.add((worker_id, optimization_id))
-        return True
+            self._parked_jobs.add(pair)
+        parked = False
+        try:
+            # No lock is held here: a slow database must not block the other workers and their leases.
+            # If the worker finishes the run now, its _mark_job_done takes the pair and does nothing:
+            # the maps are already clear, and a park that succeeds clears the lease itself.
+            parked = park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at)
+        finally:
+            if not parked:
+                self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)
+        return parked
+
+    def _undo_park(
+        self, pair: tuple[int, str], *, was_claimed: bool, was_processing: bool, cancel: threading.Event | None
+    ) -> None:
+        """Give a run that did not park its worker state back.
+
+        If the worker finished the run during the park, its ``_mark_job_done``
+        took the pair and skipped the release. The run is not parked, so this
+        method then releases the claim in its place, and restores no state.
+
+        Args:
+            pair: The (worker id, run id) that ``park_job`` recorded.
+            was_claimed: Whether this pod held the claim before the park.
+            was_processing: Whether the run was in the processing set before the park.
+            cancel: The run's cancel event before the park.
+        """
+        optimization_id = pair[1]
+        with self._queue_lock:
+            finished = pair not in self._parked_jobs
+            self._parked_jobs.discard(pair)
+            if not finished:
+                if was_claimed:
+                    self._claimed_jobs.add(optimization_id)
+                if was_processing:
+                    self._processing_jobs.add(optimization_id)
+                if cancel is not None:
+                    self._cancel_events[optimization_id] = cancel
+        if finished and was_claimed:
+            try:
+                self._job_store.release_job(optimization_id, self._pod_name)
+            except Exception:
+                logger.exception("release_job failed for %s", optimization_id)
 
     def _worker_loop(self, worker_id: int) -> None:
         """Poll for jobs and process them until stopped.

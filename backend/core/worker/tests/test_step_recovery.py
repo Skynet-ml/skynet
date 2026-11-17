@@ -692,7 +692,7 @@ def test_waking_a_run_with_a_checkpoint_keeps_the_worker_version(store: StepJobS
     _funded_run(store)
     generation = _claim(store, "pod-a")
     assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
-    _set_job(store, code_version="old-version")
+    _set_job(store, code_version=store._current_code_version)
     with Session(store.engine) as session:
         session.add(GepaCheckpointModel(optimization_id=RUN, data=b"state"))
         session.commit()
@@ -701,7 +701,30 @@ def test_waking_a_run_with_a_checkpoint_keeps_the_worker_version(store: StepJobS
 
     job = store.get_job(RUN)
     assert job["status"] == "pending"
-    assert job["code_version"] == "old-version"
+    assert job["code_version"] == store._current_code_version
+
+
+def test_waking_a_checkpoint_run_of_a_gone_worker_version_fails_it(store: StepJobStore) -> None:
+    """A woken run pinned by its checkpoint to a worker version that is gone fails, as a requeue would fail it."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC))
+    _set_job(store, code_version="old-version")
+    with Session(store.engine) as session:
+        session.add(GepaCheckpointModel(optimization_id=RUN, data=b"state"))
+        session.commit()
+
+    assert store._wake_waiting_runs() == 0
+
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert job["stop_reason"] == "interrupted"
+    assert job["message"] == (
+        f"{remote_mod.ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
+        "No compatible worker version is available for this checkpoint."
+    )
+    assert job["recovery"] is None
+    assert store.take_ended_orphans() == [(RUN, generation + 1)]
 
 
 def test_waking_a_sandbox_image_run_with_a_checkpoint_unpins_the_worker_version(store: StepJobStore) -> None:

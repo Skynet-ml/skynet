@@ -2572,42 +2572,67 @@ class RemoteDBJobStore:
         """Move each paused run whose ``wake_at`` passed back to ``pending``, so a worker claims it.
 
         Each move is a compare-and-set on the status and the generation, and
-        it bumps the generation, so two sweeps wake a run once.
+        it bumps the generation, so two sweeps wake a run once. A run whose
+        checkpoint needs a worker version that is gone fails instead, as in
+        ``requeue_for_resume``, because no worker would ever claim it.
 
         Returns:
             The number of runs woken.
         """
-        due = self._due_waiting_runs(datetime.now(UTC))
+        now = datetime.now(UTC)
+        due = self._due_waiting_runs(now)
         session = self._get_session()
         try:
             woken = 0
             for identifier, generation in due:
-                values = {
-                    JobModel.status: "pending",
-                    JobModel.execution_generation: generation + 1,
-                    JobModel.recovery: None,
-                    JobModel.message: "Continuing after its wait",
-                }
+                current = (JobModel.optimization_id == identifier, JobModel.status == "paused")
+                row = (
+                    session.query(JobModel.sandbox_image, JobModel.code_version)
+                    .filter(*current, JobModel.execution_generation == generation)
+                    .one_or_none()
+                )
+                if row is None:
+                    continue
                 has_checkpoint = (
                     session.query(GepaCheckpointModel.optimization_id)
                     .filter(GepaCheckpointModel.optimization_id == identifier)
                     .first()
                     is not None
                 )
-                sandbox_image = (
-                    session.query(JobModel.sandbox_image).filter(JobModel.optimization_id == identifier).scalar()
-                )
-                if not has_checkpoint or sandbox_image is not None:
-                    # Same rule as requeue_for_resume: only a checkpoint without a pinned
-                    # sandbox image ties the run to one worker version.
+                # Same rule as requeue_for_resume: only a checkpoint without a pinned
+                # sandbox image ties the run to one worker version.
+                pinned = has_checkpoint and row.sandbox_image is None
+                if pinned and row.code_version != self._current_code_version:
+                    reason = "No compatible worker version is available for this checkpoint."
+                    ended = (
+                        session.query(JobModel)
+                        .filter(*current, JobModel.execution_generation == generation)
+                        .update(
+                            {
+                                JobModel.status: "failed",
+                                JobModel.stop_reason: "interrupted",
+                                JobModel.completed_at: now,
+                                JobModel.message: f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} {reason}",
+                                JobModel.recovery: None,
+                            },
+                            synchronize_session=False,
+                        )
+                    )
+                    session.commit()
+                    if ended:
+                        self._note_ended_orphan(identifier, generation)
+                    continue
+                values = {
+                    JobModel.status: "pending",
+                    JobModel.execution_generation: generation + 1,
+                    JobModel.recovery: None,
+                    JobModel.message: "Continuing after its wait",
+                }
+                if not pinned:
                     values[JobModel.code_version] = None
                 woken += (
                     session.query(JobModel)
-                    .filter(
-                        JobModel.optimization_id == identifier,
-                        JobModel.status == "paused",
-                        JobModel.execution_generation == generation,
-                    )
+                    .filter(*current, JobModel.execution_generation == generation)
                     .update(values, synchronize_session=False)
                 )
                 session.commit()
@@ -2631,13 +2656,14 @@ class RemoteDBJobStore:
         try:
             rows = (
                 session.query(JobModel.optimization_id, JobModel.execution_generation, JobModel.recovery)
-                .filter(JobModel.status == "paused")
+                .filter(JobModel.status == "paused", JobModel.recovery["phase"].as_string() == WAITING_PHASE)
                 .all()
             )
         finally:
             session.close()
         due: list[tuple[str, int]] = []
-        # ``wake_at`` lives in the recovery JSON, so the filter runs here, not in SQL.
+        # The SQL filter skips user-paused runs; ``wake_at`` is a string in the
+        # JSON, so the parse and the time check run here.
         for identifier, generation, recovery in rows:
             if not isinstance(recovery, dict) or recovery.get("phase") != WAITING_PHASE:
                 continue

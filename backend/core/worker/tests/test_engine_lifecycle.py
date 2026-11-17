@@ -695,9 +695,80 @@ def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
     """A worker that lost the generation does not park the run and keeps its claim for the heartbeat."""
     w, job_store, generation, _ = _claimed_worker(tmp_path)
 
+    w._processing_jobs.add(RUN)
+
     assert not w.park_job(0, RUN, generation - 1, datetime.now(UTC))
     assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    assert not w._parked_jobs
     assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_a_park_that_raises_gives_the_worker_state_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the park raises, the run is back in the three maps with its own cancel event, and no pair stays."""
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    def broken_park(*args: Any, **kwargs: Any) -> bool:
+        """Fail as a park with a lost database connection would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(engine_module, "park_run", broken_park)
+
+    with pytest.raises(RuntimeError):
+        w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is cancel
+    assert not w._parked_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_a_slow_park_holds_no_worker_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the park waits on the database, other threads take the queue and activity locks."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    real_park = engine_module.park_run
+
+    def slow_park(*args: Any, **kwargs: Any) -> bool:
+        """Wait inside the park until the test lets it go, then park for real.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Returns:
+            The real park's result.
+        """
+        entered.set()
+        assert release.wait(5.0)
+        return real_park(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "park_run", slow_park)
+    parked: list[bool] = []
+    parker = threading.Thread(target=lambda: parked.append(w.park_job(0, RUN, generation, datetime.now(UTC))))
+    parker.start()
+    assert entered.wait(5.0)
+    try:
+        assert w._queue_lock.acquire(timeout=1.0)
+        w._queue_lock.release()
+        assert w._activity_lock.acquire(timeout=1.0)
+        w._activity_lock.release()
+    finally:
+        release.set()
+        parker.join()
+    assert parked == [True]
+    assert job_store.get_job(RUN)["status"] == "paused"
 
 
 def test_park_job_refuses_a_worker_that_does_not_process_the_run(tmp_path: Path) -> None:
