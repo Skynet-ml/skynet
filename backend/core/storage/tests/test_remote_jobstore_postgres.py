@@ -740,6 +740,7 @@ def _fund_checkpoint(store: RemoteDBJobStore, job_id: str, monkeypatch: pytest.M
     service.attach_to_job(budget.id, username, job_id, expected_revision=budget.revision)
     payload = {
         "optimizer_name": "GEPA",
+        "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
         "execution_budget_id": budget.id,
