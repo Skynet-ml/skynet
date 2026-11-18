@@ -177,7 +177,12 @@ def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
 def test_alembic_setup_skips_the_step_log_shards_from_the_settings(
     store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upgrade only the test database, even when ``STEP_LOG_SHARDS`` names another database."""
+    """Upgrade only the test database, even when ``STEP_LOG_SHARDS`` names another database.
+
+    Args:
+        store: Used only so that its fixture migrates the test database first.
+        monkeypatch: Sets ``settings.step_log_shards`` for this test.
+    """
     shard_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_shard_{uuid.uuid4().hex[:8]}")
     shards = {"proof": SecretStr(shard_url.render_as_string(hide_password=False))}
     monkeypatch.setattr(settings, "step_log_shards", shards)
