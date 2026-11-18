@@ -97,8 +97,9 @@ empty part fails the setup check, and the message names the key.
 - `setup` runs once in each proposer box, in the repository checkout where
   the command runs, before the first proposer session, also in a protected
   run. The run keeps a copy of the files that `setup` adds in the git
-  folder. GEPA and Best-of-N reset the checkout before and after each
-  version, and AutoSaddler gives each session a new worktree. Each later
+  folder, also the files that `.gitignore` names (such as
+  `node_modules/`). GEPA and Best-of-N reset the checkout before and after
+  each version, and AutoSaddler gives each session a new worktree. Each later
   session gets the kept copy back, and `setup` does not run again. A file
   of the version at the same path stays, and the copy does not replace it.
   The copy keeps symbolic links as links. A file that holds the absolute
@@ -117,9 +118,11 @@ empty part fails the setup check, and the message names the key.
   every version. Edits that the version made before `setup` ran do not count.
   The same applies to the new files of the version that git does not track
   yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
-- A file or folder name that `setup` adds cannot hold a control character
-  (such as a new line) or end in a space. The run cannot keep such a name
-  out of the versions, so the run stops, and the message names the file.
+  If `setup` makes a commit or checks out another commit, the run stops too.
+- A file or folder name that `setup` adds must be UTF-8. It cannot hold a
+  control character (such as a new line) or end in a space. The run cannot
+  keep such a name out of the versions, so the run stops, and the message
+  names the file.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in

@@ -2567,3 +2567,88 @@ def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+
+
+def test_a_reset_checkout_gets_the_setups_ignored_output_back(tmp_path: Path) -> None:
+    """``git clean -fdx`` also drops an ignored ``node_modules/``, so the kept copy holds it too (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / ".gitignore").write_text("node_modules/\n")
+    for arguments in (["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "ignore"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    log = tmp_path / "setup.log"
+    command = [
+        sys.executable,
+        "-c",
+        "import os; os.makedirs('node_modules/pkg'); open('node_modules/pkg/index.js', 'w').write('js');"
+        f" open({str(log)!r}, 'a').write('ran\\n')",
+    ]
+
+    harness_bridge.ensure_setup(command, checkout)
+    subprocess.run(["git", "reset", "--hard", "--quiet"], cwd=checkout, check=True)
+    subprocess.run(["git", "clean", "-fdxq"], cwd=checkout, check=True)
+    assert not (checkout / "node_modules").exists()
+    harness_bridge.ensure_setup(command, checkout)
+
+    assert log.read_text() == "ran\n"
+    assert (checkout / "node_modules/pkg/index.js").read_text() == "js"
+    # Git ignores the folder already, so it needs no exclude line.
+    exclude = checkout / ".git/info/exclude"
+    assert "/node_modules/" not in (exclude.read_text().splitlines() if exclude.exists() else [])
+
+
+def test_a_setup_that_makes_a_commit_stops_with_its_command(tmp_path: Path) -> None:
+    """A commit moves HEAD and hides its tracked change from the diff, but it would enter every version (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    command = [
+        "sh",
+        "-c",
+        "echo evil >> a.txt && git -c user.name=t -c user.email=t@example.com commit --quiet --no-verify -am s",
+    ]
+
+    with pytest.raises(RuntimeError, match=r"(?s)setup command in optimize.toml \(.*\) moved HEAD from [0-9a-f]+ to"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+
+def test_a_setup_file_name_that_is_not_utf8_stops_the_run() -> None:
+    """Git output decodes a non-UTF-8 name to lone surrogates, which the UTF-8 exclude file cannot hold (SKY-753)."""
+    name = b"dep\xff.bin".decode("utf-8", "surrogateescape")
+
+    with pytest.raises(RuntimeError, match=r"not UTF-8, hold a control character or end in whitespace: 'dep\\udcff"):
+        harness_bridge._excludable([name, "ok.txt"], ["npm", "ci"])
+
+
+def test_the_command_reads_the_task_file_from_an_absolute_ascent_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ASCENT_TASK`` is an absolute path to the task file, also for a relative session folder (SKY-753).
+
+    Args:
+        tmp_path: The workspace and the session folder.
+        monkeypatch: Moves into ``tmp_path`` and clears an inherited ``ASCENT_TASK``.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(harness_bridge.TASK_ENV, raising=False)
+    (tmp_path / "s").mkdir()
+    proposer = {
+        **_PLAIN,
+        "run_command": f'case "${harness_bridge.TASK_ENV}" in /*) test -f "${harness_bridge.TASK_ENV}"'
+        f' && cat "${harness_bridge.TASK_ENV}";; esac',
+    }
+
+    outcome = run_session(
+        proposer, workspace=_git_checkout(tmp_path / "w"), prompt="the task", model="m", session_dir=Path("s")
+    )
+
+    assert outcome.stdout.strip() == "the task"

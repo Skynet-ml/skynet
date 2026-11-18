@@ -56,8 +56,9 @@ SETUP_STATE = "ascent-proposer-setup"
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
 # An exclude line cannot hold these: a newline starts a new pattern, and git
-# drops trailing whitespace, so such a name could hide other files.
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# drops trailing whitespace, so such a name could hide other files. A name that
+# is not UTF-8 decodes to lone surrogates, which the UTF-8 exclude file cannot hold.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
@@ -539,27 +540,36 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     return stdout
 
 
-def _untracked(checkout: Path, *, folders: bool) -> set[str]:
-    """List the untracked, not ignored paths of a checkout.
+def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[str]:
+    """List the untracked paths of a checkout, either those git ignores or those it does not.
 
     Args:
         checkout: The checkout or worktree.
         folders: List a folder that holds only untracked files as one path
             that ends with ``/``, in place of each file in it.
+        ignored: List the ignored paths in place of the not ignored ones.
 
     Returns:
         Checkout-relative paths.
     """
-    arguments = ["ls-files", "-z", "--others", "--exclude-standard", *(["--directory"] if folders else [])]
+    arguments = [
+        "ls-files",
+        "-z",
+        "--others",
+        *(["--ignored"] if ignored else []),
+        "--exclude-standard",
+        *(["--directory"] if folders else []),
+    ]
     return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
 
 
-def _setup_output(checkout: Path, before: set[str]) -> set[str]:
+def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) -> set[str]:
     """Find the untracked paths that a setup added to a checkout.
 
     Args:
         checkout: The checkout or worktree, after the setup.
-        before: Every untracked file before the setup, one path per file.
+        before: Every untracked file of the same kind before the setup, one path per file.
+        ignored: Find the paths that git ignores in place of the not ignored ones.
 
     Returns:
         The new files, and the new folders as one path each, so a large
@@ -567,14 +577,14 @@ def _setup_output(checkout: Path, before: set[str]) -> set[str]:
     """
     added: set[str] = set()
     files: set[str] | None = None
-    for path in _untracked(checkout, folders=True):
+    for path in _untracked(checkout, folders=True, ignored=ignored):
         if not path.endswith("/"):
             if path not in before:
                 added.add(path)
         elif any(old.startswith(path) for old in before):
             # The parent version added this folder: its files stay in the
             # version, so only the files the setup wrote into it are excluded.
-            files = _untracked(checkout, folders=False) if files is None else files
+            files = _untracked(checkout, folders=False, ignored=ignored) if files is None else files
             added |= {file for file in files if file.startswith(path)} - before
         else:
             added.add(path)
@@ -635,15 +645,15 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
         One anchored exclude line per path.
 
     Raises:
-        RuntimeError: When a name holds a control character or ends in whitespace.
+        RuntimeError: When a name is not UTF-8, holds a control character or ends in whitespace.
     """
     unsafe = sorted(
         path for path in paths if _CONTROL_CHARS.search(path) or path.rstrip("/") != path.rstrip("/").rstrip()
     )
     if unsafe:
         raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names hold"
-            f" a control character or end in whitespace: {', '.join(repr(path) for path in unsafe)}. The run"
+            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names are"
+            f" not UTF-8, hold a control character or end in whitespace: {', '.join(repr(path) for path in unsafe)}. The run"
             " cannot keep such a file out of the versions. Rename it in the setup."
         )
     return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
@@ -652,10 +662,11 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
 def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
     """Run ``[proposer] setup`` once per box, and give each later checkout a copy of its output.
 
-    The setup runs in the first checkout. Its output is copied into
-    :data:`SETUP_STATE` in the git dir, and a session after a reset or in a
-    new worktree gets that copy back, without a second setup. What the setup
-    adds is excluded from every version, like the harness files (SKY-753).
+    The setup runs in the first checkout. Its output, ignored files
+    included, is copied into :data:`SETUP_STATE` in the git dir, and a
+    session after a reset or in a new worktree gets that copy back, without
+    a second setup. What the setup adds and git does not ignore is excluded
+    from every version, like the harness files (SKY-753).
 
     Args:
         command: The exact argument list from ``optimize.toml``.
@@ -664,7 +675,8 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
 
     Raises:
         RuntimeError: When the setup or git fails, the setup changes a file of
-            the version, or it writes a name that no exclude line can hold.
+            the version or moves ``HEAD``, or it writes a name that no exclude
+            line can hold.
     """
     common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
     common = common if common.is_absolute() else checkout / common
@@ -683,9 +695,19 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
             return
         # Files the parent version added are untracked too; only the setup's new paths are excluded.
         before = _untracked(checkout, folders=False)
+        # ``git clean -fdx`` and a new worktree drop ignored files too, so the setup's ignored output is kept as well.
+        ignored_before = _untracked(checkout, folders=False, ignored=True)
         version_files = {path: _tracked_state(checkout, path) for path in before}
+        head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
         tracked = _tracked_changes(checkout)
         run_setup(command, checkout, timeout_seconds)
+        moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+        if moved != head:
+            # A commit would hide its changes from the diff below, and enter every version.
+            raise RuntimeError(
+                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from {head}"
+                f" to {moved}. Those changes would enter every version. Make the setup leave the git history alone."
+            )
         changed = sorted(
             path
             for path in tracked.keys() | _tracked_changes(checkout).keys()
@@ -708,16 +730,20 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
             )
         added = sorted(_setup_output(checkout, before))
         lines = _excludable(added, command)
+        kept = sorted(set(added) | _setup_output(checkout, ignored_before, ignored=True))
         output = state / "output"
         shutil.rmtree(output, ignore_errors=True)
-        for path in added:
-            _copy_path(checkout / path.rstrip("/"), output / path.rstrip("/"))
+        for path in kept:
+            name = path.rstrip("/")
+            # An ignored path inside a new folder is already in that folder's copy.
+            if not os.path.lexists(output / name):
+                _copy_path(checkout / name, output / name)
         exclude = common / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
         with exclude.open("a", encoding="utf-8") as stream:
             stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-        record.write_text(json.dumps({"output": added}), encoding="utf-8")
+        record.write_text(json.dumps({"output": kept}), encoding="utf-8")
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
