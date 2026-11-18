@@ -1336,7 +1336,12 @@ def test_upstream_accepts_the_engine_loop_models_without_key_variables(
 def test_in_the_sandbox_an_evaluation_waits_for_the_runtime_reply_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Send a uuid4 hex id with no kind, and read the reply from ``rpc/<id>.json``, as the sandbox runtime expects."""
+    """Send a uuid4 hex id with no kind, and read the reply from ``rpc/<id>.json``, as the sandbox runtime expects.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder.
+    """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "rpc").mkdir()
     mailbox = shinka_runner.EvaluatorMailbox("testnonce", 5.0)
@@ -1378,7 +1383,11 @@ def test_a_path_that_leaves_the_checkout_is_refused(tmp_path: Path, path: str, p
 
 
 def test_a_path_through_a_symlinked_folder_is_refused_even_inside_the_checkout(tmp_path: Path) -> None:
-    """Refuse a path whose parent folder is a symlink, also when the link points inside the checkout."""
+    """Refuse a path whose parent folder is a symlink, also when the link points inside the checkout.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     checkout = tmp_path / "checkout"
     (checkout / "src").mkdir(parents=True)
     (checkout / "docs").symlink_to("src")
@@ -1428,7 +1437,11 @@ def _ship(tmp_path: Path, source: Path) -> list[str]:
 
 
 def test_a_version_cannot_write_past_its_editable_paths_through_a_shipped_symlink(tmp_path: Path) -> None:
-    """Refuse a write through a symlink the repository ships, which would reach a file outside the editable paths."""
+    """Refuse a write through a symlink the repository ships, which would reach a file outside the editable paths.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
     (source / "scoring").mkdir()
@@ -1445,7 +1458,11 @@ def test_a_version_cannot_write_past_its_editable_paths_through_a_shipped_symlin
 
 
 def test_a_version_cannot_write_outside_the_checkout_through_a_seeded_symlink(tmp_path: Path) -> None:
-    """Refuse a write through a symlink to a folder outside the checkout, before any file is written."""
+    """Refuse a write through a symlink to a folder outside the checkout, before any file is written.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     outside = tmp_path / "outside"
     outside.mkdir()
     source = tmp_path / "source"
@@ -1485,7 +1502,12 @@ def _repo_payload(tmp_path: Path, seed: str, chunks: list[str]) -> dict[str, Any
 def test_a_seed_patch_that_adds_a_symlink_is_refused_before_the_checkout_is_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse a seed version that adds a symlink, before git applies it."""
+    """Refuse a seed version that adds a symlink, before git applies it.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces the upstream runner.
+    """
     chunks, _ = _repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
@@ -1496,7 +1518,12 @@ def test_a_seed_patch_that_adds_a_symlink_is_refused_before_the_checkout_is_made
 
 
 def test_a_tree_that_ships_git_metadata_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse a shipped tree with a ``.git`` folder, whose hooks and config git would run on the worker."""
+    """Refuse a shipped tree with a ``.git`` folder, whose hooks and config git would run on the worker.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces the upstream runner.
+    """
     source = tmp_path / "source"
     (source / ".git").mkdir(parents=True)
     (source / ".git/config").write_text("[core]\n\tfsmonitor = touch planted\n")
@@ -1531,7 +1558,12 @@ def test_a_symlink_mode_with_odd_blanks_or_line_ends_is_refused(line: str) -> No
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse the checkout when the applied seed made a symlink the shipped tree did not have."""
+    """Refuse the checkout when the applied seed made a symlink the shipped tree did not have.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces the upstream runner and the patch check.
+    """
     chunks, _ = _repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
@@ -1542,7 +1574,11 @@ def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_appl
 
 
 def test_a_symlink_the_tree_ships_unchanged_is_kept(tmp_path: Path) -> None:
-    """Keep a repository's own symlink: only a new or retargeted one is refused."""
+    """Keep a repository's own symlink: only a new or retargeted one is refused.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
     (source / "src/app.py").write_text("x = 1\n")
