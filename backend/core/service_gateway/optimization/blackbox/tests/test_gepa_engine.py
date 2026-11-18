@@ -7,6 +7,7 @@ local subprocess boxes and a fake model: no network and no paid call.
 from __future__ import annotations
 
 import contextvars
+import random
 import re
 import threading
 import time
@@ -1757,13 +1758,57 @@ def test_a_proposal_that_writes_the_parent_again_gives_no_version_and_no_score_c
     assert len(scored) == len(_CASES) + 3 * proposals
 
 
-def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
+@pytest.mark.parametrize("error", [TypeError("a bug"), KeyError("reply"), IndexError("pop from empty list")])
+def test_a_bug_in_a_model_call_ends_the_run_and_gepa_does_not_call_the_model_again(
+    error: Exception, tmp_path: Path
 ) -> None:
-    """A parent the run cannot see ends the proposal; an error that no loop call raises is a bug and goes up.
+    """GEPA logs a proposer's error and retries it, so the proposer keeps a bug and the engine raises it.
 
     Args:
-        caplog: Pytest's log capture fixture.
+        error: The error that the bug raises.
+        tmp_path: Pytest's temporary folder.
+    """
+    model_calls: list[int] = []
+
+    def broken(prompt: Any, tools: Any) -> ModelReply:
+        """Fail as a bug does.
+
+        Args:
+            prompt: The messages.
+            tools: Not used.
+
+        Raises:
+            Exception: Always, the parametrized error.
+        """
+        model_calls.append(len(prompt))
+        raise error
+
+    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
+    assert proposer is not None
+    with pytest.raises(type(error)):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert proposer.failure is error
+    with pytest.raises(type(error)):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert model_calls == [1]
+
+    model_calls.clear()
+    server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=40)
+    with pytest.raises(type(error)):
+        GepaEngine().run(Task("", cases=list(_CASES)), server, _FakeCalls([]).ctx(tmp_path, call_model=broken))
+    assert model_calls == [1]
+
+    # A scripted model that runs out of replies is a test bug, and it must fail the test, not end the proposal.
+    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls(["```ls\n```"]).ctx(tmp_path), Task(""))
+    assert proposer is not None
+    with pytest.raises(IndexError):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+
+
+def test_a_parent_write_that_the_run_cannot_see_ends_the_run(tmp_path: Path) -> None:
+    """``start_tree`` checks the seed and ``put_files`` gives each other parent, so a ``LookupError`` there is a bug.
+
+    Args:
         tmp_path: Pytest's temporary folder.
     """
 
@@ -1779,67 +1824,202 @@ def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(
         """
         raise LookupError(f"run cannot see tree {base_tree_id}")
 
-    def broken(prompt: Any, tools: Any) -> ModelReply:
-        """Fail as a bug does.
-
-        Args:
-            prompt: Not used.
-            tools: Not used.
-
-        Raises:
-            TypeError: Always.
-        """
-        raise TypeError("a bug")
-
     calls = _FakeCalls([_file("answer.txt"), _file("answer.txt")])
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, put_files=unseen), Task(""))
     assert proposer is not None
-    with caplog.at_level("INFO", logger=gepa_mod.logger.name):
-        assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
-    assert len(calls.prompts) == 1
-    assert "GEPA proposal wrote no version after LookupError" in caplog.messages
-    assert proposer.failure is None
-
-    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
-    assert proposer is not None
-    with pytest.raises(TypeError, match="a bug"):
+    with pytest.raises(LookupError, match="cannot see tree tree-parent"):
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
-    assert proposer.failure is None
+    assert isinstance(proposer.failure, LookupError)
+    assert len(calls.prompts) == 1
 
 
-@pytest.mark.parametrize("error", [KeyError("reply"), IndexError("pop from empty list")])
-def test_a_lookup_bug_outside_the_parent_write_raises_out_of_the_proposer(error: LookupError, tmp_path: Path) -> None:
-    """Only ``put_files`` may end a proposal with a ``LookupError``; the same error from a bug elsewhere goes up.
+def _raises(error: Exception) -> Any:
+    """Return a loop read call that always raises ``error``.
 
     Args:
-        error: The ``LookupError`` subclass that the bug raises.
-        tmp_path: Pytest's temporary folder.
+        error: The error.
+
+    Returns:
+        The call.
     """
 
-    def broken(prompt: Any, tools: Any) -> ModelReply:
-        """Fail as a bad key or index does.
+    def call(tree_id: str, path: str = "") -> Any:
+        """Raise the error.
 
         Args:
-            prompt: Not used.
-            tools: Not used.
+            tree_id: Not used.
+            path: Not used.
 
         Raises:
-            LookupError: Always, the parametrized error.
+            Exception: Always, the given error.
         """
         raise error
 
-    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
+    return call
+
+
+def test_a_tree_the_run_cannot_see_reads_as_missing_in_a_read_a_listing_and_a_folder_check(tmp_path: Path) -> None:
+    """The loop's plain ``LookupError`` gives the answer of a missing file or folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = _FakeCalls(["```read\nanswer.txt\n```", "```ls\nsrc\n```", _file("src/x.py")])
+    unseen = _raises(LookupError("run cannot see tree tree-parent"))
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, read_file=unseen, list_files=unseen), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
+    assert calls.prompts[1] == "'answer.txt' is not a file of the current version."
+    assert calls.prompts[2] == "'src' is not a folder of the current version."
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, list_files=unseen), Task("tree-winner"))
+    assert proposer is not None
+    with pytest.raises(ServiceError, match="not a version of this run"):
+        proposer.start_tree()
+
+
+@pytest.mark.parametrize("error", [KeyError("entry"), IndexError("list index out of range")])
+@pytest.mark.parametrize(
+    ("reply", "call"),
+    [("```read\nanswer.txt\n```", "read_file"), ("```ls\nsrc\n```", "list_files"), (_file("src/x.py"), "list_files")],
+)
+def test_a_lookup_bug_in_a_read_a_listing_or_a_folder_check_ends_the_run(
+    error: LookupError, reply: str, call: str, tmp_path: Path
+) -> None:
+    """A ``KeyError`` or an ``IndexError`` from a loop read is a bug, so it does not read as a missing path.
+
+    Args:
+        error: The error that the bug raises.
+        reply: The model's reply that makes the read.
+        call: The loop call that raises.
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = _FakeCalls([reply])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, **{call: _raises(error)}), Task(""))
     assert proposer is not None
     with pytest.raises(type(error)):
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
-    assert proposer.failure is None
+    assert proposer.failure is error
+    assert calls.writes == []
 
-    # A scripted model that runs out of replies is a test bug, and it must fail the test, not end the proposal.
-    calls = _FakeCalls(["```ls\n```"])
-    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, list_files=_raises(error)), Task("tree-winner"))
     assert proposer is not None
-    with pytest.raises(IndexError):
-        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    with pytest.raises(type(error)):
+        proposer.start_tree()
+
+
+def test_an_empty_folder_lists_as_empty_and_a_file_may_not_replace_it(tmp_path: Path) -> None:
+    """The loop lists an empty folder as no files, and a folder of hidden files as missing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def listed(tree_id: str, path: str = "") -> list[str] | None:
+        """List one empty folder, and no other folder.
+
+        Args:
+            tree_id: Not used.
+            path: The folder.
+
+        Returns:
+            No files for ``src/empty``, else ``None``.
+        """
+        return [] if path == "src/empty" else None
+
+    calls = _FakeCalls(["```ls\nsrc/empty\n```", _file("src/empty"), *["no block"] * 4])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, list_files=listed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
+    assert calls.prompts[1] == "'src/empty' is an empty folder of the current version."
+    assert calls.prompts[2] == "The files break the editing rules: 'src/empty' may not be changed."
+    assert calls.writes == []
+
+
+# The fence expression that ``_blocks`` replaced. It gives the same blocks, in time quadratic in the reply's length.
+_REFERENCE_BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def test_the_block_parser_gives_the_blocks_of_the_fence_expression() -> None:
+    """Fixed and random replies give the same blocks as the fence expression, with longer fences and open blocks."""
+    replies = [
+        "",
+        "```ls\n```",
+        "```ls\nsrc\n```",
+        "````file a.py\n```sh\nls\n```\n````\n```file b.py\nb\n```",
+        "```sh\nls\n````\n```\n",
+        "```shell\nls\n```",
+        "```sh  \nls\n```  \t\n",
+        "```sh\nls\n```\r\n```",
+        "x ```sh\nls\n```",
+        "```sh\n```read\na\n```\n```",
+    ]
+    parts = ["```", "````", "```sh", "```ls", "````file a", "```file b ", "```read", "x", "", " ", "\r", "a```"]
+    rng = random.Random(720)
+    replies += [
+        "".join(rng.choice(parts) + rng.choice(["\n", "\n", " ", ""]) for _ in range(rng.randint(0, 12)))
+        for _ in range(2000)
+    ]
+
+    for reply in replies:
+        expected = [(match[2], match[3], match[4]) for match in _REFERENCE_BLOCK.finditer(reply)]
+        assert gepa_mod._blocks(reply) == expected, reply
+
+
+@pytest.mark.parametrize("reply", ["```sh\n" * 32_000, "````sh\n```\n" * 16_000 + "````", "```" * 64_000])
+def test_a_large_reply_of_open_blocks_parses_fast(reply: str) -> None:
+    """The reply is untrusted, so 192 KB of block openings must not take seconds as the fence expression did.
+
+    Args:
+        reply: A reply of about 192 KB.
+    """
+    started = time.perf_counter()
+    gepa_mod._blocks(reply)
+    # The fence expression took 20 seconds for the first reply; a linear pass takes some milliseconds.
+    assert time.perf_counter() - started < 2
+
+
+def test_the_eval_server_budget_stop_reaches_the_engine_budget_path_on_the_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the eval server raises ``BudgetExhaustedError``, so the proposer keeps no failure and the run gives a version.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
+    calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)])
+    server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=40)
+    evaluate = server.evaluate
+    scored: list[Any] = []
+
+    def capped(candidate: Any, example: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score as the server does, and stop as its cap does after ten scores.
+
+        Args:
+            candidate: The version.
+            example: The case.
+
+        Returns:
+            The server's score and side information.
+
+        Raises:
+            BudgetExhaustedError: After ten scores.
+        """
+        if len(scored) == 10:
+            raise BudgetExhaustedError("scorer-run budget of 10 exhausted")
+        scored.append(candidate)
+        return evaluate(candidate, example)
+
+    monkeypatch.setattr(server, "evaluate", capped)
+
+    result = GepaEngine().run(Task("", cases=list(_CASES)), server, calls.ctx(tmp_path))
+
+    assert len(scored) == 10
+    assert calls.writes
+    assert result.best_candidate in {"tree-seed", *(f"tree-{n}" for n in range(1, len(calls.writes) + 1))}
 
 
 def test_a_billed_failed_model_call_counts_in_the_total_cost_live_and_on_a_replay(

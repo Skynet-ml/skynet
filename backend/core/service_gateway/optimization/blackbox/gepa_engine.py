@@ -23,7 +23,7 @@ import shutil
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState
@@ -33,7 +33,7 @@ from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
 from ....sandbox.timeouts import Phase
-from ....sandbox.trees import BoxFailureError, GrantDeniedError, TreeRejectedError
+from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
@@ -48,7 +48,6 @@ from .protocol import (
     EvalServer,
     RepoSeed,
     Result,
-    ScorerAbortError,
     Task,
     engine_score,
     fill_unscored,
@@ -66,13 +65,9 @@ _OUTPUT_CHARS = 4000
 _FEEDBACK_RECORDS = 5
 # The error names the path, and a hidden path must not reach the proposer (SKY-353), so the note is fixed.
 _REJECTED_NOTE = "The command wrote a path that it may not write. Its output was discarded."
-# A block closes at a line with its own fence, so a file that holds a shorter fence can use a longer one.
-_BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
-# These errors end the run. The loop wraps its own stops in ``ScorerAbortError``.
-# The loop commits a grant list with no network policy as the command's own failure, which it calls no stop.
-# The proposer sends the same empty grant list with each command, so every later command would fail the same way.
-# A replay raises the committed error again at the same step, so the live run and its resume stop at the same place.
-_STOP_ERRORS = (ScorerAbortError, GrantDeniedError, BudgetExhaustedError)
+# The line that opens a block. ``_blocks`` matches it one line at a time, so it does no backtracking across lines.
+_OPENING = re.compile(r"(`{3,})(sh|read|ls|file)[ \t]*(.*)")
+_Found = TypeVar("_Found")
 
 
 class _JobLogger:
@@ -394,11 +389,7 @@ class _LoopRepoProposer:
         seed = self.task.seed_candidate
         if seed is None or seed == "":
             return self.seed.tree_id
-        try:
-            visible = isinstance(seed, str) and self.ctx.list_files(seed, "") is not None
-        except LookupError:
-            visible = False
-        if not visible:
+        if not isinstance(seed, str) or _unless_unseen(self.ctx.list_files, seed, "") is None:
             # A silent fallback would optimize the run's seed in place of the version that the caller gave.
             raise ServiceError("The GEPA seed is not a version of this run.")
         return seed
@@ -425,47 +416,55 @@ class _LoopRepoProposer:
 
         Returns:
             The new version's tree id under the same component key. An empty mapping when no reply wrote a
-            version other than the parent, a model call failed, or the run cannot see the parent: GEPA then skips
-            the proposal and pays no minibatch for a copy of the parent.
+            version other than the parent, or a model call failed: GEPA then skips the proposal and pays no
+            minibatch for a copy of the parent.
 
         Raises:
-            ScorerAbortError: When the loop stopped; the engine reads it back after GEPA returns.
-            GrantDeniedError: When a command's grant list does not resolve to a network policy; the engine reads it
-                back too.
+            Exception: Any error other than a failed model call, such as the loop's stop, a grant list that does
+                not resolve to a network policy, or a bug. The proposer keeps it, and the engine raises it after
+                GEPA returns.
         """
         if self.failure is not None:
             raise self.failure
-        key = components_to_update[0] if components_to_update else next(iter(candidate))
-        parent = candidate[key]
-        messages: list[dict[str, Any]] = [{"role": "user", "content": self.brief(reflective_dataset.get(key) or [])}]
         try:
+            key = components_to_update[0] if components_to_update else next(iter(candidate))
+            parent = candidate[key]
+            messages: list[dict[str, Any]] = [
+                {"role": "user", "content": self.brief(reflective_dataset.get(key) or [])}
+            ]
             for _turn in range(_MAX_TURNS):
                 reply = self.ctx.call_model(messages, None)
                 self.cost_cents += reply.cost_cents
                 messages.append({"role": "assistant", "content": reply.text})
-                blocks = list(_BLOCK.finditer(reply.text))
-                files = {block[3].strip(): block[4] for block in blocks if block[2] == "file"}
+                blocks = _blocks(reply.text)
+                files = {argument.strip(): body for kind, argument, body in blocks if kind == "file"}
                 if files:
                     note, tree_id = self.write(parent, files)
                     if tree_id is not None:
                         return {key: tree_id} if tree_id != parent else {}
                 elif not blocks:
                     note = "Reply with one ```ls block, one ```read block, one ```sh block, or ```file blocks."
-                elif blocks[0][2] == "ls":
-                    note = self.listing(parent, blocks[0][4].strip())
-                elif blocks[0][2] == "read":
-                    note = self.read(parent, blocks[0][4].strip())
+                elif blocks[0][0] == "ls":
+                    note = self.listing(parent, blocks[0][2].strip())
+                elif blocks[0][0] == "read":
+                    note = self.read(parent, blocks[0][2].strip())
                 else:
-                    note = self.command(parent, blocks[0][4])
+                    note = self.command(parent, blocks[0][2])
                 messages.append({"role": "user", "content": note})
-        except _STOP_ERRORS as error:
-            self.failure = error
-            raise
         except ModelCallFailedError as error:
             # GEPA retries a failed batch from its first model call, which pays for each reply again. A failed call
             # replays from its committed step, so ending the proposal gives the same population on a resume.
             self.cost_cents += error.cost_cents
             logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
+        except Exception as error:
+            # GEPA logs every proposer error and retries the proposal, which pays for its model calls again and
+            # hides a bug, so each other error ends the run. A loop stop (a ``ScorerAbortError``) and a grant list
+            # with no network policy fail each later step the same way, and a replay raises the committed error at
+            # the same step, so a live run and its resume stop at the same place. The loop turns every budget
+            # error of a step into its stop, so no ``BudgetExhaustedError`` gets here: only the eval server raises
+            # it, and GEPA's scoring takes it to the engine's own budget path.
+            self.failure = error
+            raise
         return {}
 
     def brief(self, records: list[dict[str, Any]]) -> str:
@@ -523,11 +522,8 @@ class _LoopRepoProposer:
         Returns:
             The note that holds the file, or why it cannot be read.
         """
-        try:
-            # The loop's ``read_file`` gives ``None`` for a hidden path, so a hidden file reads as missing (SKY-353).
-            data = self.ctx.read_file(tree_id, path)
-        except LookupError:
-            data = None
+        # The loop's ``read_file`` gives ``None`` for a hidden path, so a hidden file reads as missing (SKY-353).
+        data = _unless_unseen(self.ctx.read_file, tree_id, path)
         if data is None:
             return f"'{path}' is not a file of the current version."
         return f"{path}:\n{_cut(data.decode('utf-8', errors='replace'))}"
@@ -542,14 +538,13 @@ class _LoopRepoProposer:
         Returns:
             The note that holds the file paths, or why the folder cannot be listed.
         """
-        try:
-            # The loop's ``list_files`` leaves out the hidden paths and the exploits folder.
-            paths = self.ctx.list_files(tree_id, "" if folder in ("", ".") else folder)
-        except LookupError:
-            paths = None
-        # A folder whose files are all hidden gets the answer of a missing folder, so it does not show them (SKY-353).
-        if not paths:
+        # The loop's ``list_files`` leaves out the hidden paths and the exploits folder. It gives ``None`` for a
+        # folder whose files are all hidden, so that folder gets the answer of a missing one (SKY-353).
+        paths = _unless_unseen(self.ctx.list_files, tree_id, "" if folder in ("", ".") else folder)
+        if paths is None:
             return f"'{folder}' is not a folder of the current version."
+        if not paths:
+            return f"'{folder}' is an empty folder of the current version."
         return f"Files ({len(paths)}):\n" + _cut("\n".join(paths))
 
     def command(self, tree_id: str, command: str) -> str:
@@ -581,8 +576,7 @@ class _LoopRepoProposer:
             files: The new file text by path.
 
         Returns:
-            The note for the model and ``None``, or an empty note and the new version's tree id. An empty note and
-            the parent's tree id when the run cannot see the parent, so the proposal ends with no version.
+            The note for the model and ``None``, or an empty note and the new version's tree id.
         """
         problems = [
             problem for path in files if (problem := self.path_problem(path) or self.folder_problem(tree_id, path))
@@ -593,10 +587,7 @@ class _LoopRepoProposer:
             new_tree = self.ctx.put_files({path: text.encode() for path, text in files.items()}, tree_id)
         except ValueError as error:
             return f"The files could not be written: {error}", None
-        except LookupError as error:
-            # ``put_files`` raises it when the run cannot see the parent, and every later write would fail the same way.
-            logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
-            return "", tree_id
+        # No ``LookupError`` is caught: ``start_tree`` checks the seed, and ``put_files`` gave each other parent.
         return "", new_tree
 
     def folder_problem(self, tree_id: str, path: str) -> str | None:
@@ -609,17 +600,11 @@ class _LoopRepoProposer:
         Returns:
             The reason, or ``None`` when ``path`` is no folder.
         """
-        try:
-            paths = self.ctx.list_files(tree_id, path)
-        except LookupError:
-            paths = None
-        if paths is None:
+        # The loop's ``list_files`` gives ``None`` for a folder whose files are all hidden, so a file at its path
+        # writes as at a missing path, and the answer does not show that the folder exists (SKY-353).
+        if _unless_unseen(self.ctx.list_files, tree_id, path) is None:
             return None
-        # A file at a folder's path replaces the whole folder, with the hidden or protected files in it.
-        # A folder whose files are all hidden lists as missing, so its refusal is worded as for any path
-        # outside the editable paths and does not show that it holds hidden files (SKY-353).
-        if not paths:
-            return f"'{path}' is outside the editable paths."
+        # A file at a folder's path replaces the whole folder, with the protected files in it.
         return f"'{path}' may not be changed."
 
     def path_problem(self, path: str) -> str | None:
@@ -663,6 +648,67 @@ class _LoopRepoProposer:
         """
         # ``put_files`` does not check hidden paths, so the proposer refuses them before it writes.
         return hashed_kind(self.seed.hidden_hashes, path) is not None
+
+
+def _unless_unseen(call: Callable[[str, str], _Found], tree_id: str, path: str) -> _Found | None:
+    """Read a tree with a loop call, and give ``None`` when the run cannot see the tree.
+
+    Args:
+        call: The loop's ``read_file`` or ``list_files``.
+        tree_id: The tree.
+        path: The path in the tree.
+
+    Returns:
+        What ``call`` returns, or ``None`` when it raises a plain ``LookupError``.
+    """
+    try:
+        return call(tree_id, path)
+    except LookupError as error:
+        # The loop raises a plain ``LookupError`` for a tree that the run cannot see. A ``KeyError`` or an
+        # ``IndexError`` is a bug, and it must not read as a missing file.
+        if type(error) is not LookupError:
+            raise
+        return None
+
+
+def _blocks(text: str) -> list[tuple[str, str, str]]:
+    """Find the fenced blocks of a model reply in time linear in its length.
+
+    A block opens at a line that starts with three or more backticks and a kind, and it closes at the next line
+    that holds the same fence alone, so a file that holds a shorter fence can use a longer one. A block with no
+    such line is no block, and the lines after its opening are searched again. The reply is untrusted, so a
+    pass from the end first finds each fence's next closing line: a regular expression over the whole reply
+    took seconds for a reply of many unclosed openings.
+
+    Args:
+        text: The reply.
+
+    Returns:
+        The kind, the rest of the opening line and the body of each block, in order. The body ends with its last
+        newline.
+    """
+    lines = text.split("\n")
+    closing: dict[str, int] = {}
+    openings: dict[int, tuple[re.Match[str], int]] = {}
+    for index in range(len(lines) - 1, -1, -1):
+        opening = _OPENING.match(lines[index])
+        if opening is not None:
+            if opening[1] in closing:
+                openings[index] = (opening, closing[opening[1]])
+        else:
+            fence = lines[index].rstrip(" \t")
+            if len(fence) >= 3 and fence.strip("`") == "":
+                closing[fence] = index
+    blocks = []
+    index = 0
+    while index < len(lines):
+        if index not in openings:
+            index += 1
+            continue
+        opening, end = openings[index]
+        blocks.append((opening[2], opening[3], "".join(f"{line}\n" for line in lines[index + 1 : end])))
+        index = end + 1
+    return blocks
 
 
 def _cut(text: str, *, tail: bool = False) -> str:
