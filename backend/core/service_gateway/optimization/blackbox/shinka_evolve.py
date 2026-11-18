@@ -284,6 +284,10 @@ class ShinkaEvolveEngine:
                 stderr=stderr,
                 text=True,
                 encoding="utf-8",
+                # The child's output is untrusted: an invalid byte, as upstream prints of model
+                # text can hold, must not raise in ``readline`` and stop the run or replace a
+                # budget stop. Worker replies are ASCII JSON, so only plain output changes.
+                errors="replace",
                 bufsize=1,
                 # Its own process group, so a stop also kills upstream's
                 # ``evaluate.py`` jobs, which would otherwise poll for days and

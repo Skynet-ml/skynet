@@ -1947,6 +1947,61 @@ def test_a_line_the_drain_cannot_read_keeps_the_budget_stop(
     assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
 
 
+# Raw bytes that are not UTF-8, as upstream writes when it prints a model text with a lone surrogate.
+_INVALID_UTF8_LINE = """
+        sys.stdout.flush()
+        sys.stdout.buffer.write(b"\\xff\\n")
+        sys.stdout.buffer.flush()
+"""
+
+
+def test_a_line_that_is_not_utf8_does_not_stop_the_run(tmp_path: Path) -> None:
+    """Read past a line with an invalid byte, and go on to the child's next lines.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _scripted_child(tmp_path, _INVALID_UTF8_LINE + _SCORE_ONE_VERSION)
+
+    result = ShinkaEvolveEngine(python).run(
+        Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+    )
+
+    assert (result.best_candidate, result.best_score) == ("x", 1.0)
+
+
+def test_a_line_that_is_not_utf8_in_the_drain_keeps_the_budget_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the budget stop with its best version when the child writes an invalid byte while it drains.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0"})
+        sys.stdin.read()
+        """
+        + _INVALID_UTF8_LINE
+        + """
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 1, "candidate": "late", "score": 3.0})
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+    server = EvalServer(lambda candidate, case: (3.0, {}), max_evals=5)
+    server.evaluate("late", None)
+
+    with pytest.raises(BudgetReached) as stopped:
+        ShinkaEvolveEngine(python).run(Task("seed"), server, _context(tmp_path))
+
+    assert stopped.value.result is not None
+    assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
+
+
 def _two_case_requests(tmp_path: Path, scores: dict[str, float]) -> shinka_evolve._Requests:
     """Build a request handler for a task with two cases.
 
