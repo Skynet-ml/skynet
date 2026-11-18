@@ -175,6 +175,10 @@ _PLANNED_ROUNDS = 6
 NAMED_PREFIX = "score:"
 # Once a round spends its allowance the agent still gets time to write up the notebook.
 _WRITE_UP_GRACE_SECONDS = 90
+# The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
+# is refused before it is read. A pending list of a few candidates is far smaller than its cap.
+MAX_PENDING_BYTES = 1024 * 1024
+MAX_CANDIDATE_BYTES = repo_tree.MAX_PATCH_BYTES
 
 # With no example ids the call is a full evaluation over the whole visible pool,
 # which is what the server logs as progress; with ids it is a probe. HTTP 429
@@ -1651,7 +1655,11 @@ class AutoResearchEngine:
         spent_at: float | None = None
 
         def should_kill() -> bool:
-            """End a session that stalled or overran its allowance by more than the write-up grace."""
+            """End a session that stalled or overran its allowance by more than the write-up grace.
+
+            Returns:
+                ``True`` when the session must end.
+            """
             nonlocal last_used, last_progress, spent_at
             now = time.monotonic()
             if server.budget.used != last_used:
@@ -2217,6 +2225,8 @@ class MetaHarnessEngine:
             At most ``candidates_per_iter`` candidate specs; empty when absent or malformed.
         """
         try:
+            if pending.stat().st_size > MAX_PENDING_BYTES:
+                return []
             document = json.loads(pending.read_text(encoding="utf-8"))
         # Deeply nested JSON makes the parser raise RecursionError, which would end the run.
         except (OSError, ValueError, RecursionError):
@@ -2252,6 +2262,8 @@ class MetaHarnessEngine:
             path = (self.work_dir / file).resolve()
             if not path.is_relative_to(agents) or not path.is_file():
                 return "candidate file must exist under agents/"
+            if path.stat().st_size > MAX_CANDIDATE_BYTES:
+                return "candidate file is larger than a version may be"
         except OSError:
             return "candidate file must exist under agents/"
         if self.repo and path.suffix != self.suffix:

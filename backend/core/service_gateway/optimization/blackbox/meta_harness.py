@@ -85,6 +85,12 @@ _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded.
 OUTPUT_CHARS = 30_000
+# Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
+# never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
+# parser, ``json.dumps`` and the next prompt hash raise RecursionError.
+MAX_ARGUMENT_CHARS = 200_000
+MAX_ARGUMENT_DEPTH = 32
+_REFUSED_ARGUMENTS = "{}"
 # A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
 # the same calls in the same order.
 MODEL_ATTEMPTS = 3
@@ -113,15 +119,37 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     arguments = call.get("arguments")
-    # Sorted keys give the same text for a live reply and for its replay from the step log.
+    if not isinstance(arguments, str):
+        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_exec`` refuses
+        # arguments past the depth bound, so the transcript holds an empty object in their place.
+        arguments = _REFUSED_ARGUMENTS if _too_deep(arguments) else json.dumps(arguments, sort_keys=True)
     return {
         "id": call.get("id"),
         "type": "function",
-        "function": {
-            "name": call.get("name"),
-            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True),
-        },
+        "function": {"name": call.get("name"), "arguments": arguments},
     }
+
+
+def _too_deep(value: Any) -> bool:
+    """Tell whether a JSON value nests deeper than ``MAX_ARGUMENT_DEPTH``, with no recursion.
+
+    Args:
+        value: The parsed JSON value.
+
+    Returns:
+        ``True`` when a list or object sits deeper than the bound.
+    """
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            item = list(item.values())
+        if not isinstance(item, list):
+            continue
+        if depth > MAX_ARGUMENT_DEPTH:
+            return True
+        stack.extend((child, depth + 1) for child in item)
+    return False
 
 
 def _clip(text: str) -> str:
@@ -507,11 +535,18 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         assert self._ctx.run_command is not None
         arguments = call.get("arguments")
         if isinstance(arguments, str):
+            if len(arguments) > MAX_ARGUMENT_CHARS:
+                return self._refuse_arguments(tree)
             try:
                 arguments = json.loads(arguments)
-            except ValueError:
+            # JSON nested past the parser's recursion limit raises RecursionError.
+            except (ValueError, RecursionError):
                 arguments = None
+        if _too_deep(arguments):
+            return self._refuse_arguments(tree)
         command = arguments.get("command") if isinstance(arguments, dict) else None
+        if isinstance(command, str) and len(command) > MAX_ARGUMENT_CHARS:
+            return self._refuse_arguments(tree)
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
             # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
             return json.dumps({"error": f"Call the {BASH_TOOL['name']} tool with a command string."}), tree
@@ -528,6 +563,22 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         }
         return json.dumps(output), tree
 
+    @staticmethod
+    def _refuse_arguments(tree: str) -> tuple[str, str]:
+        """Give the error result for tool call arguments past the length or depth bound.
+
+        Args:
+            tree: The workspace tree, which does not change.
+
+        Returns:
+            The error result as JSON text, and the tree.
+        """
+        error = (
+            f"Send the {BASH_TOOL['name']} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
+            f"nested at most {MAX_ARGUMENT_DEPTH} levels."
+        )
+        return json.dumps({"error": error}), tree
+
     def _pull(self, tree: str) -> None:
         """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
 
@@ -541,7 +592,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         if data is None:
             pending.unlink(missing_ok=True)
             return
-        pending.write_bytes(data)
+        # The engine runs in the worker process, and parsing a large file costs many times its size in memory.
+        # An empty file is a malformed one: the iteration gets no candidate.
+        pending.write_bytes(b"" if len(data) > native_engines.MAX_PENDING_BYTES else data)
         for spec in self._read_pending(pending):
             file = spec.get("file")
             if not isinstance(file, str):
@@ -560,7 +613,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                     local.unlink(missing_ok=True)
                 else:
                     local.parent.mkdir(parents=True, exist_ok=True)
-                    local.write_bytes(content)
+                    # One byte past the cap is enough for ``_validate`` to refuse the file by its size.
+                    local.write_bytes(content[: native_engines.MAX_CANDIDATE_BYTES + 1])
 
 
 class MetaHarnessEngine:

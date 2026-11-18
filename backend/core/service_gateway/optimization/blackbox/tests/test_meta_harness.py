@@ -1536,3 +1536,165 @@ def test_a_budget_smaller_than_one_sweep_after_the_seed_stops_before_the_propose
 
     assert result.metadata["stop_reason"] == "eval_budget"
     assert model.calls == []
+
+
+def _nested(depth: int) -> dict[str, Any]:
+    """Build a bash call's arguments nested to a depth, with no recursion.
+
+    Args:
+        depth: The number of nested objects.
+
+    Returns:
+        ``{"command": "true", "a": {"a": ...}}``, nested ``depth`` levels.
+    """
+    arguments: dict[str, Any] = {}
+    for _ in range(depth - 1):
+        arguments = {"a": arguments}
+    return {"command": "true", "a": arguments}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ("[" * 990, "command string"),
+        (json.dumps({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}), "nested at most"),
+        ({"command": "x" * (meta_mod.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
+        # Deep enough that ``json.dumps`` at the tool loop's stack depth raised RecursionError, yet the engine loop
+        # still commits the reply.
+        (_nested(900), "nested at most"),
+    ],
+    ids=["deep-text", "long-text", "long-command", "deep-object"],
+)
+def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
+    arguments: Any,
+    error: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A model reply with arguments past the bounds gets an error result and opens no box; a resume replays it.
+
+    Args:
+        arguments: The tool call's arguments.
+        error: Text that the error result holds.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer(call={"id": "x", "name": "bash", "arguments": arguments})
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert result.best_candidate == "seed"
+    assert boxes.opened == 0
+    assert error in json.loads(model.calls[1][-1]["content"])["error"]
+    if isinstance(arguments, dict) and "a" in arguments:
+        assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
+    resumed, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=0), generation=2)
+    assert _run(resumed).best_candidate == "seed"
+
+
+def test_an_argument_at_the_depth_bound_still_runs(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Arguments nested exactly ``MAX_ARGUMENT_DEPTH`` levels run their command, and the transcript keeps them.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files({"a.txt": b"a"})
+    arguments = _nested(meta_mod.MAX_ARGUMENT_DEPTH - 1)
+
+    output, _ = worker._exec(tree, {"id": "c", "name": "bash", "arguments": arguments})
+
+    assert json.loads(output)["exit_code"] == 0
+    assert (
+        json.loads(meta_mod._openai_call({"id": "c", "name": "bash", "arguments": arguments})["function"]["arguments"])
+        == arguments
+    )
+    deeper = _nested(meta_mod.MAX_ARGUMENT_DEPTH)
+    assert "error" in json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": deeper})[0])
+
+
+def test_a_pending_file_over_its_cap_gives_no_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A ``pending_eval.json`` past ``MAX_PENDING_BYTES`` is malformed, in the tree and in the work folder.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    pending = _pending("agents/a.txt")
+    monkeypatch.setattr(native_engines, "MAX_PENDING_BYTES", len(pending) - 1)
+    tree = loop.put_files({"logs/run/pending_eval.json": pending, "agents/a.txt": b"a"})
+
+    worker._pull(tree)
+
+    assert (worker.logs_dir / "pending_eval.json").read_bytes() == b""
+    assert not (worker.work_dir / "agents" / "a.txt").exists()
+    local = worker.logs_dir / "local_pending.json"
+    local.write_bytes(pending)
+    assert worker._read_pending(local) == []
+    monkeypatch.setattr(native_engines, "MAX_PENDING_BYTES", len(pending))
+    assert worker._read_pending(local) == [{"name": "c0", "file": "agents/a.txt"}]
+
+
+def test_a_candidate_file_over_its_cap_is_refused_with_a_failed_row(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A candidate file past ``MAX_CANDIDATE_BYTES`` comes back cut to one byte past the cap and gets a failed row.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 100)
+    pending = json.dumps({"candidates": [{"name": "big", "file": "agents/big.txt"}]})
+    command = (
+        f"python3 -c \"print('x' * 500)\" > agents/big.txt && printf '%s' '{pending}' > logs/run/pending_eval.json"
+    )
+    model = _Proposer(call={"id": "x", "name": "bash", "arguments": {"command": command}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert result.best_candidate == "seed"
+    rows = [
+        json.loads(line)
+        for summary in tmp_path.rglob("evolution_summary.jsonl")
+        for line in summary.read_text().splitlines()
+    ]
+    assert [row["outcome"] for row in rows] == ["failed: candidate file is larger than a version may be"] * 2
+    assert [path.stat().st_size for path in tmp_path.rglob("agents/big.txt")] == [101]
