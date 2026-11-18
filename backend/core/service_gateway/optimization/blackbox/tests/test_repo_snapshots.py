@@ -392,7 +392,8 @@ def test_the_setup_state_is_saved_once_and_each_candidate_box_opens_from_it_offl
     try:
         first = _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
         assert first.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
-        first.close()
+        # An unhealthy close drops the warm box, so the next version opens a new box from the snapshot.
+        first.close(healthy=False)
         second = _candidate(space)
         assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
         second.close()
@@ -418,7 +419,8 @@ def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states
     try:
         box = _candidate(space)
         assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        box.close()
+        # An unhealthy close drops the warm box, so the next version opens a new box from a tar state.
+        box.close(healthy=False)
         _candidate(space).close()
     finally:
         space.close()
@@ -1028,7 +1030,8 @@ def test_services_start_in_the_candidate_box_after_the_digest_check(tmp_path: Pa
     runtime = _ServiceRuntime(tmp_path / "snaps", saves=saves)
     space = _service_space(archive, runtime)
     try:
-        _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"})).close()
+        # An unhealthy close drops the warm box, so the next version opens a new box and starts its services.
+        _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"})).close(healthy=False)
         _candidate(space).close()
     finally:
         space.close()
