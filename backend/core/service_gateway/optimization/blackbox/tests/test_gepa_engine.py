@@ -31,7 +31,13 @@ from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeEntry, TreeStore
 from core.storage.workspace_store import WorkspaceStore
 from core.worker.actors import User
-from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop, LoopStoppedError, ModelCallFailedError
+from core.worker.engine_loop import (
+    ROOT_AGENT_ID,
+    EngineLoop,
+    LoopStoppedError,
+    ModelCallBilledError,
+    ModelCallFailedError,
+)
 
 from ...budget_stop import BudgetReached
 from .. import gepa_engine as gepa_mod
@@ -136,7 +142,12 @@ class _InFlightScorer:
     """
 
     def __init__(self, limit: int, wait_seconds: float = 2.0) -> None:
-        """Create the scorer."""
+        """Create the scorer.
+
+        Args:
+            limit: The overlap each call waits for before it returns.
+            wait_seconds: The longest time one call waits for that overlap.
+        """
         self.limit = limit
         self.wait_seconds = wait_seconds
         self.in_flight = 0
@@ -955,10 +966,10 @@ def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_
     assert proposer.total_cost == pytest.approx(0.07)
 
 
-def test_the_proposer_lists_and_reads_with_no_box_and_keeps_the_parent_when_turns_run_out(
+def test_the_proposer_lists_and_reads_with_no_box_and_gives_no_version_when_turns_run_out(
     tmp_path: Path,
 ) -> None:
-    """List folders and read a file with no box, run one command, and keep the parent with no version.
+    """List folders and read a file with no box, run one command, and give GEPA no version.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -968,7 +979,7 @@ def test_the_proposer_lists_and_reads_with_no_box_and_keeps_the_parent_when_turn
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
     assert proposer is not None
 
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert calls.prompts[1] == "Files (2):\nanswer.txt\nsrc/a.py"
     assert calls.prompts[2] == "Files (1):\nsrc/a.py"
     assert calls.prompts[3] == "'none' is not a folder of the current version."
@@ -1061,7 +1072,7 @@ def test_the_proposer_refuses_the_exploits_folder_its_parents_and_their_case_var
     proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
     assert proposer is not None
 
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert calls.prompts[1] == f"The files break the editing rules: '{path}' may not be changed."
     assert calls.writes == []
 
@@ -1135,7 +1146,7 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
 
     monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 7)
 
-    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
+    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {}
     notes = calls.prompts[1:]
     assert notes[0] == "Files (1):\nanswer.txt"
     assert notes[1] == "'eval' is not a folder of the current version."
@@ -1210,13 +1221,13 @@ def test_a_file_at_a_parent_of_a_protected_or_read_only_path_is_refused(tmp_path
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
     assert proposer is not None
 
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert calls.prompts[1] == "The files break the editing rules: 'cfg' may not be changed. 'lib' may not be changed."
     assert calls.writes == []
 
 
 def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -> None:
-    """The brief lists the visible protected and read-only paths, and leaves out the hidden ones.
+    """The brief lists the visible editable, protected and read-only paths, and leaves out the hidden ones.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -1224,7 +1235,7 @@ def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -
     calls = _FakeCalls([_file("answer.txt")])
     seed = RepoSeed(
         "tree-seed",
-        editable_paths=("answer.txt",),
+        editable_paths=("answer.txt", "eval/cases"),
         constrained_paths=("optimize.toml", "src/rules.toml"),
         readonly_paths=("eval/data", "vendor"),
         hidden_hashes=hidden_hashes(["optimize.toml", "eval"]),
@@ -1233,10 +1244,11 @@ def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -
     assert proposer is not None
 
     proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert "You may change: `answer.txt`. Leave everything else as it is." in calls.prompts[0]
     assert "The repository rules protect: src/rules.toml." in calls.prompts[0]
     assert "Submodules and Git LFS files stay as fetched: vendor." in calls.prompts[0]
     assert "optimize.toml" not in calls.prompts[0]
-    assert "eval/data" not in calls.prompts[0]
+    assert "eval/" not in calls.prompts[0]
 
 
 def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
@@ -1518,14 +1530,14 @@ def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores
     proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
     assert proposer is not None
 
-    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
+    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {}
     notes = calls.prompts[1:]
     assert notes[0] == "'eval' is not a folder of the current version."
     assert notes[0].replace("eval", "<path>") == notes[1].replace("none", "<path>")
     assert counter["opened"] == 0
 
 
-def test_a_failed_model_call_keeps_the_parent_and_gepa_does_not_pay_for_it_again(tmp_path: Path) -> None:
+def test_a_failed_model_call_gives_no_version_and_gepa_does_not_pay_for_it_again(tmp_path: Path) -> None:
     """A failed reply ends only its proposal, so GEPA's batch retry does not call the model for it again.
 
     Args:
@@ -1554,7 +1566,7 @@ def test_a_failed_model_call_keeps_the_parent_and_gepa_does_not_pay_for_it_again
 
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, call_model=model), Task(""))
     assert proposer is not None
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert len(model_calls) == 1
     assert proposer.failure is None
 
@@ -1639,7 +1651,7 @@ def test_a_hidden_path_inside_the_editable_paths_gets_the_generic_note_and_no_wr
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
     assert proposer is not None
 
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert calls.prompts[1] == "The files break the editing rules: 'eval/metric.py' may not be changed."
     assert calls.writes == []
 
@@ -1673,4 +1685,184 @@ def test_a_stopped_proposer_raises_the_stop_again_with_no_model_call(tmp_path: P
     with pytest.raises(LoopStoppedError) as second:
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
     assert second.value is first.value
+    assert model_calls == [1]
+
+
+def test_a_cut_command_output_keeps_its_end_and_says_how_much_it_dropped(tmp_path: Path) -> None:
+    """A long stdout or stderr shows its last characters after a notice, so the model knows it sees only a part.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def long_output(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Give a stdout of 5000 characters and a short stderr.
+
+        Args:
+            tree_id: Not used.
+            command: Not used.
+            grants: Not used.
+
+        Returns:
+            The result and a new tree id.
+        """
+        return CommandResult(0, "a" * 1000 + "b" * 4000, "short"), "tree-command"
+
+    calls = _FakeCalls(["```sh\ncat big.log\n```"] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, run_command=long_output), Task(""))
+    assert proposer is not None
+
+    proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert calls.prompts[1] == (
+        "Exit code 0.\nstdout:\n[cut: the first 1000 of 5000 characters are not shown; read them with sh]\n"
+        + "b" * 4000
+        + "\nstderr:\nshort"
+    )
+
+
+def test_a_proposal_that_writes_the_parent_again_gives_no_version_and_no_score_call(tmp_path: Path) -> None:
+    """A write that gives the parent's tree id is no new version, so GEPA scores no copy of the parent.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = _FakeCalls([_file("answer.txt", "a\n")] * 40)
+    scored: list[Any] = []
+
+    def score(candidate: Any, case: Any) -> tuple[float, dict[str, Any]]:
+        """Record each score call.
+
+        Args:
+            candidate: The version.
+            case: The case.
+
+        Returns:
+            A constant score and no side information.
+        """
+        scored.append(candidate)
+        return 1.0, {}
+
+    ctx = calls.ctx(tmp_path, put_files=lambda files, base_tree_id: base_tree_id, proposer_token_budget_usd=0.03)
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
+    assert proposer is not None
+    assert proposer({"c": "tree-seed"}, {"c": []}, ["c"]) == {}
+
+    calls.prompts.clear()
+    GepaEngine().run(Task("", cases=list(_CASES)), EvalServer(score, max_evals=200), ctx)
+
+    proposals = len(calls.prompts)
+    assert proposals == 3
+    # The seed's sweep, then GEPA's default minibatch of three cases of the parent before each proposal, and
+    # none of a copy.
+    assert len(scored) == len(_CASES) + 3 * proposals
+
+
+def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(tmp_path: Path) -> None:
+    """A parent the run cannot see ends the proposal; an error that no loop call raises is a bug and goes up.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def unseen(files: dict[str, bytes], base_tree_id: str | None) -> str:
+        """Refuse the base tree, as the loop does for a tree the run cannot see.
+
+        Args:
+            files: Not used.
+            base_tree_id: The base tree.
+
+        Raises:
+            LookupError: Always.
+        """
+        raise LookupError(f"run cannot see tree {base_tree_id}")
+
+    def broken(prompt: Any, tools: Any) -> ModelReply:
+        """Fail as a bug does.
+
+        Args:
+            prompt: Not used.
+            tools: Not used.
+
+        Raises:
+            TypeError: Always.
+        """
+        raise TypeError("a bug")
+
+    calls = _FakeCalls([_file("answer.txt"), _file("answer.txt")])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, put_files=unseen), Task(""))
+    assert proposer is not None
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
+    assert len(calls.prompts) == 1
+
+    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
+    assert proposer is not None
+    with pytest.raises(TypeError, match="a bug"):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert proposer.failure is None
+
+
+def test_a_billed_failed_model_call_counts_in_the_total_cost_live_and_on_a_replay(
+    stores: _Stores, tmp_path: Path
+) -> None:
+    """The committed cost of a billed failed call counts toward ``max_reflection_cost``, also on a resume.
+
+    Args:
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
+    model_calls: list[int] = []
+
+    def billed(prompt: Any, tools: Any = None) -> ModelReply:
+        """Fail after the provider billed 1.5 cents.
+
+        Args:
+            prompt: Not used.
+            tools: Not used.
+
+        Raises:
+            ModelCallBilledError: Always.
+        """
+        model_calls.append(1)
+        raise ModelCallBilledError("1.5")
+
+    def propose(generation: int) -> float:
+        """Run one proposal on a loop of this generation.
+
+        Args:
+            generation: The job's execution generation.
+
+        Returns:
+            The proposer's total cost in US dollars.
+        """
+        run = stores.user.workspace().start_run(
+            _RUN_ID,
+            step_log=stores.step_log,
+            execution_generation=generation,
+            budget_generation=stores.budget_generation,
+            grant_list_id="grants-1",
+            chunk_cents=10,
+            lease_slices=4,
+        )
+        counter = {"open": 0, "opened": 0}
+        loop = EngineLoop(
+            run,
+            engine=stores.engine,
+            trees=stores.trees,
+            candidates=_CountingSource(counter),
+            metrics=_CountingSource(counter),
+            model=billed,
+            model_max_cents=2,
+            run_dir=tmp_path / "loop",
+        )
+        seed_tree = loop.put_files({"answer.txt": b"a\n"})
+        ctx = loop.context(repo_seed=RepoSeed(seed_tree, editable_paths=("answer.txt",)))
+        proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
+        assert proposer is not None
+        assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {}
+        return proposer.total_cost
+
+    assert propose(1) == pytest.approx(0.015)
+    stores.new_generation()
+    assert propose(2) == pytest.approx(0.015)
+    # The replay gives the committed failure, so the model is not called again.
     assert model_calls == [1]

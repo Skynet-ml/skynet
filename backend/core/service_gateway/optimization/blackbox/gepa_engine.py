@@ -34,6 +34,7 @@ from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
 from ....sandbox.timeouts import Phase
 from ....sandbox.trees import BoxFailureError, GrantDeniedError, TreeRejectedError
+from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
@@ -58,9 +59,9 @@ from .upstream import GEPA_SOURCE
 from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
-# One proposal's model replies; the proposer keeps the parent when they run out.
+# One proposal's model replies; the proposal gives GEPA no new version when they run out.
 _MAX_TURNS = 6
-# A command's stdout and stderr, a read file and a folder listing are each cut to this many characters.
+# A command's stdout and stderr, a read file and a folder listing each show at most this many characters.
 _OUTPUT_CHARS = 4000
 _FEEDBACK_RECORDS = 5
 # The error names the path, and a hidden path must not reach the proposer (SKY-353), so the note is fixed.
@@ -344,7 +345,7 @@ class _LoopRepoProposer:
     """GEPA ``custom_candidate_proposer`` that writes repository versions with the loop's model.
 
     A version is a tree id. The model reads files and writes whole files with no box, and each of its shell
-    commands opens one box. GEPA's cost stopper reads :attr:`total_cost`.
+    commands opens one box. GEPA's cost stopper reads :attr:`total_cost`, so ``max_reflection_cost`` caps it.
     """
 
     def __init__(self, ctx: EngineContext, seed: RepoSeed, task: Task) -> None:
@@ -404,10 +405,7 @@ class _LoopRepoProposer:
 
     @property
     def total_cost(self) -> float:
-        """Return the cost of this proposer's successful model replies in US dollars, as the step log holds it."""
-        # A failed call that the provider billed commits its cost on the step log, but the proposer gets
-        # ``ModelCallFailedError`` with no cost, so this total and GEPA's ``max_reflection_cost`` cap miss it.
-        # The fix belongs in the engine loop (SKY-719): the error must carry the committed cost.
+        """Return the committed cost of this proposer's model calls in US dollars, with the billed failed calls."""
         return float(self.cost_cents / 100)
 
     def __call__(
@@ -426,8 +424,9 @@ class _LoopRepoProposer:
             **_: GEPA's other proposer arguments, not used.
 
         Returns:
-            The new version's tree id under the same component key; the parent when no reply wrote valid files
-            or a loop call failed with an error that does not stop the run.
+            The new version's tree id under the same component key. An empty mapping when no reply wrote a
+            version other than the parent, a model call failed, or the run cannot see the parent: GEPA then skips
+            the proposal and pays no minibatch for a copy of the parent.
 
         Raises:
             ScorerAbortError: When the loop stopped; the engine reads it back after GEPA returns.
@@ -449,7 +448,7 @@ class _LoopRepoProposer:
                 if files:
                     note, tree_id = self.write(parent, files)
                     if tree_id is not None:
-                        return {key: tree_id}
+                        return {key: tree_id} if tree_id != parent else {}
                 elif not blocks:
                     note = "Reply with one ```ls block, one ```read block, one ```sh block, or ```file blocks."
                 elif blocks[0][2] == "ls":
@@ -462,11 +461,15 @@ class _LoopRepoProposer:
         except _STOP_ERRORS as error:
             self.failure = error
             raise
-        except Exception as error:
-            # GEPA retries a failed batch from its first model call, which pays for each reply again. A loop
-            # error replays from its committed step, so keeping the parent gives the same population on a resume.
-            logger.info("GEPA proposal kept its parent after %s", type(error).__name__)
-        return {key: parent}
+        except ModelCallFailedError as error:
+            # GEPA retries a failed batch from its first model call, which pays for each reply again. A failed call
+            # replays from its committed step, so ending the proposal gives the same population on a resume.
+            self.cost_cents += error.cost_cents
+            logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
+        except LookupError as error:
+            # ``put_files`` raises it when the run cannot see the parent, and every later write would fail the same way.
+            logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
+        return {}
 
     def brief(self, records: list[dict[str, Any]]) -> str:
         """Brief one proposal: the goal, the path rules, how the current version scored and the reply rules.
@@ -477,7 +480,10 @@ class _LoopRepoProposer:
         Returns:
             The first message of the proposal.
         """
-        editable = ", ".join("the whole repository" if p == "." else f"`{p}`" for p in self.seed.editable_paths)
+        # A hidden path must not reach the proposer, also when the repository rules name it (SKY-353).
+        editable = ", ".join(
+            "the whole repository" if p == "." else f"`{p}`" for p in self.seed.editable_paths if not self.hidden(p)
+        )
         lines = [
             "You are improving a code repository.",
             "",
@@ -486,7 +492,6 @@ class _LoopRepoProposer:
         if self.task.background:
             lines += ["", "Background:", self.task.background]
         lines += ["", f"You may change: {editable or 'nothing'}. Leave everything else as it is."]
-        # A hidden path must not reach the proposer, also when the repository rules name it (SKY-353).
         constrained = [path for path in self.seed.constrained_paths if not self.hidden(path)]
         readonly = [path for path in self.seed.readonly_paths if not self.hidden(path)]
         if constrained:
@@ -567,8 +572,8 @@ class _LoopRepoProposer:
         except TreeRejectedError:
             return _REJECTED_NOTE
         return (
-            f"Exit code {result.exit_code}.\nstdout:\n{result.stdout[-_OUTPUT_CHARS:]}\n"
-            f"stderr:\n{result.stderr[-_OUTPUT_CHARS:]}"
+            f"Exit code {result.exit_code}.\nstdout:\n{_cut(result.stdout, tail=True)}\n"
+            f"stderr:\n{_cut(result.stderr, tail=True)}"
         )
 
     def write(self, tree_id: str, files: dict[str, str]) -> tuple[str, str | None]:
@@ -658,17 +663,24 @@ class _LoopRepoProposer:
         return hashed_kind(self.seed.hidden_hashes, path) is not None
 
 
-def _cut(text: str) -> str:
+def _cut(text: str, *, tail: bool = False) -> str:
     """Cut a note's text to ``_OUTPUT_CHARS`` and say so, so the model does not write back a part as the whole file.
 
     Args:
         text: The text.
+        tail: Keep the last characters, as for a command's output, in place of the first ones.
 
     Returns:
         The text, with a notice when it was cut.
     """
     if len(text) <= _OUTPUT_CHARS:
         return text
+    if tail:
+        dropped = len(text) - _OUTPUT_CHARS
+        return (
+            f"[cut: the first {dropped} of {len(text)} characters are not shown; read them with sh]\n"
+            + text[-_OUTPUT_CHARS:]
+        )
     return f"{text[:_OUTPUT_CHARS]}\n[cut at {_OUTPUT_CHARS} of {len(text)} characters; read the rest with sh]"
 
 
