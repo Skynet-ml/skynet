@@ -67,7 +67,10 @@ _FEEDBACK_RECORDS = 5
 _REJECTED_NOTE = "The command wrote a path that it may not write. Its output was discarded."
 # A block closes at a line with its own fence, so a file that holds a shorter fence can use a longer one.
 _BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
-# These errors end the run. The loop wraps its own stops in ``ScorerAbortError``; a refused grant replays the same.
+# These errors end the run. The loop wraps its own stops in ``ScorerAbortError``.
+# The loop commits a grant list with no network policy as the command's own failure, which it calls no stop.
+# The proposer sends the same empty grant list with each command, so every later command would fail the same way.
+# A replay raises the committed error again at the same step, so the live run and its resume stop at the same place.
 _STOP_ERRORS = (ScorerAbortError, GrantDeniedError, BudgetExhaustedError)
 
 
@@ -401,7 +404,10 @@ class _LoopRepoProposer:
 
     @property
     def total_cost(self) -> float:
-        """Return the cost of this proposer's model replies in US dollars, as the step log holds it."""
+        """Return the cost of this proposer's successful model replies in US dollars, as the step log holds it."""
+        # A failed call that the provider billed commits its cost on the step log, but the proposer gets
+        # ``ModelCallFailedError`` with no cost, so this total and GEPA's ``max_reflection_cost`` cap miss it.
+        # The fix belongs in the engine loop (SKY-719): the error must carry the committed cost.
         return float(self.cost_cents / 100)
 
     def __call__(
@@ -425,7 +431,8 @@ class _LoopRepoProposer:
 
         Raises:
             ScorerAbortError: When the loop stopped; the engine reads it back after GEPA returns.
-            GrantDeniedError: When the budget refused a command's grants; the engine reads it back too.
+            GrantDeniedError: When a command's grant list does not resolve to a network policy; the engine reads it
+                back too.
         """
         if self.failure is not None:
             raise self.failure
