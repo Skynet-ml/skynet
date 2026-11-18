@@ -22,8 +22,8 @@ and ``headers`` and a ``query`` table that name secrets only as ``${NAME}``
 placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
-timeout; with no ``[run]``, nothing runs and the metric judges only the tree
-and the patch), and ``[data] cases`` (the path of a JSONL file that holds
+timeout; a contract needs ``[run]`` or a ``[target.<name>]`` stage, and the
+parser enforces this), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
 files), and ``[outcome]`` (the ``target`` score and, in ``[outcome.require]``,
