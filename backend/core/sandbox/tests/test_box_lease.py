@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ from core.service_gateway.optimization.blackbox.tree_sandbox import (
     StepRef,
     TreeSandbox,
     _clean,
+    _processes,
 )
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
@@ -361,17 +362,31 @@ def test_a_close_error_after_a_check_error_hides_it_only_when_it_is_a_stop(
     assert caught.value is {"check": check_error, "close": close_error}[raised]
 
 
-def test_new_grants_replace_the_warm_box() -> None:
-    """A box keeps the network policy it opened with, so other grants need a new box."""
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ([Grant("pypi.org")], [Grant("api.example.com")]),
+        ([Grant("pypi.org")], [Grant("pypi.org", credential=True)]),
+        ([Grant("pypi.org", credential=True)], [Grant("pypi.org")]),
+    ],
+    ids=["host", "adds-credential", "drops-credential"],
+)
+def test_new_grants_replace_the_warm_box(first: list[Grant], second: list[Grant]) -> None:
+    """A box keeps the network policy it opened with, so another host or credential flag needs a new box.
+
+    Args:
+        first: The grant list of the first acquire.
+        second: Another grant list for the second acquire.
+    """
     provider = _Provider()
     lease = provider.lease()
-    box = lease.acquire("agent-1", [Grant("pypi.org")])
+    box = lease.acquire("agent-1", first)
     lease.release(box, healthy=True)
 
-    again = lease.acquire("agent-1", [Grant("api.example.com")])
+    again = lease.acquire("agent-1", second)
 
     assert box.closed
-    assert again.grants == (Grant("api.example.com"),)
+    assert again.grants == tuple(second)
 
 
 def test_a_failed_close_of_a_replaced_box_frees_the_agent() -> None:
@@ -1885,6 +1900,10 @@ class _DyingBox:
         # The process scan's output, its whole result or its error; None runs the real scan. The host's own
         # processes come and go, so a real scan on a test host can see a new process that no step started.
         self.processes: str | CommandResult | BaseException | None = "1 Tue Nov 17 00:00:00 2026\n"
+        # Stands for the provider's root kind; the lease tests run the scan as a provider whose root is capable.
+        self.root_has_capabilities = True
+        # The sudo option of each process scan, in order.
+        self.scan_sudo: list[bool] = []
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write files into the inner box.
@@ -1908,6 +1927,10 @@ class _DyingBox:
             SandboxInfraError: For an agent command once the box is dead.
             BaseException: The set health check error, for the ``true`` command, or the set process scan error.
         """
+        # A local box refuses root on the developer's machine, so a root command runs as the test's user.
+        sudo = options.pop("sudo", False)
+        if command == PROCESS_SCAN:
+            self.scan_sudo.append(sudo)
         if command == "true" and isinstance(self.check, BaseException):
             raise self.check
         if command == PROCESS_SCAN and isinstance(self.processes, BaseException):
@@ -1947,6 +1970,8 @@ class _Runtime:
     boxes: list[_DyingBox] = field(default_factory=list)
     # When set, each box gets a new TMPDIR in this folder, outside its working directory.
     tmp_root: Path | None = None
+    # Wraps each new local box.
+    wrap: Callable[[SandboxSession], _DyingBox] = _DyingBox
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Open one local box.
@@ -1959,7 +1984,7 @@ class _Runtime:
         """
         if self.tmp_root is not None:
             spec = replace(spec, env={**spec.env, "TMPDIR": tempfile.mkdtemp(dir=self.tmp_root)})
-        box = _DyingBox(LocalSubprocessRuntime().open(spec))
+        box = self.wrap(LocalSubprocessRuntime().open(spec))
         self.boxes.append(box)
         return box  # type: ignore[return-value]
 
@@ -2223,6 +2248,225 @@ def test_a_failed_process_scan_logs_the_box_type_and_the_cause(
 
     assert [record.getMessage() for record in caplog.records if record.name == TreeSandbox.__module__] == [message] * 2
     assert "box-secret-name" not in caplog.text
+
+
+class _ScriptedScanBox(_DyingBox):
+    """Answer each process scan from a script that gets the scan's number and its sudo option."""
+
+    def __init__(self, inner: SandboxSession, script: Callable[[int, bool], CommandResult], capable: bool) -> None:
+        """Wrap the box.
+
+        Args:
+            inner: The local box.
+            script: Gives the result of scan number n (from 1) with its sudo option.
+            capable: The provider's root has capabilities.
+        """
+        super().__init__(inner)
+        self._script = script
+        self.root_has_capabilities = capable
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Answer a process scan from the script, and run the rest as the plain fake does.
+
+        Args:
+            command: The shell command.
+            **options: The run options.
+
+        Returns:
+            The scripted scan result, or the plain fake's result.
+        """
+        if command != PROCESS_SCAN:
+            return super().run(command, **options)
+        self.scan_sudo.append(bool(options.get("sudo", False)))
+        return self._script(len(self.scan_sudo), self.scan_sudo[-1])
+
+
+def _scripted_sandbox(
+    trees: TreeStore, step_log: StepLogStore, script: Callable[[int, bool], CommandResult], capable: bool = True
+) -> tuple[TreeSandbox, _Runtime, RuntimeBoxLease, RuntimeBoxLease]:
+    """Build the layer over a warm candidate lease whose boxes answer each process scan from a script.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        script: Gives the result of each scan of a box.
+        capable: The provider's root has capabilities.
+
+    Returns:
+        The layer, the candidate runtime and the two leases.
+    """
+    runtime = _Runtime(wrap=lambda inner: _ScriptedScanBox(inner, script, capable))
+    candidates = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
+    metrics = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, keep_warm=False, **_LIMITS)
+    return TreeSandbox(trees, step_log, candidates, metrics), runtime, candidates, metrics
+
+
+def test_a_step_whose_first_scan_fails_gives_its_box_back_unhealthy_also_when_the_second_scan_matches(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """Without the scan before the step no baseline shows that no process is left, so the next step gets a new box.
+
+    Args:
+        trees: The tree store.
+        step_log: The test step log.
+    """
+
+    def script(number: int, sudo: bool) -> CommandResult:
+        """Fail the first scan of each box and print the same lines after it.
+
+        Args:
+            number: The scan's number in its box.
+            sudo: Not used.
+
+        Returns:
+            The scan result.
+        """
+        return CommandResult(exit_code=1) if number == 1 else CommandResult(exit_code=0, stdout=_SNAPSHOT)
+
+    sandbox, runtime, candidates, metrics = _scripted_sandbox(trees, step_log, script)
+    empty = _tree(trees, {})
+    try:
+        sandbox.run(_step(1), empty, "true", [])
+        sandbox.run(_step(2), empty, "true", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert len(runtime.boxes) == 2
+    assert runtime.boxes[0].closed
+
+
+_STRAY = "77 Tue Nov 17 00:00:07 2026\n"
+
+
+@pytest.mark.parametrize("capable", [True, False], ids=["root-scan", "capless-root"])
+def test_a_scan_that_a_stray_process_replays_as_the_box_user_cannot_keep_the_box(
+    trees: TreeStore, step_log: StepLogStore, capable: bool
+) -> None:
+    """The scan runs as root where the provider's root is capable, so a replayed box user output file is not read.
+
+    On Vercel a box user command's output file belongs to the box user. The fake
+    box's box user channel gives the scan before the step again, as a stray
+    process that replaces the file would. Only the root channel shows the stray
+    process. A root with no capability (local Docker) gives its output through a
+    pipe, so it keeps the box user scan.
+
+    Args:
+        trees: The tree store.
+        step_log: The test step log.
+        capable: The provider's root has capabilities.
+    """
+
+    def script(number: int, sudo: bool) -> CommandResult:
+        """Show the stray process in each scan after a step, but only through the root channel.
+
+        Args:
+            number: The scan's number in its box; each step scans twice.
+            sudo: The scan runs as root.
+
+        Returns:
+            The scan result.
+        """
+        return CommandResult(exit_code=0, stdout=_SNAPSHOT + (_STRAY if sudo and number % 2 == 0 else ""))
+
+    sandbox, runtime, candidates, metrics = _scripted_sandbox(trees, step_log, script, capable)
+    empty = _tree(trees, {})
+    try:
+        sandbox.run(_step(1), empty, "true", [])
+        sandbox.run(_step(2), empty, "true", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    # A kept box scans before and after each of the two steps.
+    assert runtime.boxes[0].scan_sudo == [capable] * (2 if capable else 4)
+    assert runtime.boxes[0].closed is capable
+    assert len(runtime.boxes) == (2 if capable else 1)
+
+
+def test_a_local_box_scans_without_root() -> None:
+    """The local subprocess box refuses sudo, so its scan runs as the test's user and still gives its lines."""
+    box = LocalSubprocessRuntime().open(_SPEC)
+    try:
+        lines = _processes(box)
+    finally:
+        box.close()
+
+    assert lines is not None
+    assert any(line.startswith("state ") for line in lines)
+
+
+def _sudo_tools(folder: Path, home: Path) -> None:
+    """Write a fake id that says root and a fake getent that gives the box user's home.
+
+    Args:
+        folder: The folder of the fake tools.
+        home: The box user's home.
+    """
+    folder.mkdir()
+    (folder / "id").write_text("#!/bin/sh\necho 0\n")
+    entry = f"box:x:1001:0::{home}:/bin/bash"
+    (folder / "getent").write_text(f'#!/bin/sh\n[ "$1 $2" = "passwd 1001" ] && echo "{entry}"\n')
+    for tool in ("id", "getent"):
+        (folder / tool).chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("env", "same"),
+    [
+        ({"SUDO_UID": "1001"}, True),
+        ({"SUDO_UID": "0"}, False),
+        ({"SUDO_UID": "1002"}, False),
+        ({"SUDO_UID": "1001", "ENTRY_PATH": ""}, False),
+    ],
+    ids=["box-user", "root-user", "unknown-user", "no-entry-path"],
+)
+def test_a_root_scan_under_sudo_checks_the_box_user_folders_or_fails(
+    tmp_path: Path, env: dict[str, str], same: bool
+) -> None:
+    """Under sudo root has its own HOME and PATH, so the root scan checks the box user's, or fails without them.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake tools, the folders and the homes.
+        env: The sudo environment that differs from the box user's case.
+        same: The root scan gives the box user's state line; else it fails.
+    """
+    tools, folder, home, root_home = (tmp_path / name for name in ("tools", "bin", "home", "root"))
+    _sudo_tools(tools, home)
+    folder.mkdir()
+    (folder / "tool").write_text("aaaa\n")
+    home.mkdir()
+    (home / ".profile").write_text("echo hi\n")
+    root_home.mkdir()
+
+    def scan(extra: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+        """Run the scan script with the fake tools first on PATH.
+
+        Args:
+            extra: The scan's own environment.
+
+        Returns:
+            The finished scan.
+        """
+        return subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+            env={"PATH": f"{tools}:/usr/bin:/bin", **extra},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    box_user = scan({"BOX_PATH": str(folder), "HOME": str(home)})
+    root = scan({"BOX_PATH": "/usr/bin:/bin", "HOME": str(root_home), "ENTRY_PATH": str(folder), **env})
+
+    assert box_user.returncode == 0
+    if same:
+        assert root.returncode == 0
+        assert root.stdout.splitlines()[0] == box_user.stdout.splitlines()[0]
+    else:
+        assert root.returncode == 1
+        assert root.stdout == ""
 
 
 def _fake_tools(folder: Path, marker: Path, names: Sequence[str]) -> None:
