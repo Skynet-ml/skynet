@@ -2199,6 +2199,7 @@ def effective_environment(
         editable = constraints.editable_paths
     use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
     # A version must not rewrite the proposer command, or the setup it runs, that writes the next versions.
+    # Only exact argv paths are known here; the docs tell users to protect the files the command imports.
     command_files = constraints.proposer_command_files if use_file_proposer else ()
     protected = tuple(
         dict.fromkeys(
@@ -2214,6 +2215,15 @@ def effective_environment(
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.
     if all(_inside(path, protected) for path in editable):
+        without_commands = tuple(path for path in protected if path not in command_files)
+        if command_files and not all(_inside(path, without_commands) for path in editable):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), because the run protects"
+                f" the files that [proposer] entry and setup name ({', '.join(command_files)}), so no version"
+                " could change anything. Make a path outside those files editable.",
+                section="proposer",
+                key="entry",
+            )
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), so no version could"
             " change anything. Protect less, or make a path outside [paths] protected editable.",

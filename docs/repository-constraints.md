@@ -118,9 +118,14 @@ empty part fails the setup check, and the message names the key.
   engines with `entry` fails the setup check, and the message names
   `[proposer] entry` and the engine. Auto leaves out their lanes, and the run
   record says so in a note.
-- Every repository file that `entry` or `setup` names, such as
-  `agent/my-agent.js` or `scripts/setup.sh`, is protected, like
-  `optimize.toml`, so no version can change its own proposer.
+- Every repository file that `entry` or `setup` names by its exact path,
+  such as `agent/my-agent.js` or `scripts/setup.sh`, is protected, like
+  `optimize.toml`. Other files that the command uses are not protected:
+  modules that it imports, a module in `python -m agent.main`, a script in
+  `sh -c "node agent.js"`, or `package.json`. A version can change those
+  files, and so change the proposer of the next versions. To prevent this,
+  put your proposer's folder in `[paths] protected`, for example
+  `protected = ["agent"]`.
 - `entry` and `setup` cannot contain `__APP_API_KEY__` or
   `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
@@ -508,7 +513,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name are protected. A proposer that the run names replaces it. AutoResearch, Meta-Harness and ShinkaEvolve refuse it. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. AutoResearch, Meta-Harness and ShinkaEvolve refuse it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |

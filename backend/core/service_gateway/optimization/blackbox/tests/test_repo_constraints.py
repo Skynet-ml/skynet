@@ -274,6 +274,29 @@ def test_the_setup_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     assert replaced.protected_paths == (CONSTRAINTS_FILE,)
 
 
+def test_an_editable_path_that_only_the_proposer_command_protects_names_the_command_files(tmp_path: Path) -> None:
+    """The error blames ``[proposer] entry`` and names its files, not ``[paths] protected`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "agent/run.js"]\n',
+        {"agent/run.js": b"// agent"},
+    )
+    assert constraints is not None
+
+    with pytest.raises(
+        ConstraintsError, match=r"the files that \[proposer\] entry and setup name \(agent/run.js\)"
+    ) as caught:
+        effective_environment(constraints, approved_editable=["agent/run.js"], approved_setup=None)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+    with pytest.raises(ConstraintsError, match=r"outside \[paths\] protected editable"):
+        effective_environment(constraints, approved_editable=["optimize.toml"], approved_setup=None)
+
+
 def test_a_proposer_setup_without_entry_fails() -> None:
     """``setup`` only prepares the file's own command, so it needs ``entry``."""
     with pytest.raises(ConstraintsError, match=r"\[proposer\] setup needs \[proposer\] entry") as caught:
