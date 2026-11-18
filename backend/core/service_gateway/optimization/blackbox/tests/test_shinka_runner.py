@@ -2199,7 +2199,7 @@ def test_the_command_editor_files_the_tree_the_command_leaves_as_the_child(tmp_p
 def test_the_command_editor_reports_a_failed_attempt_for_a_failed_or_bad_version(
     reply: dict[str, Any], error: str, tmp_path: Path
 ) -> None:
-    """Hand upstream a failed attempt when the command failed, left no change or sent a path outside the checkout.
+    """Hand upstream a failed attempt for a failed command, no change, a malformed version or a path it may not write.
 
     Args:
         reply: The worker's reply.
