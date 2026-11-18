@@ -238,7 +238,10 @@ class AutoSaddlerEngine:
                 elif op == "evaluate":
                     reply = _evaluate(task, server, ctx, request)
                 elif op == "progress":
-                    _progress(task, server, ctx, request.get("event") or {})
+                    event = request.get("event") or {}
+                    if not isinstance(event, dict):
+                        raise TypeError("event")
+                    _progress(task, server, ctx, event)
                     reply = {}
                 elif op == "log":
                     sandbox_log.forward(request.get("record"), owner=None, scrub=sandbox_log.Scrubber(()))
