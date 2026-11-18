@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -819,3 +820,61 @@ def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.Monke
     assert result.extras["runs_ok"] == 1
     assert result.slo_violations == ["the chaos job did not fire every kill kind: {'box': 0, 'worker': 0, 'commit': 0}"]
     assert not result.slo_passed
+
+
+class _NoProcess:
+    """A shard process that never starts: the test hands its report in directly."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Take the process arguments and do nothing.
+
+        Args:
+            **kwargs: Not used.
+        """
+
+    def start(self) -> None:
+        """Start nothing."""
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for nothing.
+
+        Args:
+            timeout: Not used.
+        """
+
+    def is_alive(self) -> bool:
+        """Return that the process is gone.
+
+        Returns:
+            ``False``.
+        """
+        return False
+
+
+def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that a pass whose last step is durable when the first round ends gives 0 rates, not a crash.
+
+    Args:
+        monkeypatch: Replaces the shard processes with one made-up report.
+        tmp_path: The pass folder.
+    """
+    context = SimpleNamespace(Barrier=lambda count: None, Queue=lambda: None, Process=_NoProcess)
+    monkeypatch.setattr(swarm_10k, "multiprocessing", SimpleNamespace(get_context=lambda method: context))
+    report = {
+        "worker_id": "swarm-w",
+        "started": 0.5,
+        "waits": [0.1],
+        "lates": [0.0],
+        "times": [1.0],
+        "first_round_durable": 1.0,
+        "first_agent_done": 1.0,
+        "boxes_opened": 0,
+        "boxes_open_max": 0,
+    }
+    monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+    figures = swarm_10k.run_pass(_small_pass_config(), 1, tmp_path)
+    assert figures["commits_per_second"] == 0.0
+    assert figures["commits_per_second_with_drain"] == 0.0
