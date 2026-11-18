@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-Skynet scores a version 0 itself when its `[run]` entry fails. If the entry cannot start, times out or a signal stops it, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code is not a failure: the scorer gets it in `output`.
+When the `[run]` entry fails on a case, that case has no score. If the entry cannot start, times out or a signal stops it, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code is not a failure: the scorer gets it in `output`. A version with such a case has no score. It cannot be the best version, reaches no `[outcome] target` and opens no pull request. If a failure must count as a number, catch the failure in your program, write an output, and let the scorer score it. Read the [repository rules](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Model as judge
 

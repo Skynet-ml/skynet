@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-Skynet bewertet eine Version selbst mit 0, wenn ihr `[run]`-Eintrag fehlschlägt. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Exit-Code ungleich null ist kein Fehlschlag: Der Scorer erhält ihn in `output`.
+Wenn der `[run]`-Eintrag bei einem Fall fehlschlägt, hat dieser Fall keine Bewertung. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Exit-Code ungleich null ist kein Fehlschlag: Der Scorer erhält ihn in `output`. Eine Version mit einem solchen Fall hat keine Bewertung. Sie kann nicht die beste Version sein, erreicht kein `[outcome] target` und öffnet keinen Pull Request. Wenn ein Fehlschlag als Zahl zählen soll, fangen Sie den Fehlschlag in Ihrem Programm ab, schreiben Sie eine Ausgabe und lassen Sie den Scorer sie bewerten. Lesen Sie die [Repository-Regeln](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modell als Bewerter
 

@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-버전의 `[run]` 엔트리가 실패하면 Skynet이 직접 그 버전에 0점을 줍니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 0이 아닌 종료 코드는 실패가 아닙니다. 채점기는 그 값을 `output`으로 받습니다.
+`[run]` 엔트리가 어떤 케이스에서 실패하면 그 케이스에는 점수가 없습니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 0이 아닌 종료 코드는 실패가 아닙니다. 채점기는 그 값을 `output`으로 받습니다. 그런 케이스가 있는 버전에는 점수가 없습니다. 그 버전은 최고 버전이 될 수 없고, 어떤 `[outcome] target`에도 도달하지 않으며, pull request를 열지 않습니다. 실패를 숫자로 세야 한다면 프로그램에서 실패를 잡아 출력을 쓰고, 채점기가 그 출력에 점수를 매기게 하세요. [저장소 규칙](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)을 읽어 보세요.
 
 ### 모델을 심사자로 사용
 

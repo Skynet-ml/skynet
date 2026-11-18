@@ -542,8 +542,10 @@ Residual risk:
 - Where the image has no `/usr/local/bin/python3` (for example a local test
   host), the supervisor falls back to `python3` from `PATH`.
 
-A timeout, a crash, a non-zero exit or other `[run]` failure gives the case
-no score, and the metric does not run. The runner never makes a score. Only
+A timeout, a crash, a function entry that exits before it returns, or other
+`[run]` failure gives the case no score, and the metric does not run. A
+command entry that exits with a non-zero code does not fail: the metric gets
+its `exit_code` and `stdout` as the output. The runner never makes a score. Only
 the metric makes a score. The failure text goes to the proposer as feedback.
 A version with a case that has no score has no score itself:
 

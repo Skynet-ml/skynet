@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-当一个版本的 `[run]` 入口失败时，Skynet 会自己给该版本打 0 分。如果入口无法启动、超时或被信号停止，反馈是 `Run failed: …`，Skynet 不会调用评分器。非零退出码不算失败：评分器会在 `output` 中收到它。
+当 `[run]` 入口在某个案例上失败时，该案例没有分数。如果入口无法启动、超时或被信号停止，反馈是 `Run failed: …`，Skynet 不会调用评分器。非零退出码不算失败：评分器会在 `output` 中收到它。包含这种案例的版本没有分数。它不能成为最佳版本，不会达到任何 `[outcome] target`，也不会打开 pull request。如果失败必须算作一个数字，请在你的程序中捕获失败，写出一个输出，再让评分器为它评分。请阅读[仓库规则](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
 
 ### 用模型作为评判
 

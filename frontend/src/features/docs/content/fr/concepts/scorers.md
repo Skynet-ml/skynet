@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-Skynet donne lui-même un score de 0 à une version quand son entrée `[run]` échoue. Si l'entrée ne démarre pas, dépasse le délai ou si un signal l'arrête, le retour est `Run failed: …`, et Skynet n'appelle pas l'évaluateur. Un code de sortie non nul n'est pas un échec : l'évaluateur le reçoit dans `output`.
+Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entrée ne démarre pas, dépasse le délai ou si un signal l'arrête, le retour est `Run failed: …`, et Skynet n'appelle pas l'évaluateur. Un code de sortie non nul n'est pas un échec : l'évaluateur le reçoit dans `output`. Une version avec un tel cas n'a pas de score. Elle ne peut pas être la meilleure version, n'atteint aucun `[outcome] target` et n'ouvre aucune pull request. Si un échec doit compter comme un nombre, interceptez l'échec dans votre programme, écrivez une sortie et laissez l'évaluateur la noter. Lisez les [règles du dépôt](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Un modèle comme juge
 
