@@ -31,7 +31,7 @@ from core.worker.actors import User
 from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop
 
 from .. import best_of_n
-from ..best_of_n import BestOfNEngine, _escape_backticks, _repository_brief, _unescape_backticks
+from ..best_of_n import BestOfNEngine, _as_patch, _escape_backticks, _repository_brief, _unescape_backticks
 from ..feedback import STR_CANDIDATE_KEY
 from ..harness import GatewayConfig
 from ..harness_bridge import hidden_hashes
@@ -812,6 +812,25 @@ def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_i
     assert len(text) < 200 + 600
 
 
+def test_a_repository_brief_reads_no_file_past_its_read_cap(
+    brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tree entries carry no size, so the brief caps its reads and never reads a large file past the cap.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's read cap.
+    """
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_READS", 3)
+    files = {f"bin/{index}": b"\x00" for index in range(3)} | {"bin/z-large": b"LARGE" * 100_000}
+    reads: list[str] = []
+
+    text = brief(files, ("bin",), reads=reads)
+
+    assert reads == ["bin/0", "bin/1", "bin/2"]
+    assert text.endswith("\n1 more files are not shown.")
+
+
 def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_fence(
     brief: Callable[..., str],
 ) -> None:
@@ -900,6 +919,39 @@ def test_a_repository_sample_and_its_result_apply_to_a_real_tree(
         (checkout / "README.md").write_text(readme)
         apply_patch(checkout, patch)
         assert (checkout / "README.md").read_text() == readme.replace("code\n", "code\nmore code\n")
+
+
+@pytest.mark.parametrize("blanks", [1, 2])
+@pytest.mark.parametrize("fenced", [True, False])
+def test_a_diff_that_ends_with_empty_context_lines_still_applies_after_upstream_strips_them(
+    blanks: int, fenced: bool, tmp_path: Path
+) -> None:
+    """Upstream strips the empty context lines that end the last hunk; the patch gets them back and applies.
+
+    Args:
+        blanks: How many empty context lines end the hunk.
+        fenced: Whether the reply puts the diff in a fence, which upstream parses with another strip.
+        tmp_path: Pytest's temporary folder.
+    """
+    readme = "a\nb\n" + "\n" * blanks
+    size = 2 + blanks
+    diff = (
+        "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n"
+        f"@@ -1,{size} +1,{size} @@\n a\n-b\n+B\n" + "\n" * blanks
+    )
+    reply = f"```diff\n{diff}```" if fenced else diff
+    sample = _parse_candidate(reply)
+    assert sample is not None
+    assert not sample.endswith("\n")
+
+    for index, patch in enumerate([diff, _as_patch(sample)]):
+        checkout = tmp_path / f"checkout-{index}"
+        checkout.mkdir()
+        (checkout / "README.md").write_text(readme)
+        apply_patch(checkout, patch)
+        assert (checkout / "README.md").read_text() == readme.replace("b", "B")
+    assert _as_patch(sample) == diff
+    assert _as_patch(diff) == diff
 
 
 def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(

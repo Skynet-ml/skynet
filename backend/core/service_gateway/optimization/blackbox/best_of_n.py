@@ -26,6 +26,9 @@ _MAX_FINALISTS = 3
 # The file blocks and notices that a repository brief shows the model; upstream
 # sends the brief in every sample's prompt, so the cap bounds each model call.
 _BRIEF_MAX_BYTES = 64_000
+# The tree entries carry no size, so a repository of many large or binary files
+# would make the brief read about a thousand whole blobs on each resume.
+_BRIEF_MAX_READS = 256
 # Upstream's reply parser ends the candidate at the first run of three
 # backticks anywhere in the reply, also inside a line, so a repository diff
 # spells each such run as a token that Skynet turns back before scoring. A
@@ -34,6 +37,7 @@ _BRIEF_MAX_BYTES = 64_000
 # token the encoder writes decodes; a longer run splits into several tokens.
 _ESCAPE = re.compile("<<|`{3,9999}")
 _UNESCAPE = re.compile(r"<<<<|<<(\d{1,4}) backticks>>")
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", re.MULTILINE)
 
 
 class _SampleStream:
@@ -278,7 +282,7 @@ def _repository_brief(
     for index, path in enumerate(names):
         # Notices cost room too, so a repository of many skipped files still
         # gives a bounded brief, and no file is read once the room is spent.
-        if room <= 0:
+        if room <= 0 or index >= _BRIEF_MAX_READS:
             lines.append(f"{len(names) - index} more files are not shown.")
             break
         data = read_file(seed.tree_id, path)
@@ -319,8 +323,10 @@ def _escape_backticks(text: str) -> str:
 def _as_patch(text: str) -> str:
     """Turn a repository sample back into a diff that ``git apply`` accepts.
 
-    Upstream's reply parser strips the final newline, and ``git apply``
-    refuses a diff with no final newline as a corrupt patch.
+    Upstream's reply parser strips the final newlines, and ``git apply``
+    refuses a diff with no final newline as a corrupt patch. The strip also
+    drops a blank context line at the end of the last hunk when the model
+    wrote it as an empty line, so the hunk falls short of its header.
 
     Args:
         text: A repository sample as upstream parsed it.
@@ -329,7 +335,43 @@ def _as_patch(text: str) -> str:
         The sample as a real diff that ends with a newline, or ``""``.
     """
     patch = _unescape_backticks(text)
-    return patch if not patch or patch.endswith("\n") else patch + "\n"
+    if not patch:
+        return patch
+    if not patch.endswith("\n"):
+        patch += "\n"
+    return patch + "\n" * _stripped_context_lines(patch)
+
+
+def _stripped_context_lines(patch: str) -> int:
+    """Count the empty context lines that the strip took from the end of the last hunk.
+
+    Args:
+        patch: A diff that ends with a newline.
+
+    Returns:
+        How many lines the last hunk lacks against its header, when only empty context lines can explain the
+        gap; otherwise ``0``, so a complete or malformed diff stays as it is.
+    """
+    headers = list(_HUNK_HEADER.finditer(patch))
+    if not headers:
+        return 0
+    last = headers[-1]
+    old_missing = 1 if last.group(1) is None else int(last.group(1))
+    new_missing = 1 if last.group(2) is None else int(last.group(2))
+    # The first part is the rest of the header line, and the last is the empty text after the final newline.
+    for line in patch[last.end() :].split("\n")[1:-1]:
+        if line.startswith("\\"):
+            continue
+        if line == "" or line.startswith(" "):
+            old_missing -= 1
+            new_missing -= 1
+        elif line.startswith("-"):
+            old_missing -= 1
+        elif line.startswith("+"):
+            new_missing -= 1
+        else:
+            return 0
+    return old_missing if old_missing == new_missing and old_missing > 0 else 0
 
 
 def _unescape_backticks(text: str) -> str:
