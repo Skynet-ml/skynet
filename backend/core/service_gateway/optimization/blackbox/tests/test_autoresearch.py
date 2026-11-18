@@ -596,7 +596,7 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
     )
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
-    with pytest.raises(RuntimeError, match="without scoring any candidate"):
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
         _run(loop)
 
     assert boxes.opened == 0
@@ -682,7 +682,7 @@ def test_a_session_that_only_runs_commands_stops_at_the_tool_call_cap(
     model = _Researcher([], rest=_bash("true"))
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
-    with pytest.raises(RuntimeError, match="without scoring any candidate"):
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
         _run(loop, native_options=_options(max_tool_calls=3))
 
     assert len(model.calls) == 4
@@ -1101,7 +1101,7 @@ def test_a_run_with_no_finite_score_fails_and_reports_no_minus_infinity(
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
 
-    with pytest.raises(RuntimeError, match="without scoring any candidate"):
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
         _run(loop, cases=[], max_evals=2, score=lambda _loop, _candidate, _case: (None, {}))
 
 

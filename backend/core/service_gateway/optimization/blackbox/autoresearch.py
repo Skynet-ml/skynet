@@ -290,6 +290,8 @@ class _UpstreamServer:
 class _WorkerAutoResearch(native_engines.AutoResearchEngine):
     """The native AutoResearch loop, with each round's session as a tool loop on the engine context."""
 
+    scorer = "the evaluate tool"
+
     def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext, *, max_tool_calls: int) -> None:
         """Build the native engine and bind the context.
 

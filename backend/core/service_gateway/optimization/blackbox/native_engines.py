@@ -980,6 +980,8 @@ class AutoResearchEngine:
     """
 
     name = "autoresearch"
+    # The scorer that the agent calls, as the failure message names it.
+    scorer = "eval.sh"
 
     def __init__(self, config: OptimizeAnythingConfig) -> None:
         """Pop the engine knobs from the shared config.
@@ -1734,7 +1736,7 @@ class AutoResearchEngine:
         """
         best = self.incumbent(server)
         if best is None:
-            raise RuntimeError("The research agent finished without scoring any candidate through eval.sh.")
+            raise RuntimeError(f"The research agent finished without scoring any candidate through {self.scorer}.")
         candidate, score = best
         table = self._table()
         ranking = self._ranking()
