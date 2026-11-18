@@ -264,6 +264,20 @@ def test_usage_kind_tells_meta_notes_from_mutations() -> None:
     }
 
 
+def test_usage_ledger_counts_a_routed_call_under_its_gateway_model() -> None:
+    """Key usage by the gateway model, the same with or without upstream, and keep other names as given."""
+    ledger = shinka_runner.UsageLedger(None)
+
+    ledger.record(_EDITOR_MODEL, SimpleNamespace(input_tokens=100, output_tokens=50))
+    ledger.record("local/claude-test@https://gw.example/v1", SimpleNamespace(input_tokens=1, output_tokens=2))
+    ledger.record("gpt-test", SimpleNamespace(input_tokens=3, output_tokens=None))
+
+    assert ledger.usage_by_model == {
+        "claude-test": {"prompt_tokens": 101, "completion_tokens": 52, "total_tokens": 153},
+        "gpt-test": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+    }
+
+
 def test_scores_become_upstream_metrics() -> None:
     """Report the mean as the combined score, named scores as public metrics and feedback as text."""
     metrics = shinka_runner.summarize_scores(
@@ -959,7 +973,7 @@ def test_agent_editor_writes_a_text_version_from_the_agents_edits(tmp_path: Path
     assert meta["num_applied"] == 1
     assert selection.submitted == [_EDITOR_MODEL]
     assert selection.costs == [(_EDITOR_MODEL, 0.25)]
-    assert ledger.usage_by_model[_EDITOR_MODEL]["total_tokens"] == 150
+    assert ledger.usage_by_model["claude-test"]["total_tokens"] == 150
     assert calls[0]["api_key"] == "route-key"
     assert calls[0]["proposer"]["max_tool_calls"] == 7
     assert calls[0]["proposer"]["instructions_file"] is None
