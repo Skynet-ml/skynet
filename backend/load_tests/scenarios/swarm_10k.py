@@ -21,12 +21,12 @@ step wait. The step wait is about one flush window or more (0.5 s by
 default), so fewer than about 3,000 agents cannot offer the target, and
 the default 1,000 agents are a smoke run that fails the rate gate. The
 gate needs about 10,000 agents. A real agent also waits for its model and
-its box between steps. Each
-agent starts at a seeded random offset in its first interval, so the
-agents do not commit in lock step. A step that is ready while the agent's
-last step is not durable waits for it, as each agent's engine loop waits
-only for its own steps. A driver commits each ready step at once and does
-not wait for one agent's step to commit another agent's step.
+its box between steps. Each agent starts at a seeded random offset in its
+first interval, so the agents do not commit in lock step. A step that is
+ready while the agent's last step is not durable waits for it, as each
+agent's engine loop waits only for its own steps. A driver commits each
+ready step at once and does not wait for one agent's step to commit
+another agent's step.
 
 The scenario measures, across all shard processes on one system-wide
 monotonic clock:
@@ -34,11 +34,11 @@ monotonic clock:
 - the steady commit rate: the steps that become durable while every agent
   runs, divided by the length of that time. It starts when the first step
   of every agent in every shard is durable: before that, the agents are
-  still starting at their offsets. It ends when the first agent of any shard finishes its
-  last step: after that, fewer agents commit, as only a finite test drains.
-  The agents offer the target rate and a margin, so the rate falls below
-  the target when the step log cannot keep up. The report also gives the rate up to the last
-  durable step, with the drain;
+  still starting at their offsets. It ends when the first agent of any
+  shard finishes its last step: after that, fewer agents commit, as only a
+  finite test drains. The agents offer the target rate and a margin, so
+  the rate falls below the target when the step log cannot keep up. The
+  report also gives the rate up to the last durable step, with the drain;
 - the agent step wait: the time from the start of ``commit`` to the moment
   the driver sees the step durable, for each step of every shard. That is
   the time that the step log adds to each agent step. The pause between
@@ -472,6 +472,37 @@ def _waiter(store: StepLogStore, step_id: str) -> Any:
         return store._waiters.get((step_id, 1))
 
 
+def _drive_or_stop(
+    agents: list[tuple[str, str]],
+    config: SwarmConfig,
+    store: StepLogStore,
+    boxes: FakeBoxProvider,
+    origin: float,
+    stop: threading.Event,
+) -> list[list[tuple[float, float, float]]]:
+    """Run ``_drive`` and set ``stop`` when it fails, so the shard's other drivers return soon.
+
+    ``pool.map`` gives the results in submit order, so without this a failed driver would wait for every
+    earlier driver to finish all its steps before the shard sees the error.
+
+    Args:
+        agents: ``(run_id, agent_id)`` of each agent of the group.
+        config: The knobs.
+        store: The shard's step log.
+        boxes: The fake box provider.
+        origin: The shared start on the system-wide clock.
+        stop: The shard's stop, shared by all its drivers.
+
+    Returns:
+        What ``_drive`` returns.
+    """
+    try:
+        return _drive(agents, config, store, boxes, origin, stop)
+    except BaseException:
+        stop.set()
+        raise
+
+
 def _drive(
     agents: list[tuple[str, str]],
     config: SwarmConfig,
@@ -493,7 +524,8 @@ def _drive(
         store: The shard's step log.
         boxes: The fake box provider.
         origin: The shared start on the system-wide clock.
-        stop: Set when the shard fails or gets Ctrl-C; the thread then returns at its next turn.
+        stop: Set when a driver of the shard fails or the shard gets Ctrl-C; the thread then returns at its
+            next turn.
 
     Returns:
         For each agent, and for each seq, the moment the step was ready, the start of ``commit`` and the
@@ -639,12 +671,12 @@ def _shard_process(
             with ThreadPoolExecutor(max_workers=drivers, thread_name_prefix="swarm-driver") as pool:
                 try:
                     groups = pool.map(
-                        lambda group: _drive(group, config, store, boxes, started, stop),
+                        lambda group: _drive_or_stop(group, config, store, boxes, started, stop),
                         [agents[i::drivers] for i in range(drivers)],
                     )
                     done = [steps for group in groups for steps in group]
                 except BaseException:
-                    # The pool's exit waits for every driver, so the drivers must stop first, also on Ctrl-C.
+                    # The pool's exit waits for every driver, so the drivers must stop first on Ctrl-C.
                     stop.set()
                     raise
         finally:

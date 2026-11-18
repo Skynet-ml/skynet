@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,44 @@ def test_swarm_driver_stops_when_the_shard_stops(tmp_path: Path) -> None:
         stop.set()
         store.close()
         engine.dispose()
+
+
+def test_swarm_driver_failure_stops_the_other_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a failed driver stops an earlier driver, which ``pool.map`` would otherwise wait for.
+
+    Args:
+        monkeypatch: Replaces ``_drive`` with a driver that waits for the stop and a driver that fails.
+    """
+
+    def drive(agents: list[tuple[str, str]], *args: Any) -> list[Any]:
+        """Wait for the stop as a long driver does, or fail at once.
+
+        Args:
+            agents: ``[("wait", "")]`` for the long driver, anything else for the failed one.
+            *args: The other ``_drive`` arguments; the last one is the stop.
+
+        Returns:
+            Whether the stop was set before the wait ended.
+
+        Raises:
+            RuntimeError: For the failed driver.
+        """
+        if agents[0][0] == "wait":
+            return [args[-1].wait(10)]
+        raise RuntimeError("driver failed")
+
+    monkeypatch.setattr(swarm_10k, "_drive", drive)
+    stop = threading.Event()
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = pool.map(
+            lambda group: swarm_10k._drive_or_stop(group, _swarm_config(), None, None, 0.0, stop),
+            [[("wait", "")], [("fail", "")]],
+        )
+        assert next(results) == [True]
+        with pytest.raises(RuntimeError, match="driver failed"):
+            next(results)
+    assert time.monotonic() - started < 5
 
 
 def test_chaos_gate_rejects_a_kill_interval_of_zero(monkeypatch: pytest.MonkeyPatch) -> None:
