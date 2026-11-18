@@ -108,7 +108,6 @@ _FAKE_UPSTREAM = {
                 self.python_executable = python_executable
                 self.time = time
     """,
-    "shinka/local_openai_config.py": "def parse_local_openai_model(name):\n    return None\n",
     "shinka/prompts.py": "FULL_SYS_FORMATS = {}\n",
     "shinka/core/runner.py": '''
         import asyncio
