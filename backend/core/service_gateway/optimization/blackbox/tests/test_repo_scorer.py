@@ -75,6 +75,7 @@ from ..rule_judge import (
 )
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
+from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
 from .test_repo_workspace import _archive, _patch
 
@@ -321,7 +322,10 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
 
         monkeypatch.setattr(CandidateBox, "close", close_raises)
     if failure == "run_failed":
-        assert scorer.score("")[STATUS_KEY] == RUN_FAILED_STATUS
+        reply = scorer.score("")
+        assert reply[STATUS_KEY] == RUN_FAILED_STATUS
+        # SKY-751: the reply carries the failure text, so the feedback check accepts it.
+        assert normalize_score(reply) == (None, {"feedback": "Run failed: boom", STATUS_KEY: RUN_FAILED_STATUS})
     else:
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")

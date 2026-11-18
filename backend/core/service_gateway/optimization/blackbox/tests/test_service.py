@@ -1224,6 +1224,42 @@ def test_version_history_sheds_images_from_the_weakest_versions_first(monkeypatc
     assert best.side_info == {"feedback": "len 3", "render": image, "frames": [image]}
 
 
+def test_version_history_sheds_an_unscored_versions_images_before_negative_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With negative scores, a version with no score still ranks weakest and loses its renders first (SKY-751)."""
+    image = "data:image/png;base64," + "A" * 400
+
+    def rendering_scorer(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score by minus the length, fail the [run] entry of "ccc", and attach renders.
+
+        Args:
+            candidate: The version.
+            case: Ignored.
+
+        Returns:
+            Minus the length, or no score for "ccc", and side info with two images.
+        """
+        info = {"feedback": f"len {len(candidate)}", "render": image, "frames": [image]}
+        if candidate == "ccc":
+            return None, {**info, "status": "run_failed"}
+        return -float(len(candidate)), info
+
+    server = service_mod.EvalServer(rendering_scorer, max_evals=10)
+    for candidate in ("a", "ccc", "bb"):
+        server.evaluate(candidate)
+    monkeypatch.setattr(service_mod, "VERSION_SIDE_INFO_BYTE_CAP", 2_000)
+
+    versions = service_mod._version_history(server)
+
+    best, unscored, middle = versions
+    assert (best.score, unscored.score, middle.score) == (-1.0, None, -2.0)
+    assert "render" not in unscored.side_info
+    assert unscored.side_info["frames"] == []
+    assert middle.side_info["render"] == image
+    assert best.side_info["render"] == image
+
+
 def test_service_hands_the_progress_sink_to_the_engine_context(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

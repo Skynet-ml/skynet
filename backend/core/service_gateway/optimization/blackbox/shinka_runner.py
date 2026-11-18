@@ -1434,6 +1434,9 @@ class ProgramScorer:
         self.target_reached = threading.Event()
         self.scored: dict[int, dict[str, Any]] = {}
         self.best: dict[str, Any] | None = None
+        # SKY-751: programs the parent scored that failed a case. It tells a
+        # run where every version failed from one where nothing was scored.
+        self.failed_versions = 0
         self._lock = threading.Lock()
         self._seen: set[str] = set()
         self._cases = ThreadPoolExecutor(max_workers=max(1, max_concurrency))
@@ -1533,6 +1536,8 @@ class ProgramScorer:
             feedback = "\n\n".join(texts)
             if len(feedback) > _FEEDBACK_CHARS:
                 feedback = feedback[:_FEEDBACK_CHARS] + "\n[feedback truncated]"
+            with self._lock:
+                self.failed_versions += 1
             return {
                 "correct": False,
                 "error": f"{len(failed)} of {len(results)} case(s) have no score.",
@@ -1800,10 +1805,14 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         document.update(incumbent)
     elif document.get("error"):
         document["interrupted_incumbent"] = {**incumbent, "total_evals": mailbox.total_evals}
+    elif best is None and not scorer.failed_versions:
+        # Upstream scored nothing at all (a rejected decode, a layout mismatch
+        # or no generation), so no version failed a case either.
+        document["error"] = "ShinkaEvolve finished without scoring any version."
     else:
         if best is None:
-            # SKY-751: every version, the seed included, failed a case. The
-            # run keeps the seed with no score and says why.
+            # SKY-751: every scored version, the seed included, failed a case.
+            # The run keeps the seed with no score and says why.
             mailbox.emit(_LOG_PREFIX, _NO_VERSION_SCORED_RECORD)
         document.update(incumbent)
     document["metadata"] = {

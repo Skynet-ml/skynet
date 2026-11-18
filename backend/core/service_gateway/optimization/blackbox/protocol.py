@@ -491,7 +491,8 @@ class EvalServer:
 
         Args:
             candidate: The scored version.
-            score: Its score on the case just evaluated, or ``None`` after a metric error.
+            score: Its score on the case just evaluated, or ``None`` after a
+                metric error or a failed ``[run]`` entry (``status: run_failed``).
             side_info: What the scorer said about it on that case.
         """
         key = candidate_key(candidate)

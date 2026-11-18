@@ -55,6 +55,28 @@ def test_normalize_score_rejects_other_shapes(raw: Any) -> None:
         normalize_score(raw)
 
 
+def test_normalize_score_keeps_no_score_for_a_failed_run_with_feedback() -> None:
+    """A failed ``[run]`` entry with feedback keeps no score and its feedback (SKY-751)."""
+    raw = {"score": None, "feedback": "Run failed: boom", "status": "run_failed"}
+
+    assert normalize_score(raw) == (None, {"feedback": "Run failed: boom", "status": "run_failed"})
+
+
+@pytest.mark.parametrize("feedback", [None, "", "   "])
+def test_normalize_score_rejects_a_failed_run_without_feedback(feedback: str | None) -> None:
+    """A failed ``[run]`` entry needs feedback like any other result, also from a remote endpoint (SKY-751).
+
+    Args:
+        feedback: Missing or blank feedback.
+    """
+    raw: dict[str, Any] = {"score": None, "status": "run_failed"}
+    if feedback is not None:
+        raw["feedback"] = feedback
+
+    with pytest.raises(ServiceError, match="must return feedback"):
+        normalize_score(raw)
+
+
 def test_load_scorer_prefers_score_then_metric_then_single_function() -> None:
     """Entrypoint lookup order: ``score``, ``metric``, the only function defined."""
     both = "def metric(c, x=None): return 0.0\ndef score(c, x=None): return 1.0\n"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -551,7 +552,7 @@ def test_a_program_the_metric_fails_on_every_case_has_no_score(tmp_path: Path, m
 
 
 class _NoProgramRunner:
-    """Stand in for upstream's runner: it finishes without one scored program."""
+    """Stand in for upstream's runner: it finishes without submitting one program."""
 
     def __init__(self, **_: Any) -> None:
         """Take upstream's keyword arguments.
@@ -561,31 +562,63 @@ class _NoProgramRunner:
         """
 
     def run(self) -> None:
-        """Finish at once, as when every program failed a case."""
+        """Finish at once, as when upstream submits no generation."""
 
 
-def test_a_run_where_no_version_scores_keeps_the_seed_and_says_why(
+class _FailedProgramRunner(_NoProgramRunner):
+    """Stand in for upstream's runner: it submits the seed, whose [run] entry fails."""
+
+    def run(self) -> None:
+        """Queue the seed as generation 0 and wait for the scorer's answer, as ``evaluate.py`` does."""
+        program = Path("shinka-run/results/gen_0/main.md")
+        program.parent.mkdir(parents=True)
+        program.write_text(shinka_runner.pack_program("Answer."), encoding="utf-8")
+        queue = Path("shinka-run/eval-queue")
+        (queue / "requests" / "q0.json").write_text(json.dumps({"program_path": str(program.resolve())}))
+        deadline = time.monotonic() + 4.0
+        while not (queue / "responses" / "q0.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+
+def _execute_with(tmp_path: Path, monkeypatch: Any, runner: type) -> dict[str, Any]:
+    """Run ``execute`` on one case with ``runner`` in place of upstream's runner.
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        runner: The stand-in runner class.
+
+    Returns:
+        The run's result document.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    for name in ("EvolutionConfig", "DatabaseConfig", "LocalJobConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner.UsageLedger, "install", lambda self: None)
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r0"))
+    (tmp_path / "rpc").mkdir()
+    failure = {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": None, "info": failure}))
+    payload = _payload(
+        nonce="testnonce",
+        timeout_seconds=5.0,
+        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": [{"id": "a"}]},
+    )
+    return shinka_runner.execute(payload)
+
+
+def test_a_run_where_every_scored_version_fails_keeps_the_seed_and_says_why(
     tmp_path: Path, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With no scored version, the run keeps the seed with no score and logs why, never an error (SKY-751).
+    """When every scored version fails a case, the run keeps the seed with no score and logs why (SKY-751).
 
     Args:
         tmp_path: Working folder for the run.
         monkeypatch: Replaces upstream's runner and configuration classes.
         capsys: Captures the framed log lines.
     """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", _NoProgramRunner)
-    for name in ("EvolutionConfig", "DatabaseConfig", "LocalJobConfig"):
-        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
-    monkeypatch.setattr(shinka_runner.UsageLedger, "install", lambda self: None)
-    payload = _payload(
-        nonce="testnonce",
-        timeout_seconds=5.0,
-        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": [{"id": "a"}]},
-    )
-
-    document = shinka_runner.execute(payload)
+    document = _execute_with(tmp_path, monkeypatch, _FailedProgramRunner)
 
     assert "error" not in document
     assert (document["best_candidate"], document["best_score"]) == ("Answer.", None)
@@ -593,6 +626,23 @@ def test_a_run_where_no_version_scores_keeps_the_seed_and_says_why(
     assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
         "No version has a score: each one failed on at least one case. The run keeps the starting version."
     ]
+
+
+def test_a_run_that_scores_no_program_at_all_fails_with_an_error(
+    tmp_path: Path, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When upstream submits no program for scoring, the run fails explicitly, as Best-of-N does (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capsys: Captures the framed log lines.
+    """
+    document = _execute_with(tmp_path, monkeypatch, _NoProgramRunner)
+
+    assert document["error"] == "ShinkaEvolve finished without scoring any version."
+    assert "best_candidate" not in document
+    assert "No version has a score" not in capsys.readouterr().out
 
 
 def test_repository_mode_swaps_prompts_edits_and_novelty_input(tmp_path: Path, monkeypatch: Any) -> None:

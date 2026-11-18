@@ -53,7 +53,7 @@ def normalize_score(raw: Any) -> tuple[float | None, SideInfo]:
 
     See :func:`runner.normalize_score` for the accepted shapes. A result with
     no score and the ``run_failed`` status is a failed ``[run]`` entry: it
-    keeps no score (SKY-751).
+    keeps no score (SKY-751), but it still needs feedback, like every result.
 
     Args:
         raw: Whatever the scorer returned.
@@ -65,9 +65,13 @@ def normalize_score(raw: Any) -> tuple[float | None, SideInfo]:
     Raises:
         ServiceError: When the value has none of the accepted shapes or lacks feedback.
     """
-    if isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
-        return None, {key: value for key, value in raw.items() if key != "score"}
     try:
+        if isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            # A remote endpoint can send this shape too; the proposer learns
+            # only from the feedback, so it stays required here.
+            side_info = {key: value for key, value in raw.items() if key != "score"}
+            side_info["feedback"] = runner._feedback(side_info.get("feedback"), "The failed run")
+            return None, side_info
         return runner.normalize_score(raw)
     except runner.ScorerError as exc:
         raise ServiceError(str(exc)) from exc

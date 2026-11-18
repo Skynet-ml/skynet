@@ -2192,6 +2192,17 @@ def test_a_starting_code_whose_final_run_failed_loses_to_a_scored_version() -> N
     assert repo_staging.improved_patch(result) == _EDIT
 
 
+def test_the_pr_body_says_the_starting_code_has_no_score_when_its_final_run_failed() -> None:
+    """The final run decides the PR body: the search scores never stand in for a failed starting code (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.6, versions=versions, details={"baseline_run_failed": True})
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "The starting code has no score: it failed on at least one case. This version scored 0.6." in body
+    assert "Score went from" not in body
+
+
 def test_a_metric_error_in_the_final_run_never_lets_a_version_win() -> None:
     """The final run decides: a metric error there opens no PR, even after a search ``[run]`` failure (SKY-751)."""
     versions = [_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]

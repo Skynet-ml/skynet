@@ -372,6 +372,19 @@ def test_fill_unscored_keeps_a_scorers_own_run_failed_status_with_a_score() -> N
     assert fill_unscored(["a", "a"], [0.4, 0.6], [{"status": RUN_FAILED_STATUS}, {}]) == pytest.approx([0.4, 0.6])
 
 
+def test_a_scorers_own_run_failed_status_with_a_finite_score_keeps_its_score() -> None:
+    """Only a failed [run] entry, which sends no score, drops a score; a real score with that status stays (SKY-751)."""
+    server = EvalServer(lambda c, e: (0.4, {"feedback": "ok", "status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score == pytest.approx(0.4)
+    assert info == {"feedback": "ok", "status": RUN_FAILED_STATUS}
+    assert server.mean_score("x") == pytest.approx(0.4)
+    assert server.run_failed("x") is False
+    assert server.metric_error("x") is None
+
+
 def test_nested_server_marks_an_unscored_failed_run_as_no_score() -> None:
     """An Auto lane gets a failed [run] case as UNSCORED; it stays a run failure with no score (SKY-751)."""
     server = EvalServer(lambda c, e: (UNSCORED, {"status": RUN_FAILED_STATUS}), max_evals=5)
