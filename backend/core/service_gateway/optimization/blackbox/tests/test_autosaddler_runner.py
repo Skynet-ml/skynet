@@ -34,7 +34,9 @@ from unittest import mock
 
 import pytest
 
-from .. import autosaddler_runner, harness_bridge, native_runtime, repo_tree
+from core.exceptions import ServiceError
+
+from .. import autosaddler, autosaddler_runner, harness_bridge, native_runtime, repo_tree
 
 # The runner needs the pinned upstream package on Python 3.12, which the
 # backend venv does not carry; point this at an interpreter that has it.
@@ -369,6 +371,176 @@ def test_a_worker_run_never_selects_or_scores_a_version_with_a_failed_run_case(
     expected = None if seed_fails else pytest.approx(_vowel_fraction(json.dumps("bcd")))
     assert result["best_score"] == expected
     assert result["metadata"]["selection"]["development_score"] == expected
+
+
+_METRIC_ERROR = {"score": None, "info": {"error": "KeyError: 'x'", "status": "metric_error"}}
+_RUN_FAILED = {"score": None, "info": {"feedback": "Run failed: boom", "status": "run_failed"}}
+
+
+class _ScriptedScoreHost(_ReplayHost):
+    """A fake host whose scorer answers some evaluations from a script, and the rest as the replay host does."""
+
+    def __init__(self, score: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+        """Hold the scoring script.
+
+        Args:
+            score: Gives the reply to an evaluate request, or ``None`` to score it by vowel density.
+        """
+        super().__init__({})
+        self.score = score
+
+    def answer(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Answer one request, and an evaluation from the script when it has a reply.
+
+        Args:
+            request: The runner's request.
+
+        Returns:
+            The reply.
+        """
+        reply = self.score(request) if request["op"] == "evaluate" else None
+        return super().answer(request) if reply is None else reply
+
+
+def _worker_payload(cases: int, max_evals: int = 12, max_iterations: int = 2) -> dict[str, Any]:
+    """Build a worker payload for a text run from the seed ``bcd``.
+
+    Args:
+        cases: How many training examples the run has.
+        max_evals: The evaluation budget.
+        max_iterations: The iteration budget.
+
+    Returns:
+        The payload.
+    """
+    return {
+        "engine_id": "autosaddler",
+        "task": {
+            "name": "autosaddler",
+            "seed_candidate": "bcd",
+            "objective": "maximize vowel density",
+            "background": "",
+            "train_set": [{"id": index} for index in range(cases)],
+        },
+        "max_evals": max_evals,
+        "max_iterations": max_iterations,
+        "stop_at_score": None,
+        "repo": None,
+    }
+
+
+def test_a_worker_run_never_selects_a_version_with_a_metric_error(tmp_path: Path) -> None:
+    """Upstream ranks a child with a metric error above the seed, but the run keeps the fully scored seed (SKY-751).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    host = _ScriptedScoreHost(
+        lambda request: _METRIC_ERROR if request["example"]["id"] == 0 and request["candidate"] != "bcd" else None
+    )
+
+    requests, result = _run_worker(python, tmp_path / "run", _worker_payload(2), {}, host=host)
+
+    assert "error" not in result, result
+    # A child reached development, so upstream's ranking had a child to pick.
+    assert any(r["op"] == "evaluate" and r["candidate"] != "bcd" and r["candidate_id"] is not None for r in requests)
+    assert result["best_candidate"] == "bcd"
+    expected = pytest.approx(_vowel_fraction(json.dumps("bcd")))
+    assert result["best_score"] == expected
+    assert result["metadata"]["selection"]["development_score"] == expected
+    assert result["metadata"]["selection"]["selected_candidate_id"] == result["metadata"]["selected_candidate_id"]
+    task = SimpleNamespace(seed_candidate="bcd", str_mode=True)
+    assert autosaddler._result(result, task, SimpleNamespace(used=0)).best_candidate == "bcd"
+
+
+def test_a_worker_run_where_no_version_has_a_score_fails_clearly(tmp_path: Path) -> None:
+    """With a metric error on one case for every version, the seed included, the run fails with a clear error.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    host = _ScriptedScoreHost(lambda request: _METRIC_ERROR if request["example"]["id"] == 0 else None)
+
+    _requests, result = _run_worker(python, tmp_path / "run", _worker_payload(2), {}, host=host)
+
+    assert "error" not in result, result
+    assert result["best_candidate"] != "bcd"
+    assert result["best_score"] is None
+    task = SimpleNamespace(seed_candidate="bcd", str_mode=True)
+    with pytest.raises(ServiceError, match="fully evaluated candidate"):
+        autosaddler._result(result, task, SimpleNamespace(used=0))
+
+
+def test_a_worker_run_rejects_a_child_with_a_failed_run_case_in_training(tmp_path: Path) -> None:
+    """A child that fails a ``[run]`` entry in training never passes acceptance, even if it scores high elsewhere.
+
+    The seed has no score on either case, so a plain mean comparison over the floor would accept the child
+    (SKY-751).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+
+    def score(request: dict[str, Any]) -> dict[str, Any] | None:
+        """Give the seed a metric error on each case, and each child a failed ``[run]`` entry on case 0.
+
+        Args:
+            request: The evaluate request.
+
+        Returns:
+            The reply, or ``None`` to score by vowel density.
+        """
+        if request["candidate"] == "bcd":
+            return _METRIC_ERROR
+        return _RUN_FAILED if request["example"]["id"] == 0 else None
+
+    requests, result = _run_worker(python, tmp_path / "run", _worker_payload(2), {}, host=_ScriptedScoreHost(score))
+
+    assert "error" not in result, result
+    children = [r for r in requests if r["op"] == "evaluate" and r["candidate"] != "bcd"]
+    assert any(r["example"]["id"] == 1 for r in children)
+    # Only an accepted child reaches development, which gives it a version number.
+    assert all(r["candidate_id"] is None for r in children)
+    assert result["best_candidate"] == "bcd"
+
+
+def test_a_worker_run_never_offers_a_version_that_failed_in_development_as_a_parent(tmp_path: Path) -> None:
+    """A child that fails a ``[run]`` entry on a development-only case drops out of later parent choices (SKY-751).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    # The training batch is cases 0 and 1, so case 2 fails only in development.
+    host = _ScriptedScoreHost(
+        lambda request: _RUN_FAILED if request["example"]["id"] == 2 and request["candidate"] != "bcd" else None
+    )
+
+    requests, result = _run_worker(python, tmp_path / "run", _worker_payload(3, 40, 3), {}, host=host)
+
+    assert "error" not in result, result
+    assert any(r["op"] == "evaluate" and r["candidate"] != "bcd" and r["candidate_id"] is not None for r in requests)
+    offers = [
+        schema["properties"]["parent_ids"]["items"]["enum"]
+        for r in requests
+        if r["op"] == "model" and len(r["prompt"]) >= 4
+        for schema in [json.loads(r["prompt"][3]["content"])]
+        if "parent_ids" in schema["properties"]
+    ]
+    assert len(offers) >= 2
+    assert all(len(offer) == 1 for offer in offers)
+    assert result["best_candidate"] == "bcd"
 
 
 @pytest.mark.parametrize("repository", [False, True], ids=["text", "repository"])

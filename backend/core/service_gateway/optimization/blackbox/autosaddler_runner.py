@@ -382,7 +382,8 @@ class WorkerChannel:
             candidate_id: The version number the run view shows, if it has one.
 
         Returns:
-            The score, NaN for a metric error, and the scorer's feedback.
+            The score, NaN for a case with no score (a metric error or a failed ``[run]`` entry), and the scorer's
+            feedback.
 
         Raises:
             EvaluationStopped: When the worker refuses the evaluation; ``BudgetStopped`` for a spent budget.
@@ -2697,17 +2698,26 @@ def execute_worker(payload: dict[str, Any], channel: WorkerChannel) -> dict[str,
     try:
         result = engine.run()
         selected = store.read_json("result.json")
-        no_score = result.selected_candidate_id in evaluator.no_score_candidates
-        if no_score and isinstance(selected, dict):
-            selected = {**selected, "development_score": None}
+        selected_id, score = result.selected_candidate_id, result.development_score
+        if selected_id in evaluator.no_score_candidates:
+            # Upstream's score for that version holds the no-score floor (SKY-751).
+            score = None
+            # Upstream ranks a version with a metric error by its scored cases,
+            # but a version with no score is never the final pick (SKY-751).
+            # With no fully scored version, upstream's pick stays: the seed
+            # finishes with no score, and any other version fails the run.
+            if evaluator.best_development is not None:
+                selected_id = evaluator.best_development["candidate_id"]
+                score = evaluator.best_development["best_score"]
+            if isinstance(selected, dict):
+                selected = {**selected, "selected_candidate_id": selected_id, "development_score": score}
         document.update(
             {
-                "best_candidate": evaluator.value_of(_candidate(store, result.selected_candidate_id)),
-                # Upstream's score for that version holds the no-score floor (SKY-751).
-                "best_score": None if no_score else result.development_score,
+                "best_candidate": evaluator.value_of(_candidate(store, selected_id)),
+                "best_score": score,
                 "metadata": {
                     "autosaddler_run_id": result.run_id,
-                    "selected_candidate_id": result.selected_candidate_id,
+                    "selected_candidate_id": selected_id,
                     "iterations": result.iterations,
                     "selection": selected if isinstance(selected, dict) else None,
                 },

@@ -428,7 +428,8 @@ def _progress(task: Task, server: EvalServer, ctx: EngineContext, event: dict[st
     candidate = event.get("candidate")
     if not _candidate_shape_ok(candidate, task.str_mode):
         return
-    # The child fills a crashed case with its version's mean (SKY-367); final selection drops that version.
+    # The child scores a case with no score at the floor and sends no version event for that version
+    # (SKY-751), so this check is only a guard.
     shown = None if server.metric_error(candidate) is not None else float(score)
     per_example = event.get("per_example")
     emit_candidate(
