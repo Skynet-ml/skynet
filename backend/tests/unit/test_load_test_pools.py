@@ -613,7 +613,14 @@ def test_swarm_pass_cleans_every_shard_and_keeps_the_first_error(
 
 @pytest.mark.parametrize(
     "url",
-    ["postgresql://user@db.example.com/swarm", "postgresql://user@10.0.0.5:5432/swarm", "postgresql:///swarm"],
+    [
+        "postgresql://user@db.example.com/swarm",
+        "postgresql://user@10.0.0.5:5432/swarm",
+        "postgresql:///swarm",
+        "postgresql://user@localhost/swarm?host=db.example.com",
+        "postgresql://user@localhost/swarm?hostaddr=10.0.0.5",
+        "postgresql://user@127.0.0.1/swarm?service=remote",
+    ],
 )
 def test_swarm_refuses_a_database_that_is_not_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str) -> None:
     """Check that the swarm refuses a database URL off the local host, before it opens the database.
@@ -735,6 +742,101 @@ def test_gpu_check_fails_with_no_box_or_an_unchecked_box(opened: int, placed: in
     assert row["ok"] is False
 
 
+def _passing_outcome(shape: reference_shapes.Shape) -> reference_shapes.RunOutcome:
+    """Return an outcome that passes every check of :attr:`RunOutcome.ok`.
+
+    Args:
+        shape: The shape.
+
+    Returns:
+        The outcome, with one opened box.
+    """
+    outcome = reference_shapes.RunOutcome(
+        "made-0",
+        shape.name,
+        finished=True,
+        result=reference_shapes.expected_result(shape, 1),
+        gapless=True,
+        replayed=True,
+        correct=True,
+    )
+    outcome.meter.opened = 1
+    return outcome
+
+
+def test_gpu_check_fails_a_run_that_is_ok_otherwise() -> None:
+    """Check that an unchecked GPU placement fails the report row of a run that passes every other check."""
+    shape = reference_shapes.SHAPES[3]
+    outcome = _passing_outcome(shape)
+    outcome.meter.opened = 4
+    outcome.meter.placements["gpu:A10G"] = 3
+    assert outcome.ok
+    row = reference_shapes.outcome_report(shape, outcome, 1.0)
+    assert row["gpu_placement_checked"] is False
+    assert row["ok"] is False
+
+
+def test_run_with_a_seq_gap_is_not_ok() -> None:
+    """Check that a step log with a seq gap fails the run, also when every other check passes."""
+    assert not reference_shapes._gapless([("a", 0, "model", 1), ("a", 2, "command", 1)])
+    outcome = _passing_outcome(reference_shapes.SHAPES[0])
+    assert outcome.ok
+    outcome.gapless = False
+    assert not outcome.ok
+
+
+def test_run_that_repeats_a_committed_step_is_not_ok() -> None:
+    """Check that a resumed worker that did a committed step again fails the run, also when the replay works."""
+    outcome = _passing_outcome(reference_shapes.SHAPES[0])
+    outcome.repeated = ["run 2"]
+    assert outcome.replayed
+    assert not outcome.ok
+
+
+def test_result_that_is_not_the_expected_result_is_not_correct() -> None:
+    """Check that a result whose score is its candidate's own score, but whose eval count is wrong, is not correct."""
+    shape = reference_shapes.SHAPES[1]
+    best, score, evals = reference_shapes.expected_result(shape, 1)
+    assert score == shape.score(int(best))
+    assert reference_shapes._correct(shape, 1, (best, score, evals))
+    assert not reference_shapes._correct(shape, 1, (best, score, evals + 1))
+
+
+@pytest.mark.parametrize("leak", ["box", "pack"])
+def test_replay_that_opens_a_box_or_stores_a_pack_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, leak: str
+) -> None:
+    """Check that a replay with the same result fails when it opens a box or stores new data.
+
+    Args:
+        monkeypatch: Makes the replay's meter count a box, or its footprint grow.
+        tmp_path: The folder for the harness.
+        leak: ``box`` or ``pack``.
+    """
+    shape = reference_shapes.SHAPES[0]
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        outcome = reference_shapes.run_shape(harness, shape, "one-0", rounds=1)
+        assert outcome.ok, outcome.error
+        if leak == "box":
+
+            class _OpenedMeter(reference_shapes.BoxMeter):
+                """A meter that counts one box before the replay starts."""
+
+                def __init__(self) -> None:
+                    """Start with one opened box."""
+                    super().__init__()
+                    self.opened = 1
+
+            monkeypatch.setattr(reference_shapes, "BoxMeter", _OpenedMeter)
+        else:
+            footprints = iter([(1, 1, 1, 1), (1, 2, 1, 2)])
+            monkeypatch.setattr(harness, "footprint", lambda run_id: next(footprints))
+        assert not reference_shapes._replays(harness, shape, "one-0", 1, outcome.result)
+    finally:
+        harness.close()
+
+
 class _KillFirstBox(reference_shapes.ChaosSwitch):
     """A chaos switch that kills the run's first box."""
 
@@ -758,8 +860,30 @@ def test_killed_box_commits_a_failure_that_replays(tmp_path: Path) -> None:
     assert switch.fired == {"box": 1}
     assert outcome.restarts == 0
     assert outcome.result == ("2", shape.score(2), 2)
+    assert switch.failed_candidates() == {1}
     assert outcome.replayed
     assert outcome.ok, outcome.error
+
+
+def test_box_killed_run_must_give_the_expected_result() -> None:
+    """Check that a run whose box a kill failed must still give the expected result with that candidate failed."""
+    shape = reference_shapes.SHAPES[0]
+    failed = frozenset({1})
+    assert reference_shapes.expected_result(shape, 1, failed) == ("2", shape.score(2), 2)
+    assert reference_shapes._correct(shape, 1, ("2", shape.score(2), 2), failed=failed)
+    # The score agrees with the candidate, but the seed's box failed, so the seed cannot win.
+    assert not reference_shapes._correct(shape, 1, ("1", shape.score(1), 2), failed=failed)
+    assert not reference_shapes._correct(shape, 1, ("2", shape.score(2), 3), failed=failed)
+
+
+def test_redone_box_step_clears_its_box_kill() -> None:
+    """Check that a box step done again after a lost kill counts by its last attempt."""
+    switch = reference_shapes.ChaosSwitch()
+    switch.box_attempt("run 2", True)
+    switch.box_attempt("score 3", True)
+    assert switch.failed_candidates() == {2, 3}
+    switch.box_attempt("run 2", False)
+    assert switch.failed_candidates() == {3}
 
 
 class _KillAfterModelCommit(reference_shapes.ChaosSwitch):
@@ -819,6 +943,44 @@ def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.Monke
     result = chaos_gate.run(config)
     assert result.extras["runs_ok"] == 1
     assert result.slo_violations == ["the chaos job did not fire every kill kind: {'box': 0, 'worker': 0, 'commit': 0}"]
+    assert not result.slo_passed
+
+
+def test_chaos_gate_fails_when_the_fence_drops_no_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the chaos gate fails when every kill kind fires but no commit kill lost a step.
+
+    Args:
+        monkeypatch: Runs one made-up shape run that fires each kill kind, and stops the chaos job.
+    """
+    shape = reference_shapes.SHAPES[0]
+
+    def fire_all(
+        harness: Any, made_shape: reference_shapes.Shape, run_id: str, *, rounds: int, switch: Any
+    ) -> reference_shapes.RunOutcome:
+        """Fire each kill kind on the switch and return a passing outcome with no lost cut.
+
+        Args:
+            harness: Not used.
+            made_shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+            switch: The run's chaos switch.
+
+        Returns:
+            The outcome.
+        """
+        switch.fired.update(dict.fromkeys(reference_shapes.KILL_KINDS, 1))
+        return _passing_outcome(made_shape)
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", (shape,))
+    monkeypatch.setattr(chaos_gate, "run_shape", fire_all)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=1, rounds=1, workers=1, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    assert result.extras["runs_ok"] == 1
+    assert result.slo_violations == ["no commit kill landed before the flush, so the fence dropped no step"]
     assert not result.slo_passed
 
 

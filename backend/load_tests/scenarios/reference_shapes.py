@@ -20,8 +20,9 @@ The report prices sandbox use per run from the metered box-seconds and list
 prices: the new path opens a box only for a step, and the old path kept one
 box open for the whole run, also while the engine waited for the model.
 
-With no box kill, each shape's result is deterministic: the scenario
-compares it to the result that the shape's own score formula gives.
+Each shape's result is deterministic: the scenario compares it to the
+result that the shape's own score formula gives, with each candidate whose
+box a chaos kill failed scored as failed.
 
 The chaos gate (``chaos_gate.py``) reuses this harness.
 """
@@ -224,22 +225,25 @@ SHAPES: tuple[Shape, ...] = (
 )
 
 
-def expected_result(shape: Shape, rounds: int) -> tuple[str, float, int]:
-    """Return the result of a run with no box kill: the fake engine's best candidate by the shape's score.
+def expected_result(shape: Shape, rounds: int, failed: frozenset[int] = frozenset()) -> tuple[str, float | None, int]:
+    """Return the fake engine's result by the shape's score, with the failed candidates scored as ``None``.
 
     Args:
         shape: The shape.
         rounds: The fake engine's model rounds.
+        failed: The candidates whose box a chaos kill failed.
 
     Returns:
         ``(best candidate, best score, evals)``.
     """
     best = int(SEED_CANDIDATE)
+    best_score = None if best in failed else shape.score(best)
     for candidate in range(best + 1, best + rounds + 1):
+        score = None if candidate in failed else shape.score(candidate)
         # The fake engine keeps the first best: a later candidate wins only with a higher score.
-        if shape.score(candidate) > shape.score(best):
-            best = candidate
-    return str(best), shape.score(best), rounds + 1
+        if score is not None and (best_score is None or score > best_score):
+            best, best_score = candidate, score
+    return str(best), best_score, rounds + 1
 
 
 # Where each kill kind fires: a ``commit`` kill fires after the step log buffers a step and before it is durable.
@@ -258,6 +262,8 @@ class ChaosSwitch:
         self.fired: Counter[str] = Counter()
         # ``(step id, generation)`` of each step that a commit kill cut off before it was durable.
         self.cuts: list[tuple[str, int]] = []
+        # A lost step is done again, so only the last box attempt of a step decides whether its candidate failed.
+        self.box_failed: set[str] = set()
 
     def arm(self, kind: str) -> None:
         """Arm one kill.
@@ -285,6 +291,28 @@ class ChaosSwitch:
             self._armed = None
             self.fired[kind] += 1
             return kind
+
+    def box_attempt(self, step: str, killed: bool) -> None:
+        """Keep whether a box kill failed the last attempt of a box step.
+
+        Args:
+            step: The key of the box's step in the work log, such as ``run 2``.
+            killed: Whether a box kill failed this attempt.
+        """
+        with self._lock:
+            if killed:
+                self.box_failed.add(step)
+            else:
+                self.box_failed.discard(step)
+
+    def failed_candidates(self) -> frozenset[int]:
+        """Return the candidates whose last run or score box attempt a box kill failed.
+
+        Returns:
+            The candidates.
+        """
+        with self._lock:
+            return frozenset(int(step.split()[-1]) for step in self.box_failed if step)
 
     def cut(self, step_id: str, generation: int) -> None:
         """Keep one step that a commit kill cut off before it was durable.
@@ -531,6 +559,8 @@ class _MeteredBox:
             WorkerKilledError: When the chaos job killed the worker.
         """
         kill = self._switch.take("box") if self._switch is not None else None
+        if self._switch is not None:
+            self._switch.box_attempt(self._step, kill == "box")
         if kill == "worker":
             # The step commits only after its command, so the killed worker loses it and the resume does it again.
             if self._work is not None:
@@ -718,8 +748,8 @@ class RunOutcome:
         gapless: Whether every agent's seq runs from 0 with no gap.
         replayed: Whether a replay gave the same result with no model call, no box and no new step.
         repeated: The steps that a resumed worker did again although they committed before the kill.
-        correct: Whether the best score is the shape's own score of the best candidate and, with no box kill, the
-            result is :func:`expected_result`.
+        correct: Whether the best score is the shape's own score of the best candidate and the result is
+            :func:`expected_result` with the candidates that box kills failed.
         cuts_lost: How many steps that a commit kill cut off the fence dropped, so the resume committed them again.
         error: The error that stopped the run, or ``None``.
         meter: The run's box meter.
@@ -1105,38 +1135,45 @@ def run_shape(
         outcome.cuts_lost = sum(
             1 for step_id, generation in switch.cuts if harness.stored_generation(step_id) != generation
         )
+    failed = switch.failed_candidates() if switch is not None else frozenset()
     if outcome.finished:
-        outcome.correct = _correct(shape, rounds, outcome.result, box_killed=bool(switch and switch.fired["box"]))
+        outcome.correct = _correct(shape, rounds, outcome.result, failed=failed)
         outcome.replayed = _replays(harness, shape, run_id, rounds, outcome.result)
         if outcome.repeated:
             outcome.error = f"a resumed worker did committed steps again: {', '.join(outcome.repeated)}"
         elif not outcome.replayed:
             outcome.error = "replay failed"
         elif not outcome.correct:
-            outcome.error = f"wrong result {outcome.result}, expected {expected_result(shape, rounds)}"
+            outcome.error = f"wrong result {outcome.result}, expected {expected_result(shape, rounds, failed)}"
     if outcome.error is None and outcome.meter.opened == 0:
         outcome.error = "the run opened no box"
     return outcome
 
 
-def _correct(shape: Shape, rounds: int, result: tuple[str, float | None, int] | None, *, box_killed: bool) -> bool:
+def _correct(
+    shape: Shape,
+    rounds: int,
+    result: tuple[str, float | None, int] | None,
+    *,
+    failed: frozenset[int] = frozenset(),
+) -> bool:
     """Return whether a run's result is right for its shape.
 
     Args:
         shape: The shape.
         rounds: The fake engine's model rounds.
         result: The run's result.
-        box_killed: Whether a box kill failed a step; it can change the best candidate.
+        failed: The candidates whose box a chaos kill failed; it can change the best candidate.
 
     Returns:
-        Whether the best score is real and is the shape's score of the best candidate, and, with no box kill,
-        whether the result is :func:`expected_result`.
+        Whether the best score is real and is the shape's score of the best candidate, and whether the result is
+        :func:`expected_result` with those failed candidates.
     """
     if result is None or result[1] is None:
         return False
     if result[1] != shape.score(int(result[0])):
         return False
-    return box_killed or result == expected_result(shape, rounds)
+    return result == expected_result(shape, rounds, failed)
 
 
 def _replays(
