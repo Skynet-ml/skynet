@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from core.billing.budgets import BudgetService
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
 from core.sandbox.errors import SandboxInfraError
+from core.sandbox.trees import TreeRejectedError
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
@@ -810,7 +811,12 @@ class _FakeCalls:
 
         Returns:
             The files under the root or ``src``, or ``None`` for another folder.
+
+        Raises:
+            LookupError: For an id that does not start with ``tree-``, as the loop does for a tree it cannot see.
         """
+        if not tree_id.startswith("tree-"):
+            raise LookupError(f"run cannot see tree {tree_id}")
         self.listings.append(path)
         return {"": ["answer.txt", "src/a.py"], "src": ["src/a.py"]}.get(path)
 
@@ -827,7 +833,7 @@ class _FakeCalls:
         seed = RepoSeed(
             "tree-seed",
             editable_paths=("answer.txt", "src"),
-            readonly_paths=("vendor",),
+            readonly_paths=("src/vendor",),
             constrained_paths=("src/rules.toml",),
             hidden_hashes=hidden_hashes(["eval/metric.py", "secret"]),
         )
@@ -854,7 +860,9 @@ def _file(path: str, text: str = "new\n") -> str:
     return f"```file {path}\n{text}```"
 
 
-def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_box(tmp_path: Path) -> None:
+def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_box(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Refuse hidden, protected, read-only, outside and invalid paths; then write the valid files over the parent."""
     calls = _FakeCalls(
         [
@@ -862,23 +870,22 @@ def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_
             _file("secret/key.txt"),
             _file(".optimize/exploits/a.py"),
             _file("src/rules.toml"),
-            _file("vendor/lib.py"),
+            _file("src/vendor/lib.py"),
             _file("../escape.txt") + "\n" + _file("README.md"),
             "````file answer.txt\n```sh\nls\n```\n````\n" + _file("src/new.py"),
         ]
     )
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
     assert proposer is not None
-    gepa_mod._MAX_TURNS, turns = 7, gepa_mod._MAX_TURNS
-    try:
-        assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
-    finally:
-        gepa_mod._MAX_TURNS = turns
+    monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 7)
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
 
     notes = calls.prompts[1:]
-    assert notes[0] == "The files break the editing rules: 'eval/metric.py' may not be changed."
-    assert notes[1] == "The files break the editing rules: 'secret/key.txt' may not be changed."
-    assert notes[2] == "The files break the editing rules: '.optimize/exploits/a.py' may not be changed."
+    # The hidden paths and the exploits folder are outside the editable paths, so they get that answer.
+    assert notes[0] == "The files break the editing rules: 'eval/metric.py' is outside the editable paths."
+    assert notes[1] == "The files break the editing rules: 'secret/key.txt' is outside the editable paths."
+    assert notes[2] == "The files break the editing rules: '.optimize/exploits/a.py' is outside the editable paths."
     assert "protected by the repository rules" in notes[3]
     assert "read-only" in notes[4]
     assert "'../escape.txt' is not a path inside the repository." in notes[5]
@@ -987,7 +994,9 @@ def test_the_proposer_writes_a_path_that_only_starts_like_the_exploits_folder(tm
     assert calls.writes == [({".optimizer": b"new\n", ".optimize/exploits2/a.py": b"new\n"}, "tree-parent")]
 
 
-def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
+def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
+    monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
+) -> None:
     """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``optimize.toml`` to the engine."""
     metric, config = "the-hidden-metric-42", "the-hidden-config-43"
     run = stores.user.workspace().start_run(
@@ -1029,11 +1038,9 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(store
     proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
     assert proposer is not None
 
-    gepa_mod._MAX_TURNS, turns = 7, gepa_mod._MAX_TURNS
-    try:
-        assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
-    finally:
-        gepa_mod._MAX_TURNS = turns
+    monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 7)
+
+    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
     notes = calls.prompts[1:]
     assert notes[0] == "Files (1):\nanswer.txt"
     assert notes[1] == "'eval' is not a folder of the current version."
@@ -1041,7 +1048,7 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(store
     assert notes[3] == "'optimize.toml' is not a file of the current version."
     assert notes[4].startswith("Exit code ")
     assert not notes[4].startswith("Exit code 0.")
-    assert notes[5] == "The files break the editing rules: 'optimize.toml' may not be changed."
+    assert notes[5] == "The files break the editing rules: 'optimize.toml' is outside the editable paths."
     assert all(metric not in note and config not in note for note in calls.prompts)
     assert counter["opened"] == 1
 
@@ -1130,7 +1137,7 @@ def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
 
 
 def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Path) -> None:
-    """On the loop a version is a tree id, so a run with no scorer calls left returns the seed tree."""
+    """On the loop a version is a tree id, so a run with a text seed and no scorer calls left returns the seed tree."""
     ctx = _FakeCalls([]).ctx(tmp_path)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=0)
 
@@ -1162,3 +1169,156 @@ def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
     result = GepaEngine().run(Task("text seed", cases=list(_CASES)), server, ctx)
 
     assert result.best_candidate == "tree-seed"
+
+
+def test_a_repository_run_starts_from_the_task_seed_when_it_is_a_tree_of_the_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Auto's continuation gives the winner's tree as the task seed, so GEPA starts and falls back there."""
+    seeds: list[Any] = []
+
+    def exhausted(**kwargs: Any) -> None:
+        """Record GEPA's seed, then stop as the scorer cap does before GEPA saves a state.
+
+        Args:
+            **kwargs: GEPA's arguments.
+
+        Raises:
+            BudgetExhaustedError: Always.
+        """
+        seeds.append(kwargs["seed_candidate"])
+        raise BudgetExhaustedError
+
+    monkeypatch.setattr(gepa_mod, "optimize_anything", exhausted)
+    task = Task("tree-winner", cases=list(_CASES))
+    no_evals = EvalServer(lambda candidate, case: (1.0, {}), max_evals=0)
+    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
+
+    assert GepaEngine().run(task, no_evals, _FakeCalls([]).ctx(tmp_path)).best_candidate == "tree-winner"
+    assert GepaEngine().run(task, server, _FakeCalls([]).ctx(tmp_path)).best_candidate == "tree-winner"
+    assert seeds == ["tree-winner"]
+
+
+def test_the_start_tree_is_the_task_seed_only_when_the_real_loop_can_see_it(stores: _Stores, tmp_path: Path) -> None:
+    """On a real loop, a tree id of the run is the start; empty, ``None`` and text seeds give the run's seed tree."""
+    run = stores.user.workspace().start_run(
+        _RUN_ID,
+        step_log=stores.step_log,
+        execution_generation=1,
+        budget_generation=stores.budget_generation,
+        grant_list_id="grants-1",
+        chunk_cents=10,
+        lease_slices=4,
+    )
+    counter = {"open": 0, "opened": 0}
+    loop = EngineLoop(
+        run,
+        engine=stores.engine,
+        trees=stores.trees,
+        candidates=_CountingSource(counter),
+        metrics=_CountingSource(counter),
+        model=_FakeCalls([]).model,
+        model_max_cents=2,
+        run_dir=tmp_path / "loop",
+    )
+    seed_tree = loop.put_files({"answer.txt": b"a\n"})
+    winner = loop.put_files({"answer.txt": b"axx\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed_tree, editable_paths=("answer.txt",)))
+
+    def start(seed: str | None) -> str:
+        """Return the start tree for one task seed.
+
+        Args:
+            seed: The task's seed.
+
+        Returns:
+            The start tree.
+        """
+        proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(seed))
+        assert proposer is not None
+        return proposer.start_tree()
+
+    assert start(winner) == winner
+    assert start("text seed") == seed_tree
+    assert start("") == seed_tree
+    assert start(None) == seed_tree
+    assert counter["opened"] == 0
+
+
+def test_a_hidden_path_outside_the_editable_paths_gets_the_answer_of_any_other_path(tmp_path: Path) -> None:
+    """A hidden name and a plain name outside the editable paths get the same answer, so it does not show which is hidden."""
+    calls = _FakeCalls([])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+
+    for hidden, plain in (("secret", "public"), ("secret/key.txt", "public/key.txt"), ("eval/metric.py", "docs/a.py")):
+        assert proposer.hidden(hidden)
+        assert not proposer.hidden(plain)
+        hidden_note, plain_note = proposer.path_problem(hidden), proposer.path_problem(plain)
+        assert hidden_note is not None
+        assert plain_note is not None
+        assert hidden_note.replace(hidden, "<path>") == plain_note.replace(plain, "<path>")
+
+
+def test_a_command_whose_output_is_rejected_gets_a_fixed_note_and_the_proposal_goes_on(tmp_path: Path) -> None:
+    """The rejection names the hidden path, so the model gets a fixed note; the next reply still runs."""
+    rejected: list[str] = []
+
+    def reject(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Reject the command's output tree, as the loop does for an output with a hidden path.
+
+        Args:
+            tree_id: Not used.
+            command: The command.
+            grants: Not used.
+
+        Raises:
+            TreeRejectedError: Always, with the hidden path in its text.
+        """
+        rejected.append(command)
+        raise TreeRejectedError("run-1:root:3", "the output tree holds the hidden path eval/metric.py")
+
+    def notes() -> list[str]:
+        """Run one proposal whose first reply runs a command and whose second writes a file.
+
+        Returns:
+            The notes the model got.
+        """
+        calls = _FakeCalls(["```sh\necho x > eval/metric.py\n```", _file("answer.txt")])
+        proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, run_command=reject), Task(""))
+        assert proposer is not None
+        assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
+        return calls.prompts[1:]
+
+    first = notes()
+    assert first == ["The command wrote a path that it may not write. Its output was discarded."]
+    assert all("eval" not in note for note in first)
+    # The note does not depend on the error's text, so a replay that raises the error again gives the same note.
+    assert notes() == first
+    assert len(rejected) == 2
+
+
+def test_a_loop_stop_in_a_proposer_command_ends_the_proposal(tmp_path: Path) -> None:
+    """A loop stop from a command is not a box error, so the proposer keeps it and raises it."""
+
+    def stopped(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Stop, as a fenced or closed loop does.
+
+        Args:
+            tree_id: Not used.
+            command: Not used.
+            grants: Not used.
+
+        Raises:
+            LoopStoppedError: Always.
+        """
+        raise LoopStoppedError("Run run-1 is closed.")
+
+    calls = _FakeCalls(["```sh\nls\n```", _file("answer.txt")])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, run_command=stopped), Task(""))
+    assert proposer is not None
+
+    with pytest.raises(LoopStoppedError):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert isinstance(proposer.failure, LoopStoppedError)
+    assert calls.writes == []

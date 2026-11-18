@@ -60,9 +60,11 @@ from .workspace_scorer import run_on_pool
 logger = logging.getLogger(__name__)
 # One proposal's model replies; the proposer keeps the parent when they run out.
 _MAX_TURNS = 6
-# A command's output is cut to this many characters of stdout and of stderr before the model sees it.
+# A command's stdout and stderr, a read file and a folder listing are each cut to this many characters.
 _OUTPUT_CHARS = 4000
 _FEEDBACK_RECORDS = 5
+# The error names the path, and a hidden path must not reach the proposer (SKY-353), so the note is fixed.
+_REJECTED_NOTE = "The command wrote a path that it may not write. Its output was discarded."
 # A block closes at a line with its own fence, so a file that holds a shorter fence can use a longer one.
 _BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
 
@@ -146,10 +148,10 @@ class GepaEngine:
             budget ran out before GEPA could report.
         """
         proposer = _LoopRepoProposer.bind(ctx, task)
+        # On the loop a version is a tree id, so GEPA starts from a tree.
+        start = proposer.start_tree() if proposer is not None else task.seed_candidate
         if server.remaining <= 0:
-            # On the loop a version is a tree id, so the seed version is the seed tree.
-            seed = proposer.seed.tree_id if proposer is not None else task.seed_candidate or ""
-            return Result(best_candidate=seed, best_score=None, total_evals=0)
+            return Result(best_candidate=start or "", best_score=None, total_evals=0)
         if proposer is None and ctx.native_options is not None and ctx.native_options.repo is not None:
             # Until the cutover (SKY-728) binds every run to a loop, a coding agent writes each
             # version inside the native runtime's checkout, where GEPA runs with it as its proposer.
@@ -262,8 +264,7 @@ class GepaEngine:
             return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {
-            # On the loop, a repository version is a tree id, and the seed is the run's starting tree.
-            "seed_candidate": task.seed_candidate if proposer is None else proposer.seed.tree_id,
+            "seed_candidate": start,
             "evaluator": evaluator,
             "batch_evaluator": batch_evaluator,
             "config": config,
@@ -314,11 +315,9 @@ class GepaEngine:
             raise proposer.failure
 
         if gepa_result is None:
-            if proposer is not None:
-                return Result(best_candidate=proposer.seed.tree_id, best_score=None, total_evals=server.used)
-            if task.seed_candidate is None:
+            if start is None:
                 raise ServiceError("GEPA stopped before producing a fully evaluated candidate.")
-            return Result(best_candidate=task.seed_candidate, best_score=None, total_evals=server.used)
+            return Result(best_candidate=start, best_score=None, total_evals=server.used)
 
         best: Any = gepa_result.best_candidate
         if isinstance(best, dict) and task.str_mode:
@@ -373,6 +372,26 @@ class _LoopRepoProposer:
         if ctx.repo_seed is None or any(call is None for call in calls):
             return None
         return cls(ctx, ctx.repo_seed, task)
+
+    def start_tree(self) -> str:
+        """Return the tree GEPA starts from: the task's seed when it is a tree of the run, else the seed tree.
+
+        Auto's continuation gives the winner's tree id as the task's seed. A run's first lane gives the run's own
+        seed, which can be empty or text. A non-empty seed is a tree id only when the run can see a tree with that
+        id. The check reads the tree store with no box and no step, and a tree id is the hash of its content, so a
+        resume makes the same choice.
+
+        Returns:
+            The task's seed tree id, or the run's seed tree.
+        """
+        seed = self.task.seed_candidate
+        if isinstance(seed, str) and seed:
+            try:
+                if self.ctx.list_files(seed, "") is not None:
+                    return seed
+            except LookupError:
+                pass
+        return self.seed.tree_id
 
     @property
     def total_cost(self) -> float:
@@ -465,7 +484,8 @@ class _LoopRepoProposer:
             "- An ```ls block holds one folder path, or nothing for the root. You get the files under it.",
             "- A ```read block holds one file path. You get the file of the current version.",
             "- A ```sh block runs one shell command in a checkout of the current version and shows you its "
-            "output. Use it to run tests. The command's changes are not kept.",
+            "output. Use it to run tests. The command's changes are not kept. When the command writes a path "
+            "that it may not write, you get no output.",
             "- ```file <path> blocks are your answer: each one holds the whole new text of one file. The new "
             "version is the current version with these files. Use a longer fence when a file holds ```.",
             f"You have {_MAX_TURNS} replies. You cannot run the evaluator.",
@@ -522,8 +542,10 @@ class _LoopRepoProposer:
         """
         try:
             result, _tree = self.ctx.run_command(tree_id, command, ())
-        except (BoxFailureError, TreeRejectedError) as error:
+        except BoxFailureError as error:
             return f"The command did not run: {error}"
+        except TreeRejectedError:
+            return _REJECTED_NOTE
         return (
             f"Exit code {result.exit_code}.\nstdout:\n{result.stdout[-_OUTPUT_CHARS:]}\n"
             f"stderr:\n{result.stderr[-_OUTPUT_CHARS:]}"
@@ -580,6 +602,10 @@ class _LoopRepoProposer:
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
             return f"'{path}' is not a path inside the repository."
+        # This check comes before the hidden check, so a hidden path outside the editable paths gets the same
+        # answer as any other path there, and the answer does not show that it is hidden (SKY-353).
+        if not inside(path, self.seed.editable_paths):
+            return f"'{path}' is outside the editable paths."
         folded, exploits = path.casefold(), EXPLOITS_DIR.casefold()
         # A file at a parent of the exploits folder, such as ``.optimize``, would block the hidden suite too.
         if self.hidden(path) or inside(folded, [exploits]) or exploits.startswith(folded + "/"):
@@ -592,8 +618,6 @@ class _LoopRepoProposer:
             return f"'{path}' is protected by the repository rules ([paths] protected)."
         if inside(path, self.seed.readonly_paths):
             return f"'{path}' is a submodule or Git LFS file, which are read-only."
-        if not inside(path, self.seed.editable_paths):
-            return f"'{path}' is outside the editable paths."
         return None
 
     def hidden(self, path: str) -> bool:
