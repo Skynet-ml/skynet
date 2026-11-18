@@ -92,6 +92,9 @@ _MAX_COMMAND_PARTS = 50
 # harness_bridge's gateway key tokens. A launch command with one gets the
 # proposer's relay key in its text, so the file's own commands cannot name them.
 _KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
+# Popen raises ValueError on a NUL byte, outside the setup check's clear error, and
+# other control characters only hide what the command does.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
@@ -750,7 +753,7 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
 
     Raises:
         ConstraintsError: When the value is not a non-empty list of non-empty
-            strings, or names a gateway key token.
+            strings without control characters, or names a gateway key token.
     """
     if key not in section:
         return None
@@ -758,7 +761,13 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
     if (
         not isinstance(value, list)
         or not 1 <= len(value) <= _MAX_COMMAND_PARTS
-        or not all(isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS for part in value)
+        or not all(
+            isinstance(part, str)
+            and part.strip()
+            and len(part) <= _MAX_COMMAND_CHARS
+            and not _CONTROL_CHARS.search(part)
+            for part in value
+        )
     ):
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: {label} {key} must be a command list such as ["node", "my-agent.js"].',

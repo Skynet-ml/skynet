@@ -208,6 +208,23 @@ def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value:
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize("part", [r'"agent\u0000.js"', r'"agent.js\n"', r'"\u001fagent.js"', r'"agent\u007f.js"'])
+def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) -> None:
+    """A NUL or other control character fails the setup check, not ``Popen`` later (SKY-753).
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        part: A TOML string with a control character.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", {part}]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
 @pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
 def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
     """The bridge would fill the relay key into the file's command text, so the setup check refuses the token.
