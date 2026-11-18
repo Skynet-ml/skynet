@@ -55,26 +55,27 @@ Lee [Motores](/docs/concepts/engines) para elegir un motor concreto.
 
 ## 5. Métrica y ejecución
 
-El último paso es **Métrica y ejecución**. El asistente escribe el evaluador por ti. Puedes editarlo. El evaluador recibe la ruta de una versión del repositorio y un caso:
+El último paso es **Métrica y ejecución**. El asistente escribe el evaluador y el archivo `optimize.toml` por ti. Puedes editarlos. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador recibe la salida de la entrada y el caso:
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return {"score": 1.0, "feedback": "Correct label."}
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` contiene las columnas de entrada de un caso. `case["expected"]` contiene la columna de salida, con su nombre de columna como clave. El repositorio tiene un archivo `serve.py` con `def serve(input)`. Skynet usa la misma función para servir la mejor versión después de la ejecución.
+`case["input"]` contiene las columnas de entrada de un caso. `case["expected"]` contiene la columna de salida, con su nombre de columna como clave. El repositorio tiene un archivo `serve.py` con `def serve(input)`. La entrada `[run]` lo llama, y `output` es su valor devuelto. El evaluador se ejecuta en una caja de sandbox separada con solo tus archivos de métrica y sin código de la versión, así que no puede importar `serve.py`. Skynet usa la misma función para servir la mejor versión después de la ejecución.
 
-Después ejecuta la comprobación. La comprobación ejecuta tu configuración y tu evaluador sobre la versión inicial en el sandbox. Solo puedes iniciar la ejecución cuando la comprobación pasa.
+Después ejecuta la comprobación. La comprobación ejecuta tu configuración, la entrada `[run]` y tu evaluador sobre la versión inicial en el sandbox. Solo puedes iniciar la ejecución cuando la comprobación pasa.
 
 ## 6. Iniciar y seguir
 

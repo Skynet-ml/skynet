@@ -55,26 +55,27 @@ Skynet はあなたの GitHub アカウントにリポジトリを作成しま�
 
 ## 5. メトリクスと実行
 
-最後のステップは **メトリクスと実行** です。アシスタントがスコアラーを書きます。あなたはそれを編集できます。スコアラーは、リポジトリの 1 つのバージョンのパスと 1 つのケースを受け取ります。
+最後のステップは **メトリクスと実行** です。アシスタントがスコアラーと `optimize.toml` ファイルを書きます。あなたはそれらを編集できます。`[run]` エントリーは、リポジトリの 1 つのバージョンを 1 つのケースで実行します。スコアラーは、エントリーの出力とケースを受け取ります。
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return {"score": 1.0, "feedback": "Correct label."}
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` は 1 つのケースの入力列を保持します。`case["expected"]` は出力列を、その列名をキーとして保持します。リポジトリには `def serve(input)` を持つ `serve.py` ファイルがあります。Skynet は実行の後、同じ関数を使って最も良いバージョンを提供します。
+`case["input"]` は 1 つのケースの入力列を保持します。`case["expected"]` は出力列を、その列名をキーとして保持します。リポジトリには `def serve(input)` を持つ `serve.py` ファイルがあります。`[run]` エントリーがこの関数を呼び出し、`output` はその戻り値です。スコアラーはメトリクスファイルだけがあり、バージョンのコードがない別のサンドボックスで実行されるため、`serve.py` をインポートできません。Skynet は実行の後、同じ関数を使って最も良いバージョンを提供します。
 
-次に、チェックを実行します。チェックは、サンドボックス内の開始バージョンでセットアップとスコアラーを実行します。実行を開始できるのは、チェックに合格した後だけです。
+次に、チェックを実行します。チェックは、サンドボックス内の開始バージョンでセットアップ、`[run]` エントリー、スコアラーを実行します。実行を開始できるのは、チェックに合格した後だけです。
 
 ## 6. 開始して見守る
 

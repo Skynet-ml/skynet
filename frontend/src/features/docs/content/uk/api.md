@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 Важливі поля:
 
 - `target.repo.repository` — це репозиторій GitHub у форматі `owner/name`. Спочатку підключіть GitHub у **Налаштування → Конектори**.
 - `target.repo.editable_paths` перелічує файли й папки, які оптимізатор може змінювати. `"."` означає весь репозиторій.
 - `target.repo.commit` необов’язкове. Це SHA із 40 символів. Без нього Skynet використовує останній коміт у гілці.
-- `target.repo.secrets` необов’язкове. Кожен секрет має `name` і `value`. Він потрапляє у ваш код і ваш оцінювач як змінна середовища.
-- `scorer.metric_code` визначає `score(repo_path, case)`. `scorer.model` — це модель, яку ваш код і ваш оцінювач можуть викликати через шлюз моделей.
+- `target.repo.secrets` необов’язкове. Кожен секрет має `name` і `value`. Він потрапляє у ваш код або ваш оцінювач лише через заголовок `[services.<name>]` або через сервер із файлу `mcp` ролі, ніколи як змінна середовища.
+- `scorer.metric_code` визначає `score(repo_path, case, output=None)`. `output` — це те, що точка входу `[run]` повернула для кейсу. Вкладка `optimize.toml` показує точку входу `[run]` репозиторію з прикладу. `scorer.model` — це модель, яку ваш код і ваш оцінювач можуть викликати через шлюз моделей.
 - `strategy.mode` має значення `auto` (за замовчуванням) або `single`. Для `single` укажіть у `strategy.engine` назву одного рушія з `GET /blackbox/engines`.
 - `max_cost_cents` — ліміт витрат для цього запуску в центах США.
 - `is_private` за замовчуванням має значення `false`. Установіть `true`, щоб зробити запуск приватним.

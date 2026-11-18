@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 فیلدهای مهم:
 
 - `target.repo.repository` مخزن GitHub به شکل `owner/name` است. ابتدا GitHub را در **تنظیمات → اتصال‌دهنده‌ها** متصل کنید.
 - `target.repo.editable_paths` فایل‌ها و پوشه‌هایی را فهرست می‌کند که بهینه‌ساز اجازهٔ تغییرشان را دارد. `"."` یعنی کل مخزن.
 - `target.repo.commit` اختیاری است. یک SHA با ۴۰ نویسه است. بدون آن، Skynet از آخرین کامیت شاخه استفاده می‌کند.
-- `target.repo.secrets` اختیاری است. هر راز یک `name` و یک `value` دارد. این راز به‌صورت یک متغیر محیطی به کد و امتیازدهندهٔ شما می‌رسد.
-- `scorer.metric_code` تابع `score(repo_path, case)` را تعریف می‌کند. `scorer.model` مدلی است که کد و امتیازدهندهٔ شما می‌توانند از طریق دروازهٔ مدل فراخوانی کنند.
+- `target.repo.secrets` اختیاری است. هر راز یک `name` و یک `value` دارد. این راز فقط از راه یک هدر در `[services.<name>]` یا یک سرور در فایل `mcp` نقش، به کد یا امتیازدهندهٔ شما می‌رسد، هرگز به‌صورت متغیر محیطی.
+- `scorer.metric_code` تابع `score(repo_path, case, output=None)` را تعریف می‌کند. `output` همان چیزی است که `entry` بخش `[run]` برای این مورد برگرداند. زبانهٔ `optimize.toml` مقدار `entry` بخش `[run]` در مخزن نمونه را نشان می‌دهد. `scorer.model` مدلی است که کد و امتیازدهندهٔ شما می‌توانند از طریق دروازهٔ مدل فراخوانی کنند.
 - `strategy.mode` یا `auto` است (پیش‌فرض) یا `single`. با `single`، مقدار `strategy.engine` را روی نام یکی از موتورهای `GET /blackbox/engines` بگذارید.
 - `max_cost_cents` سقف هزینهٔ این اجرا به سنت آمریکاست.
 - `is_private` به‌طور پیش‌فرض `false` است. برای خصوصی نگه داشتن اجرا، آن را `true` کنید.

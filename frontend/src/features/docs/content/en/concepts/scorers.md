@@ -3,19 +3,23 @@ The scorer tells Skynet how good one version of your repository is. It is a Pyth
 ## The contract
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return {"score": score_value, "feedback": "..."}
 ```
 
 | Argument    | What it holds                                                                    |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | The folder of one version of the repository, after the setup command ran         |
+| `repo_path` | A folder that holds only your metric files. It holds no other repository file and no version code |
 | `case`      | A dict. `case["input"]` holds the input fields. `case["expected"]` holds the expected value, or `None` |
+| `output`    | What the `[run]` entry returned for the case, or `None` when the file has no `[run]` |
 
-If your function takes only one argument, Skynet calls `score(repo_path)`. Use this form when the scorer runs its own tests and needs no cases.
+The `optimize.toml` file of the repository must have a `[run]` section or a `[target.<name>]` stage. The `[run]` `entry` runs one version on one case, in its own sandbox box. Skynet refuses a file with neither, because every version would get the same score.
 
-The scorer runs in the sandbox, in the folder of the version. It can import code from the repository, run a command, or call `serve()` from `serve.py`. Read [How optimization works](/docs/concepts/optimization).
+- A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
+- A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
+
+The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from skynet import call`. Read [How optimization works](/docs/concepts/optimization).
 
 ## The return value
 
@@ -65,54 +69,63 @@ GEPA and Auto read the feedback text to write the next version. Say what is wron
 
 ### Exact match
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return {"score": 1.0, "feedback": "Correct."}
-    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` is a dict keyed by the name of your Output column. Read [Datasets and splits](/docs/concepts/datasets).
 
 ### Run the tests of the repository
 
-```python tab="scorer.py"
-import subprocess
+The `[run]` entry runs the tests. The scorer reads the exit code and the test output.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+```
+
+When the `[run]` entry fails on a case, that case has no score. If the entry cannot start, times out or a signal stops it, or if a function entry raises or exits before it returns, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code of a command entry is not a failure: the scorer gets it in `output`. A version with such a case has no score. It cannot be the best version, reaches no `[outcome] target` and opens no pull request. If a failure must count as a number, catch the failure in your program, write an output, and let the scorer score it. Read the [repository rules](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Model as judge
 
 The scorer can call a model. Import `llm` from the `skynet` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -125,7 +138,7 @@ The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`,
 ## Model calls and secrets
 
 - Calls on Skynet's keys are metered against the run budget. With your own key (BYOK), the call goes to your provider key, with no Skynet model fee. Read [Billing](/docs/concepts/billing).
-- Run secrets reach the scorer as environment variables. The variable name is the secret name, for example `os.environ["SEARCH_API_KEY"]`.
+- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists, or through a server in the `[metric] mcp` file. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
 - Skynet hides secret values in the scorer output and in the logs.
 
 ## Limits

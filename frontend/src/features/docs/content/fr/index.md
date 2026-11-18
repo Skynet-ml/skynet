@@ -11,7 +11,7 @@ Chaque exécution optimise un dépôt. Vous pouvez commencer de deux façons :
 
 Le code du dépôt peut être de toute nature : une application, un service, un script ou une bibliothèque. Il peut utiliser n'importe quelle bibliothèque.
 
-Chaque exécution suit le même contrat. Votre évaluateur définit `score(repo_path, case)`. Il renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
+Chaque exécution suit le même contrat. Votre évaluateur définit `score(repo_path, case, output=None)`. L'évaluateur lit `output`, ce que l'entrée `[run]` a renvoyé pour le cas. Il ne s'exécute pas dans le dossier de la version et n'importe pas de code du dépôt. Il renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
 
 > [!NOTE]
 > Chaque version s'exécute dans une sandbox. L'agent de code qui rédige les versions ne peut voir ni le source de l'évaluateur ni les valeurs attendues.

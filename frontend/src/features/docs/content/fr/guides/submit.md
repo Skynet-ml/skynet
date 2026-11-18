@@ -90,13 +90,13 @@ L'assistant ne vous laisse pas continuer si le plafond ou votre solde est infér
 
 ### Évaluateur
 
-Rédigez `scorer.py`. Ce fichier définit `score(repo_path, case)` et renvoie un score avec un retour. L'assistant IA peut le rédiger pour vous. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
+Rédigez `scorer.py`. Ce fichier définit `score(repo_path, case, output=None)` et renvoie un score avec un retour. L'évaluateur lit `output`, ce que l'entrée `[run]` a renvoyé pour le cas. Il ne s'exécute pas dans le dossier de la version et n'importe pas de code du dépôt. L'assistant IA peut le rédiger pour vous. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
 
 Le dépôt peut contenir un fichier `serve.py` avec `def serve(input)`. Skynet l'utilise pour servir la meilleure version après l'exécution. Lisez [Lire les résultats](/docs/guides/results).
 
 ### Secrets
 
-Ajoutez des secrets, par exemple les clés d'API dont votre code a besoin. Chaque secret arrive à votre code et à votre évaluateur sous forme de variable d'environnement de même nom. L'agent de code ne peut pas les voir. Skynet masque leurs valeurs dans les journaux.
+Ajoutez des secrets, par exemple les clés d'API dont votre code a besoin. Votre code et votre évaluateur ne reçoivent pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à un rôle seulement par une table `[services.<name>]` que le rôle liste dans `[run] services` ou `[metric] services`, ou par un serveur du fichier `mcp` du rôle. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'agent de code ne peut pas les voir. Skynet masque leurs valeurs dans les journaux.
 
 ### Vérification
 

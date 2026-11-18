@@ -3,19 +3,23 @@ Puanlayıcı, Skynet'e deponuzun bir sürümünün ne kadar iyi olduğunu söyle
 ## Sözleşme
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return {"score": score_value, "feedback": "..."}
 ```
 
 | Argüman     | İçeriği                                                                      |
 | ----------- | ---------------------------------------------------------------------------- |
-| `repo_path` | Kurulum komutu çalıştıktan sonra deponun bir sürümünün klasörü               |
+| `repo_path` | Yalnızca metrik dosyalarınızı tutan bir klasör. Başka bir depo dosyası veya sürüm kodu tutmaz |
 | `case`      | Bir dict. `case["input"]` girdi alanlarını tutar. `case["expected"]` beklenen değeri veya `None` tutar |
+| `output`    | `[run]` giriş noktasının vaka için döndürdüğü değer veya dosyada `[run]` yoksa `None` |
 
-Fonksiyonunuz yalnızca bir argüman alıyorsa Skynet `score(repo_path)` çağırır. Puanlayıcı kendi testlerini çalıştırıyorsa ve vakalara ihtiyacı yoksa bu biçimi kullanın.
+Deponun `optimize.toml` dosyasında bir `[run]` bölümü veya bir `[target.<name>]` aşaması olmalıdır. `[run]` giriş noktası (`entry`), bir sürümü bir vaka üzerinde kendi sandbox'ında çalıştırır. Skynet ikisi de olmayan bir dosyayı reddeder, çünkü her sürüm aynı puanı alırdı.
 
-Puanlayıcı sandbox içinde, sürümün klasöründe çalışır. Depodan kod içe aktarabilir, bir komut çalıştırabilir veya `serve.py` içindeki `serve()` fonksiyonunu çağırabilir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+- Bir fonksiyon giriş noktası, örneğin `entry = "serve.py:serve"`, `case["input"]` değerini argüman olarak alır. `output`, onun döndürdüğü değerdir.
+- Bir komut giriş noktası, örneğin `entry = ["python", "-m", "pytest", "-q"]`, girdiyi stdin üzerinden JSON olarak alır. `output`, `{"exit_code": ..., "stdout": "..."}` değeridir.
+
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
 ## Dönüş değeri
 
@@ -65,54 +69,63 @@ GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnini okur. Ney
 
 ### Tam eşleşme
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return {"score": 1.0, "feedback": "Correct."}
-    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]`, Çıktı sütununuzun adıyla anahtarlanmış bir dict'tir. [Veri kümeleri ve bölmeler](/docs/concepts/datasets) sayfasını okuyun.
 
 ### Deponun testlerini çalıştırın
 
-```python tab="scorer.py"
-import subprocess
+`[run]` giriş noktası testleri çalıştırır. Puanlayıcı çıkış kodunu ve test çıktısını okur.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+```
+
+`[run]` giriş noktası bir durumda başarısız olursa o durumun puanı olmaz. Giriş noktası başlayamazsa, zaman aşımına uğrarsa veya bir sinyal onu durdurursa ya da bir fonksiyon giriş noktası değer döndürmeden önce hata fırlatır veya çıkarsa geri bildirim `Run failed: …` olur ve Skynet puanlayıcıyı çağırmaz. Bir komut giriş noktasının sıfır olmayan çıkış kodu başarısızlık değildir: puanlayıcı onu `output` içinde alır. Böyle bir durumu olan sürümün puanı olmaz. O sürüm en iyi sürüm olamaz, hiçbir `[outcome] target` değerine ulaşmaz ve pull request açmaz. Bir başarısızlığın sayı olarak sayılması gerekiyorsa başarısızlığı programınızda yakalayın, bir çıktı yazın ve puanlayıcının onu puanlamasına izin verin. [Depo kuralları](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) sayfasını okuyun.
 
 ### Hakem olarak model
 
 Puanlayıcı bir model çağırabilir. `skynet` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -125,7 +138,7 @@ Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenle
 ## Model çağrıları ve gizli anahtarlar
 
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
-- Çalıştırma gizli anahtarları puanlayıcıya ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır, örneğin `os.environ["SEARCH_API_KEY"]`.
+- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu veya `[metric] mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `SKYNET_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
 - Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler

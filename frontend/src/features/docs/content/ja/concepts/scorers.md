@@ -3,19 +3,23 @@
 ## コントラクト
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return {"score": score_value, "feedback": "..."}
 ```
 
 | 引数        | 保持する内容                                                                     |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | セットアップコマンドの実行後の、リポジトリの 1 つのバージョンのフォルダー        |
+| `repo_path` | メトリクスファイルだけを保持するフォルダー。ほかのリポジトリのファイルとバージョンのコードは保持しません |
 | `case`      | dict。`case["input"]` は入力フィールドを保持します。`case["expected"]` は期待値、または `None` を保持します |
+| `output`    | `[run]` エントリーがそのケースに対して返した値。ファイルに `[run]` がない場合は `None` |
 
-関数が引数を 1 つしか受け取らない場合、Skynet は `score(repo_path)` を呼び出します。スコアラーが独自のテストを実行し、ケースが不要な場合は、この形を使います。
+リポジトリの `optimize.toml` ファイルには、`[run]` セクションまたは `[target.<name>]` ステージが必要です。`[run]` の `entry` は、1 つのバージョンを 1 つのケースで、専用のサンドボックスで実行します。どちらもないファイルは Skynet が拒否します。すべてのバージョンが同じスコアになるからです。
 
-スコアラーは、サンドボックス内のバージョンのフォルダーで実行されます。リポジトリのコードをインポートすることも、コマンドを実行することも、`serve.py` の `serve()` を呼び出すこともできます。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
+- 関数エントリー（例: `entry = "serve.py:serve"`）は、`case["input"]` を引数として受け取ります。`output` はその戻り値です。
+- コマンドエントリー（例: `entry = ["python", "-m", "pytest", "-q"]`）は、入力を JSON として stdin で受け取ります。`output` は `{"exit_code": ..., "stdout": "..."}` です。
+
+スコアラーは別のサンドボックスで実行されます。そのサンドボックスはメトリクスファイルだけを保持します。スコアラーはバージョンのコードをインポートすることも、実行することもできません。スコアラーには `output` を通してだけ、または `[target.<name>]` ステージへの `call()` を通してだけバージョンが見えます。`call` は `from skynet import call` でインポートします。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
 
 ## 戻り値
 
@@ -65,54 +69,63 @@ GEPA と Auto は、フィードバックの文章を読んで次のバージョ
 
 ### 完全一致
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return {"score": 1.0, "feedback": "Correct."}
-    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
 
 ### リポジトリのテストを実行する
 
-```python tab="scorer.py"
-import subprocess
+`[run]` エントリーがテストを実行します。スコアラーは終了コードとテストの出力を読みます。
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+```
+
+`[run]` エントリーがあるケースで失敗すると、そのケースにはスコアがありません。エントリーが起動できない、タイムアウトする、シグナルで止まる、または関数エントリーが値を返す前に例外を送出するか終了すると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。コマンドエントリーの 0 以外の終了コードは失敗ではありません。スコアラーは `output` でそれを受け取ります。そのようなケースを持つバージョンにはスコアがありません。そのバージョンは最良のバージョンにならず、どの `[outcome] target` にも届かず、pull request も開きません。失敗を数値として数える必要がある場合は、プログラムの中で失敗を捕捉し、出力を書き、スコアラーにその出力を採点させてください。[リポジトリのルール](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) をお読みください。
 
 ### 審査員としてのモデル
 
 スコアラーはモデルを呼び出せます。`skynet` ヘルパーモジュールから `llm` をインポートします。呼び出しは Skynet のモデルゲートウェイを通り、実行のスコアラーモデルに送られます。
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -125,7 +138,7 @@ def score(repo_path, case):
 ## モデル呼び出しとシークレット
 
 - Skynet のキーによる呼び出しは、実行予算に対して計測されます。独自のキー (BYOK) では、呼び出しはあなたのプロバイダーキーに送られ、Skynet のモデル料金はかかりません。[請求](/docs/concepts/billing) をお読みください。
-- 実行シークレットは、環境変数としてスコアラーに届きます。変数名はシークレット名です。例: `os.environ["SEARCH_API_KEY"]`。
+- スコアラーは、実行シークレットを環境変数として受け取りません。シークレットがスコアラーに届くのは、`[metric] services` が挙げる `[services.<name>]` テーブルか、`[metric] mcp` ファイルにあるサーバーを通る場合だけです。シークレットは、テーブルの `headers` に `${NAME}` として書きます。スコアラーは、`SKYNET_SERVICE_<NAME>_URL` の URL にリクエストを送ります。Skynet はサンドボックスの外でシークレットを追加します。
 - Skynet は、スコアラーの出力とログの中のシークレットの値を隠します。
 
 ## 制限

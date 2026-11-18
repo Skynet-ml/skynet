@@ -3,19 +3,23 @@
 ## कॉन्ट्रैक्ट
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return {"score": score_value, "feedback": "..."}
 ```
 
 | आर्गुमेंट    | इसमें क्या होता है                                                              |
 | ----------- | ------------------------------------------------------------------------------ |
-| `repo_path` | रिपॉज़िटरी के एक संस्करण का फ़ोल्डर, सेटअप कमांड चलने के बाद                       |
+| `repo_path` | एक फ़ोल्डर जिसमें केवल आपकी मेट्रिक फ़ाइलें होती हैं। इसमें रिपॉज़िटरी की कोई और फ़ाइल और संस्करण का कोई कोड नहीं होता |
 | `case`      | एक dict। `case["input"]` में इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` |
+| `output`    | केस के लिए `[run]` की `entry` ने जो लौटाया, या `None` जब फ़ाइल में `[run]` नहीं होता |
 
-अगर आपका फ़ंक्शन केवल एक आर्गुमेंट लेता है, तो Skynet `score(repo_path)` को कॉल करता है। यह रूप तब इस्तेमाल करें जब स्कोरर अपने खुद के टेस्ट चलाता है और उसे केसों की ज़रूरत नहीं है।
+रिपॉज़िटरी की `optimize.toml` फ़ाइल में एक `[run]` सेक्शन या एक `[target.<name>]` स्टेज होना चाहिए। `[run]` की `entry` एक संस्करण को एक केस पर, अपने अलग सैंडबॉक्स बॉक्स में चलाती है। जिस फ़ाइल में इनमें से कोई नहीं है, उसे Skynet अस्वीकार करता है, क्योंकि हर संस्करण को एक ही स्कोर मिलता।
 
-स्कोरर सैंडबॉक्स में, संस्करण के फ़ोल्डर में चलता है। यह रिपॉज़िटरी से कोड इम्पोर्ट कर सकता है, कोई कमांड चला सकता है, या `serve.py` से `serve()` को कॉल कर सकता है। [ऑप्टिमाइज़ेशन कैसे काम करता है](/docs/concepts/optimization) पढ़ें।
+- फ़ंक्शन entry, जैसे `entry = "serve.py:serve"`, को `case["input"]` आर्गुमेंट के रूप में मिलता है। `output` उसका रिटर्न मान है।
+- कमांड entry, जैसे `entry = ["python", "-m", "pytest", "-q"]`, को इनपुट stdin पर JSON के रूप में मिलता है। `output` का रूप `{"exit_code": ..., "stdout": "..."}` है।
+
+स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है। उस बॉक्स में केवल आपकी मेट्रिक फ़ाइलें होती हैं। स्कोरर संस्करण के कोड को न इम्पोर्ट कर सकता है, न चला सकता है। वह संस्करण को केवल `output` से, या किसी `[target.<name>]` स्टेज को `call()` से देखता है। `call` को `from skynet import call` से इम्पोर्ट करें। [ऑप्टिमाइज़ेशन कैसे काम करता है](/docs/concepts/optimization) पढ़ें।
 
 ## रिटर्न मान
 
@@ -65,54 +69,63 @@ GEPA और Auto अगला संस्करण लिखने के ल�
 
 ### सटीक मिलान
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return {"score": 1.0, "feedback": "Correct."}
-    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` एक dict है, जिसकी key आपके आउटपुट कॉलम का नाम है। [डेटासेट और विभाजन](/docs/concepts/datasets) पढ़ें।
 
 ### रिपॉज़िटरी के टेस्ट चलाएँ
 
-```python tab="scorer.py"
-import subprocess
+`[run]` की `entry` टेस्ट चलाती है। स्कोरर exit code और टेस्ट का आउटपुट पढ़ता है।
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+```
+
+जब `[run]` entry किसी केस पर विफल होती है, तो उस केस का कोई स्कोर नहीं होता। अगर entry शुरू नहीं होती, उसका समय खत्म होता है या कोई सिग्नल उसे रोकता है, या कोई function entry लौटने से पहले exception उठाती है या बाहर निकल जाती है, तो फ़ीडबैक `Run failed: …` होता है, और Skynet स्कोरर को कॉल नहीं करता। किसी command entry का शून्य से अलग exit code विफलता नहीं है: स्कोरर को वह `output` में मिलता है। ऐसे केस वाले संस्करण का कोई स्कोर नहीं होता। वह सबसे अच्छा संस्करण नहीं बन सकता, किसी `[outcome] target` तक नहीं पहुँचता और कोई pull request नहीं खोलता। अगर किसी विफलता को एक संख्या के रूप में गिनना ज़रूरी है, तो अपने प्रोग्राम में विफलता को पकड़ें, एक आउटपुट लिखें और स्कोरर को उसे स्कोर करने दें। [रिपॉज़िटरी के नियम](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) पढ़ें।
 
 ### जज के रूप में मॉडल
 
 स्कोरर किसी मॉडल को कॉल कर सकता है। `skynet` हेल्पर मॉड्यूल से `llm` इम्पोर्ट करें। कॉल Skynet के मॉडल गेटवे से होकर रन के स्कोरर मॉडल तक जाती है।
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -125,7 +138,7 @@ def score(repo_path, case):
 ## मॉडल कॉल और सीक्रेट
 
 - Skynet की कुंजियों पर हुई कॉल रन के बजट से मापी जाती हैं। आपकी अपनी कुंजी (BYOK) के साथ, कॉल आपके प्रदाता की कुंजी पर जाती है, और Skynet कोई मॉडल शुल्क नहीं लेता। [बिलिंग](/docs/concepts/billing) पढ़ें।
-- रन के सीक्रेट स्कोरर तक एनवायरनमेंट वेरिएबल के रूप में पहुँचते हैं। वेरिएबल का नाम सीक्रेट का नाम है, उदाहरण के लिए `os.environ["SEARCH_API_KEY"]`।
+- स्कोरर को रन के सीक्रेट एनवायरनमेंट वेरिएबल के रूप में नहीं मिलते। कोई सीक्रेट स्कोरर तक सिर्फ़ उस `[services.<name>]` टेबल से पहुँचता है जिसे `[metric] services` में लिखा गया है, या `[metric] mcp` फ़ाइल के किसी सर्वर से। सीक्रेट को टेबल के `headers` में `${NAME}` के रूप में लिखें। स्कोरर अपने अनुरोध `SKYNET_SERVICE_<NAME>_URL` वाले URL पर भेजता है। Skynet सीक्रेट को सैंडबॉक्स के बाहर जोड़ता है।
 - Skynet स्कोरर के आउटपुट और लॉग में सीक्रेट मान छिपाता है।
 
 ## सीमाएँ

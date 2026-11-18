@@ -57,7 +57,7 @@ Skynet 對運行、檔案、儲存空間同請求速率設有限制。呢啲限�
 | 資料夾深度           | 3 層資料夾                                                              |
 | 檔案類型             | `.py`、`.txt`、`.md`、`.json`、`.yaml`、`.csv`、`.toml`、`.ini`、`.cfg` |
 
-`scorer.py` 裝住你嘅評分器。Skynet 會為每個案例呼叫佢嘅 `score(repo_path, case)` 函數。
+`scorer.py` 裝住你嘅評分器。Skynet 會為每個案例呼叫佢嘅 `score(repo_path, case, output=None)` 函數。`output` 參數裝住 `[run]` 入口為嗰個案例回傳嘅嘢。
 
 ## 請求速率
 

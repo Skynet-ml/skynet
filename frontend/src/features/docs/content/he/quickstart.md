@@ -55,26 +55,27 @@
 
 ## 5. מדד והרצה
 
-השלב האחרון הוא **מדד והרצה**. העוזר כותב בשבילך את פונקציית הניקוד. אפשר לערוך אותה. פונקציית הניקוד מקבלת את הנתיב של גרסה אחת של המאגר ומקרה אחד:
+השלב האחרון הוא **מדד והרצה**. העוזר כותב בשבילך את פונקציית הניקוד ואת הקובץ `optimize.toml`. אפשר לערוך אותם. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד מקבלת את הפלט של ה-`entry` ואת המקרה:
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return {"score": 1.0, "feedback": "Correct label."}
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-‏`case["input"]` מכיל את עמודות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את עמודת הפלט, עם שם העמודה כמפתח. במאגר יש קובץ `serve.py` עם `def serve(input)`. ‏Skynet משתמש באותה פונקציה כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
+‏`case["input"]` מכיל את עמודות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את עמודת הפלט, עם שם העמודה כמפתח. במאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו, ו-`output` הוא ערך ההחזרה שלו. פונקציית הניקוד רצה בתיבת sandbox נפרדת שיש בה רק את קובצי המדד שלך ואין בה קוד של גרסה, ולכן היא לא יכולה לייבא את `serve.py`. ‏Skynet משתמש באותה פונקציה כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
 
-אחר כך הרץ/הריצי את הבדיקה. הבדיקה מריצה את ההתקנה ואת פונקציית הניקוד שלך על גרסת ההתחלה ב-sandbox. אפשר להפעיל את הריצה רק אחרי שהבדיקה עוברת.
+אחר כך הרץ/הריצי את הבדיקה. הבדיקה מריצה את ההתקנה, את ה-`entry` של `[run]` ואת פונקציית הניקוד שלך על גרסת ההתחלה ב-sandbox. אפשר להפעיל את הריצה רק אחרי שהבדיקה עוברת.
 
 ## 6. הפעלה ומעקב
 
