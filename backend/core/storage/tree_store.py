@@ -49,6 +49,22 @@ def object_id_of(stored: bytes) -> str:
     return hashlib.sha256(stored).hexdigest()
 
 
+def is_git_part(name: str) -> bool:
+    """Tell whether a path part is ``.git`` in any letter case.
+
+    Case-insensitive file systems (macOS, Windows) treat ``.GIT`` as ``.git``
+    (SKY-810). New trees refuse such a part; writers of stored trees leave it
+    out, because a tree stored before SKY-810 can hold one.
+
+    Args:
+        name: One path part.
+
+    Returns:
+        Whether the part is a ``.git`` name.
+    """
+    return name.lower() == ".git"
+
+
 def encode_blob(data: bytes) -> bytes:
     """Return the stored form of a file's bytes.
 
@@ -80,8 +96,7 @@ def encode_tree(entries: Iterable[TreeEntry]) -> bytes:
     if len(set(names)) != len(names):
         raise ValueError("a tree holds the same name twice")
     for name, mode, object_id in rows:
-        # Case-insensitive file systems (macOS, Windows) treat ``.GIT`` as ``.git`` (SKY-810).
-        if name in {"", ".", ".."} or "/" in name or "\0" in name or name.lower() == ".git":
+        if name in {"", ".", ".."} or "/" in name or "\0" in name or is_git_part(name):
             raise ValueError(f"bad tree entry name: {name!r}")
         if mode not in TREE_MODES:
             raise ValueError(f"bad tree entry mode: {mode!r}")
