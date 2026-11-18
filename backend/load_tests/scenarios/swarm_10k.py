@@ -13,10 +13,15 @@ its own step log worker, as one Cloudflare Durable Object owns its own
 storage. Run ``i`` goes to shard ``i % shards``. The shard processes start
 their agents together at a barrier. In each shard process, at most
 ``MAX_DRIVERS_PER_SHARD`` driver threads serve the agents, whatever the
-agent count. Each agent commits one step every ``step_interval`` seconds,
-so the whole swarm offers ``TARGET_COMMITS_PER_SECOND`` times
-``OFFERED_LOAD_MARGIN`` steps per second;
-a real agent also waits for its model and its box between steps. Each
+agent count. Each agent is due to commit one step every ``step_interval``
+seconds, so the agents ask for ``TARGET_COMMITS_PER_SECOND`` times
+``OFFERED_LOAD_MARGIN`` steps per second. But each agent keeps only one
+step in flight, so the swarm offers at most the agent count divided by the
+step wait. The step wait is about one flush window or more (0.5 s by
+default), so fewer than about 3,000 agents cannot offer the target, and
+the default 1,000 agents are a smoke run that fails the rate gate. The
+gate needs about 10,000 agents. A real agent also waits for its model and
+its box between steps. Each
 agent starts at a seeded random offset in its first interval, so the
 agents do not commit in lock step. A step that is ready while the agent's
 last step is not durable waits for it, as each agent's engine loop waits
@@ -49,7 +54,8 @@ shards, or fewer runs than shards, the passes are not compared and the gate
 fails.
 
 The gate passes when the sharded pass commits at least
-``TARGET_COMMITS_PER_SECOND`` steps per second in the steady part, and its
+``TARGET_COMMITS_PER_SECOND`` steps per second in the steady part, the
+steady part is at least ``steady_floor_seconds`` long, and its
 step wait p99 is at most ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows: one
 window for the batch to close, and one for the pack write and the database
 commit. The sharded layout is the design, so the 1-shard pass is the
@@ -100,6 +106,10 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+# ``python -m load_tests.scenarios.swarm_10k`` does not pass through run_all: litellm, which ``core`` can
+# import, fetches its price map over HTTPS at import unless this is set. It must come before the core imports.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 from core.config import Settings
 from core.storage.models import AgentStepModel, Base, JobModel, StoragePackModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
@@ -149,6 +159,14 @@ MAX_SHARDS = 32
 # scale out, as more Durable Objects do.
 AGENTS_PER_SHARD = 800
 PASS_TIMEOUT_SECONDS = 3600
+# How often the parent checks for a shard process that died with no report.
+REPORT_POLL_SECONDS = 1.0
+# With 2 steps for each agent the steady part can be close to 0 s, and a few steps over it give any rate.
+MIN_STEPS_PER_AGENT = 5
+# The steady part must hold several flushes, so one batch at its edges does not decide the rate, and more
+# than one step of each agent.
+MIN_STEADY_FLUSH_WINDOWS = 4
+MIN_STEADY_STEP_INTERVALS = 2
 
 
 @dataclass
@@ -157,7 +175,7 @@ class SwarmConfig:
 
     Attributes:
         agents: How many agents.
-        steps_per_agent: How many steps each agent commits; at least 2, for the steady rate.
+        steps_per_agent: How many steps each agent commits; at least ``MIN_STEPS_PER_AGENT``, for the steady rate.
         shards: The step-log shards of the second pass; below 2 the passes are not compared.
         flush_window_seconds: The step log's buffer window.
         box_seconds: The assumed life of one real box, for the box load figures.
@@ -402,6 +420,22 @@ def step_interval(agent_count: int) -> float:
     return agent_count / (TARGET_COMMITS_PER_SECOND * OFFERED_LOAD_MARGIN)
 
 
+def steady_floor_seconds(config: SwarmConfig) -> float:
+    """Return the shortest steady part that the gate accepts.
+
+    Args:
+        config: The knobs.
+
+    Returns:
+        ``MIN_STEADY_FLUSH_WINDOWS`` flush windows or ``MIN_STEADY_STEP_INTERVALS`` step intervals, whichever is
+        longer.
+    """
+    return max(
+        MIN_STEADY_FLUSH_WINDOWS * config.flush_window_seconds,
+        MIN_STEADY_STEP_INTERVALS * step_interval(config.agents),
+    )
+
+
 def start_offset(run_id: str, agent_id: str, interval: float) -> float:
     """Return one agent's start offset: a seeded random point in its first step interval.
 
@@ -439,7 +473,12 @@ def _waiter(store: StepLogStore, step_id: str) -> Any:
 
 
 def _drive(
-    agents: list[tuple[str, str]], config: SwarmConfig, store: StepLogStore, boxes: FakeBoxProvider, origin: float
+    agents: list[tuple[str, str]],
+    config: SwarmConfig,
+    store: StepLogStore,
+    boxes: FakeBoxProvider,
+    origin: float,
+    stop: threading.Event,
 ) -> list[list[tuple[float, float, float]]]:
     """Run every step of a group of agents on one thread, each agent at the target pace.
 
@@ -454,10 +493,11 @@ def _drive(
         store: The shard's step log.
         boxes: The fake box provider.
         origin: The shared start on the system-wide clock.
+        stop: Set when the shard fails or gets Ctrl-C; the thread then returns at its next turn.
 
     Returns:
         For each agent, and for each seq, the moment the step was ready, the start of ``commit`` and the
-        moment the thread saw the step durable.
+        moment the thread saw the step durable; only the steps up to a stop.
 
     Raises:
         RuntimeError: When a step failed the fence, or the step log closed before the step was durable.
@@ -469,7 +509,7 @@ def _drive(
     due = [(start, index, 0) for index, start in enumerate(starts)]
     heapq.heapify(due)
     in_flight: deque[tuple[int, int, str, float, float, Any]] = deque()
-    while due or in_flight:
+    while (due or in_flight) and not stop.is_set():
         while due and due[0][0] <= _now():
             ready, index, seq = heapq.heappop(due)
             step_id, started = _commit_step(*agents[index], seq, store, boxes)
@@ -490,11 +530,12 @@ def _drive(
             if seq + 1 < config.steps_per_agent:
                 # The pace keeps to the agent's own schedule: a late step does not push back the later ones.
                 heapq.heappush(due, (max(starts[index] + (seq + 1) * interval, finished), index, seq + 1))
+        # Each wait ends within 1 s, so the thread sees a stop soon also with a long step interval.
         if in_flight:
             # Wake for the next ready step even when the oldest step is not durable yet.
-            in_flight[0][5].wait(max(0.0, due[0][0] - _now()) if due else 1.0)
+            in_flight[0][5].wait(min(1.0, max(0.0, due[0][0] - _now())) if due else 1.0)
         elif due:
-            time.sleep(max(0.0, due[0][0] - _now()))
+            stop.wait(min(1.0, max(0.0, due[0][0] - _now())))
     return steps
 
 
@@ -592,14 +633,20 @@ def _shard_process(
         boxes = FakeBoxProvider()
         barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
         started = _now()
+        stop = threading.Event()
         try:
             drivers = driver_count(len(agents))
             with ThreadPoolExecutor(max_workers=drivers, thread_name_prefix="swarm-driver") as pool:
-                groups = pool.map(
-                    lambda group: _drive(group, config, store, boxes, started),
-                    [agents[i::drivers] for i in range(drivers)],
-                )
-                done = [steps for group in groups for steps in group]
+                try:
+                    groups = pool.map(
+                        lambda group: _drive(group, config, store, boxes, started, stop),
+                        [agents[i::drivers] for i in range(drivers)],
+                    )
+                    done = [steps for group in groups for steps in group]
+                except BaseException:
+                    # The pool's exit waits for every driver, so the drivers must stop first, also on Ctrl-C.
+                    stop.set()
+                    raise
         finally:
             store.close()
             engine.dispose()
@@ -620,6 +667,45 @@ def _shard_process(
         # A shard that fails before the barrier must not leave the others waiting there.
         barrier.abort()
         results.put({"worker_id": shard["worker_id"], "error": traceback.format_exc()})
+
+
+def collect_reports(results: Any, processes: dict[str, Any], timeout: float) -> list[dict[str, Any]]:
+    """Take one report from each shard process, and fail soon when a process exits with no report.
+
+    A process puts its report before it exits, so a report can still be in the queue when the process is
+    gone. A process counts as lost only when it is still gone with no report at the next poll.
+
+    Args:
+        results: The queue that the shard processes put their reports on.
+        processes: Each shard process by its worker id.
+        timeout: The most seconds to wait for all the reports.
+
+    Returns:
+        The reports.
+
+    Raises:
+        RuntimeError: When a process exits with no report, or the reports do not all come in time.
+    """
+    deadline = time.monotonic() + timeout
+    pending = dict(processes)
+    reports: list[dict[str, Any]] = []
+    suspects: set[str] = set()
+    while pending:
+        try:
+            report = results.get(timeout=REPORT_POLL_SECONDS)
+        except queue.Empty:
+            gone = {worker_id for worker_id, process in pending.items() if not process.is_alive()}
+            lost = sorted(gone & suspects)
+            if lost:
+                codes = ", ".join(f"{worker_id} (exit code {pending[worker_id].exitcode})" for worker_id in lost)
+                raise RuntimeError(f"shard process(es) exited with no report: {codes}") from None
+            suspects = gone
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"{len(pending)} shard process(es) did not report in time") from None
+            continue
+        pending.pop(report["worker_id"], None)
+        reports.append(report)
+    return reports
 
 
 def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
@@ -679,12 +765,13 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             )
             process.start()
             processes.append(process)
-        deadline = time.monotonic() + PASS_TIMEOUT_SECONDS
-        try:
-            while len(reports) < shard_count:
-                reports.append(results.get(timeout=max(1.0, deadline - time.monotonic())))
-        except queue.Empty as error:
-            raise RuntimeError(f"{shard_count - len(reports)} shard process(es) did not report in time") from error
+        reports.extend(
+            collect_reports(
+                results,
+                {shard.worker_id: process for shard, process in zip(shards, processes, strict=True)},
+                PASS_TIMEOUT_SECONDS,
+            )
+        )
         errors = [report["error"] for report in reports if "error" in report]
         if errors:
             raise RuntimeError("a shard process failed:\n" + "\n".join(errors))
@@ -782,15 +869,20 @@ def run(config: SwarmConfig) -> ScenarioResult:
         config: The knobs.
 
     Returns:
-        The scenario result; ``slo_passed`` needs, on the sharded pass, the target steady commit rate and a step
-        wait p99 of at most ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, and the same step log on both layouts.
+        The scenario result; ``slo_passed`` needs, on the sharded pass, the target steady commit rate over a
+        steady part of at least ``steady_floor_seconds``, a step wait p99 of at most
+        ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, and the same step log on both layouts.
 
     Raises:
-        ValueError: When an agent commits fewer than 2 steps (the steady rate needs a step after the first), or
-            when the shards are more than ``MAX_SHARDS``.
+        ValueError: When there is no agent, an agent commits fewer than ``MIN_STEPS_PER_AGENT`` steps, or the
+            shards are more than ``MAX_SHARDS``.
     """
-    if config.steps_per_agent < 2:
-        raise ValueError(f"the swarm needs at least 2 steps for each agent, got {config.steps_per_agent}")
+    if config.agents < 1:
+        raise ValueError(f"the swarm needs at least 1 agent, got {config.agents}")
+    if config.steps_per_agent < MIN_STEPS_PER_AGENT:
+        raise ValueError(
+            f"the swarm needs at least {MIN_STEPS_PER_AGENT} steps for each agent, got {config.steps_per_agent}"
+        )
     if config.shards > MAX_SHARDS:
         raise ValueError(f"the swarm starts at most {MAX_SHARDS} shard processes, got {config.shards}")
     runs = math.ceil(config.agents / AGENTS_PER_RUN)
@@ -813,6 +905,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
     )
     gated = passes[-1]
     max_wait_ms = round(1000 * MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds, 2)
+    min_steady_seconds = steady_floor_seconds(config)
     result = metrics.finish()
     result.extras = {
         "agents": config.agents,
@@ -831,6 +924,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "target_commits_per_second": TARGET_COMMITS_PER_SECOND,
         "offered_commits_per_second": round(TARGET_COMMITS_PER_SECOND * OFFERED_LOAD_MARGIN, 1),
         "max_step_wait_p99_ms": max_wait_ms,
+        "min_steady_seconds": round(min_steady_seconds, 3),
         "gated_pass_shards": gated["shards"],
         "passes": passes,
         "same_step_log": same_step_log,
@@ -849,6 +943,11 @@ def run(config: SwarmConfig) -> ScenarioResult:
         violations.append(
             f"{gated['shards']}-shard steady commit rate {gated['commits_per_second']}/s"
             f" is below {TARGET_COMMITS_PER_SECOND}/s"
+        )
+    if gated["steady_seconds"] < min_steady_seconds:
+        violations.append(
+            f"{gated['shards']}-shard steady part is {gated['steady_seconds']} s, shorter than"
+            f" {round(min_steady_seconds, 3)} s: give each agent more steps"
         )
     if gated["step_wait_ms"]["p99"] > max_wait_ms:
         violations.append(

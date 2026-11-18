@@ -12,7 +12,9 @@ Knobs (env or flag):
 
 The SKY-727 scenarios (reference_shapes, chaos_gate, swarm_10k) run in
 process with a mock model and local or fake boxes. When only they are
-selected, the orchestrator starts no stack:
+selected, the orchestrator starts no stack. The swarm runs only when
+named: its rate gate needs about 10,000 agents, and its default 1,000
+agents always fail it:
 
     .venv/bin/python -m load_tests.run_all --scenarios=chaos_gate,swarm_10k --swarm-agents=10000
 
@@ -77,6 +79,10 @@ _SCENARIOS: dict[str, ScenarioFn] = {
 
 # These scenarios need no compose stack: they run the new path in process and spend no money (SKY-727).
 _IN_PROCESS_SCENARIOS = frozenset({"reference_shapes", "chaos_gate", "swarm_10k"})
+# The swarm runs only when named: below about 3,000 agents it cannot offer its target rate, so its default
+# 1,000 agents would fail every default run.
+_OPT_IN_SCENARIOS = frozenset({"swarm_10k"})
+_DEFAULT_SCENARIOS = [name for name in _SCENARIOS if name not in _OPT_IN_SCENARIOS]
 
 # Each flag sets the environment variable that its scenario reads, so the scenario also runs alone.
 _SCENARIO_KNOBS = (
@@ -93,7 +99,7 @@ _SCENARIO_KNOBS = (
     (
         "--swarm-steps-per-agent",
         "LOAD_TEST_SWARM_STEPS_PER_AGENT",
-        "swarm steps of each agent, at least 2 (default: 10)",
+        f"swarm steps of each agent, at least {swarm_10k.MIN_STEPS_PER_AGENT} (default: 10)",
     ),
     (
         "--swarm-shards",
@@ -128,8 +134,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenarios",
-        default=",".join(_SCENARIOS),
-        help=f"Comma-separated scenario list from: {', '.join(_SCENARIOS)} (default: all, in this order)",
+        default=",".join(_DEFAULT_SCENARIOS),
+        help=(
+            f"Comma-separated scenario list from: {', '.join(_SCENARIOS)}"
+            f" (default: all but {', '.join(sorted(_OPT_IN_SCENARIOS))}, in this order)"
+        ),
     )
     parser.add_argument(
         "--compose-file",

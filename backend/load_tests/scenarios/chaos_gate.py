@@ -13,8 +13,9 @@ random and arms one kill:
   from the committed steps.
 
 The gate passes only when 100% of the runs finish, every agent's step log
-has no gap, and a replay of each finished run gives the same result with no
-model call, no box and no new step.
+has no gap, a resumed worker does again only the work that the killed
+worker did not commit, and a replay of each finished run gives the same
+result with no model call, no box and no new step.
 
 ``failure_injection.py`` kills real stack containers; this gate kills
 in-process boxes and workers, so it needs no stack and spends no money.
@@ -128,7 +129,12 @@ def run(config: ChaosGateConfig) -> ScenarioResult:
 
     Returns:
         The scenario result; ``slo_passed`` is ``True`` only when 100% of the runs finish correct and replayable.
+
+    Raises:
+        ValueError: When the kill interval is not above 0: the chaos job would wait 0 s and hold one core.
     """
+    if config.kill_interval_seconds <= 0:
+        raise ValueError(f"the chaos kill interval must be above 0 s, got {config.kill_interval_seconds}")
     runtime, provider = box_runtime()
     metrics = ScenarioMetrics("chaos_gate")
     plan: list[tuple[Shape, str, ChaosSwitch]] = [

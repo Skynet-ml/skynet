@@ -43,6 +43,11 @@ from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+# ``python -m load_tests.scenarios.reference_shapes`` (and ``chaos_gate``, which imports this module) does not
+# pass through run_all: litellm, which ``core`` imports, fetches its price map over HTTPS at import unless this
+# is set. It must come before the core imports.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 from core.billing.budgets import BudgetService
 from core.billing.vercel_usage import vercel_actual_usd
 from core.config import Settings
@@ -226,18 +231,64 @@ class ChaosSwitch:
             self._armed = None
 
 
+class WorkLog:
+    """Count one run's real model calls and boxes by step, to find work that a resumed worker did again.
+
+    The fake engine's steps are all different: each model prompt, and each run and score box, is for a new
+    candidate. So a step that a worker does twice is a step that its resume did not replay. That is right
+    only when a worker kill lost the step before it committed.
+    """
+
+    def __init__(self) -> None:
+        """Start with no work."""
+        self._lock = threading.Lock()
+        self.done: Counter[str] = Counter()
+        self.lost: Counter[str] = Counter()
+        # The scorer names the box step before it asks for the box, as the box source does not get the step.
+        self.box_step = ""
+
+    def did(self, step: str) -> None:
+        """Count one real model call or box.
+
+        Args:
+            step: The step's key.
+        """
+        with self._lock:
+            self.done[step] += 1
+
+    def lose(self, step: str) -> None:
+        """Count one worker kill that lost a step before it committed, so its resume may do it again.
+
+        Args:
+            step: The step's key.
+        """
+        with self._lock:
+            self.lost[step] += 1
+
+    def repeated(self) -> list[str]:
+        """Return the steps done more often than once and once more for each lost try.
+
+        Returns:
+            The keys of those steps, sorted.
+        """
+        with self._lock:
+            return sorted(step for step, count in self.done.items() if count > 1 + self.lost[step])
+
+
 class MockModel:
     """A deterministic mock model: ``improve <n>`` gets ``n + 1``. It makes no network call."""
 
-    def __init__(self, switch: ChaosSwitch | None = None, *, refuse: bool = False) -> None:
+    def __init__(self, switch: ChaosSwitch | None = None, *, refuse: bool = False, work: WorkLog | None = None) -> None:
         """Bind the model to a run's chaos switch.
 
         Args:
             switch: The run's chaos switch, or ``None`` for no chaos.
             refuse: Raise :class:`ReplayLeakError` on every call, for a replay check.
+            work: Counts the run's real calls by prompt, or ``None``.
         """
         self._switch = switch
         self._refuse = refuse
+        self._work = work
         self._lock = threading.Lock()
         self.calls = 0
 
@@ -261,6 +312,8 @@ class MockModel:
             raise WorkerKilledError
         with self._lock:
             self.calls += 1
+        if self._work is not None:
+            self._work.did(f"model {prompt}")
         return ModelReply(text=str(int(str(prompt).split()[-1]) + 1), cost_cents=MODEL_COST_CENTS)
 
 
@@ -356,15 +409,19 @@ class FakeModalRuntime:
 class _MeteredBox:
     """A box that the meter times and the chaos job can kill."""
 
-    def __init__(self, inner: SandboxSession, switch: ChaosSwitch | None) -> None:
+    def __init__(self, inner: SandboxSession, switch: ChaosSwitch | None, work: WorkLog | None, step: str) -> None:
         """Wrap one open box.
 
         Args:
             inner: The open box.
             switch: The run's chaos switch, or ``None``.
+            work: The run's work log, or ``None``.
+            step: The key of the box's step in the work log.
         """
         self._inner = inner
         self._switch = switch
+        self._work = work
+        self._step = step
         self._killed = False
 
     def write_files(self, files: Mapping[str, str]) -> None:
@@ -391,6 +448,9 @@ class _MeteredBox:
         """
         kill = self._switch.take("box") if self._switch is not None else None
         if kill == "worker":
+            # The step commits only after its command, so the killed worker loses it and the resume does it again.
+            if self._work is not None:
+                self._work.lose(self._step)
             raise WorkerKilledError
         if kill == "box":
             self._killed = True
@@ -426,6 +486,7 @@ class MeteredSource(RuntimeBoxSource):
         switch: ChaosSwitch | None = None,
         *,
         refuse: bool = False,
+        work: WorkLog | None = None,
     ) -> None:
         """Bind the source to a runtime, its spec, the run's meter and the run's chaos switch.
 
@@ -435,11 +496,13 @@ class MeteredSource(RuntimeBoxSource):
             meter: Meters the boxes.
             switch: The run's chaos switch, or ``None``.
             refuse: Raise :class:`ReplayLeakError` on every acquire, for a replay check.
+            work: Counts the run's real boxes by step, or ``None``.
         """
         super().__init__(runtime, spec)
         self._meter = meter
         self._switch = switch
         self._refuse = refuse
+        self._work = work
         self._started: dict[int, float] = {}
 
     def acquire(self, agent_id: str, grants: Any) -> SandboxSession:
@@ -457,8 +520,11 @@ class MeteredSource(RuntimeBoxSource):
         """
         if self._refuse:
             raise ReplayLeakError("the replay opened a box")
-        box = _MeteredBox(super().acquire(agent_id, grants), self._switch)
+        step = self._work.box_step if self._work is not None else ""
+        box = _MeteredBox(super().acquire(agent_id, grants), self._switch, self._work, step)
         self._started[id(box)] = self._meter.started()
+        if self._work is not None:
+            self._work.did(step)
         return box
 
     def release(self, box: SandboxSession, healthy: bool) -> None:
@@ -523,8 +589,10 @@ class RunOutcome:
         steps: The committed steps.
         gapless: Whether every agent's seq runs from 0 with no gap.
         replayed: Whether a replay gave the same result with no model call, no box and no new step.
+        repeated: The steps that a resumed worker did again although they committed before the kill.
         error: The error that stopped the run, or ``None``.
         meter: The run's box meter.
+        work: The run's real work by step.
     """
 
     run_id: str
@@ -537,13 +605,15 @@ class RunOutcome:
     steps: int = 0
     gapless: bool = False
     replayed: bool = False
+    repeated: list[str] = field(default_factory=list)
     error: str | None = None
     meter: BoxMeter = field(default_factory=BoxMeter)
+    work: WorkLog = field(default_factory=WorkLog)
 
     @property
     def ok(self) -> bool:
-        """Return whether the run finished with a correct, replayable step log."""
-        return self.finished and self.gapless and self.replayed
+        """Return whether the run finished with a correct, replayable step log and did no committed step again."""
+        return self.finished and self.gapless and self.replayed and not self.repeated
 
 
 def box_runtime() -> tuple[SandboxRuntime, str]:
@@ -703,6 +773,7 @@ class Harness:
         switch: ChaosSwitch | None = None,
         *,
         refuse: bool = False,
+        work: WorkLog | None = None,
     ) -> tuple[EngineLoop, StepLogStore, Callable[..., Any]]:
         """Start one worker incarnation of a run: its own step log, run actor, loop and scorer.
 
@@ -714,6 +785,7 @@ class Harness:
             meter: The run's box meter.
             switch: The run's chaos switch, or ``None``.
             refuse: Refuse every box, for a replay check.
+            work: Counts the run's real boxes by step, or ``None``.
 
         Returns:
             The loop, its step log and the step scorer.
@@ -739,7 +811,7 @@ class Harness:
             tags={"placement": f"gpu:{shape.gpu}"} if shape.gpu else {},
         )
         runtime = FakeModalRuntime(self.runtime, meter) if shape.gpu else self.runtime
-        source = MeteredSource(runtime, spec, meter, switch, refuse=refuse)
+        source = MeteredSource(runtime, spec, meter, switch, refuse=refuse, work=work)
         loop = EngineLoop(
             run,
             engine=self.engine,
@@ -762,9 +834,13 @@ class Harness:
             Returns:
                 The score and the side information.
             """
+            if work is not None:
+                work.box_step = f"run {candidate}"
             result, tree_id = loop.run(seed_tree, shape.command(str(candidate)))
             if not result.ok:
                 return None, {"exit_code": result.exit_code}
+            if work is not None:
+                work.box_step = f"score {candidate}"
             return loop.score(tree_id, metric_tree, shape.metric_command), {}
 
         return loop, store, scorer
@@ -827,14 +903,16 @@ def run_shape(
     """
     outcome = RunOutcome(run_id, shape.name)
     harness.add_run(run_id, shape)
-    model = MockModel(switch)
+    model = MockModel(switch, work=outcome.work)
     generation = 1
     started = time.monotonic()
     if switch is not None:
         switch.live = True
     try:
         while outcome.result is None and outcome.error is None:
-            loop, store, scorer = harness.loop(shape, run_id, generation, model, outcome.meter, switch)
+            loop, store, scorer = harness.loop(
+                shape, run_id, generation, model, outcome.meter, switch, work=outcome.work
+            )
             try:
                 result = FakeEngine(rounds).run(
                     Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context()
@@ -864,8 +942,13 @@ def run_shape(
     steps = harness.steps(run_id)
     outcome.steps = len(steps)
     outcome.gapless = _gapless(steps)
+    outcome.repeated = outcome.work.repeated()
     if outcome.finished:
         outcome.replayed = _replays(harness, shape, run_id, rounds, outcome.result)
+        if outcome.repeated:
+            outcome.error = f"a resumed worker did committed steps again: {', '.join(outcome.repeated)}"
+        elif not outcome.replayed:
+            outcome.error = "replay failed"
     return outcome
 
 
@@ -1003,6 +1086,7 @@ def outcome_report(shape: Shape, outcome: RunOutcome, model_wait_seconds: float)
         "finished": outcome.finished,
         "gapless": outcome.gapless,
         "replayed": outcome.replayed,
+        "repeated_steps": outcome.repeated,
         "result": list(outcome.result) if outcome.result else None,
         "restarts": outcome.restarts,
         "model_calls": outcome.model_calls,
