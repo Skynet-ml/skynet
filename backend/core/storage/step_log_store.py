@@ -53,7 +53,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -1001,10 +1001,9 @@ class StepLogStore:
         only reads, so no two-phase commit is needed. A step whose run records
         another shard fails the fence, so it never lands on this one.
 
-        When an entry gets no row (a stale step, a step that already has a
-        row, or an object of a job that is gone), the pack gets
-        ``needs_rewrite``, so the compactor drops the entry's bytes. An
-        object that already has a row does not mark the pack.
+        When an entry gets no row (a stale step, a step or object that
+        already has a row, or an object of a job that is gone), the pack
+        gets ``needs_rewrite``, so the compactor drops the entry's bytes.
 
         Args:
             shard: The shard that records the pack.
@@ -1134,19 +1133,10 @@ class StepLogStore:
                 )
                 .on_conflict_do_nothing()
             ).rowcount
-        object_missing = any(entry["run_id"] not in jobs for entry in objects)
-        if not object_missing and landed_objects < len(owned):
-            # Repeated blobs are common, and a mark for each copy would make the compactor rewrite most
-            # packs. A copy of an object that already has a row only wastes its few bytes (SKY-733).
-            present = session.scalar(
-                select(func.count())
-                .select_from(TreeObjectModel)
-                .where(tuple_(TreeObjectModel.username, TreeObjectModel.object_id).in_(list(owned)))
-            )
-            object_missing = present < len(owned)
-        if landed_steps < len(steps) or object_missing:
+        if landed_steps < len(steps) or landed_objects < len(objects):
             # No row points at those bytes. A pack over half the merge target is a candidate only with
-            # the mark, so without it the bytes of a deleted account could stay forever (SKY-733).
+            # the mark, so without it the bytes of a deleted account could stay forever (SKY-733). This
+            # includes a duplicate object: the purge marks only the pack of its first copy's row.
             session.execute(
                 update(StoragePackModel).where(StoragePackModel.pack_key == pack_key).values(needs_rewrite=True)
             )

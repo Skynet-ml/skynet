@@ -614,8 +614,8 @@ def test_a_mixed_pack_applied_after_an_account_is_gone_is_marked_and_rewritten(
     assert _marked(engine) == set()
 
 
-def test_a_pack_with_an_object_that_already_has_a_row_is_not_marked(engine: Engine, objects: LocalObjectStore) -> None:
-    """A second run stores the same blob again: the copy gets no row, and the pack does not get the mark.
+def test_a_pack_with_an_object_that_already_has_a_row_is_marked(engine: Engine, objects: LocalObjectStore) -> None:
+    """A second run stores the same blob again: the copy gets no row, so the second pack gets the mark.
 
     Args:
         engine: The test engine.
@@ -632,53 +632,52 @@ def test_a_pack_with_an_object_that_already_has_a_row_is_not_marked(engine: Engi
         step_log.flush()
     finally:
         step_log.close()
-    assert len(set(objects.list("")) - {first}) == 1
+    (second,) = set(objects.list("")) - {first}
     with Session(engine) as session:
         assert session.scalar(select(TreeObjectModel.pack_key).where(TreeObjectModel.object_id == blob)) == first
-    assert _marked(engine) == set()
+    assert _marked(engine) == {second}
 
 
-def test_a_pack_with_an_object_whose_row_is_gone_after_the_insert_is_marked(
-    engine: Engine, objects: LocalObjectStore
+def test_an_account_delete_erases_the_bytes_of_a_duplicate_in_a_shared_pack(
+    engine: Engine, objects: LocalObjectStore, tmp_path: Path
 ) -> None:
-    """An object row that another transaction deletes after the insert skips it leaves no row, so the pack is marked.
+    """A copy of an object whose row points at another pack leaves no byte of the deleted account after compaction.
+
+    The purge deletes the row, which points at the first pack, so only the flush's mark makes the compactor
+    rewrite the shared second pack.
 
     Args:
         engine: The test engine.
         objects: The test object store.
+        tmp_path: Pytest's temporary folder.
     """
+    root = tmp_path / "objects"
     step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
-
-    def delete_the_row(connection, cursor, statement, parameters, context, executemany) -> None:
-        """Delete the first copy's row right after the second flush inserts its objects, as a purge could.
-
-        Args:
-            connection: The connection.
-            cursor: The DB-API cursor.
-            statement: The SQL text.
-            parameters: The statement parameters.
-            context: The execution context.
-            executemany: Whether the call is an executemany.
-        """
-        if statement.startswith("INSERT INTO tree_objects"):
-            connection.execute(delete(TreeObjectModel).where(TreeObjectModel.object_id == blob))
-
     try:
         trees = TreeStore(step_log)
-        blob = trees.put_blob("job-1", b"same bytes")
+        blob = trees.put_blob("job-1", b"ada secret")
         step_log.flush()
         (first,) = objects.list("")
-        trees.put_blob("job-2", b"same bytes")
-        trees.put_blob("job-2", b"new bytes")
-        event.listen(engine, "after_cursor_execute", delete_the_row)
-        try:
-            step_log.flush()
-        finally:
-            event.remove(engine, "after_cursor_execute", delete_the_row)
+        assert trees.put_blob("job-2", b"ada secret") == blob
+        trees.put_blob(BOB_RUN, b"bob keeps this")
+        step_log.flush()
     finally:
         step_log.close()
     (second,) = set(objects.list("")) - {first}
+    assert b"ada secret" in objects.get(second)
     assert _marked(engine) == {second}
+
+    _purge(engine, _deleter(root, []))
+    assert first not in objects.list("")
+    # A target of one byte makes every pack full, so only the mark makes the shared pack a candidate.
+    assert _compact(engine, objects, root) == 1
+
+    remaining = objects.list("")
+    assert second not in remaining
+    assert remaining
+    assert not [key for key in remaining if b"ada secret" in objects.get(key)]
+    assert [key for key in remaining if b"bob keeps this" in objects.get(key)]
+    assert _rows(engine, "ada", ADA_RUNS)[0] == 0
 
 
 def test_a_pack_with_a_stale_step_is_marked_and_rewritten_without_it(
