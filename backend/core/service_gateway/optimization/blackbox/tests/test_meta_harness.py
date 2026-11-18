@@ -734,10 +734,11 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 2
 
 
+@pytest.mark.parametrize("bad", [math.inf, math.nan])
 def test_a_non_finite_score_sends_no_case_event_and_no_per_case_score(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    bad: float, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """As in the native runner, a NaN or infinite score is no score in the climb view."""
+    """As in the native runner, a NaN or infinite score is no score: it gets the scored mean and marks the crash."""
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
         """Score the first case as infinite, and the second by length.
@@ -751,20 +752,39 @@ def test_a_non_finite_score_sends_no_case_event_and_no_per_case_score(
             The score and no side information.
         """
         del loop
-        return (math.inf if case == _CASES[0] else float(len(str(candidate)))), {}
+        return (bad if case == _CASES[0] else float(len(str(candidate)))), {}
 
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     events: list[tuple[str, dict[str, Any]]] = []
     ctx = loop.context(progress_callback=lambda kind, data: events.append((kind, data)))
     adapter = meta_mod._UpstreamServer(loop.server(score, max_evals=20), list(_CASES), ctx)
 
-    adapter.evaluate_examples("seed")
+    mean, info = adapter.evaluate_examples("seed")
     adapter.log_progress(4.0, "seed")
+
+    assert mean == 4.0
+    assert info["scores"] == {"0": 4.0, "1": 4.0}
+    assert info[native_engines.UNSCORED_CASES_KEY] == ["0"]
 
     cases = [(data["example_id"], data["score"]) for kind, data in events if kind == PROGRESS_CASE_SCORED]
     assert cases == [("1", 4.0)]
     candidates = [data["per_example"] for kind, data in events if kind == PROGRESS_CANDIDATE]
     assert candidates == [[{"id": "1", "score": 4.0}]]
+
+
+def test_a_sweep_with_no_scored_case_lists_every_case_as_unscored(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """As in the native runner, a sweep with no finite score keeps the unscored mean and lists every case."""
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    scores = iter([math.nan, None])
+    server = loop.server(lambda _loop, _candidate, _case: (next(scores), {}), max_evals=20)
+    adapter = meta_mod._UpstreamServer(server, list(_CASES), loop.context())
+
+    mean, info = adapter.evaluate_examples("seed")
+
+    assert mean == float("-inf")
+    assert info[native_engines.UNSCORED_CASES_KEY] == ["0", "1"]
 
 
 def test_a_full_sweep_logs_its_start_as_the_native_runner_does(

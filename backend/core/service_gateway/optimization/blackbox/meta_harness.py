@@ -234,16 +234,20 @@ class _UpstreamServer:
                     ),
                 )
                 emit_case_scored(self._progress, trial=trial, example_id=eid, score=score, total=len(pairs))
-        filled = fill_unscored([candidate] * len(scores), scores)
+        # As in the native runner, a NaN or infinite case is a metric error: it must not make the mean
+        # non-finite, and it marks the version as crashed.
+        scored = [score if score is not None and math.isfinite(score) else None for score in scores]
+        filled = fill_unscored([candidate] * len(scored), scored)
         names = [eid for eid, _ in pairs]
         self._sweeps[candidate_key(candidate)] = [
-            (eid, score) for eid, score in zip(names, scores, strict=True) if score is not None and math.isfinite(score)
+            (eid, score) for eid, score in zip(names, scored, strict=True) if score is not None
         ]
+        # A sweep that scored no case lists every case, as in the native runner, so no engine ranks it as scored.
         return sum(filled) / len(filled), {
             "scores": dict(zip(names, filled, strict=True)),
             "infos": infos,
             "num_evaluated": len(pairs),
-            native_engines.UNSCORED_CASES_KEY: [eid for eid, score in zip(names, scores, strict=True) if score is None],
+            native_engines.UNSCORED_CASES_KEY: [eid for eid, score in zip(names, scored, strict=True) if score is None],
         }
 
     def log_progress(
