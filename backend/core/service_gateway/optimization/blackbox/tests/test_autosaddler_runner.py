@@ -480,7 +480,8 @@ def test_a_worker_run_where_no_version_has_a_score_fails_clearly(tmp_path: Path)
 def test_a_worker_run_rejects_a_child_with_a_failed_run_case_in_training(tmp_path: Path) -> None:
     """A child that fails a ``[run]`` entry in training never passes acceptance, even if it scores high elsewhere.
 
-    The seed has no score on either case, so a plain mean comparison over the floor would accept the child
+    The seed has a metric error on case 0 and a score on case 1. The child fails ``[run]`` on case 0 and wins
+    on case 1, the only case both versions score, so a comparison over the matched cases would accept it
     (SKY-751).
 
     Args:
@@ -491,7 +492,7 @@ def test_a_worker_run_rejects_a_child_with_a_failed_run_case_in_training(tmp_pat
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
 
     def score(request: dict[str, Any]) -> dict[str, Any] | None:
-        """Give the seed a metric error on each case, and each child a failed ``[run]`` entry on case 0.
+        """On case 0, give the seed a metric error and each child a failed ``[run]`` entry.
 
         Args:
             request: The evaluate request.
@@ -499,9 +500,9 @@ def test_a_worker_run_rejects_a_child_with_a_failed_run_case_in_training(tmp_pat
         Returns:
             The reply, or ``None`` to score by vowel density.
         """
-        if request["candidate"] == "bcd":
-            return _METRIC_ERROR
-        return _RUN_FAILED if request["example"]["id"] == 0 else None
+        if request["example"]["id"] != 0:
+            return None
+        return _METRIC_ERROR if request["candidate"] == "bcd" else _RUN_FAILED
 
     requests, result = _run_worker(python, tmp_path / "run", _worker_payload(2), {}, host=_ScriptedScoreHost(score))
 
