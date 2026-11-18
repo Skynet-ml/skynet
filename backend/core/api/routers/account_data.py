@@ -128,8 +128,11 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 account's confirmation password is missing or does not match.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
                 the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
-                is not set, or boto3 is missing. The database rows stay, so
-                the account is not deleted.
+                is not set or the bucket client cannot be built (for example,
+                boto3 is missing or no region is set). Also when the compactor
+                keeps moving the account's packs for ``PACK_LOCK_TRIES``
+                tries; a retry can succeed. The database rows stay, so the
+                account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking

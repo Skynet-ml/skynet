@@ -33,8 +33,10 @@ deletes a younger pack that no row points at once the grace time ends.
 The S3 delete happens only after the transaction commits, in
 :func:`delete_unused_packs`. A rollback after the purge then keeps every
 pack that the account's rows still point at. Before the commit, the purge
-only checks that it can open the bucket, so a deletion with packs to delete
-and no bucket fails. The unused packs keep their ``storage_packs`` rows,
+only builds the delete function and does not contact the bucket. A deletion
+with packs to delete fails when ``SKYNET_TREE_BUCKET`` is not set or the
+client cannot be built. A wrong bucket name or a missing S3 permission shows
+only after the commit, as a logged error with a 200 answer. The unused packs keep their ``storage_packs`` rows,
 which no row points at, until their objects are gone. If the delete after
 the commit fails, the compactor deletes those packs in its next pass
 (:meth:`TreeCompactor.remove_retired`).
@@ -343,7 +345,9 @@ def purge_user(
         The count of deleted rows, the unused packs, and the delete function for them.
 
     Raises:
-        TreePurgeError: When a pack must go and ``SKYNET_TREE_BUCKET`` is not set, or boto3 is missing.
+        TreePurgeError: When a pack must go and ``SKYNET_TREE_BUCKET`` is not set or the bucket client
+            cannot be built (for example, boto3 is missing or no region is set). Also when the
+            account's packs keep moving for ``PACK_LOCK_TRIES`` tries; a retry can succeed.
     """
     run_ids = sorted(run_ids)
     # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the

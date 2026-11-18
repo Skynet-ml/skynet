@@ -532,7 +532,10 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     Raises:
         TreePurgeError: When the account has tree packs to delete and
-            ``SKYNET_TREE_BUCKET`` is not set, or boto3 is missing.
+            ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
+            built (for example, boto3 is missing or no region is set). Also
+            when the compactor keeps moving the account's packs for
+            ``PACK_LOCK_TRIES`` tries; a retry can succeed.
     """
     deleted = 0
     anonymized = 0
