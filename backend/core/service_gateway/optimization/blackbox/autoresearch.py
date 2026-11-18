@@ -94,10 +94,15 @@ _WRITE_UP_TURNS = 3
 # ``max_no_eval_seconds`` becomes model turns with no budget change, at a nominal 30 seconds for one model reply
 # and its tool calls. The native watchdog reads a clock; a turn count stops a resumed session at the same place.
 _SECONDS_PER_TURN = 30
-# The worker holds the carried lab in memory at each round's tree write, so the files that come back from the tree
-# are bounded: room for a few candidates of the largest size that ``evaluate`` scores, and the notebook. A file
-# past the per-file cap could never be scored, so it stays behind.
+# The worker holds the carried lab in memory at each round's tree write. This cap bounds only the agent's files
+# that come back from the tree, ``work/`` and ``notebook.md``: room for a few candidates of the largest size that
+# ``evaluate`` scores, and the notebook. A file past the per-file cap could never be scored, so it stays behind.
 _MAX_CARRY_BYTES = 4 * native_engines.MAX_CANDIDATE_BYTES
+# The archive gets one file for each new fully scored candidate, so a long run would hold GBs in worker memory at
+# the tree write and could pass the sandbox's ``MAX_TREE_BYTES`` (1 GiB). Eight candidates of the largest size, or
+# hundreds of typical ones, keep the lab tree with ``work/`` well under that limit. The worker's own archive, the
+# frontier and the ids stay complete; only the copy in the lab tree is cut.
+_MAX_ARCHIVE_BYTES = 8 * native_engines.MAX_CANDIDATE_BYTES
 
 
 class _UpstreamServer:
@@ -369,6 +374,12 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 "- `./eval.sh <file>` is a **full evaluation**",
                 "- The `evaluate` tool with only a `file` is a **full evaluation**",
             ),
+            (
+                "`archive/<id>.txt` holds every candidate that ever received a full evaluation, with scores in "
+                "`archive/index.tsv`.",
+                "`archive/<id>.txt` holds the best candidates that ever received a full evaluation, up to a size "
+                "cap; `archive/index.tsv` has the scores of all of them.",
+            ),
             ("- If `eval.sh` prints", "- If the `evaluate` tool answers"),
         ]
         if self.example_ids:
@@ -403,11 +414,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         assert ctx.call_model is not None
         start_used = server.budget.used
         quota = self._round_quota(server)
-        files = {
-            path.relative_to(self.work_dir).as_posix(): path.read_bytes()
-            for path in sorted(self.work_dir.rglob("*"))
-            if path.is_file()
-        }
+        files = self._lab_files()
         # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
         tree = ctx.put_files(files, None)
         messages: list[dict[str, Any]] = [{"role": "user", "content": self._round_prompt(directive)}]
@@ -498,6 +505,36 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             killed=killed,
         )
 
+    def _lab_files(self) -> dict[str, bytes]:
+        """Read the local lab for the round's tree, with the archived candidates cut to the archive cap.
+
+        The archived candidates come best score first, and on a tie the newest first. One that would pass the cap
+        stays out, and the scan goes on. Its bytes are never read: the cap checks each file's size first.
+
+        Returns:
+            The file bytes, keyed by path inside the lab.
+        """
+        ranking = self._ranking()
+        # Every archived candidate has a full score. A score that is not finite ranks last, so a NaN cannot break
+        # the sort; the id order breaks a tie.
+        order = {
+            f"archive/{cid}{self.suffix}": (score if math.isfinite(score := ranking[candidate]) else -math.inf, place)
+            for place, (candidate, cid) in enumerate(self._ids.items())
+        }
+        paths = {
+            path.relative_to(self.work_dir).as_posix(): path
+            for path in sorted(self.work_dir.rglob("*"))
+            if path.is_file()
+        }
+        total = 0
+        for name in sorted(order.keys() & paths.keys(), key=order.__getitem__, reverse=True):
+            size = paths[name].stat().st_size
+            if total + size > _MAX_ARCHIVE_BYTES:
+                del paths[name]
+                continue
+            total += size
+        return {name: path.read_bytes() for name, path in paths.items()}
+
     def _evaluate(self, server: Any, tree: str, call: dict[str, Any]) -> str:
         """Score a lab file as the upstream HTTP handler that ``eval.sh`` calls does.
 
@@ -517,7 +554,11 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             return refused
         arguments = loop_tools.arguments(call) or {}
         file = arguments.get("file")
-        example_ids = arguments.get("example_ids") or None
+        # Only a missing key, null or an empty list asks for a full sweep: any other value that is not a list of
+        # strings, such as "" or 0, gets the error and spends nothing.
+        example_ids = arguments.get("example_ids")
+        if example_ids == []:
+            example_ids = None
         path = posixpath.normpath(file) if isinstance(file, str) and file else ""
         if not path or path == ".." or path.startswith(("../", "/")):
             return json.dumps({"error": "Give `file` as a path inside the lab."}, ensure_ascii=False)

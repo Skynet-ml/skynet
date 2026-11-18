@@ -616,6 +616,11 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
     [
         ({"file": "work/bad.txt"}, "is not UTF-8 text"),
         ({"file": "work/c1.txt", "example_ids": [["a"]]}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": ""}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": 0}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": False}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": {}}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": "abc"}, "list of example id strings"),
         ({"file": "work/c1.txt", "example_ids": ["zzz"]}, "Unknown or sealed example_ids"),
     ],
 )
@@ -647,6 +652,39 @@ def test_a_bad_evaluate_input_gets_an_error_result_and_spends_no_budget(
 
     assert error in _tool_result(model, 3)["error"]
     assert _tool_result(model, 4)["budget"] == {"used": 2, "remaining": 0}
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
+
+
+@pytest.mark.parametrize("extra", [{}, {"example_ids": None}, {"example_ids": []}], ids=["missing", "null", "empty"])
+def test_no_example_ids_runs_a_full_evaluation(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    extra: dict[str, Any],
+) -> None:
+    """A missing key, null or an empty list scores every visible example and logs a checkpoint.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        extra: The ``example_ids`` argument, if any.
+    """
+    model = _Researcher([_WRITE, _evaluate(**extra)])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, max_evals=2, stop_at_score=None)
+
+    answer = _tool_result(model, 2)
+    assert (answer["num_evaluated"], answer["budget"]) == (2, {"used": 2, "remaining": 0})
+    assert [(data["candidate_id"], data["score"]) for kind, data in events if kind == PROGRESS_CANDIDATE] == [
+        ("0", 5.0)
+    ]
     assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
 
 
@@ -1506,6 +1544,103 @@ def test_the_carried_lab_skips_files_past_the_caps_the_same_way_on_a_resume(
         _run(loop)
 
     assert sorted(path.name for path in (_lab(tmp_path, 2) / "work").iterdir()) == ["a", "c", "seed.txt"]
+
+
+def test_the_lab_tree_carries_the_best_archived_candidates_up_to_the_archive_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive in the lab tree is best first, newest first on a tie, under the cap; skipped files are not read.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(ar_mod, "_MAX_ARCHIVE_BYTES", 10)
+    config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(tmp_path), engine_config={"model": ""})
+    worker = ar_mod._WorkerAutoResearch(
+        config, EngineContext(reflection_lm=str, run_dir=str(tmp_path)), max_tool_calls=100
+    )
+    (worker.work_dir / "archive").mkdir(parents=True)
+    (worker.work_dir / "archive" / "index.tsv").write_text("id\tscore\tround\n", encoding="utf-8")
+    (worker.work_dir / "notebook.md").write_text("notes", encoding="utf-8")
+    # In order of the walk: c005 (11 bytes, past the cap alone), the 3.0 tie newest first: c006 (at 4), c004 (at
+    # 8), c002 (past the cap), then c001 (at 10) and last c003, whose score is not finite (past the cap).
+    for text, score in [("aa", 1.0), ("bbbb", 3.0), ("cc", math.nan), ("dddd", 3.0), ("e" * 11, 9.0), ("ffff", 3.0)]:
+        worker._observe(native_engines.Observation(text, score, {}, {}, True, 1))
+    reads: list[str] = []
+    read_bytes = Path.read_bytes
+
+    def recorded(path: Path) -> bytes:
+        """Record each local file read.
+
+        Args:
+            path: The file.
+
+        Returns:
+            The file bytes.
+        """
+        reads.append(path.relative_to(worker.work_dir).as_posix())
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", recorded)
+
+    files = worker._lab_files()
+
+    archived = {name: data for name, data in files.items() if name.startswith("archive/c")}
+    assert archived == {"archive/c006.txt": b"ffff", "archive/c004.txt": b"dddd", "archive/c001.txt": b"aa"}
+    assert sum(map(len, archived.values())) <= ar_mod._MAX_ARCHIVE_BYTES
+    assert {"archive/index.tsv", "notebook.md"} <= files.keys()
+    assert sorted(reads) == sorted(files)
+    # The worker's own archive stays complete.
+    assert len(list((worker.work_dir / "archive").glob("c*.txt"))) == 6
+
+
+def test_a_run_writes_a_lab_tree_with_the_archive_under_its_cap(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each round's tree holds the best archived candidates that fit the cap; the run still finds the best one.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(ar_mod, "_MAX_ARCHIVE_BYTES", 13)
+    writes: list[dict[str, bytes]] = []
+    put_files = EngineLoop.put_files
+
+    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None) -> str:
+        """Record each tree write.
+
+        Args:
+            loop: The engine loop.
+            files: The file bytes by path.
+            base_tree_id: The base tree.
+
+        Returns:
+            The new tree's id.
+        """
+        writes.append(dict(files))
+        return put_files(loop, files, base_tree_id)
+
+    monkeypatch.setattr(EngineLoop, "put_files", recorded)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    result = _run(loop, max_evals=8, stop_at_score=None)
+
+    # Round 4 starts with seedx (c001, 5 bytes), seedxx (c002, 6) and seedxxx (c003, 7) in the archive.
+    archived = {name: data for name, data in writes[3].items() if name.startswith("archive/c")}
+    assert archived == {"archive/c003.txt": b"seedxxx", "archive/c002.txt": b"seedxx"}
+    assert len(list((_lab(tmp_path) / "archive").glob("c*.txt"))) == 4
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedxxxx", 8.0, 8)
 
 
 def test_a_lab_file_the_local_file_system_refuses_stays_behind(
