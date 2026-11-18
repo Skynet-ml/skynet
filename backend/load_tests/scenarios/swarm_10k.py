@@ -11,22 +11,22 @@ step with the tree id. About 100 agents share one run (one ``jobs`` row).
 Each step-log shard runs in its own OS process, with its own database on
 SQLite (one shared Postgres database otherwise) and its own step log worker,
 as one Cloudflare Durable Object owns its own storage. Run ``i`` goes to
-shard ``i % shards``. The shard processes start their agents together at
-a barrier. In each shard process, at most ``MAX_DRIVERS_PER_SHARD`` driver
-threads serve the agents, whatever the agent count. Each agent is due to commit one step every ``step_interval``
-seconds, so the agents ask for ``TARGET_COMMITS_PER_SECOND`` times
-``OFFERED_LOAD_MARGIN`` steps per second. But each agent keeps only one
-step in flight, so the swarm offers at most the agent count divided by the
-step wait. The step wait is about one flush window or more (0.5 s by
-default), so fewer than about 3,000 agents cannot offer the target, and
-the default 1,000 agents are a smoke run that fails the rate gate. The
-gate needs about 10,000 agents. A real agent also waits for its model and
-its box between steps. Each agent starts at a seeded random offset in its
-first interval, so the agents do not commit in lock step. A step that is
-ready while the agent's last step is not durable waits for it, as each
-agent's engine loop waits only for its own steps. A driver commits each
-ready step at once and does not wait for one agent's step to commit
-another agent's step.
+shard ``i % shards``. The shard processes start their agents together at a
+barrier. In each shard process, at most ``MAX_DRIVERS_PER_SHARD`` driver
+threads serve the agents, whatever the agent count. Each agent is due to
+commit one step every ``step_interval`` seconds, so the agents ask for
+``TARGET_COMMITS_PER_SECOND`` times ``OFFERED_LOAD_MARGIN`` steps per
+second. But each agent keeps only one step in flight, so the swarm offers at
+most the agent count divided by the step wait. The step wait is about one
+flush window or more (0.5 s by default), so fewer than about 3,000 agents
+cannot offer the target, and the default 1,000 agents are a smoke run that
+fails the rate gate. The gate needs about 10,000 agents. A real agent also
+waits for its model and its box between steps. Each agent starts at a seeded
+random offset in its first interval, so the agents do not commit in lock
+step. A step that is ready while the agent's last step is not durable waits
+for it, as each agent's engine loop waits only for its own steps. A driver
+commits each ready step at once and does not wait for one agent's step to
+commit another agent's step.
 
 The scenario measures, across all shard processes on one system-wide
 monotonic clock:
@@ -56,10 +56,10 @@ monotonic clock:
 
 The swarm runs on 1 shard process, on 2, then on ``shards`` shard processes.
 Each shard count runs once, so with ``shards`` of 2 the 2-shard pass is the
-gated pass. Every pass must give the same step log. The 2-shard pass checks
-only the step log: at 10,000 agents, 2 shards cannot keep the step wait
-under its limit. With fewer than 2 shards, or fewer runs than shards, the
-passes are not compared and the gate fails.
+gated pass. Every pass must give the same step log. When ``shards`` is more
+than 2, the 2-shard pass checks only the step log: at 10,000 agents, 2
+shards cannot keep the step wait under its limit. With fewer than 2 shards,
+or fewer runs than shards, the passes are not compared and the gate fails.
 
 The gate passes when the sharded pass commits at least
 ``TARGET_COMMITS_PER_SECOND`` steps per second in the steady part, the
