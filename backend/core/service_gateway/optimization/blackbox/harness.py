@@ -86,6 +86,9 @@ from .harnesses.prime import _prime_agent_launch as _prime_agent_launch
 # Set for a custom harness only when the run chose an effort, so its command
 # can read the level without it ever being spliced into the command text.
 ENV_REASONING_EFFORT = "APP_REASONING_EFFORT"
+# The open standard's name for the task file a custom command reads (SKY-753);
+# APP_PROMPT_FILE stays until the variable rename lands (SKY-776).
+ENV_TASK_FILE = "ASCENT_TASK"
 # Substituted verbatim into a custom harness's commands; the env vars above
 # are the quoting-safe alternative. Saved custom commands may still use the
 # ``SKYNET_*`` spellings, so every launch sets both.
@@ -304,6 +307,22 @@ def host_cli_launch(model: str, gateway: GatewayConfig, host_cli: str, host_agen
     )
 
 
+def mcp_unsupported(name: str) -> str:
+    """Explain that a proposer cannot load the ``[proposer] mcp`` servers.
+
+    Args:
+        name: The proposer, such as ``custom`` or ``host CLI codex``.
+
+    Returns:
+        The message, which names the cause and the fix.
+    """
+    return (
+        f"The {name} proposer harness cannot load the [proposer] mcp servers yet. "
+        f"Use one of these harnesses: {', '.join(MCP_HARNESSES)}, "
+        "or remove [proposer] mcp from optimize.toml."
+    )
+
+
 def _fill(command: str | None, model: str, gateway: GatewayConfig, *, protected: bool = False) -> str | None:
     """Substitute the custom-harness placeholders into ``command``.
 
@@ -369,18 +388,14 @@ def build_launch(
         # needs a protected run.
         name = f"host CLI {host_cli}" if host_cli is not None else target.harness
         if host_cli is not None or target.harness not in MCP_HARNESSES or not protected:
-            raise ServiceError(
-                f"The {name} proposer harness cannot load the [proposer] mcp servers yet. "
-                f"Use one of these harnesses: {', '.join(MCP_HARNESSES)}, "
-                "or remove [proposer] mcp from optimize.toml."
-            )
+            raise ServiceError(mcp_unsupported(name))
     if host_cli is not None:
         return host_cli_launch(model, gateway, host_cli, host_agent_token)
     if target.harness == BLACKBOX_HARNESS_CUSTOM:
         run_command = _fill(target.run_command, model, gateway, protected=protected)
         if run_command is None:
             raise ServiceError("A custom harness needs a run_command.")
-        env = _base_env(model, gateway)
+        env = _base_env(model, gateway) | {ENV_TASK_FILE: PROMPT_FILE}
         if reasoning_effort:
             env.update(with_legacy_env({ENV_REASONING_EFFORT: reasoning_effort}))
         return HarnessLaunch(

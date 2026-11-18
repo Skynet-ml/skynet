@@ -25,8 +25,10 @@ from pydantic import (
     Field,
     ModelWrapValidatorHandler,
     PrivateAttr,
+    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -553,6 +555,26 @@ class BlackboxProposer(BaseModel):
         if self.harness == BLACKBOX_HARNESS_CUSTOM and not (self.run_command or "").strip():
             raise ValueError("A custom proposer harness needs a run_command.")
         return self
+
+    # No return annotation: with one, openapi.json would lose the model's own schema.
+    @model_serializer(mode="wrap")
+    def _keep_harness_choice(self, handler: SerializerFunctionWrapHandler):
+        """Leave ``harness`` out of the dump when the client did not send it.
+
+        A repository run then uses the ``[proposer] entry`` of its contract
+        file, and the stored request still tells that apart from a chosen
+        Codex (SKY-753). Validating the dump gives the same default again.
+
+        Args:
+            handler: Pydantic's default serializer.
+
+        Returns:
+            The serialized proposer.
+        """
+        data = handler(self)
+        if "harness" not in self.model_fields_set and isinstance(data, dict):
+            data.pop("harness", None)
+        return data
 
 
 # ShinkaEvolve's evolution knobs (island model, parent selection, mutation

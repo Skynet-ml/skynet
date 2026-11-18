@@ -29,6 +29,11 @@ illegal = "docs/rules.md"
 # Optional. Extra hosts the proposer's box can reach, on top of the relay and
 # the package registries. [] means the relay only.
 network = ["docs.python.org"]
+# Optional. Your own proposer command. Used only when the run names no
+# proposer of its own. See "Your own proposer" below.
+entry = ["node", "agent/my-agent.js"]
+# Optional. Runs once before entry, for example to install the command.
+setup = ["npm", "ci"]
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
@@ -76,6 +81,27 @@ into a file.
 The worker never reads the metric. The metric lives in the repository, and
 the worker gets a copy of the repository without the metric files. Or the
 metric lives with the judge.
+
+## Your own proposer: `[proposer] entry` and `setup`
+
+`entry` names the command that proposes each new version. `setup` names a
+command that runs once before it. Write each one as a list of strings, for
+example `["node", "agent/my-agent.js"]`. A plain string, an empty list or an
+empty part fails the setup check, and the message names the key.
+
+- The run's own proposer wins. When the run request names a proposer, the
+  run ignores `entry` and `setup`, and the run record shows the note "The
+  run's own proposer replaces the one in the contract file."
+- `setup` without `entry` fails the setup check.
+- The command runs in the proposer's box, under the `[proposer]` rules. Its
+  working directory is the repository. It gets the task file path in
+  `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
+  `APP_MODEL`, the model relay in `APP_GATEWAY_URL` and the relay key in
+  `APP_API_KEY`. The files it changes are the new version.
+- `optimize.toml` is always protected, so no version can change its own
+  proposer command.
+- Limits in this version: `[proposer] mcp` with `entry` fails the setup
+  check, and the run's tool-call limit does not apply to your command.
 
 ## Outcome: `[outcome]`
 
@@ -459,6 +485,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, under the `[proposer]` rules. A proposer that the run names replaces it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
@@ -474,6 +501,8 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
+- A `[proposer] entry` or `setup` that is not a list of non-empty strings.
+  A `setup` without `entry`. An `entry` together with `[proposer] mcp`.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.

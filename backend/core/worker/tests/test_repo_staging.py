@@ -6,8 +6,10 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -35,9 +37,11 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.i18n_keys import I18nKey
+from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxRunRequest, BlackboxTarget
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import runner
+from core.service_gateway.optimization.blackbox.harness import PROMPT_FILE, GatewayConfig, build_launch
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -367,6 +371,94 @@ def test_staging_refuses_a_file_that_asks_for_more(
 
     assert workdirs
     assert not workdirs[0].exists()
+
+
+# The fake proposer writes the task it read where a version change would go; its setup leaves a marker.
+_FAKE_AGENT = """
+import os, pathlib
+pathlib.Path("src").mkdir(exist_ok=True)
+task = pathlib.Path(os.environ["ASCENT_TASK"]).read_text()
+pathlib.Path("src/proposed.txt").write_text(os.environ["APP_MODEL"] + ":" + task)
+"""
+_FAKE_SETUP = 'import pathlib; pathlib.Path("setup-ran").write_text("yes")'
+
+
+def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request with no proposer gets the file's command as the custom proposer, and that command runs (SKY-753)."""
+    files = {
+        "optimize.toml": (
+            "version = 1\n[proposer]\n"
+            f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
+            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py"]\n'
+        ),
+        "agent/fake.py": _FAKE_AGENT,
+    }
+    payload = BlackboxRunRequest.model_validate(
+        {
+            **_payload("c" * 40),
+            "objective": "o",
+            "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
+            "cases": [{"input": "x"}],
+            "reflection_model_config": {"name": "openai/reflect"},
+        }
+    ).model_dump(mode="json", by_alias=True)
+    assert "harness" not in payload["proposer"]
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    proposer = BlackboxRunRequest.model_validate(staged_payload).proposer
+    assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == []
+    launch = build_launch(
+        BlackboxTarget(
+            kind="agent",
+            harness=proposer.harness,
+            model="openai/task",
+            install_command=proposer.install_command,
+            run_command=proposer.run_command,
+        ),
+        GatewayConfig(url="https://gw.example/v1", api_key="k"),
+    )
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent/fake.py").write_text(_FAKE_AGENT)
+    (tmp_path / PROMPT_FILE).parent.mkdir(parents=True)
+    (tmp_path / PROMPT_FILE).write_text("Make it faster.")
+    env = {**os.environ, **launch.env}
+    for command in (launch.install_command, launch.run_command):
+        assert command is not None
+        subprocess.run(command, shell=True, cwd=tmp_path, env=env, check=True)
+
+    assert (tmp_path / "setup-ran").read_text() == "yes"
+    assert (tmp_path / "src/proposed.txt").read_text() == "openai/task:Make it faster."
+
+
+def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request that names a proposer keeps it, and the run record notes the replacement."""
+    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload["proposer"] == {"harness": "pi"}
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        "The run's own proposer replaces the one in the contract file."
+    ]
+
+
+def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A custom command cannot load the relay's MCP servers yet, so the setup check names the cause."""
+    files = {
+        "optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n',
+        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+    }
+
+    with pytest.raises(ConstraintsError, match=r"custom proposer harness cannot load the \[proposer\] mcp") as caught:
+        _stage_with(files, monkeypatch)
+    assert (caught.value.section, caught.value.key) == ("proposer", "mcp")
 
 
 def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

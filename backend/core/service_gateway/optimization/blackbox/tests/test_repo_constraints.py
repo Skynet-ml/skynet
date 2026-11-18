@@ -138,6 +138,69 @@ def test_the_approved_setup_command_wins_and_says_so() -> None:
     assert environment.notes == (f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.",)
 
 
+_OWN_PROPOSER = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "my agent.js"]\n'
+
+
+def test_the_snapshot_holds_the_proposer_entry_and_setup(tmp_path: Path) -> None:
+    """``[proposer] entry`` and ``setup`` are read as command lists (SKY-753)."""
+    constraints = _read(tmp_path, _OWN_PROPOSER)
+    assert constraints is not None
+
+    assert constraints.proposer_entry == ("node", "my agent.js")
+    assert constraints.proposer_setup == ("npm", "ci")
+
+
+def test_a_contract_without_the_proposer_keys_keeps_the_runners_own_agent() -> None:
+    """With no ``entry``, nothing changes: no command and no note."""
+    environment = effective_environment(parse_constraints(_CFCA), approved_editable=["."], approved_setup=None)
+
+    assert environment.constraints is not None
+    assert environment.constraints.proposer_entry is None
+    assert environment.proposer_entry is None
+    assert environment.proposer_setup is None
+    assert environment.notes == ()
+
+
+def test_the_file_proposer_applies_when_the_run_names_none() -> None:
+    """A run with no proposer of its own uses the file's command."""
+    environment = effective_environment(parse_constraints(_OWN_PROPOSER), approved_editable=["."], approved_setup=None)
+
+    assert environment.proposer_entry == ("node", "my agent.js")
+    assert environment.proposer_setup == ("npm", "ci")
+    assert environment.notes == ()
+
+
+def test_the_runs_own_proposer_wins_and_says_so() -> None:
+    """A run that names its proposer keeps it, with the same kind of note as ``[setup] command``."""
+    environment = effective_environment(
+        parse_constraints(_OWN_PROPOSER), approved_editable=["."], approved_setup=None, approved_proposer=True
+    )
+
+    assert environment.proposer_entry is None
+    assert environment.proposer_setup is None
+    assert environment.notes == ("The run's own proposer replaces the one in the contract file.",)
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize("value", ['"node agent.js"', "[]", '[""]', '["node", 1]', "1"])
+def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value: str) -> None:
+    """Every other form fails with one error that names the key."""
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f"version = 1\n[proposer]\n{entry}{key} = {value}\n".encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
+        parse_constraints(raw)
+    assert caught.value.section == "proposer"
+    assert caught.value.key == key
+
+
+def test_a_proposer_setup_without_entry_fails() -> None:
+    """``setup`` only prepares the file's own command, so it needs ``entry``."""
+    with pytest.raises(ConstraintsError, match=r"\[proposer\] setup needs \[proposer\] entry") as caught:
+        parse_constraints(b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\n')
+    assert caught.value.key == "setup"
+
+
 def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
     """Asking to edit outside the approved paths fails with the path and the way to fix it."""
     constraints = parse_constraints(b'version = 1\n[paths]\neditable = ["bot", "eval"]\n')

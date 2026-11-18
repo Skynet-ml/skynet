@@ -317,6 +317,15 @@ def test_an_empty_proposer_network_passes_the_gate(tmp_path: Path, place: str) -
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_proposer_entry_and_setup_pass_the_gate(tmp_path: Path, place: str) -> None:
+    """Staging runs the file's proposer command as the custom proposer, so both keys are enforced (SKY-753)."""
+    raw = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "agent.js"]\n'
+
+    assert {"proposer.entry", "proposer.setup"} <= repo_gate._ENFORCED_EVERYWHERE
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
 def _mcp_archive(tmp_path: Path, server: str) -> Path:
     """Pack a ``[metric] mcp`` file with one server.
 

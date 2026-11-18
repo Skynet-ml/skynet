@@ -399,6 +399,17 @@ def test_prime_agent_launch_bounds_reasoning_behind_openrouter() -> None:
     assert '--model "$APP_MODEL:low"' in launch.run_command
 
 
+def test_custom_launch_names_the_task_file_and_keeps_the_model_variables() -> None:
+    """A custom command reads the task file from ASCENT_TASK; the APP_* names stay until SKY-776."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CUSTOM, run_command="agent"), _GATEWAY)
+
+    assert launch.env["ASCENT_TASK"] == PROMPT_FILE
+    assert launch.env["APP_PROMPT_FILE"] == PROMPT_FILE
+    assert launch.env["APP_MODEL"] == "target-model"
+    assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
+    assert launch.env["APP_API_KEY"] == "secret-key"
+
+
 def test_custom_launch_fills_placeholders() -> None:
     """A custom harness substitutes the model/gateway/file placeholders into its commands."""
     target = _target(

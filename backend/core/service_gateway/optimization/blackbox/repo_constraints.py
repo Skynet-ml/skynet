@@ -96,7 +96,8 @@ _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
     "setup": frozenset({"command"}),
-    "proposer": _ROLE_KEYS,
+    # entry and setup name the user's own proposer command (SKY-753).
+    "proposer": _ROLE_KEYS | {"entry", "setup"},
     "metric": frozenset({"files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus"}),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
@@ -303,6 +304,9 @@ class RepoConstraints:
     intent: str | None = None
     rules: tuple[str, ...] = ()
     proposer: RoleEnvironment = RoleEnvironment()
+    # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
+    proposer_entry: tuple[str, ...] | None = None
+    proposer_setup: tuple[str, ...] | None = None
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
@@ -363,6 +367,9 @@ class RepoEnvironment:
     setup_command: str | None
     constraints: RepoConstraints | None = None
     notes: tuple[str, ...] = ()
+    # The file's proposer command when the run names no proposer of its own; else None (SKY-753).
+    proposer_entry: tuple[str, ...] | None = None
+    proposer_setup: tuple[str, ...] | None = None
 
     @property
     def rules(self) -> tuple[str, ...]:
@@ -717,6 +724,35 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         or not all(isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS for part in value)
     ):
         raise problem
+    return tuple(value)
+
+
+def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...] | None:
+    """Read an optional command list, such as ``[proposer] entry``.
+
+    Args:
+        section: The parsed table.
+        key: The setting, such as ``entry`` or ``setup``.
+        label: The table as the file names it, used in errors.
+
+    Returns:
+        The command as a tuple, or ``None`` when the key is absent.
+
+    Raises:
+        ConstraintsError: When the value is not a non-empty list of non-empty strings.
+    """
+    if key not in section:
+        return None
+    value = section[key]
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= _MAX_COMMAND_PARTS
+        or not all(isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS for part in value)
+    ):
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: {label} {key} must be a command list such as ["node", "my-agent.js"].',
+            **_at(f"{label} {key}"),
+        )
     return tuple(value)
 
 
@@ -1465,7 +1501,17 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         )
     services = {name: _service(table, name) for name, table in _named_tables(document, "services").items()}
     targets = {name: _target(table, name, services) for name, table in _named_tables(document, "target").items()}
-    proposer = _role(document.get("proposer", {}), "[proposer]", services)
+    proposer_section = document.get("proposer", {})
+    proposer = _role(proposer_section, "[proposer]", services)
+    proposer_entry = _command(proposer_section, "entry", "[proposer]")
+    proposer_setup = _command(proposer_section, "setup", "[proposer]")
+    if proposer_setup is not None and proposer_entry is None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [proposer] setup needs [proposer] entry. setup prepares your own proposer"
+            " command; add entry, or remove setup to use the runner's own agent.",
+            section="proposer",
+            key="setup",
+        )
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
     run_role = _role(run_section, "[run]", services)
@@ -1523,6 +1569,8 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         metric_vcpus=metric_vcpus,
         instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
+        proposer_entry=proposer_entry,
+        proposer_setup=proposer_setup,
         targets=targets,
         services=services,
         metric=metric,
@@ -2069,6 +2117,7 @@ def effective_environment(
     *,
     approved_editable: Sequence[str],
     approved_setup: str | None,
+    approved_proposer: bool = False,
 ) -> RepoEnvironment:
     """Combine the customer's approved settings with what the repository proposes.
 
@@ -2079,6 +2128,8 @@ def effective_environment(
         constraints: The repository's proposal, or ``None`` when it has none.
         approved_editable: Editable paths from the submitted run.
         approved_setup: Setup command from the submitted run, if any.
+        approved_proposer: Whether the submitted run names its own proposer,
+            which then replaces ``[proposer] entry`` and ``setup``.
 
     Returns:
         The rules the run is held to.
@@ -2139,12 +2190,17 @@ def effective_environment(
             notes.append(f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.")
     else:
         setup = constraints.setup_command
+    use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
+    if constraints.proposer_entry is not None and approved_proposer:
+        notes.append("The run's own proposer replaces the one in the contract file.")
     return RepoEnvironment(
         editable_paths=editable,
         protected_paths=protected,
         setup_command=setup,
         constraints=constraints,
         notes=tuple(notes),
+        proposer_entry=constraints.proposer_entry if use_file_proposer else None,
+        proposer_setup=constraints.proposer_setup if use_file_proposer else None,
     )
 
 

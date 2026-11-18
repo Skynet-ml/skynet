@@ -12,6 +12,7 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,10 +61,12 @@ from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
+from ..models.blackbox import BLACKBOX_HARNESS_CUSTOM
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
@@ -420,7 +423,11 @@ def stage_repository(
             constraints,
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
+            approved_proposer=_names_proposer(result),
         )
+        # A custom command runs without the relay's MCP servers, so it would run without the file's tools.
+        if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
+            raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -496,6 +503,13 @@ def stage_repository(
     repo["editable_paths"] = list(environment.editable_paths)
     repo[ENVIRONMENT_KEY] = record
     result["target"]["setup_command"] = environment.setup_command
+    if environment.proposer_entry is not None:
+        result["proposer"] = {
+            **(result.get("proposer") or {}),
+            "harness": BLACKBOX_HARNESS_CUSTOM,
+            "run_command": shlex.join(environment.proposer_entry),
+            "install_command": shlex.join(environment.proposer_setup) if environment.proposer_setup else None,
+        }
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
@@ -557,6 +571,23 @@ def stage_repository(
         require_version=require_version,
         record_facts=record_facts,
     )
+
+
+def _names_proposer(payload: Mapping[str, Any]) -> bool:
+    """Tell whether a run request names its own proposer.
+
+    The stored request keeps ``proposer.harness`` only when the client sent
+    it (SKY-753), so a default does not replace ``[proposer] entry``. A host
+    CLI is the user's own choice too.
+
+    Args:
+        payload: The stored run request.
+
+    Returns:
+        True when the request sends ``proposer.harness`` or a host CLI.
+    """
+    proposer = payload.get("proposer")
+    return isinstance(proposer, dict) and ("harness" in proposer or proposer.get("host_cli") is not None)
 
 
 def _role_hosts(role: RoleEnvironment | None) -> tuple[str, ...]:
