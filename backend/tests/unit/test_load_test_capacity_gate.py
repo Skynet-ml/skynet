@@ -592,6 +592,48 @@ def test_failed_replay_names_its_error(tmp_path: Path, monkeypatch: pytest.Monke
     assert outcome.error == "replay failed"
 
 
+def test_a_failed_loop_start_closes_its_step_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a loop whose start fails closes its new step log, so no flusher thread stays alive.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Makes the loop start fail and records each step log close.
+    """
+    closed: list[str] = []
+    real_close = StepLogStore.close
+
+    def close(self: StepLogStore) -> None:
+        """Record the close, then close the step log.
+
+        Args:
+            self: The step log.
+        """
+        closed.append(self._worker_id)
+        real_close(self)
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        """Fail the loop start, as a refused lease reservation does.
+
+        Args:
+            *args: Not used.
+            **kwargs: Not used.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("start refused")
+
+    monkeypatch.setattr(StepLogStore, "close", close)
+    monkeypatch.setattr(EngineLoop, "__init__", refuse)
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        with pytest.raises(RuntimeError, match="start refused"):
+            reference_shapes.run_shape(harness, reference_shapes.SHAPES[0], "start-0", rounds=1)
+    finally:
+        harness.close()
+    assert "start-0-g1" in closed
+
+
 def _small_pass_config() -> swarm_10k.SwarmConfig:
     """Return a swarm config for a pass of a few seconds: 20 agents, 5 steps each, a 0.01 s flush window.
 

@@ -991,35 +991,40 @@ class Harness:
         user, budget_generation = self._owners[run_id]
         # Each incarnation is a new worker with its own step log, as after a pod restart under a new name.
         store = self._step_log(f"{run_id}-g{generation}", switch, work)
-        trees = TreeStore(store)
-        seed_tree, metric_tree = self._trees[run_id]
-        run = user.workspace().start_run(
-            run_id,
-            step_log=store,
-            execution_generation=generation,
-            budget_generation=budget_generation,
-            grant_list_id=GRANT_LIST_ID,
-            chunk_cents=CHUNK_CENTS,
-            lease_slices=LEASE_SLICES,
-        )
-        spec = SandboxSpec(
-            lifetime_seconds=BOX_LIFETIME_SECONDS,
-            vcpus=shape.vcpus,
-            operation_key=f"loadtest-{run_id}",
-            tags={"placement": f"gpu:{shape.gpu}"} if shape.gpu else {},
-        )
-        runtime = FakeModalRuntime(self.runtime, meter) if shape.gpu else self.runtime
-        source = MeteredSource(runtime, spec, meter, switch, refuse=refuse, work=work)
-        loop = EngineLoop(
-            run,
-            engine=self.engine,
-            trees=trees,
-            candidates=source,
-            metrics=source,
-            model=model,
-            model_max_cents=MODEL_MAX_CENTS,
-            run_dir=self.folder / run_id / f"g{generation}",
-        )
+        # The callers close the step log only after this returns, so a failed start must close it here.
+        try:
+            trees = TreeStore(store)
+            seed_tree, metric_tree = self._trees[run_id]
+            run = user.workspace().start_run(
+                run_id,
+                step_log=store,
+                execution_generation=generation,
+                budget_generation=budget_generation,
+                grant_list_id=GRANT_LIST_ID,
+                chunk_cents=CHUNK_CENTS,
+                lease_slices=LEASE_SLICES,
+            )
+            spec = SandboxSpec(
+                lifetime_seconds=BOX_LIFETIME_SECONDS,
+                vcpus=shape.vcpus,
+                operation_key=f"loadtest-{run_id}",
+                tags={"placement": f"gpu:{shape.gpu}"} if shape.gpu else {},
+            )
+            runtime = FakeModalRuntime(self.runtime, meter) if shape.gpu else self.runtime
+            source = MeteredSource(runtime, spec, meter, switch, refuse=refuse, work=work)
+            loop = EngineLoop(
+                run,
+                engine=self.engine,
+                trees=trees,
+                candidates=source,
+                metrics=source,
+                model=model,
+                model_max_cents=MODEL_MAX_CENTS,
+                run_dir=self.folder / run_id / f"g{generation}",
+            )
+        except BaseException:
+            store.close()
+            raise
 
         def scorer(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
             """Run the shape's command in one box, then its metric in another.
