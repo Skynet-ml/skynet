@@ -58,3 +58,5 @@ class SandboxSpec:
     allowed_hosts: tuple[str, ...] = ()
     operation_key: str | None = None
     private: bool = False
+    # A named GPU type such as ``a100``; only a provider with ``gpu_types`` starts such a box (SKY-804).
+    gpu_type: str | None = None

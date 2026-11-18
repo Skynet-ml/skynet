@@ -26,10 +26,12 @@ from core.sandbox import (
     SandboxSpecError,
     factory,
 )
+from core.sandbox.capabilities import VERCEL_CAPABILITIES, EnvironmentCapabilities, validate_spec
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import modal as modal_provider
 from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resource_kwargs
+from core.sandbox.providers.smol import SmolEnvironment
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
 from core.sandbox.timeouts import Phase, PhaseTimeouts
 
@@ -379,6 +381,39 @@ def test_resource_kwargs_send_a_gpu_and_skip_sizes_when_ignored() -> None:
         lifetime_seconds=60, resources=ResourceRequest(cpus=4, memory_mb=1024, gpu=2, mode=ResourceMode.IGNORE)
     )
     assert resource_kwargs(spec) == {"gpu": "any:2"}
+
+
+@pytest.mark.parametrize(
+    ("gpu_type", "count", "expected"),
+    [(" a100 ", 0, "A100"), ("h100", 2, "H100:2"), ("A100-80GB", 1, "A100-80GB:1"), ("a10g", 0, "A10G")],
+)
+def test_resource_kwargs_send_the_normalized_gpu_type(gpu_type: str, count: int, expected: str) -> None:
+    """Send the GPU type as the upper-case Modal name, with the count when the spec sets one."""
+    spec = SandboxSpec(lifetime_seconds=60, gpu_type=gpu_type, resources=ResourceRequest(gpu=count))
+    assert resource_kwargs(spec)["gpu"] == expected
+
+
+@pytest.mark.parametrize("gpu_type", ["", "  ", "tpu-v5", "a100:2", 7])
+def test_a_gpu_type_modal_does_not_name_is_refused_before_start(fake_modal: FakeModal, gpu_type: Any) -> None:
+    """Refuse an empty, unknown or malformed GPU type in the constructor, so no box starts."""
+    with pytest.raises(SandboxSpecError, match="GPU"):
+        ModalEnvironment(SandboxSpec(lifetime_seconds=60, gpu_type=gpu_type))
+    assert fake_modal.create_calls == 0
+
+
+async def test_create_starts_the_sandbox_with_the_gpu_type(fake_modal: FakeModal) -> None:
+    """Send the spec's GPU type to ``Sandbox.create``."""
+    async with ModalEnvironment(SandboxSpec(lifetime_seconds=60, gpu_type="a100")):
+        assert _box(fake_modal).kwargs["gpu"] == "A100"
+
+
+@pytest.mark.parametrize(
+    "caps", [VERCEL_CAPABILITIES, SmolEnvironment.capabilities], ids=["vercel", "smol-with-gpu-counts"]
+)
+def test_every_other_provider_refuses_a_gpu_type(caps: EnvironmentCapabilities) -> None:
+    """Refuse a GPU type on a provider without GPU types, also one that takes a GPU count."""
+    with pytest.raises(SandboxSpecError, match=f"The {caps.name} sandbox cannot start a box with GPU type 'a100'"):
+        validate_spec(SandboxSpec(lifetime_seconds=60, gpu_type="a100"), caps)
 
 
 def test_resource_kwargs_leave_out_memory_when_unset() -> None:
@@ -927,6 +962,7 @@ def test_capabilities_allow_every_network_mode_and_gpus() -> None:
     assert caps.name == "modal"
     assert caps.dynamic_network_policy
     assert caps.gpus
+    assert caps.gpu_types
     assert not caps.billable
     assert not caps.protected
     assert len(caps.network_modes) == 3

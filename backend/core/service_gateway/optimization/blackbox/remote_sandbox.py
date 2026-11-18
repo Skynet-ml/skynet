@@ -124,7 +124,13 @@ class RemoteSandboxRuntime:
 
         Returns:
             A guest handle containing only an opaque broker identity.
+
+        Raises:
+            ServiceError: When the spec asks for a GPU.
         """
+        if spec.gpu is not None:
+            # The parent's open request has no GPU field, so the box would start without the GPU.
+            raise ServiceError(f"The parent sandbox cannot start a box with GPU type {spec.gpu!r}.")
         request_id = spec.operation_key or uuid.uuid4().hex
         value = self._request(
             "open",

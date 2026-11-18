@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
+from ..capabilities import MODAL_GPU_TYPES, EnvironmentCapabilities, NetworkMode, SandboxSpecError, modal_gpu_name
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError
 from ..resources import ResourceMode, SandboxSpec
@@ -53,6 +53,7 @@ MODAL_CAPABILITIES = EnvironmentCapabilities(
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
     gpus=True,
+    gpu_types=True,
 )
 
 DEFAULT_IMAGE = "python:3.11-slim"
@@ -107,14 +108,15 @@ class ModalEnvironment(SandboxEnvironment):
                 ``exec`` time limit. ``None`` means no default limit.
 
         Raises:
-            SandboxSpecError: The spec asks for a lifetime or a disk size that
-                Modal cannot apply, or for another unsupported feature.
+            SandboxSpecError: The spec asks for a lifetime, a disk size or a
+                GPU type that Modal cannot apply, or for another unsupported feature.
         """
         super().__init__(spec)
         if spec.lifetime_seconds > _MAX_LIFETIME_SEC:
             raise SandboxSpecError(f"The modal sandbox lives at most {_MAX_LIFETIME_SEC} seconds.")
         if spec.resources.disk_mb is not None and spec.resources.mode is not ResourceMode.IGNORE:
             raise SandboxSpecError("The modal sandbox cannot set a disk size.")
+        modal_gpu_type(spec)
         self._app_name = app_name
         self._idle_timeout_sec = idle_timeout_sec
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts is not None else None
@@ -439,6 +441,28 @@ class ModalEnvironment(SandboxEnvironment):
         return self._sandbox
 
 
+def modal_gpu_type(spec: SandboxSpec) -> str | None:
+    """Return the spec's GPU type as the Modal name.
+
+    Args:
+        spec: The sandbox spec.
+
+    Returns:
+        The upper-case Modal GPU name, or ``None`` when the spec names no GPU type.
+
+    Raises:
+        SandboxSpecError: The type is empty or is not a Modal GPU name.
+    """
+    if spec.gpu_type is None:
+        return None
+    name = modal_gpu_name(spec.gpu_type)
+    if name is None:
+        raise SandboxSpecError(
+            f"The modal sandbox has no {spec.gpu_type!r} GPU. Use one of: {', '.join(sorted(MODAL_GPU_TYPES))}."
+        )
+    return name
+
+
 def resource_kwargs(spec: SandboxSpec) -> dict[str, Any]:
     """Map the requested sizes to the Modal ``cpu``, ``memory`` and ``gpu`` arguments.
 
@@ -447,10 +471,17 @@ def resource_kwargs(spec: SandboxSpec) -> dict[str, Any]:
 
     Returns:
         The keyword arguments for ``Sandbox.create``.
+
+    Raises:
+        SandboxSpecError: The GPU type is not a Modal GPU name.
     """
     request = spec.resources
     kwargs: dict[str, Any] = {}
-    if request.gpu:
+    gpu_type = modal_gpu_type(spec)
+    if gpu_type is not None:
+        # A named type with no count asks for one GPU of that type.
+        kwargs["gpu"] = f"{gpu_type}:{request.gpu}" if request.gpu else gpu_type
+    elif request.gpu:
         kwargs["gpu"] = f"any:{request.gpu}"
     if request.mode is ResourceMode.IGNORE:
         return kwargs
