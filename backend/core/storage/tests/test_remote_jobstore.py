@@ -2030,6 +2030,50 @@ def test_progress_trim_deletes_structural_events_only_for_the_uncovered_excess(
     assert [e["event"] for e in events] == [PROGRESS_OPTIMIZED, PROGRESS_LANE_STARTED, "step"]
 
 
+def test_progress_trim_never_deletes_a_keyed_row_to_cover_the_structural_excess(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The structural pass deletes only unkeyed rows, so a kept keyed row stays when structural rows go (SKY-808)."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-keyed-first")
+    store.record_progress("evict-keyed-first", "step", {PROGRESS_EVENT_KEY: "step:0"})
+    for name in (PROGRESS_BASELINE, PROGRESS_OPTIMIZED, PROGRESS_LANE_STARTED):
+        store.record_progress("evict-keyed-first", name, {})
+
+    events = store.get_progress_events("evict-keyed-first")
+    assert [e["event"] for e in events] == ["step", PROGRESS_OPTIMIZED, PROGRESS_LANE_STARTED]
+
+
+def test_progress_trim_deletes_the_oldest_unnamed_events(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An event with no name is non-structural, so the trim deletes the oldest one."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-unnamed")
+    for i in range(3):
+        store.record_progress("evict-unnamed", None, {"i": i})
+
+    events = store.get_progress_events("evict-unnamed")
+    assert [e["metrics"]["i"] for e in events] == [1, 2]
+
+
+def test_progress_trim_counts_keyed_unnamed_events_as_non_structural(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept keyed rows with no name cover the excess, so the trim does not delete the baseline (SKY-808)."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-keyed-unnamed")
+    store.record_progress("evict-keyed-unnamed", PROGRESS_BASELINE, {})
+    for i in range(3):
+        store.record_progress("evict-keyed-unnamed", None, {PROGRESS_EVENT_KEY: f"step:{i}"})
+
+    events = store.get_progress_events("evict-keyed-unnamed")
+    assert [e["event"] for e in events] == [PROGRESS_BASELINE, None, None, None]
+
+
 def test_progress_trim_hard_cap_deletes_oldest_keyed_events(
     store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3382,10 +3382,7 @@ class RemoteDBJobStore:
         Returns:
             The number of deleted rows.
         """
-        # One ordered DELETE replaces the prior count→select→top-up→delete
-        # round trips. Structural events sort last (flag 1) so they are
-        # evicted only when non-structural rows alone cannot cover the
-        # excess — identical preference to the old two-phase selection.
+        # Structural rows sort last, so a filter that admits them deletes non-structural rows first.
         structural_last = case(
             (ProgressEventModel.event.in_(STRUCTURAL_PROGRESS_EVENTS), 1),
             else_=0,
