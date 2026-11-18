@@ -1914,6 +1914,44 @@ def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.Monke
     assert not result.slo_passed
 
 
+def test_chaos_gate_fails_when_one_kill_kind_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the chaos gate fails when the box and worker kills fire but the commit kill does not.
+
+    Args:
+        monkeypatch: Runs one made-up shape run that fires only some kill kinds, and stops the chaos job.
+    """
+    shape = reference_shapes.SHAPES[0]
+
+    def fire_some(
+        harness: Any, made_shape: reference_shapes.Shape, run_id: str, *, rounds: int, switch: Any
+    ) -> reference_shapes.RunOutcome:
+        """Fire the box and worker kills on the switch and return a passing outcome.
+
+        Args:
+            harness: Not used.
+            made_shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+            switch: The run's chaos switch.
+
+        Returns:
+            The outcome.
+        """
+        switch.fired.update({"box": 1, "worker": 1, "commit": 0})
+        return _passing_outcome(made_shape)
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", (shape,))
+    monkeypatch.setattr(chaos_gate, "run_shape", fire_some)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=1, rounds=1, workers=1, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    assert result.extras["runs_ok"] == 1
+    assert result.slo_violations == ["the chaos job did not fire every kill kind: {'box': 1, 'worker': 1, 'commit': 0}"]
+    assert not result.slo_passed
+
+
 def test_chaos_gate_fails_when_the_fence_drops_no_step(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the chaos gate fails when every kill kind fires but no commit kill lost a step.
 
@@ -2667,6 +2705,19 @@ def test_swarm_lock_that_fails_closes_its_connection(tmp_path: Path) -> None:
     with pytest.raises(OperationalError, match="pg_try_advisory_lock"):
         swarm_10k._lock_database(engine)
     assert engine.pool.checkedout() == 0
+    engine.dispose()
+
+
+def test_swarm_lock_ends_its_transaction(tmp_path: Path) -> None:
+    """Check that a lock call commits, so the held connection keeps no open transaction.
+
+    Args:
+        tmp_path: The database folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    lock = swarm_10k._lock_database(engine)
+    assert not lock.in_transaction()
+    lock.close()
     engine.dispose()
 
 
