@@ -1219,7 +1219,9 @@ def test_a_status_write_after_the_locked_read_is_not_lost_to_the_requeue_claim(
     """A cancel status write after the sweep's locked budget read loses no race to the claim (SKY-814).
 
     The cancel writes only its status, so the locked read sees an open budget and only
-    the status condition of the claim's compare-and-set keeps the run cancelled.
+    the status condition of the claim's compare-and-set keeps the run cancelled. The
+    cancel does not pass ``ends_recovery``, so the sweep itself ends its ``recovering``
+    marker.
 
     Args:
         store: The job store.
@@ -1265,6 +1267,7 @@ def test_a_status_write_after_the_locked_read_is_not_lost_to_the_requeue_claim(
     assert "generation" in held
     job = store.get_job(RUN)
     assert job["status"] == "cancelled"
+    assert job["recovery"] == INTERRUPTED
     assert job["execution_generation"] == held["generation"]
     assert _automatic_resumes(store) == 0
     assert store.take_ended_orphans() == []
