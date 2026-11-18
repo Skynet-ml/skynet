@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` contém as colunas de Entrada de um caso. `case["expected"]` contém a coluna de Saída, indexada pelo nome da coluna. O repositório tem um arquivo `serve.py` com `def serve(input)`. A entrada `[run]` o chama, e `output` é o valor que ele retorna. O avaliador roda em outra sandbox sem arquivos do repositório, então não pode importar `serve.py`. O Skynet usa a mesma função para servir a melhor versão depois da execução.
+`case["input"]` contém as colunas de Entrada de um caso. `case["expected"]` contém a coluna de Saída, indexada pelo nome da coluna. O repositório tem um arquivo `serve.py` com `def serve(input)`. A entrada `[run]` o chama, e `output` é o valor que ele retorna. O avaliador roda em outra sandbox que contém apenas os seus arquivos de métrica e nenhum código da versão, então não pode importar `serve.py`. O Skynet usa a mesma função para servir a melhor versão depois da execução.
 
 Depois execute a verificação. A verificação executa a sua configuração, a entrada `[run]` e o seu avaliador na versão inicial, na sandbox. Você só pode iniciar a execução depois que a verificação passar.
 

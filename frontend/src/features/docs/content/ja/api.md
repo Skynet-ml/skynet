@@ -112,7 +112,7 @@ entry = "serve.py:serve"
 - `target.repo.repository` は `owner/name` 形式の GitHub リポジトリです。先に **設定 → コネクタ** で GitHub を接続してください。
 - `target.repo.editable_paths` は、オプティマイザーが変更できるファイルとフォルダーの一覧です。`"."` はリポジトリ全体を意味します。
 - `target.repo.commit` は任意です。40 文字の SHA です。省略すると、Skynet はブランチの最新のコミットを使います。
-- `target.repo.secrets` は任意です。各シークレットには `name` と `value` があります。シークレットは `[services.<name>]` のヘッダーを通してだけコードやスコアラーに届きます。環境変数としては届きません。
+- `target.repo.secrets` は任意です。各シークレットには `name` と `value` があります。シークレットは `[services.<name>]` のヘッダーか、ロールの `mcp` ファイルにあるサーバーを通してだけコードやスコアラーに届きます。環境変数としては届きません。
 - `scorer.metric_code` は `score(repo_path, case, output=None)` を定義します。`output` は、`[run]` エントリーがケースに対して返した値です。`optimize.toml` タブは、例のリポジトリの `[run]` エントリーを示します。`scorer.model` は、コードとスコアラーがモデルゲートウェイ経由で呼び出せるモデルです。
 - `strategy.mode` は `auto`（既定）または `single` です。`single` の場合は、`strategy.engine` に `GET /blackbox/engines` が返すエンジン名を 1 つ設定します。
 - `max_cost_cents` はこの実行の支出上限で、単位は米セントです。

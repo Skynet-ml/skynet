@@ -131,7 +131,7 @@ L'évaluateur peut aussi utiliser n'importe quel client compatible OpenAI avec l
 ## Appels de modèle et secrets
 
 - Les appels sur les clés de Skynet sont décomptés du budget de l'exécution. Avec votre propre clé (BYOK), l'appel passe par la clé de votre fournisseur, sans frais de modèle Skynet. Lisez [Facturation](/docs/concepts/billing).
-- L'évaluateur ne reçoit pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à l'évaluateur seulement par une table `[services.<name>]` que `[metric] services` liste. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'évaluateur envoie ses requêtes à l'URL de `SKYNET_SERVICE_<NAME>_URL`. Skynet ajoute le secret hors de la sandbox.
+- L'évaluateur ne reçoit pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à l'évaluateur seulement par une table `[services.<name>]` que `[metric] services` liste, ou par un serveur du fichier `[metric] mcp`. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'évaluateur envoie ses requêtes à l'URL de `SKYNET_SERVICE_<NAME>_URL`. Skynet ajoute le secret hors de la sandbox.
 - Skynet masque les valeurs des secrets dans la sortie de l'évaluateur et dans les journaux.
 
 ## Limites

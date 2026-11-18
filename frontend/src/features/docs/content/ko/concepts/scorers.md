@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## 모델 호출과 시크릿
 
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다. 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 가며, Skynet 모델 요금은 없습니다. [예산과 결제](/docs/concepts/billing)를 읽어 보세요.
-- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블을 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `SKYNET_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
+- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블이나 `[metric] mcp` 파일에 있는 서버를 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `SKYNET_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
 - Skynet은 채점기 출력과 로그에서 시크릿 값을 숨깁니다.
 
 ## 제한

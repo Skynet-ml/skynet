@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Il repository ha un file `serve.py` nella radice con `def serve(input)`. La voce `[run]` lo chiama nel proprio box della sandbox. Skynet lo usa per servire la versione migliore dopo l'esecuzione.
 
-Lo scorer gira in un box della sandbox separato. Quel box non contiene file del repository né codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from skynet import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `optimize.toml`.
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from skynet import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `optimize.toml`.
 
 > [!NOTE]
 > L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer, i valori attesi né i segreti dell'esecuzione.
@@ -61,7 +61,7 @@ def label(message):
 - Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione.
 - Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider. Skynet non applica costi per il modello.
 - Il gateway rifiuta le richieste per qualsiasi altro modello.
-- Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Skynet aggiunge il segreto fuori dalla sandbox e nasconde i valori dei segreti nell'output.
+- Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`, o tramite un server del file `mcp` del ruolo. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Skynet aggiunge il segreto fuori dalla sandbox e nasconde i valori dei segreti nell'output.
 
 La sandbox non ha altri accessi alla rete.
 

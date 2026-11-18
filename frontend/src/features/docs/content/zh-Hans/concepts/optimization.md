@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。运行结束后，Skynet 也用它来部署最好的版本。
 
-评分器在另一个独立的沙箱中运行。该沙箱不包含仓库文件和版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from skynet import call` 导入 `call`。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `optimize.toml` 文件。
+评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件，不包含版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from skynet import call` 导入 `call`。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `optimize.toml` 文件。
 
 > [!NOTE]
 > 编写版本的编码智能体看不到评分器的源代码、期望值或运行密钥。
@@ -61,7 +61,7 @@ def label(message):
 - 使用 Skynet 密钥的调用会计入运行预算。
 - 使用你自己的密钥（BYOK）时，调用计到你的提供商密钥上。Skynet 不收取模型费用。
 - 网关会拒绝对其他任何模型的请求。
-- 你的代码和评分器不会以环境变量的形式收到运行密钥。密钥只能通过角色在 `[run] services` 或 `[metric] services` 中列出的 `[services.<name>]` 表传给该角色。把密钥以 `${NAME}` 的形式写在该表的 `headers` 中。Skynet 在沙箱外添加密钥，并在输出中隐藏密钥的值。
+- 你的代码和评分器不会以环境变量的形式收到运行密钥。密钥只能通过角色在 `[run] services` 或 `[metric] services` 中列出的 `[services.<name>]` 表，或该角色 `mcp` 文件中的服务器，传给该角色。把密钥以 `${NAME}` 的形式写在该表的 `headers` 中。Skynet 在沙箱外添加密钥，并在输出中隐藏密钥的值。
 
 沙箱没有其他网络访问权限。
 

@@ -3,7 +3,8 @@
 The guest that hosts the coding agent never sees the secrets or these boxes:
 it posts each version through the parent's evaluator capability, and the
 parent lays it out on a copy of the already set-up tree, then calls the
-user's ``score(repo_path)`` (or ``score(repo_path, case)``).
+user's ``score(repo_path, case, output=None)``. The older ``score(repo_path)``
+and ``score(repo_path, case)`` forms still work.
 
 Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
 the prepared tree with the version laid out, and runs the ``[run]`` entry on

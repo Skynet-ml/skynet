@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 倉庫嘅根目錄有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會喺自己嘅沙盒入面呼叫佢。運行完之後，Skynet 會用佢嚟提供最好嗰個版本。
 
-評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒冇倉庫檔案，亦冇版本程式碼，所以評分器唔可以匯入 `serve.py`。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from skynet import call` 匯入 `call`。如果冇 `[run]` 入口，又冇 `[target.<name>]` 階段，Skynet 會拒絕個 `optimize.toml` 檔案。
+評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案，冇版本程式碼，所以評分器唔可以匯入 `serve.py`。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from skynet import call` 匯入 `call`。如果冇 `[run]` 入口，又冇 `[target.<name>]` 階段，Skynet 會拒絕個 `optimize.toml` 檔案。
 
 > [!NOTE]
 > 寫版本嘅編程 agent 睇唔到評分器原始碼、預期值，亦都睇唔到運行密鑰。
@@ -61,7 +61,7 @@ def label(message):
 - 用 Skynet 金鑰嘅呼叫會計入運行預算。
 - 用你自己嘅金鑰（BYOK）嘅話，呼叫會計落你嘅供應商金鑰。Skynet 唔收模型費用。
 - 閘道會拒絕任何其他模型嘅請求。
-- 你嘅程式碼同評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經角色喺 `[run] services` 或者 `[metric] services` 列出嘅 `[services.<name>]` 表去到嗰個角色。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。Skynet 會喺沙盒外面加入密鑰，並且喺輸出入面隱藏密鑰嘅值。
+- 你嘅程式碼同評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經角色喺 `[run] services` 或者 `[metric] services` 列出嘅 `[services.<name>]` 表，或者角色個 `mcp` 檔案入面嘅伺服器，去到嗰個角色。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。Skynet 會喺沙盒外面加入密鑰，並且喺輸出入面隱藏密鑰嘅值。
 
 沙盒冇其他網絡存取。
 

@@ -96,7 +96,7 @@ Depoda `def serve(input)` içeren bir `serve.py` dosyası olabilir. Skynet, çal
 
 ### Gizli anahtarlar
 
-Kodunuzun ihtiyaç duyduğu API anahtarları gibi gizli anahtarları ekleyin. Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Kodlama ajanı bunları göremez. Skynet değerlerini günlüklerde gizler.
+Kodunuzun ihtiyaç duyduğu API anahtarları gibi gizli anahtarları ekleyin. Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu veya rolün `mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Kodlama ajanı bunları göremez. Skynet değerlerini günlüklerde gizler.
 
 ### Kontrol
 

@@ -131,7 +131,7 @@ O avaliador também pode usar qualquer cliente compatível com OpenAI com as var
 ## Chamadas de modelo e segredos
 
 - As chamadas com as chaves do Skynet são medidas no orçamento da execução. Com a sua própria chave (BYOK), a chamada vai para a chave do seu provedor, sem taxa de modelo do Skynet. Leia [Cobrança](/docs/concepts/billing).
-- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `SKYNET_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
+- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista, ou por um servidor do arquivo `[metric] mcp`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `SKYNET_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
 - O Skynet oculta os valores dos segredos na saída do avaliador e nos logs.
 
 ## Limites

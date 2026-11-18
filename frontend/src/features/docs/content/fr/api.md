@@ -112,7 +112,7 @@ Champs importants :
 - `target.repo.repository` est le dépôt GitHub sous la forme `owner/name`. Connectez d'abord GitHub dans **Paramètres → Connecteurs**.
 - `target.repo.editable_paths` liste les fichiers et dossiers que l'optimiseur peut modifier. `"."` désigne le dépôt entier.
 - `target.repo.commit` est facultatif. C'est un SHA de 40 caractères. Sans lui, Skynet utilise le dernier commit de la branche.
-- `target.repo.secrets` est facultatif. Chaque secret a un `name` et une `value`. Il arrive à votre code ou à votre évaluateur seulement par un en-tête de `[services.<name>]`, jamais sous forme de variable d'environnement.
+- `target.repo.secrets` est facultatif. Chaque secret a un `name` et une `value`. Il arrive à votre code ou à votre évaluateur seulement par un en-tête de `[services.<name>]` ou par un serveur du fichier `mcp` du rôle, jamais sous forme de variable d'environnement.
 - `scorer.metric_code` définit `score(repo_path, case, output=None)`. `output` est ce que l'entrée `[run]` a renvoyé pour le cas. L'onglet `optimize.toml` montre l'entrée `[run]` du dépôt d'exemple. `scorer.model` est le modèle que votre code et votre évaluateur peuvent appeler via la passerelle de modèles.
 - `strategy.mode` vaut `auto` (par défaut) ou `single`. Avec `single`, définissez `strategy.engine` sur le nom d'un moteur renvoyé par `GET /blackbox/engines`.
 - `max_cost_cents` est le plafond de dépenses de cette exécution, en cents de dollar américain.

@@ -131,7 +131,7 @@ Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen 
 ## Modellaufrufe und Secrets
 
 - Aufrufe über die Schlüssel von Skynet werden auf das Laufbudget angerechnet. Mit Ihrem eigenen Schlüssel (BYOK) geht der Aufruf an Ihren Anbieterschlüssel, ohne Modellgebühr von Skynet. Lesen Sie [Abrechnung](/docs/concepts/billing).
-- Der Scorer erhält keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht den Scorer nur über eine Tabelle `[services.<name>]`, die `[metric] services` nennt. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Der Scorer sendet seine Anfragen an die URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet fügt das Secret außerhalb der Sandbox hinzu.
+- Der Scorer erhält keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht den Scorer nur über eine Tabelle `[services.<name>]`, die `[metric] services` nennt, oder über einen Server in der Datei `[metric] mcp`. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Der Scorer sendet seine Anfragen an die URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet fügt das Secret außerhalb der Sandbox hinzu.
 - Skynet verbirgt Secret-Werte in der Ausgabe des Scorers und in den Logs.
 
 ## Limits

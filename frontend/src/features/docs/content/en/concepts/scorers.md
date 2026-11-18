@@ -131,7 +131,7 @@ The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`,
 ## Model calls and secrets
 
 - Calls on Skynet's keys are metered against the run budget. With your own key (BYOK), the call goes to your provider key, with no Skynet model fee. Read [Billing](/docs/concepts/billing).
-- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
+- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists, or through a server in the `[metric] mcp` file. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
 - Skynet hides secret values in the scorer output and in the logs.
 
 ## Limits

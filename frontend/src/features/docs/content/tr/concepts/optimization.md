@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu kendi sandbox'ında çağırır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
 
-Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox depo dosyalarını ve sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
 
 > [!NOTE]
 > Sürümleri yazan kodlama ajanı, puanlayıcının kaynak kodunu, beklenen değerleri veya çalıştırma gizli anahtarlarını göremez.
@@ -61,7 +61,7 @@ def label(message):
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür.
 - Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider. Skynet model ücreti almaz.
 - Ağ geçidi başka herhangi bir model için gelen istekleri reddeder.
-- Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Skynet gizli anahtarı sandbox'ın dışında ekler ve gizli değerleri çıktıda gizler.
+- Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu veya rolün `mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Skynet gizli anahtarı sandbox'ın dışında ekler ve gizli değerleri çıktıda gizler.
 
 Sandbox'ın başka bir ağ erişimi yoktur.
 

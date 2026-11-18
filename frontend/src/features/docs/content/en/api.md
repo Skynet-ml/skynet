@@ -112,7 +112,7 @@ Important fields:
 - `target.repo.repository` is the GitHub repository as `owner/name`. Connect GitHub in **Settings → Connectors** first.
 - `target.repo.editable_paths` lists the files and folders that the optimizer may change. `"."` means the whole repository.
 - `target.repo.commit` is optional. It is a 40-character SHA. Without it, Skynet uses the latest commit on the branch.
-- `target.repo.secrets` is optional. Each secret has a `name` and a `value`. It reaches your code or your scorer only through a `[services.<name>]` header, never as an environment variable.
+- `target.repo.secrets` is optional. Each secret has a `name` and a `value`. It reaches your code or your scorer only through a `[services.<name>]` header or a server in the role's `mcp` file, never as an environment variable.
 - `scorer.metric_code` defines `score(repo_path, case, output=None)`. `output` is what the `[run]` entry returned for the case. The `optimize.toml` tab shows the `[run]` entry of the example repository. `scorer.model` is the model that your code and your scorer can call through the model gateway.
 - `strategy.mode` is `auto` (the default) or `single`. With `single`, set `strategy.engine` to one engine name from `GET /blackbox/engines`.
 - `max_cost_cents` is the spending limit for this run, in US cents.

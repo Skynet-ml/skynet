@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리는 자체 샌드박스에서 이 함수를 호출합니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
 
-채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 리포지토리 파일도 버전 코드도 없으므로 채점기는 `serve.py`를 가져올 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. `[run]` 엔트리도 `[target.<name>]` 스테이지도 없으면 Skynet은 `optimize.toml` 파일을 거부합니다.
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있고 버전 코드는 없으므로 채점기는 `serve.py`를 가져올 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. `[run]` 엔트리도 `[target.<name>]` 스테이지도 없으면 Skynet은 `optimize.toml` 파일을 거부합니다.
 
 > [!NOTE]
 > 버전을 작성하는 코딩 에이전트는 채점기 소스, 기댓값, 실행 시크릿을 볼 수 없습니다.
@@ -61,7 +61,7 @@ def label(message):
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다.
 - 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 갑니다. Skynet은 모델 요금을 청구하지 않습니다.
 - 게이트웨이는 다른 모델에 대한 요청을 거부합니다.
-- 코드와 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 역할이 `[run] services` 또는 `[metric] services`에 나열한 `[services.<name>]` 테이블을 통해서만 그 역할에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. Skynet은 샌드박스 밖에서 시크릿을 추가하고, 출력에서 시크릿 값을 숨깁니다.
+- 코드와 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 역할이 `[run] services` 또는 `[metric] services`에 나열한 `[services.<name>]` 테이블이나 역할의 `mcp` 파일에 있는 서버를 통해서만 그 역할에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. Skynet은 샌드박스 밖에서 시크릿을 추가하고, 출력에서 시크릿 값을 숨깁니다.
 
 샌드박스에는 다른 네트워크 접근이 없습니다.
 

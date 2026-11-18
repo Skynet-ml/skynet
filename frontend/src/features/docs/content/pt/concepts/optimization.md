@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 O repositório tem um arquivo `serve.py` na raiz com `def serve(input)`. A entrada `[run]` o chama na sua própria sandbox. O Skynet o usa para servir a melhor versão depois da execução.
 
-O avaliador roda em outra sandbox. Essa sandbox não contém arquivos do repositório nem código da versão, então o avaliador não pode importar `serve.py`. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from skynet import call`. Sem uma entrada `[run]` ou uma etapa `[target.<name>]`, o Skynet recusa o arquivo `optimize.toml`.
+O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica e nenhum código da versão, então o avaliador não pode importar `serve.py`. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from skynet import call`. Sem uma entrada `[run]` ou uma etapa `[target.<name>]`, o Skynet recusa o arquivo `optimize.toml`.
 
 > [!NOTE]
 > O agente de código que escreve as versões não vê o código do avaliador, os valores esperados nem os segredos da execução.
@@ -61,7 +61,7 @@ def label(message):
 - As chamadas com as chaves do Skynet são medidas no orçamento da execução.
 - Com a sua própria chave (BYOK), a chamada vai para a chave do seu provedor. O Skynet não cobra taxa de modelo.
 - O gateway recusa pedidos para qualquer outro modelo.
-- O seu código e o seu avaliador não recebem os segredos da execução como variáveis de ambiente. Um segredo chega a um papel só por uma tabela `[services.<name>]` que o papel lista em `[run] services` ou `[metric] services`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O Skynet adiciona o segredo fora da sandbox e oculta os valores dos segredos na saída.
+- O seu código e o seu avaliador não recebem os segredos da execução como variáveis de ambiente. Um segredo chega a um papel só por uma tabela `[services.<name>]` que o papel lista em `[run] services` ou `[metric] services`, ou por um servidor do arquivo `mcp` do papel. Escreva o segredo nos `headers` da tabela como `${NAME}`. O Skynet adiciona o segredo fora da sandbox e oculta os valores dos segredos na saída.
 
 A sandbox não tem nenhum outro acesso à rede.
 

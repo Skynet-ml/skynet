@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]`는 케이스 하나의 입력 열을 담습니다. `case["expected"]`는 출력 열을 열 이름을 키로 하여 담습니다. 리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리가 이 함수를 호출하고, `output`은 그 반환값입니다. 채점기는 리포지토리 파일이 없는 별도의 샌드박스에서 실행되므로 `serve.py`를 가져올 수 없습니다. Skynet은 실행 후 같은 함수로 가장 좋은 버전을 서빙합니다.
+`case["input"]`는 케이스 하나의 입력 열을 담습니다. `case["expected"]`는 출력 열을 열 이름을 키로 하여 담습니다. 리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리가 이 함수를 호출하고, `output`은 그 반환값입니다. 채점기는 지표 파일만 있고 버전 코드는 없는 별도의 샌드박스에서 실행되므로 `serve.py`를 가져올 수 없습니다. Skynet은 실행 후 같은 함수로 가장 좋은 버전을 서빙합니다.
 
 그런 다음 검사를 실행합니다. 검사는 샌드박스의 시작 버전에서 설정, `[run]` 엔트리, 채점기를 실행합니다. 검사를 통과한 후에만 실행을 시작할 수 있습니다.
 

@@ -112,7 +112,7 @@ Campos importantes:
 - `target.repo.repository` é o repositório do GitHub no formato `owner/name`. Conecte o GitHub antes em **Definições → Conectores**.
 - `target.repo.editable_paths` lista os arquivos e pastas que o otimizador pode alterar. `"."` significa o repositório inteiro.
 - `target.repo.commit` é opcional. É um SHA de 40 caracteres. Sem ele, o Skynet usa o commit mais recente do branch.
-- `target.repo.secrets` é opcional. Cada segredo tem um `name` e um `value`. Ele chega ao seu código ou ao seu avaliador só por um cabeçalho de `[services.<name>]`, nunca como variável de ambiente.
+- `target.repo.secrets` é opcional. Cada segredo tem um `name` e um `value`. Ele chega ao seu código ou ao seu avaliador só por um cabeçalho de `[services.<name>]` ou por um servidor do arquivo `mcp` do papel, nunca como variável de ambiente.
 - `scorer.metric_code` define `score(repo_path, case, output=None)`. `output` é o que a entrada `[run]` retornou para o caso. A aba `optimize.toml` mostra a entrada `[run]` do repositório de exemplo. `scorer.model` é o modelo que o seu código e o seu avaliador podem chamar pelo gateway de modelos.
 - `strategy.mode` é `auto` (o padrão) ou `single`. Com `single`, defina `strategy.engine` como o nome de um motor retornado por `GET /blackbox/engines`.
 - `max_cost_cents` é o limite de gastos desta execução, em centavos de dólar americano.

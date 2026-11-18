@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## 模型呼叫同密鑰
 
 - 用 Skynet 金鑰嘅呼叫會計入運行預算。用你自己嘅金鑰（BYOK）嘅話，呼叫會計落你嘅供應商金鑰，Skynet 唔收模型費用。睇 [預算同收費](/docs/concepts/billing)。
-- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `SKYNET_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
+- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表，或者 `[metric] mcp` 檔案入面嘅伺服器，去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `SKYNET_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
 - Skynet 會喺評分器輸出同日誌入面隱藏密鑰嘅值。
 
 ## 限制

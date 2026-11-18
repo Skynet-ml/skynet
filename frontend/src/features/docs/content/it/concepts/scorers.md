@@ -131,7 +131,7 @@ Lo scorer può anche usare qualsiasi client compatibile con OpenAI con le variab
 ## Chiamate ai modelli e segreti
 
 - Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione. Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider, senza costi Skynet per il modello. Leggi [Fatturazione](/docs/concepts/billing).
-- Lo scorer non riceve i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva allo scorer solo tramite una tabella `[services.<name>]` che `[metric] services` elenca. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Lo scorer invia le sue richieste all'URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet aggiunge il segreto fuori dalla sandbox.
+- Lo scorer non riceve i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva allo scorer solo tramite una tabella `[services.<name>]` che `[metric] services` elenca, o tramite un server del file `[metric] mcp`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Lo scorer invia le sue richieste all'URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet aggiunge il segreto fuori dalla sandbox.
 - Skynet nasconde i valori dei segreti nell'output dello scorer e nei log.
 
 ## Limiti

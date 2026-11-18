@@ -96,7 +96,7 @@ El repositorio puede tener un archivo `serve.py` con `def serve(input)`. Skynet 
 
 ### Secretos
 
-Añade secretos, como las claves de API que necesita tu código. Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El agente de código no puede verlos. Skynet oculta sus valores en los registros.
+Añade secretos, como las claves de API que necesita tu código. Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`, o a través de un servidor del archivo `mcp` del rol. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El agente de código no puede verlos. Skynet oculta sus valores en los registros.
 
 ### Comprobación
 

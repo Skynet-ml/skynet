@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie in einer eigenen Sandbox-Box auf. Skynet stellt damit nach dem Durchlauf die beste Version bereit.
 
-Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält keine Dateien des Repositorys und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from skynet import call`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `optimize.toml` ab.
+Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from skynet import call`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `optimize.toml` ab.
 
 > [!NOTE]
 > Der Coding-Agent, der die Versionen schreibt, sieht weder den Quelltext des Scorers noch die erwarteten Werte oder die Secrets des Durchlaufs.
@@ -61,7 +61,7 @@ def label(message):
 - Aufrufe über die Schlüssel von Skynet werden auf das Laufbudget angerechnet.
 - Mit Ihrem eigenen Schlüssel (BYOK) geht der Aufruf an Ihren Anbieterschlüssel. Skynet berechnet keine Modellgebühr.
 - Das Gateway lehnt Anfragen für jedes andere Modell ab.
-- Ihr Code und Ihr Scorer erhalten keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht eine Rolle nur über eine Tabelle `[services.<name>]`, die die Rolle in `[run] services` oder `[metric] services` nennt. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Skynet fügt das Secret außerhalb der Sandbox hinzu und verbirgt Secret-Werte in der Ausgabe.
+- Ihr Code und Ihr Scorer erhalten keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht eine Rolle nur über eine Tabelle `[services.<name>]`, die die Rolle in `[run] services` oder `[metric] services` nennt, oder über einen Server in der `mcp`-Datei der Rolle. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Skynet fügt das Secret außerhalb der Sandbox hinzu und verbirgt Secret-Werte in der Ausgabe.
 
 Die Sandbox hat keinen anderen Netzwerkzugang.
 

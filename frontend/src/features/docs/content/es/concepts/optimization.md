@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 El repositorio tiene un archivo `serve.py` en su raíz con `def serve(input)`. La entrada `[run]` lo llama en su propia caja de sandbox. Skynet lo usa para servir la mejor versión después de la ejecución.
 
-El evaluador se ejecuta en una caja de sandbox separada. Esa caja no contiene archivos del repositorio ni código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica y ningún código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
 
 > [!NOTE]
 > El agente de código que escribe las versiones no puede ver el código fuente del evaluador, los valores esperados ni los secretos de la ejecución.
@@ -61,7 +61,7 @@ def label(message):
 - Las llamadas con las claves de Skynet se miden contra el presupuesto de la ejecución.
 - Con tu propia clave (BYOK), la llamada va a la clave de tu proveedor. Skynet no cobra ninguna tarifa por el modelo.
 - La pasarela rechaza las solicitudes para cualquier otro modelo.
-- Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. Skynet añade el secreto fuera del sandbox y oculta los valores de los secretos en la salida.
+- Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`, o a través de un servidor del archivo `mcp` del rol. Escribe el secreto en los `headers` de la tabla como `${NAME}`. Skynet añade el secreto fuera del sandbox y oculta los valores de los secretos en la salida.
 
 El sandbox no tiene otro acceso a la red.
 

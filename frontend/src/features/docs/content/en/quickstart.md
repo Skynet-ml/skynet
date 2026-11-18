@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` holds the Input columns of one case. `case["expected"]` holds the Output column, keyed by its column name. The repository has a `serve.py` file with `def serve(input)`. The `[run]` entry calls it, and `output` is its return value. The scorer runs in a separate sandbox box with no repository files, so it cannot import `serve.py`. Skynet uses the same function to serve the best version after the run.
+`case["input"]` holds the Input columns of one case. `case["expected"]` holds the Output column, keyed by its column name. The repository has a `serve.py` file with `def serve(input)`. The `[run]` entry calls it, and `output` is its return value. The scorer runs in a separate sandbox box with only your metric files and no version code, so it cannot import `serve.py`. Skynet uses the same function to serve the best version after the run.
 
 Then run the check. The check runs your setup, the `[run]` entry and your scorer on the starting version in the sandbox. You can start the run only after the check passes.
 

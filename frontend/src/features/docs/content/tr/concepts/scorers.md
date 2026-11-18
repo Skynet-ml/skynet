@@ -131,7 +131,7 @@ Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenle
 ## Model çağrıları ve gizli anahtarlar
 
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
-- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `SKYNET_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
+- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu veya `[metric] mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `SKYNET_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
 - Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler

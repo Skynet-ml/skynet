@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` contiene le colonne di input di un caso. `case["expected"]` contiene la colonna di output, con il nome della colonna come chiave. Il repository ha un file `serve.py` con `def serve(input)`. La voce `[run]` lo chiama, e `output` è il suo valore restituito. Lo scorer gira in un box della sandbox separato senza file del repository, quindi non può importare `serve.py`. Skynet usa la stessa funzione per servire la versione migliore dopo l'esecuzione.
+`case["input"]` contiene le colonne di input di un caso. `case["expected"]` contiene la colonna di output, con il nome della colonna come chiave. Il repository ha un file `serve.py` con `def serve(input)`. La voce `[run]` lo chiama, e `output` è il suo valore restituito. Lo scorer gira in un box della sandbox separato che contiene solo i tuoi file della metrica e nessun codice della versione, quindi non può importare `serve.py`. Skynet usa la stessa funzione per servire la versione migliore dopo l'esecuzione.
 
 Poi esegui il controllo. Il controllo esegue la tua configurazione, la voce `[run]` e il tuo scorer sulla versione iniziale nella sandbox. Puoi avviare l'esecuzione solo dopo che il controllo è superato.
 
