@@ -271,6 +271,8 @@ class TreeCompactor:
         """Run one pass: delete the retired packs and the new packs with no row, then merge, on every shard.
 
         Each step runs on its own, so a failed step or shard does not skip the others.
+        Each pass also logs an error for the step log shards that jobs record and the shard map does not have.
+        A pass with a sweep reads and reports those shards only once.
 
         Returns:
             The number of packs merged and the number of packs deleted.

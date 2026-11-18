@@ -3254,7 +3254,7 @@ def test_a_missing_pack_on_a_shard_is_marked_broken_on_that_shard(
 
 
 @pytest.fixture
-def postgres_shard(postgres_engine: Engine) -> Iterator[ShardMap]:
+def postgres_shards(postgres_engine: Engine) -> Iterator[ShardMap]:
     """Yield a map of the PostgreSQL main schema and a shard ``s2`` in a second schema, with the runs' shards recorded.
 
     Args:
@@ -3286,7 +3286,7 @@ def postgres_shard(postgres_engine: Engine) -> Iterator[ShardMap]:
 
 @needs_postgres
 def test_postgres_a_shard_merge_locks_jobs_on_main_and_packs_on_the_shard_with_nowait(
-    tmp_path, postgres_engine, objects, postgres_shard
+    tmp_path, postgres_engine, objects, postgres_shards
 ) -> None:
     """On PostgreSQL a pass merges each shard; the shard merge locks its jobs on main and its packs on the shard.
 
@@ -3294,16 +3294,16 @@ def test_postgres_a_shard_merge_locks_jobs_on_main_and_packs_on_the_shard_with_n
         tmp_path: Pytest's temporary folder.
         postgres_engine: The engine on the main schema.
         objects: The test object store.
-        postgres_shard: The map of the main schema and shard ``s2``.
+        postgres_shards: The map of the main schema and shard ``s2``.
     """
-    shard = postgres_shard.engine("s2")
-    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shard)
+    shard = postgres_shards.engine("s2")
+    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shards)
     try:
         written = _fill(store)
         main_statements = _record_statements(postgres_engine)
         shard_statements = _record_statements(shard)
         compactor = TreeCompactor(
-            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shard
+            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shards
         )
 
         assert compactor.merge(shard) == 3
@@ -3322,7 +3322,7 @@ def test_postgres_a_shard_merge_locks_jobs_on_main_and_packs_on_the_shard_with_n
 
 @needs_postgres
 def test_postgres_a_shard_merge_does_not_wait_for_a_job_locked_on_main(
-    tmp_path, postgres_engine, objects, postgres_shard, caplog
+    tmp_path, postgres_engine, objects, postgres_shards, caplog
 ) -> None:
     """A shard merge whose job a main transaction locks gives up at once; the shard keeps every row.
 
@@ -3330,17 +3330,17 @@ def test_postgres_a_shard_merge_does_not_wait_for_a_job_locked_on_main(
         tmp_path: Pytest's temporary folder.
         postgres_engine: The engine on the main schema.
         objects: The test object store.
-        postgres_shard: The map of the main schema and shard ``s2``.
+        postgres_shards: The map of the main schema and shard ``s2``.
         caplog: Pytest's log capture fixture.
     """
-    shard = postgres_shard.engine("s2")
-    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shard)
+    shard = postgres_shards.engine("s2")
+    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shards)
     try:
         written = _fill(store)
         old = _pack_keys_of_rows(shard)
         results: list[int] = []
         compactor = TreeCompactor(
-            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shard
+            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shards
         )
         with postgres_engine.connect() as holder:
             holder.execute(
@@ -3364,7 +3364,7 @@ def test_postgres_a_shard_merge_does_not_wait_for_a_job_locked_on_main(
 
 @needs_postgres
 def test_postgres_the_unknown_shard_check_reads_the_partial_index(
-    tmp_path, postgres_engine, objects, postgres_shard
+    tmp_path, postgres_engine, objects, postgres_shards
 ) -> None:
     """On PostgreSQL the pass's check of the jobs' shards reads the partial index, not every ``jobs`` row.
 
@@ -3372,7 +3372,7 @@ def test_postgres_the_unknown_shard_check_reads_the_partial_index(
         tmp_path: Pytest's temporary folder.
         postgres_engine: The engine on the main schema.
         objects: The test object store.
-        postgres_shard: The map of the main schema and shard ``s2``.
+        postgres_shards: The map of the main schema and shard ``s2``.
     """
     rows = [
         {
@@ -3404,7 +3404,7 @@ def test_postgres_the_unknown_shard_check_reads_the_partial_index(
         if "DISTINCT jobs.step_log_shard" in statement:
             queries.append((statement, parameters))
 
-    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), shards=postgres_shard)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), shards=postgres_shards)
     event.listen(postgres_engine, "before_cursor_execute", keep_query)
     try:
         assert compactor.run_once() == (0, 0)
