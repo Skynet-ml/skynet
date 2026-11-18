@@ -170,9 +170,15 @@ class BestOfNEngine:
         if on_loop:
             brief = _repository_brief(ctx.repo_seed, ctx.read_file, ctx.list_files)
             task = replace(task, background="\n\n".join(part for part in (task.background, brief) if part))
+        sampled = task
+        if on_loop and isinstance(task.seed_candidate, str) and task.seed_candidate:
+            # Upstream shows the seed in a fence and keeps it as the result when
+            # no sample completes, and the result is unescaped below, so the
+            # seed goes in encoded like the brief's file text.
+            sampled = replace(task, seed_candidate=_escape_backticks(task.seed_candidate))
         finalists = _validation_finalists(task, server)
         sampling = server.lane(server.remaining - finalists * len(task.valset))
-        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
+        upstream = upstream_server(sampled, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
         result = None
         budget_stop = None
         try:

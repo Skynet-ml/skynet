@@ -737,6 +737,28 @@ def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
     assert result.best_candidate == _README_DIFF
 
 
+def test_a_repository_seed_comes_back_exact_and_never_breaks_the_prompt_fence(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no sample scored, the result is the exact seed, and the prompt shows the seed encoded."""
+    seed = "keep <<<< and ``` and <<3 backticks>> here"
+    repo_tree = _repo(trees)
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, ["```\naa\n```"], generation=1)
+
+    # A metric error on every case leaves the one sample unscored, so upstream keeps its seed.
+    result = BestOfNEngine().run(
+        Task(seed, cases=list(_CASES)),
+        loop.server(lambda loop, candidate, case: (None, {}), max_evals=2),
+        _context(loop, repo_tree),
+    )
+
+    assert result.best_candidate == seed
+    assert result.best_score is None
+    [prompt] = model.prompts
+    assert _escape_backticks(seed) in prompt
+    assert "``` and" not in prompt
+
+
 def _recording(scored: list[tuple[Any, Any]]) -> Any:
     """Return a scorer that records each candidate and case it gets.
 
