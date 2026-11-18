@@ -466,9 +466,6 @@ class _LoopRepoProposer:
             # replays from its committed step, so ending the proposal gives the same population on a resume.
             self.cost_cents += error.cost_cents
             logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
-        except LookupError as error:
-            # ``put_files`` raises it when the run cannot see the parent, and every later write would fail the same way.
-            logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
         return {}
 
     def brief(self, records: list[dict[str, Any]]) -> str:
@@ -584,7 +581,8 @@ class _LoopRepoProposer:
             files: The new file text by path.
 
         Returns:
-            The note for the model and ``None``, or an empty note and the new version's tree id.
+            The note for the model and ``None``, or an empty note and the new version's tree id. An empty note and
+            the parent's tree id when the run cannot see the parent, so the proposal ends with no version.
         """
         problems = [
             problem for path in files if (problem := self.path_problem(path) or self.folder_problem(tree_id, path))
@@ -595,6 +593,10 @@ class _LoopRepoProposer:
             new_tree = self.ctx.put_files({path: text.encode() for path, text in files.items()}, tree_id)
         except ValueError as error:
             return f"The files could not be written: {error}", None
+        except LookupError as error:
+            # ``put_files`` raises it when the run cannot see the parent, and every later write would fail the same way.
+            logger.info("GEPA proposal wrote no version after %s", type(error).__name__)
+            return "", tree_id
         return "", new_tree
 
     def folder_problem(self, tree_id: str, path: str) -> str | None:

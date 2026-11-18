@@ -1757,10 +1757,13 @@ def test_a_proposal_that_writes_the_parent_again_gives_no_version_and_no_score_c
     assert len(scored) == len(_CASES) + 3 * proposals
 
 
-def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(tmp_path: Path) -> None:
+def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
     """A parent the run cannot see ends the proposal; an error that no loop call raises is a bug and goes up.
 
     Args:
+        caplog: Pytest's log capture fixture.
         tmp_path: Pytest's temporary folder.
     """
 
@@ -1791,14 +1794,52 @@ def test_a_failed_parent_write_gives_no_version_and_an_unexpected_error_raises(t
     calls = _FakeCalls([_file("answer.txt"), _file("answer.txt")])
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, put_files=unseen), Task(""))
     assert proposer is not None
-    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
+    with caplog.at_level("INFO", logger=gepa_mod.logger.name):
+        assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
     assert len(calls.prompts) == 1
+    assert "GEPA proposal wrote no version after LookupError" in caplog.messages
+    assert proposer.failure is None
 
     proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
     assert proposer is not None
     with pytest.raises(TypeError, match="a bug"):
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
     assert proposer.failure is None
+
+
+@pytest.mark.parametrize("error", [KeyError("reply"), IndexError("pop from empty list")])
+def test_a_lookup_bug_outside_the_parent_write_raises_out_of_the_proposer(error: LookupError, tmp_path: Path) -> None:
+    """Only ``put_files`` may end a proposal with a ``LookupError``; the same error from a bug elsewhere goes up.
+
+    Args:
+        error: The ``LookupError`` subclass that the bug raises.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def broken(prompt: Any, tools: Any) -> ModelReply:
+        """Fail as a bad key or index does.
+
+        Args:
+            prompt: Not used.
+            tools: Not used.
+
+        Raises:
+            LookupError: Always, the parametrized error.
+        """
+        raise error
+
+    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=broken), Task(""))
+    assert proposer is not None
+    with pytest.raises(type(error)):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert proposer.failure is None
+
+    # A scripted model that runs out of replies is a test bug, and it must fail the test, not end the proposal.
+    calls = _FakeCalls(["```ls\n```"])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+    with pytest.raises(IndexError):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
 
 
 def test_a_billed_failed_model_call_counts_in_the_total_cost_live_and_on_a_replay(
