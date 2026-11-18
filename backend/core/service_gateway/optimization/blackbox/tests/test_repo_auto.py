@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from gepa.oa.ensemble import optimize_best_of
 
 from core.models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
@@ -164,12 +165,26 @@ def test_auto_with_the_files_proposer_leaves_out_the_lanes_that_cannot_use_it(
     """
     RepoFixtureEngine.calls = []
     monkeypatch.setattr(auto, "get_engine", lambda name, caps: RepoFixtureEngine(name))
+    configs: list[Any] = []
+
+    def spy(**kwargs: Any) -> Any:
+        """Record the explore lane configs, then run the real composition.
+
+        Args:
+            kwargs: The upstream composition arguments.
+
+        Returns:
+            The upstream winner.
+        """
+        configs.extend(kwargs["configs"])
+        return optimize_best_of(**kwargs)
+
+    monkeypatch.setattr(auto, "optimize_best_of", spy)
     native = replace(_native(), repo={**REPO, "file_proposer": True})
     server = EvalServer(score, max_evals=2 * len(AUTO_ENGINES))
+    ctx = make_ctx(str(tmp_path), native_options=native, proposer_token_budget_usd=3.0)
 
-    _, lanes = auto.run_strategy(
-        BlackboxStrategy(), Task(""), server, make_ctx(str(tmp_path), native_options=native), caps=CAPS
-    )
+    _, lanes = auto.run_strategy(BlackboxStrategy(), Task(""), server, ctx, caps=CAPS)
 
     refused = {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
     explored = sorted(lane.engine for lane in lanes if lane.phase == "explore")
@@ -177,6 +192,9 @@ def test_auto_with_the_files_proposer_leaves_out_the_lanes_that_cannot_use_it(
     assert explored == ["autosaddler", "gepa"]
     assert not refused & {call["name"] for call in RepoFixtureEngine.calls}
     assert [lane.phase for lane in lanes][-1] == "continue"
+    # Two explore lanes and the continuation split the budget in three.
+    assert [config.max_evals for config in configs] == [10 // 3] * 2
+    assert [config.max_token_cost for config in configs] == [pytest.approx(3.0 / 3)] * 2
 
 
 def test_gepa_on_a_repository_runs_the_native_repository_engine(

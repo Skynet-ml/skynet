@@ -631,11 +631,11 @@ def _guest_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: d
 def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The setup's output is in the checkout at every GEPA and Best-of-N session, also after a reset (SKY-753).
+    """The setup runs once, and its output is in the checkout at every GEPA and Best-of-N session (SKY-753).
 
     The bootstrap skips install steps in a protected run, so the setup goes
     with the proposer. ``git clean -fdx`` removes its output between
-    sessions, so the next session runs it again, and none of it joins a version.
+    sessions, so the next session gets the kept copy back, and none of it joins a version.
 
     Args:
         tmp_path: Artifact destination and guest folder.
@@ -679,12 +679,11 @@ def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_sess
     assert log.read_text().splitlines() == [
         f"setup {checkout}",
         f"agent {checkout} True",
-        f"setup {checkout}",
         f"agent {checkout} True",
     ]
     assert "src.txt" in second
     assert "setup-out" not in first + second
-    assert harness_bridge.SETUP_MARKER not in first + second
+    assert harness_bridge.SETUP_STATE not in first + second
 
 
 def test_a_files_proposer_whose_setup_fails_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -792,6 +791,49 @@ def test_only_autosaddler_ships_the_default_agent_for_sessions_outside_a_checkou
         assert "outside_checkout" not in proposer
         assert "codex --version" not in session.calls[0][0]
         assert session.requirements == []
+
+
+@pytest.mark.parametrize(
+    ("readback", "starts"), [(_CODEX_REQUIREMENTS_READBACK, True), ("", False)], ids=["parent-wrote", "missing"]
+)
+def test_a_contained_autosaddler_fallback_only_checks_the_codex_requirements_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readback: str, starts: bool
+) -> None:
+    """In the guest box, the default agent of a file proposer needs the file that the parent wrote (SKY-753).
+
+    The contained runtime never writes the root-owned file, so a missing file stops the run.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture and gateway stop.
+        readback: The requirements file read-back in the box.
+        starts: Whether the runner starts.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    session = FakeSession()
+    session.candidate = {"system": "seed"}
+    session.readback = readback
+    session.root_write_readback = readback
+    runtime = FakeRuntime(session)
+    runtime.contained = True
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="custom", run_command="node agent.js"),
+        repo={"chunks": [], "editable_paths": ["."], "readonly_paths": [], "file_proposer": True},
+    )
+    task = Task({"system": "seed"}, cases=[{"id": "a"}])
+    server = EvalServer(lambda *_: (0.5, {}), max_evals=3)
+
+    if starts:
+        run_native_engine("autosaddler", task, server, ctx)
+    else:
+        with pytest.raises(ServiceError, match="Codex cannot start"):
+            run_native_engine("autosaddler", task, server, ctx)
+
+    assert session.requirements == [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]
+    assert (len(session.calls) > 1) is starts
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])

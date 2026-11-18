@@ -92,6 +92,11 @@ _MAX_COMMAND_PARTS = 50
 # harness_bridge's gateway key tokens. A launch command with one gets the
 # proposer's relay key in its text, so the file's own commands cannot name them.
 _KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
+# Popen raises ValueError on a NUL byte, outside the setup check's clear error, and
+# other control characters only hide what the command does. That covers the C1
+# controls and the bidi embeddings, overrides, isolates and marks, which reorder the
+# shown text. Other format characters stay legal: a ZWJ or ZWNJ is part of real names.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
@@ -311,7 +316,8 @@ class RepoConstraints:
     # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
     proposer_entry: tuple[str, ...] | None = None
     proposer_setup: tuple[str, ...] | None = None
-    # The repository files and folders that entry and setup name; read_constraints fills them, and the file proposer protects them.
+    # The repository files and folders that entry and setup name; read_constraints fills them,
+    # and the file proposer protects them.
     proposer_command_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
@@ -425,6 +431,7 @@ class RepoEnvironment:
             },
             # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
             **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
+            **({"proposer_setup": list(self.proposer_setup)} if self.proposer_setup is not None else {}),
         }
 
 
@@ -748,7 +755,7 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
 
     Raises:
         ConstraintsError: When the value is not a non-empty list of non-empty
-            strings, or names a gateway key token.
+            strings without control characters, or names a gateway key token.
     """
     if key not in section:
         return None
@@ -756,7 +763,13 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
     if (
         not isinstance(value, list)
         or not 1 <= len(value) <= _MAX_COMMAND_PARTS
-        or not all(isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS for part in value)
+        or not all(
+            isinstance(part, str)
+            and part.strip()
+            and len(part) <= _MAX_COMMAND_CHARS
+            and not _CONTROL_CHARS.search(part)
+            for part in value
+        )
     ):
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: {label} {key} must be a command list such as ["node", "my-agent.js"].',
@@ -1616,7 +1629,8 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
             missing, too large, empty, or has a line that is not one case,
             or when the ``[sandbox] compose`` file is missing or not a
             compose file the box can run, or when a ``[proposer] entry`` or
-            ``setup`` argument names a symbolic link or a path inside one.
+            ``setup`` argument names a symbolic link, a path inside one, or a
+            folder that holds one.
     """
     raw = read_constraints_file(archive)
     if raw is None:
@@ -1645,7 +1659,8 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
 
     Raises:
         ConstraintsError: When an argument names a symbolic link of the
-            snapshot or a path inside a linked folder.
+            snapshot, a path inside a linked folder, or a folder that holds a
+            symbolic link at any depth.
     """
     if constraints.proposer_entry is None:
         return constraints
@@ -1667,6 +1682,16 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
                 raise ConstraintsError(
                     f"{CONSTRAINTS_FILE}: [proposer] {key} names '{part}', which goes through the symbolic"
                     f" link '{link}'. Name the real path, so that no version can change the proposer.",
+                    section="proposer",
+                    key=key,
+                )
+            # A named folder protects its paths, not the files that its links
+            # point at, so a link anywhere inside it is refused too.
+            inner = next((name for name in sorted(links) if name.startswith(f"{path}/")), None)
+            if inner is not None:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: [proposer] {key} names the folder '{part}', which holds the symbolic"
+                    f" link '{inner}'. Remove the link from the folder, so that no version can change the proposer.",
                     section="proposer",
                     key=key,
                 )

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -48,12 +49,17 @@ TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
 # in the sandbox, so it cannot import that constant.
 SETUP_TIMEOUT_SECONDS = 1_800.0
-# Written into a checkout once ``[proposer] setup`` succeeds there. A reset
-# (``git clean -fdx``) or a fresh worktree has no marker and none of the
-# setup's output, so the next session runs the setup again (SKY-753).
-SETUP_MARKER = ".ascent-proposer-setup"
+# The folder in the git dir that keeps ``[proposer] setup``'s record and a
+# copy of its output. ``git clean -fdx`` never touches the git dir, and every
+# worktree of a checkout shares its common dir, so the setup runs once per git
+# checkout and its worktrees. Each Auto lane checkout runs it again (SKY-753).
+SETUP_STATE = "ascent-proposer-setup"
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
+# An exclude line cannot hold these: a newline starts a new pattern, and git
+# drops trailing whitespace, so such a name could hide other files. A name that
+# is not UTF-8 decodes to lone surrogates, which the UTF-8 exclude file cannot hold.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
@@ -382,20 +388,27 @@ def workspace_files(proposer: dict[str, Any]) -> list[str]:
     return paths
 
 
-def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
+def run_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
     """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
         checkout: The repository checkout or worktree of the next session.
         timeout_seconds: Stop the setup, and every process it started, after this long.
+        env: The setup's environment; the default is this process's environment.
 
     Raises:
         RuntimeError: When the command cannot start, runs out of time or
             exits with an error, so no session starts without its setup.
     """
     label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
-    if sys.platform == "linux" and sys.executable:
+    reaped = sys.platform == "linux" and bool(sys.executable)
+    if reaped:
         # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     # Files, not pipes: a background child keeps an inherited pipe open, and a
@@ -406,6 +419,7 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
                 process = subprocess.Popen(
                     command,
                     cwd=checkout,
+                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_file,
                     stderr=stderr_file,
@@ -429,6 +443,8 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
             raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.")
         if process.returncode != 0:
             detail = (_tail(stderr_file) or _tail(stdout_file)).strip()[-2000:]
+            if reaped and process.returncode in (_REAPER_NOT_FOUND, _REAPER_NOT_EXECUTABLE):
+                raise RuntimeError(f"{label} could not start: {detail}")
             raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
 
 
@@ -527,33 +543,45 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, text=True, check=False)
+    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, check=False)
+    # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
+    stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
     if done.returncode != 0:
-        raise RuntimeError(f"git {arguments[0]} failed: {(done.stderr or done.stdout).strip()[-2000:]}")
-    return done.stdout
+        raise RuntimeError(f"git {arguments[0]} failed: {(stderr or stdout).strip()[-2000:]}")
+    return stdout
 
 
-def _untracked(checkout: Path, *, folders: bool) -> set[str]:
-    """List the untracked, not ignored paths of a checkout.
+def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[str]:
+    """List the untracked paths of a checkout, either those git ignores or those it does not.
 
     Args:
         checkout: The checkout or worktree.
         folders: List a folder that holds only untracked files as one path
             that ends with ``/``, in place of each file in it.
+        ignored: List the ignored paths in place of the not ignored ones.
 
     Returns:
         Checkout-relative paths.
     """
-    arguments = ["ls-files", "-z", "--others", "--exclude-standard", *(["--directory"] if folders else [])]
+    arguments = [
+        "ls-files",
+        "-z",
+        "--others",
+        *(["--ignored"] if ignored else []),
+        "--exclude-standard",
+        # An empty folder holds no file of the version or of the setup, so it is no output either.
+        *(["--directory", "--no-empty-directory"] if folders else []),
+    ]
     return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
 
 
-def _setup_output(checkout: Path, before: set[str]) -> set[str]:
+def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) -> set[str]:
     """Find the untracked paths that a setup added to a checkout.
 
     Args:
         checkout: The checkout or worktree, after the setup.
-        before: Every untracked file before the setup, one path per file.
+        before: Every untracked file of the same kind before the setup, one path per file.
+        ignored: Find the paths that git ignores in place of the not ignored ones.
 
     Returns:
         The new files, and the new folders as one path each, so a large
@@ -561,14 +589,14 @@ def _setup_output(checkout: Path, before: set[str]) -> set[str]:
     """
     added: set[str] = set()
     files: set[str] | None = None
-    for path in _untracked(checkout, folders=True):
+    for path in _untracked(checkout, folders=True, ignored=ignored):
         if not path.endswith("/"):
             if path not in before:
                 added.add(path)
         elif any(old.startswith(path) for old in before):
             # The parent version added this folder: its files stay in the
             # version, so only the files the setup wrote into it are excluded.
-            files = _untracked(checkout, folders=False) if files is None else files
+            files = _untracked(checkout, folders=False, ignored=ignored) if files is None else files
             added |= {file for file in files if file.startswith(path)} - before
         else:
             added.add(path)
@@ -604,58 +632,340 @@ def _tracked_changes(checkout: Path) -> dict[str, str]:
     return {path: _tracked_state(checkout, path) for path in paths if path}
 
 
-def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
-    """Run ``[proposer] setup`` in a checkout unless its output is still there.
+def _setup_changes(checkout: Path, tracked: dict[str, str]) -> list[str]:
+    """List the tracked paths whose content differs from their content before the setup.
 
-    The same command in the same folder gives the same result, so a session
-    after a reset or in a fresh worktree gets the setup again. What the setup
-    adds is excluded from every version, like the harness files (SKY-753).
+    Args:
+        checkout: The checkout or worktree, after the setup.
+        tracked: :func:`_tracked_changes` before the setup.
+
+    Returns:
+        The changed paths, sorted.
+    """
+    return sorted(
+        path
+        for path in tracked.keys() | _tracked_changes(checkout).keys()
+        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
+    )
+
+
+def _index_path(checkout: Path) -> Path:
+    """Find the git index file of a checkout or worktree.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of its index file.
+    """
+    index = Path(_checkout_git(["rev-parse", "--git-path", "index"], checkout).strip())
+    return index if index.is_absolute() else checkout / index
+
+
+def _save_checkout(checkout: Path, paths: Iterable[str], saved: Path) -> None:
+    """Copy the index and the version's changed files before a setup, so a failed setup can be undone.
+
+    Args:
+        checkout: The checkout or worktree.
+        paths: The tracked paths the version changed and its untracked files.
+        saved: An empty folder for the copy.
+    """
+    index = _index_path(checkout)
+    if index.exists():
+        shutil.copy2(index, saved / "index")
+    for path in paths:
+        if os.path.lexists(checkout / path):
+            _copy_path(checkout / path, saved / "files" / path, saved / "files")
+
+
+def _undo_setup(
+    checkout: Path,
+    head: str,
+    tracked: dict[str, str],
+    version_files: dict[str, str],
+    ignored_before: set[str],
+    saved: Path,
+) -> None:
+    """Put a checkout back to its state before a failed setup.
+
+    Args:
+        checkout: The checkout or worktree.
+        head: The commit of ``HEAD`` before the setup.
+        tracked: :func:`_tracked_changes` before the setup.
+        version_files: Each untracked file of the version before the setup, with its :func:`_tracked_state`.
+        ignored_before: Every ignored file before the setup.
+        saved: The :func:`_save_checkout` copy from before the setup.
+    """
+    if _checkout_git(["rev-parse", "HEAD"], checkout).strip() != head:
+        # Soft, so the working tree keeps the version's own changes; the loop below undoes the setup's.
+        _checkout_git(["reset", "--soft", head], checkout)
+    if (saved / "index").exists():
+        shutil.copy2(saved / "index", _index_path(checkout))
+    # Listed after the index is back, so a file the setup untracked in its commit counts as tracked again.
+    # Removed first, so a link the setup put in place of a folder is gone before the files below are restored.
+    before = set(version_files)
+    for path in _setup_output(checkout, before) | _setup_output(checkout, ignored_before, ignored=True):
+        _remove_path(checkout / path.rstrip("/"))
+    changed = _setup_changes(checkout, tracked)
+    specs = [f":(literal){path}" for path in changed]
+    in_head = (
+        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head, "--", *specs], checkout).split("\0"))
+        if specs
+        else set()
+    )
+    for path in changed:
+        _check_parents(checkout / path, checkout)
+        if path in tracked:
+            # The version had changed this file before the setup, so the commit's content is not its content.
+            _remove_path(checkout / path)
+            if os.path.lexists(saved / "files" / path):
+                _copy_path(saved / "files" / path, checkout / path, checkout)
+        elif path in in_head:
+            _checkout_git(["checkout", head, "--", f":(literal){path}"], checkout)
+        else:
+            _remove_path(checkout / path)
+    for path, content in version_files.items():
+        if _tracked_state(checkout, path) != content:
+            _check_parents(checkout / path, checkout)
+            _remove_path(checkout / path)
+            _copy_path(saved / "files" / path, checkout / path, checkout)
+
+
+def _check_parents(target: Path, root: Path) -> None:
+    """Refuse a path whose parent folders do not stay plain folders inside a root.
+
+    Args:
+        target: The path to write or remove.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
+    """
+    # A version can replace a parent folder with a link; the copy would then write outside the checkout.
+    folder = root
+    for part in target.relative_to(root).parts[:-1]:
+        folder = folder / part
+        if os.path.lexists(folder) and (
+            folder.is_symlink() or not folder.is_dir() or not folder.resolve().is_relative_to(root.resolve())
+        ):
+            raise RuntimeError(
+                f"The [proposer] setup output {target} cannot be restored: its parent folder {folder} is a link,"
+                f" is not a folder or is outside {root}. Make the version keep that folder a plain folder."
+            )
+
+
+def _copy_path(source: Path, target: Path, root: Path) -> None:
+    """Copy one file, link or folder of a setup's output, with its links kept as links.
+
+    Args:
+        source: The path to copy.
+        target: The new path; its parent folders are made.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
+    """
+    _check_parents(target, root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, target, symlinks=True)
+    else:
+        shutil.copy2(source, target, follow_symlinks=False)
+
+
+def _remove_path(path: Path) -> None:
+    """Remove one file, link or folder, and never follow a link.
+
+    Args:
+        path: The path to remove; a missing path is skipped.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        path.unlink()
+
+
+def _unsafe(path: str) -> bool:
+    """Tell whether no exclude line can hold a path.
+
+    Args:
+        path: A checkout-relative path; a folder ends with ``/``.
+
+    Returns:
+        True when the name is not UTF-8, holds a control character or ends in whitespace.
+    """
+    return bool(_CONTROL_CHARS.search(path)) or path.rstrip("/") != path.rstrip("/").rstrip()
+
+
+def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
+    """Turn a setup's output paths into exclude lines, and refuse a name no line can hold.
+
+    Args:
+        paths: Checkout-relative paths; a folder ends with ``/``.
+        command: The setup's argument list, for the error.
+
+    Returns:
+        One anchored exclude line per path.
+
+    Raises:
+        RuntimeError: When a name is not UTF-8, holds a control character or ends in whitespace.
+    """
+    paths = list(paths)
+    unsafe = sorted(path for path in paths if _unsafe(path))
+    if unsafe:
+        raise RuntimeError(
+            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names are"
+            " not UTF-8, hold a control character or end in whitespace:"
+            f" {', '.join(repr(path) for path in unsafe)}. The run cannot keep such a file out of the versions."
+            " Rename it in the setup."
+        )
+    return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
+
+
+def ensure_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Run ``[proposer] setup`` once per git checkout, and give each later session in it a copy of its output.
+
+    The record is in the git common dir, so the checkout and its worktrees
+    share it, and a separate checkout (each Auto lane) runs the setup again.
+    The setup runs in the first session. Its output, ignored files
+    included, is copied into :data:`SETUP_STATE` in the git dir, and a
+    session after a reset or in a new worktree gets that copy back, without
+    a second setup. What the setup adds, ignored files included, is excluded
+    from every version, like the harness files (SKY-753). Any failure after
+    the setup starts puts the checkout back as it was: ``HEAD``, the index,
+    the files of the version, and no setup output.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
         checkout: The repository checkout or worktree the proposer command runs in.
         timeout_seconds: Stop the setup, and every process it started, after this long.
+            The wait for another session's setup counts inside it.
+        env: The setup's environment, the same as the proposer command's.
 
     Raises:
-        RuntimeError: When the setup or git fails, or the setup changes a file of the version.
+        RuntimeError: When the setup or git fails, the setup changes a file of
+            the version or moves ``HEAD``, it writes a name that no exclude
+            line can hold, another session's setup holds the lock past
+            ``timeout_seconds`` or fails with no time left to run it again,
+            or the setup's record is unreadable.
     """
-    marker = checkout / SETUP_MARKER
-    if marker.exists():
-        return
-    # Files the parent version added are untracked too; only the setup's new paths are excluded.
-    before = _untracked(checkout, folders=False)
-    version_files = {path: _tracked_state(checkout, path) for path in before}
-    tracked = _tracked_changes(checkout)
-    run_setup(command, checkout, timeout_seconds)
-    changed = sorted(
-        path
-        for path in tracked.keys() | _tracked_changes(checkout).keys()
-        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
-    )
-    if changed:
-        raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
-            f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
-            " files that git does not track."
-        )
-    # GEPA and Best-of-N check out a parent version with its new files untracked;
-    # a change to one of them would enter every version as well.
-    rewritten = sorted(path for path, state in version_files.items() if _tracked_state(checkout, path) != state)
-    if rewritten:
-        raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed files"
-            f" of the version: {', '.join(rewritten)}. Those changes would enter every version. Make the setup"
-            " write only new files that git does not track."
-        )
-    added = sorted(_setup_output(checkout, before) | {SETUP_MARKER})
-    exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
-    exclude = (exclude if exclude.is_absolute() else checkout / exclude) / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in added]
-    known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
-    with exclude.open("a", encoding="utf-8") as stream:
-        stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-    marker.write_text(shlex.join(command) + "\n", encoding="utf-8")
+    common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
+    common = common if common.is_absolute() else checkout / common
+    state = common / SETUP_STATE
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "lock").open("a") as lock:
+        # Parallel AutoSaddler sessions share the git dir; one runs the setup, the others wait for its output.
+        # A blocking flock would wait past the session's time limit, so the wait polls up to that limit.
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish"
+                        f" in another session within {timeout_seconds:g} seconds."
+                    ) from None
+                time.sleep(0.1)
+        record = state / "done.json"
+        if record.exists():
+            try:
+                kept = json.loads(record.read_text(encoding="utf-8"))["output"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise RuntimeError(
+                    f"The record of the [proposer] setup command in optimize.toml ({shlex.join(command)}) at"
+                    f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
+                ) from error
+            # The first session writes the whole copy before done.json, and nothing changes it after,
+            # so later sessions copy it unlocked and do not wait in line for each other.
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            for path in kept:
+                name = path.rstrip("/")
+                # A file that the version holds at the same path wins over the setup's copy.
+                if not os.path.lexists(checkout / name):
+                    _copy_path(state / "output" / name, checkout / name, checkout)
+            return
+        # Files the parent version added are untracked too; only the setup's new paths are excluded.
+        before = _untracked(checkout, folders=False)
+        # ``git clean -fdx`` and a new worktree drop ignored files too, so the setup's ignored output is kept as well.
+        ignored_before = _untracked(checkout, folders=False, ignored=True)
+        version_files = {path: _tracked_state(checkout, path) for path in before}
+        head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+        tracked = _tracked_changes(checkout)
+        # A waiter whose lock holder failed runs the setup itself, but only in the time its own limit has left.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
+                f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
+            )
+        with tempfile.TemporaryDirectory(dir=state) as saved_name:
+            saved = Path(saved_name)
+            # The version's own edits are only hashed above, so a failed setup could not put them back.
+            _save_checkout(checkout, tracked.keys() | before, saved)
+            try:
+                run_setup(command, checkout, remaining, env)
+                moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+                if moved != head:
+                    # A commit would hide its changes from the diff below, and enter every version.
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
+                        f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
+                        " history alone."
+                    )
+                changed = _setup_changes(checkout, tracked)
+                if changed:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                        f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+                        " files that git does not track."
+                    )
+                # GEPA and Best-of-N check out a parent version with its new files untracked;
+                # a change to one of them would enter every version as well.
+                rewritten = sorted(
+                    path for path, content in version_files.items() if _tracked_state(checkout, path) != content
+                )
+                if rewritten:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
+                        f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
+                        " Make the setup write only new files that git does not track."
+                    )
+                added = sorted(_setup_output(checkout, before))
+                ignored = _setup_output(checkout, ignored_before, ignored=True)
+                # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
+                # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
+                lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
+                kept = sorted(set(added) | ignored)
+                output = state / "output"
+                shutil.rmtree(output, ignore_errors=True)
+                for path in kept:
+                    name = path.rstrip("/")
+                    # An ignored path inside a new folder is already in that folder's copy.
+                    if not os.path.lexists(output / name):
+                        _copy_path(checkout / name, output / name, output)
+                exclude = common / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+                with exclude.open("a", encoding="utf-8") as stream:
+                    stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+                # A stop between truncate and write would leave an empty record, so the record is replaced whole.
+                partial = state / "done.json.tmp"
+                partial.write_text(json.dumps({"output": kept}), encoding="utf-8")
+                partial.replace(record)
+            except BaseException as error:
+                # Any failure after the setup starts leaves the checkout as it was, so no edit becomes the baseline.
+                try:
+                    _undo_setup(checkout, head, tracked, version_files, ignored_before, saved)
+                except Exception as undo_error:
+                    error.add_note(f"The checkout could not be restored after the setup: {undo_error!r}")
+                raise
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
@@ -711,6 +1021,9 @@ _GUARD_DEADLINE_SECONDS = 5.0
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
 # Linux prctl option that makes a process adopt the orphans of its descendants.
 _PR_SET_CHILD_SUBREAPER = 36
+# The shell's exit codes for a command it cannot find or cannot run.
+_REAPER_NOT_FOUND = 127
+_REAPER_NOT_EXECUTABLE = 126
 # The reaper stops sweeping after this many rounds, so a descendant that keeps
 # forking cannot hold the session open.
 _REAPER_SWEEPS = 50
@@ -1618,7 +1931,8 @@ def reaper_main(command: list[str]) -> int:
         command: The harness shell and its arguments.
 
     Returns:
-        The shell's exit code, or 128 plus the signal number when a signal ended it.
+        The shell's exit code, or 128 plus the signal number when a signal ended it,
+        or 127 (no such file) or 126 (cannot run it) when the command cannot start.
     """
     ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
     # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
@@ -1631,7 +1945,13 @@ def reaper_main(command: list[str]) -> int:
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, _arm_stop_grace)
     signal.signal(signal.SIGALRM, _kill_descendants)
-    returncode = subprocess.Popen(command, restore_signals=True).wait()
+    try:
+        child = subprocess.Popen(command, restore_signals=True)
+    except OSError as error:
+        # The caller reads these shell codes as "could not start"; a traceback would hide the one-line reason.
+        print(error, file=sys.stderr, flush=True)
+        return _REAPER_NOT_FOUND if isinstance(error, FileNotFoundError) else _REAPER_NOT_EXECUTABLE
+    returncode = child.wait()
     for _ in range(_REAPER_SWEEPS):
         left = _descendants(_proc_stats() or {}, os.getpid())
         if not left:
@@ -1693,7 +2013,8 @@ def run_session(
             ``exec_commands`` (command names the exec shim records), and
             ``resume_command`` (:func:`main` runs it in place of
             ``run_command`` for a ``--resume`` of a known session, so a
-            harness with native resume continues its own session state),
+            harness with native resume continues its own session state;
+            never for a ``file_command``),
             ``setup`` (the contract file's ``[proposer] setup``, run by
             :func:`ensure_setup` before a session in a checkout) and
             ``file_command`` (``run_command`` is the contract file's exact
@@ -1729,6 +2050,17 @@ def run_session(
                 f"The [proposer] entry command in optimize.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    if api_key is None:
+        api_key = _env(KEY_ENV)
+    env = {
+        **os.environ,
+        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
+        **(extra_env or {}),
+    }
+    hashes = dict(proposer.get("hidden_hashes") or {})
+    if hashes:
+        home = Path(env["HOME"]) if env.get("HOME") else None
+        env.update(install_guard(session_dir, workspace, hashes, home))
     if proposer.get("setup"):
         # The setup counts inside the session's time limit. An in-process
         # caller (AutoSaddler) installs no SIGTERM handler; its stop kills
@@ -1737,11 +2069,18 @@ def run_session(
         setup_seconds = (
             SETUP_TIMEOUT_SECONDS if timeout_seconds is None else min(SETUP_TIMEOUT_SECONDS, timeout_seconds)
         )
-        ensure_setup(list(proposer["setup"]), workspace, setup_seconds)
+        # The setup gets the proposer command's environment and guard. The exec shim comes after it, so
+        # the exec log holds only the proposer's own commands.
+        ensure_setup(list(proposer["setup"]), workspace, setup_seconds, env)
         if timeout_seconds is not None:
-            timeout_seconds = max(0.0, timeout_seconds - (time.monotonic() - setup_started))
-    if api_key is None:
-        api_key = _env(KEY_ENV)
+            limit = timeout_seconds
+            timeout_seconds -= time.monotonic() - setup_started
+            if timeout_seconds <= 0:
+                # A harness with no time left would be killed at once, so the setup's overrun stops the session.
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(proposer['setup'])}) used up"
+                    f" the session's time limit of {limit:g} seconds."
+                )
     for relative_path, content in (proposer.get("files") or {}).items():
         target = contained_path(workspace, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1754,15 +2093,6 @@ def run_session(
     attempt = len(list(session_dir.glob("prompt-*.md"))) + 1
     prompt_file = session_dir / f"prompt-{attempt}.md"
     prompt_file.write_text(prompt, encoding="utf-8")
-    env = {
-        **os.environ,
-        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
-        **(extra_env or {}),
-    }
-    hashes = dict(proposer.get("hidden_hashes") or {})
-    if hashes:
-        home = Path(env["HOME"]) if env.get("HOME") else None
-        env.update(install_guard(session_dir, workspace, hashes, home))
     exec_commands = proposer.get("exec_commands") or []
     if exec_commands:
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
@@ -2116,7 +2446,8 @@ def main(argv: list[str]) -> int:
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
     opening = session_dir / "opening-prompt.md"
-    if resumed and opening.exists() and proposer.get("resume_command"):
+    # The file's own command has no resume protocol, so its session restates the task, as a fallback harness does.
+    if resumed and opening.exists() and proposer.get("resume_command") and not proposer.get("file_command"):
         # The harness continues its own session from the session folder, so it gets only the follow-up.
         proposer = {**proposer, "run_command": proposer["resume_command"]}
     elif resumed and opening.exists():

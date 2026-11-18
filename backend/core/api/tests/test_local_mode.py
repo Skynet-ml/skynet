@@ -1083,21 +1083,27 @@ def test_a_check_on_a_filled_in_cli_is_not_evidence_for_the_same_cli_picked(
     assert submitted.status_code == 409, submitted.text
 
 
-def test_a_check_cli_sent_back_without_its_mark_stays_current_when_the_run_names_its_harness(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "named",
+    [{"harness": "codex"}, {"run_command": "python propose.py"}, {"install_command": "pip install proposer"}],
+    ids=["harness", "run_command", "install_command"],
+)
+def test_a_check_cli_sent_back_without_its_mark_stays_current_when_the_run_names_its_proposer(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, named: dict[str, str]
 ) -> None:
-    """A named harness never uses ``[proposer] entry``, so the mark cannot make the check stale (SKY-753).
+    """A named harness or command never uses ``[proposer] entry``, so the mark cannot make the check stale (SKY-753).
 
     Args:
         harness: Real setup, wallet, and job services.
         monkeypatch: Pytest fixture used to set local mode and the probe.
+        named: The proposer field that the request names.
     """
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
     budget = harness.budgets.create(harness.username, 20, idempotency_key="named")
     payload = {
         **_run_payload(**_SUBSCRIPTION_RUN),
-        "proposer": {"harness": "codex"},
+        "proposer": named,
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -1119,7 +1125,7 @@ def test_a_check_cli_sent_back_without_its_mark_stays_current_when_the_run_names
         "/blackbox/run",
         json={
             **payload,
-            "proposer": {"harness": "codex", "host_cli": checked["proposer_host_cli"]},
+            "proposer": {**named, "host_cli": checked["proposer_host_cli"]},
             "execution_budget_revision": checked["budget"]["revision"],
             "preflight_id": checked["id"],
             "preflight_fingerprint": checked["fingerprint"],

@@ -328,7 +328,8 @@ def test_a_proposer_entry_and_setup_pass_the_gate(tmp_path: Path, place: str) ->
     raw = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "agent.js"]\n'
 
     assert {"proposer.entry", "proposer.setup"} <= repo_gate._ENFORCED_EVERYWHERE
-    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
 
 
 def _mcp_archive(tmp_path: Path, server: str) -> Path:

@@ -32,8 +32,8 @@ network = ["docs.python.org"]
 # Optional. Your own proposer command. Used only when the run names no
 # proposer of its own. See "Your own proposer" below.
 entry = ["node", "agent/my-agent.js"]
-# Optional. Runs before the first session in each checkout, for example to
-# install the command.
+# Optional. Runs once in the proposer box, before the first session, for
+# example to install the command.
 setup = ["npm", "ci"]
 
 [data]
@@ -87,30 +87,45 @@ metric lives with the judge.
 
 `entry` names the command that proposes each new version. `setup` names a
 command that prepares the repository for it. Write each one as a list of strings, for
-example `["node", "agent/my-agent.js"]`. A plain string, an empty list or an
-empty part fails the setup check, and the message names the key.
+example `["node", "agent/my-agent.js"]`. A plain string, an empty list, an
+empty part or a part with a control character fails the setup check, and the
+message names the key. Control characters include the C1 controls and the
+bidirectional text controls (U+061C, U+200E, U+200F, U+202A to U+202E and
+U+2066 to U+2069), because they can hide what a command does.
 
 - The run's own proposer wins. When the run request names a proposer, the
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
 - `setup` without `entry` fails the setup check.
-- `setup` runs in the repository checkout where the command runs, before a
-  proposer session, also in a protected run. It runs again each time that
-  checkout loses its output: GEPA and Best-of-N reset the checkout before and
-  after each version, and AutoSaddler gives each session a new worktree. So
-  write a `setup` that you can run again with the same result. The files it
-  adds never join a version. It has 30 minutes, but never more than the
-  time that the proposer session has left: the setup time counts inside the
-  session's time limit. If it fails or runs out of time, the run stops, and
-  the message names the command and its output.
-  When `setup` ends, the run stops every process that it left running.
-  When the run stops a proposer session, it also stops a `setup` that runs.
+- `setup` runs once in each proposer box, in the repository checkout where
+  the command runs, before the first proposer session, also in a protected
+  run. The run keeps a copy of the files that `setup` adds in the git
+  folder, also the files that `.gitignore` names (such as `node_modules/`).
+  GEPA and Best-of-N reset the checkout before and after each version, and
+  AutoSaddler gives each session a new worktree. Each later session gets the
+  kept copy back, and `setup` does not run again. A file of the version at
+  the same path stays, and the copy does not replace it. The copy keeps
+  symbolic links as links. A file that holds the absolute path of the first
+  checkout (for example a Python virtual environment) can fail in an
+  AutoSaddler worktree, because each worktree has a different path. The copy
+  uses disk space in the box, and each later session spends time to copy it.
+  The files it adds never join a version. It has 30 minutes, but never more
+  than the time that the proposer session has left: the setup time counts
+  inside the session's time limit. If it fails or runs out of time, the run
+  stops, and the message names the command and its output. When `setup`
+  ends, the run stops every process that it left running. When the run stops
+  a proposer session, it also stops a `setup` that runs.
 - `setup` can write only files that git does not track. If it changes,
   adds to the index or removes a tracked file, the run stops. The message
   names the command and the changed files, because the change would join
   every version. Edits that the version made before `setup` ran do not count.
   The same applies to the new files of the version that git does not track
   yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
+  If `setup` makes a commit or checks out another commit, the run stops too.
+- A file or folder name that `setup` adds must be UTF-8. It cannot hold a
+  control character (such as a new line) or end in a space. The run cannot
+  keep such a name out of the versions, so the run stops, and the message
+  names the file.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
@@ -144,9 +159,11 @@ empty part fails the setup check, and the message names the key.
   files, and so change the proposer of the next versions. To prevent this,
   put your proposer's folder in `[paths] protected`, for example
   `protected = ["agent"]`.
-- An `entry` or `setup` argument that names a symbolic link, or a path in a
-  linked folder, fails the setup check. Protection matches paths, so a
-  version could change the file that the link points at. Name the real path.
+- An `entry` or `setup` argument that names a symbolic link, a path in a
+  linked folder, or a folder that holds a symbolic link at any depth, fails
+  the setup check. Protection matches paths, so a version could change the
+  file that the link points at. Name the real path, and keep links out of a
+  named folder.
 - `entry` and `setup` cannot contain `__APP_API_KEY__` or
   `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
@@ -583,9 +600,10 @@ catch the failure in the program, as above, and let the metric score it.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A `[proposer] entry` or `setup` that is not a list of non-empty strings,
-  or that contains `__APP_API_KEY__` or `__SKYNET_API_KEY__`. A `setup`
-  without `entry`. An `entry` together with `[proposer] mcp`. An `entry` in a
-  single AutoResearch, Meta-Harness or ShinkaEvolve run.
+  or a part with a control character, or that contains `__APP_API_KEY__` or
+  `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
+  `[proposer] mcp`. An `entry` in a single AutoResearch, Meta-Harness or
+  ShinkaEvolve run.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
@@ -622,7 +640,8 @@ The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
 command, the network for setup, for versions (`[run]`) and for the metric, and each role's services
-and MCP servers.
+and MCP servers. When the run uses the file's proposer, it also holds
+`proposer_entry` and `proposer_setup`.
 A resumed run that arrives at different rules fails instead of continuing.
 
 ## Services, MCP files and secrets

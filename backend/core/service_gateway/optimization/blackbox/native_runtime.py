@@ -1212,8 +1212,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             "task": native_task_payload(engine_id, task),
         }
         if (options.repo or {}).get("file_proposer"):
-            # The guest runs the setup in the checkout before each session that
-            # lacks its output, also in a protected run, where the bootstrap installs nothing.
+            # The guest runs the setup once in the checkout, and gives later sessions a copy of its
+            # output, also in a protected run, where the bootstrap installs nothing.
             payload["proposer"]["file_command"] = True
             payload["proposer"]["setup"] = list(options.repo.get("proposer_setup") or ())
         if fallback is not None:

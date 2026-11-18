@@ -523,11 +523,22 @@ export function hostCliPatch(
 ): {
   host_cli: CliProvider | null | undefined;
   host_permission: "workspace_only" | "full_access" | undefined;
+  host_cli_auto: undefined;
 } {
+  // Any choice here is the user's, so the patch clears a mark that says the
+  // server filled in host_cli; with the mark, the server ignores the pick (SKY-753).
   if (isCliProvider(value)) {
-    return { host_cli: value, host_permission: permission ?? "workspace_only" };
+    return {
+      host_cli: value,
+      host_permission: permission ?? "workspace_only",
+      host_cli_auto: undefined,
+    };
   }
-  return { host_cli: value === "off" ? null : undefined, host_permission: undefined };
+  return {
+    host_cli: value === "off" ? null : undefined,
+    host_permission: undefined,
+    host_cli_auto: undefined,
+  };
 }
 
 /**
