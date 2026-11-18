@@ -1083,6 +1083,69 @@ def test_a_check_on_a_filled_in_cli_is_not_evidence_for_the_same_cli_picked(
     assert submitted.status_code == 409, submitted.text
 
 
+def test_a_check_cli_sent_back_without_its_mark_stays_current_when_the_run_names_its_harness(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named harness never uses ``[proposer] entry``, so the mark cannot make the check stale (SKY-753).
+
+    Args:
+        harness: Real setup, wallet, and job services.
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="named")
+    payload = {
+        **_run_payload(**_SUBSCRIPTION_RUN),
+        "proposer": {"harness": "codex"},
+        "execution_budget_id": budget.id,
+        "execution_budget_revision": budget.revision,
+    }
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "succeeded", checked
+
+    submitted = harness.client.post(
+        "/blackbox/run",
+        json={
+            **payload,
+            "proposer": {"harness": "codex", "host_cli": checked["proposer_host_cli"]},
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert submitted.status_code == 201, submitted.text
+    job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
+    assert job["payload"]["proposer"]["host_cli"] == "claude"
+
+
+def test_the_openapi_schema_documents_the_filled_in_cli_mark() -> None:
+    """A client can learn about ``host_cli_auto`` from openapi.json (SKY-753)."""
+    with (
+        patch("core.api.app.get_job_store"),
+        patch("core.api.app.get_worker"),
+    ):
+        application = create_app(registry=ServiceRegistry())
+    schemas = application.openapi()["components"]["schemas"]
+    proposer = schemas.get("BlackboxProposer") or schemas["BlackboxProposer-Input"]
+    field = proposer["properties"][HOST_CLI_AUTO_KEY]
+
+    assert field["type"] == "boolean"
+    assert "proposer_host_cli" in field["description"]
+
+
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])
 def test_local_wizard_check_without_a_cli_survives_a_new_engine_cli(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, route: str

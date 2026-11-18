@@ -435,6 +435,9 @@ export interface BlackboxProposer {
   // Local desktop build only: run the proposer as this signed-in CLI on the
   // host, confined to the run workspace unless the user grants full access.
   host_cli?: "codex" | "claude" | null;
+  // True when the server filled in host_cli, so a repository's [proposer]
+  // entry still applies. A picked host_cli replaces it.
+  host_cli_auto?: boolean;
   host_permission?: "workspace_only" | "full_access";
 }
 

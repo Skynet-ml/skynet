@@ -541,6 +541,17 @@ class BlackboxProposer(BaseModel):
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
     host_cli: Literal["codex", "claude"] | None = None
     host_permission: Literal["workspace_only", "full_access"] = "workspace_only"
+    # Input only: the serializer below writes the mark from ``model_fields_set``.
+    host_cli_auto: bool = Field(
+        default=False,
+        exclude=True,
+        description=(
+            "Local mode only. True says that host_cli is the CLI that the server filled in, for example the "
+            "proposer_host_cli of a wizard check, not one the client picked. A filled-in CLI lets the repository's "
+            "[proposer] entry apply, and a picked CLI replaces it. Send it back with that CLI so a check on a "
+            "request that names no harness, run_command or install_command stays current."
+        ),
+    )
 
     _refuse_removed_cli = field_validator("host_cli", mode="before")(refuse_removed_cli)
 
@@ -557,7 +568,7 @@ class BlackboxProposer(BaseModel):
             The validated proposer.
         """
         proposer = handler(data)
-        if isinstance(data, dict) and data.get(HOST_CLI_AUTO_KEY):
+        if proposer.host_cli_auto:
             proposer.model_fields_set.discard("host_cli")
         return proposer
 
