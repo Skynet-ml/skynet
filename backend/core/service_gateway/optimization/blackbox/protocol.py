@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
 
 from gepa.oa.budget import BudgetExhausted
@@ -24,7 +25,9 @@ from ..timing import STAGE_TRAINING
 from .runner import FEEDBACK_REQUIRED
 
 if TYPE_CHECKING:
+    from ....sandbox.grants import Grant
     from .native_runtime import NativeOptions
+    from .sandbox_contract import CommandResult
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +224,37 @@ class CandidateRecord:
         return self.total / self.count
 
 
+@dataclass(frozen=True)
+class ModelReply:
+    """One model response: its text, the tool calls that it asks for, and its cost in cents."""
+
+    text: str
+    cost_cents: Decimal
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RepoSeed:
+    """The run's repository seed tree and the rules for its paths, all repository-relative.
+
+    A symlink of the tree must not be, lie below or hold a hidden path: the engine loop stops on such a tree,
+    because the link's target would stay visible under its real path. A tree that holds a hidden path must
+    also have no symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell
+    what it reaches. The engine loop does not enforce the editable, read-only and constrained paths; the caller
+    enforces them where it accepts a candidate.
+    """
+
+    tree_id: str
+    editable_paths: tuple[str, ...] = ()
+    readonly_paths: tuple[str, ...] = ()
+    constrained_paths: tuple[str, ...] = ()
+    # The engine never learns the hidden names: each key is the SHA-256 of a normalized repository-relative
+    # path, built by harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case.
+    # The value is its kind. A folder key hides its whole subtree, so check a path with
+    # harness_bridge.hashed_kind, never with ``path in hidden_hashes``.
+    hidden_hashes: Mapping[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class EngineContext:
     """Run-scoped resources every engine receives alongside the task."""
@@ -245,6 +279,13 @@ class EngineContext:
     # Job-level progress sink. Engines that can narrate their run (GEPA via
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
+    # The worker engine loop (SKY-719) sets these; each model call and command is one step there.
+    call_model: Callable[[str | list[dict[str, Any]], list[dict[str, Any]] | None], ModelReply] | None = None
+    run_command: Callable[[str, str, tuple[Grant, ...]], tuple[CommandResult, str]] | None = None
+    put_files: Callable[[Mapping[str, bytes], str | None], str] | None = None
+    read_file: Callable[[str, str], bytes | None] | None = None
+    list_files: Callable[[str, str], list[str] | None] | None = None
+    repo_seed: RepoSeed | None = None
 
 
 class Engine(Protocol):

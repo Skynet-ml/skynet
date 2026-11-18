@@ -118,6 +118,8 @@ SHINKA_IMAGE_PYTHON = "/opt/shinka/venv/bin/python"
 SHINKA_NOVELTY_KEY_ENV = "APP_SHINKA_NOVELTY_KEY"
 SHINKA_EMBED_KEY_ENV = "APP_SHINKA_EMBED_KEY"
 _BRIDGE_FILE = "harness_bridge.py"
+# harness_bridge.install_exec_shim runs the shim from the bridge's own folder (SKY-715).
+_EXEC_SHIM_FILE = "exec_shim.py"
 _ENGINES_FILE = "native_engines.py"
 _REPO_TREE_FILE = "repo_tree.py"
 _REPO_CHUNK_DIR = "repo-tree"
@@ -240,6 +242,19 @@ def _source_archive() -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _bridge_files() -> dict[str, str]:
+    """Return the harness bridge and the exec shim that it installs next to itself.
+
+    Returns:
+        Relative file paths mapped to their text.
+    """
+    bridge = Path(harness_bridge.__file__)
+    return {
+        _BRIDGE_FILE: bridge.read_text(encoding="utf-8"),
+        _EXEC_SHIM_FILE: bridge.with_name(_EXEC_SHIM_FILE).read_text(encoding="utf-8"),
+    }
+
+
 def _runner_files(engine_id: str) -> dict[str, str]:
     """Collect the sandbox-side runner plus the pinned upstream prompts or plugin it drives.
 
@@ -254,11 +269,11 @@ def _runner_files(engine_id: str) -> dict[str, str]:
         return {
             _SHINKA_RUNNER_FILE: runner.read_text(encoding="utf-8"),
             _SHINKA_BUNDLE_FILE: runner.with_name(_SHINKA_BUNDLE_FILE).read_text(encoding="utf-8"),
-            _BRIDGE_FILE: Path(harness_bridge.__file__).read_text(encoding="utf-8"),
+            **_bridge_files(),
             _SHINKA_REQUIREMENTS_FILE: runner.with_name(_SHINKA_REQUIREMENTS_FILE).read_text(encoding="utf-8"),
             _REPO_TREE_FILE: Path(repo_tree.__file__).read_text(encoding="utf-8"),
         }
-    bridge = {_BRIDGE_FILE: Path(harness_bridge.__file__).read_text(encoding="utf-8")}
+    bridge = _bridge_files()
     if engine_id != "autosaddler":
         engines = Path(native_runner.__file__).with_name(_ENGINES_FILE)
         files = {
