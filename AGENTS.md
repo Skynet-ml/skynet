@@ -108,10 +108,10 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   Before and After images or videos.
 - **Fix bugs locally, push once.** Each push starts a new review. Test and
   review the full diff locally, then push once.
-- **Among agents, only the orchestrator merges**, as soon as a batch passes
-  its gates (no fixed window, Gilad, 2026-11-18). Implementation and review
-  agents never merge, and never post `Approved for merge` or
-  `Changes requested:`.
+- **Among agents, only the orchestrator merges**, through a batch, as soon
+  as the batch CI runs pass (no fixed window, Gilad, 2026-11-18).
+  Implementation and review agents never merge, and never post
+  `Approved for merge` or `Changes requested:`.
 - A PR merges into `staging` when one Opus 5.5 review at medium effort
   approves its current head commit with 0 findings, and CI passes (Gilad,
   2026-11-11). This includes CI (`.github/**`), deploy and infra config, and

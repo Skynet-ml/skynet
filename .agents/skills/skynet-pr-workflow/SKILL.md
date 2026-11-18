@@ -372,9 +372,13 @@ A manual hold on a change or on a promotion still stops it.
 ### Merging into staging (batch flow 2026-11-10, no window 2026-11-18)
 
 - There is no fixed merge window (Gilad, 2026-11-18). The orchestrator
-  merges a batch into `staging` as soon as the batch passes its gates.
-- After an approval, the orchestrator does not merge the PR alone. It
-  moves the issue to **Ready to Merge**, adds the `ready-to-merge` label,
+  merges a batch into `staging` as soon as its `ci` and `i18n` runs pass,
+  and, after a conflict fix, its batch review approves (see "PR tests and
+  batch CI").
+- The orchestrator starts a batch when a PR is in **Ready to Merge** and no
+  other batch PR is open.
+- After an approval, the orchestrator does not merge the PR outside a
+  batch. It moves the issue to **Ready to Merge**, adds the `ready-to-merge` label,
   a PR comment and the `agent-review/ready-to-merge` status on the approved
   head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
