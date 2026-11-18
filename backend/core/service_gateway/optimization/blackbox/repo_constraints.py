@@ -1630,9 +1630,11 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
     """Find the repository files and folders that ``[proposer] entry`` and ``setup`` name.
 
     An argument names a path when, normalized, it is relative and equals a
-    file of the snapshot, such as ``agent/run.js``, or a folder that holds
-    one, such as ``agent`` in ``npm ci --prefix agent``. The checkout root
-    (``.``) is never one, and a protected folder covers all its files.
+    file or a symbolic link of the snapshot, such as ``agent/run.js``, or a
+    folder that holds one, such as ``agent`` in ``npm ci --prefix agent``.
+    The checkout root (``.``) is never one, and a protected folder covers all
+    its files. A link is protected by its own path, so a version cannot point
+    it at other code.
 
     Args:
         constraints: The parsed proposal.
@@ -1644,7 +1646,7 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
     if constraints.proposer_entry is None:
         return constraints
     with tarfile.open(archive, "r:gz") as packed:
-        files = {PurePosixPath(member.name) for member in packed.getmembers() if member.isfile()}
+        files = {PurePosixPath(member.name) for member in packed.getmembers() if member.isfile() or member.issym()}
     paths = {str(path) for file in files for path in (file, *file.parents)} - {"."}
     parts = (*constraints.proposer_entry, *(constraints.proposer_setup or ()))
     named = (posixpath.normpath(part) for part in parts if not part.startswith("/"))

@@ -249,6 +249,25 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
 
 
+def test_an_entry_that_names_a_tracked_link_protects_the_link(tmp_path: Path) -> None:
+    """A version cannot point a linked entry script at its own code (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    raw = b'version = 1\n[proposer]\nentry = ["node", "agent/run.js"]\n'
+    archive = _archive(
+        tmp_path, {CONSTRAINTS_FILE: raw, "agent/real.js": b"// agent"}, link="real.js", link_name="agent/run.js"
+    )
+    constraints = read_constraints(archive)
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    assert constraints.proposer_command_files == ("agent/run.js",)
+    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
+
+
 def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_path: Path) -> None:
     """``npm ci --prefix agent`` protects the agent folder, but never the checkout root or a path outside (SKY-753).
 
