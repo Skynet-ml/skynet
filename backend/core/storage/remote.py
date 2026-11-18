@@ -1269,7 +1269,13 @@ class RemoteDBJobStore:
             session.close()
 
     def update_job_if_status(
-        self, optimization_id: str, expected: tuple[str, ...], *, expected_generation: int | None = None, **kwargs: Any
+        self,
+        optimization_id: str,
+        expected: tuple[str, ...],
+        *,
+        expected_generation: int | None = None,
+        ends_recovery: bool = False,
+        **kwargs: Any,
     ) -> bool:
         """Update a job only while its status is one of ``expected`` (compare-and-set).
 
@@ -1284,6 +1290,9 @@ class RemoteDBJobStore:
             expected: Status values the row must currently hold for the write to
                 apply.
             expected_generation: Execution fence required for worker-owned writes.
+            ends_recovery: Whether a user's stop writes the status. Then a
+                ``recovering`` marker becomes ``interrupted`` in the same
+                transaction, and any other marker stays.
             **kwargs: Column values to overwrite.
 
         Returns:
@@ -1322,6 +1331,15 @@ class RemoteDBJobStore:
             if expected_generation is not None:
                 query = query.filter(JobModel.execution_generation == expected_generation)
             rows = query.update(update_values, synchronize_session=False)
+            if rows and ends_recovery:
+                # Sweeps skip a stopped run, so a sweep's recovering marker would stay
+                # and hide the user's status in the UI. The interrupted marker keeps the
+                # crash waivable for a later manual resume (SKY-814).
+                recovery = session.query(JobModel.recovery).filter(JobModel.optimization_id == optimization_id).scalar()
+                if isinstance(recovery, dict) and recovery.get("state") == "recovering":
+                    session.query(JobModel).filter(JobModel.optimization_id == optimization_id).update(
+                        {JobModel.recovery: _interrupted_recovery(recovery)}, synchronize_session=False
+                    )
             session.commit()
             return rows > 0
         finally:

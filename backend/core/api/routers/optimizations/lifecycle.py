@@ -66,7 +66,8 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
     Uses the store's ``update_job_if_status`` CAS when available so a pause /
     cancel can't clobber a status the worker moved the row to in the race window
     after the handler's status pre-check. Stores without the CAS (test fakes)
-    keep the prior unconditional write.
+    keep the prior unconditional write. The CAS also ends a sweep's
+    ``recovering`` marker, so the UI shows the user's status (SKY-814).
 
     Args:
         job_store: The active job store.
@@ -82,7 +83,7 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
     if cas is None:
         job_store.update_job(optimization_id, **fields)
         return True
-    return cas(optimization_id, expected, **fields)
+    return cas(optimization_id, expected, ends_recovery=True, **fields)
 
 
 def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> None:

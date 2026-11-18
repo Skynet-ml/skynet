@@ -1488,3 +1488,64 @@ def test_a_cancel_after_the_requeue_commit_closes_the_budget(
     assert job["status"] == "cancelled"
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
     assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+
+
+@pytest.mark.parametrize("action", ["cancel", "pause"])
+def test_a_user_stop_while_the_sweep_waits_for_usage_ends_the_recovering_marker(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """A stop through the route while the sweep waits for in-flight usage shows its status (SKY-814).
+
+    Later sweeps skip the stopped run, so only the route's status write can end the
+    ``recovering`` marker that hides the status in the UI.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        monkeypatch: The pytest monkeypatch fixture.
+        action: The route the user calls.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    service = BudgetService(engine=store.engine)
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    operation = service.reserve(
+        budget_id,
+        "owner",
+        operation_key="in-flight",
+        generation=0,
+        phase="run",
+        cost_kind="model",
+        request_fingerprint="in-flight",
+        price_snapshot={"version": "fixture-v1"},
+        max_cents=3,
+    )
+    service.mark_dispatched(operation.id, "owner")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 0
+    job = store.get_job(RUN)
+    assert (job["status"], job["recovery"]["state"]) == ("running", "recovering")
+    # The step log is the run's resumable state; the pause route asks for a checkpoint.
+    monkeypatch.setattr(store, "has_compatible_gepa_checkpoint", lambda _run: True, raising=False)
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    # The run's payload names no owner, so only an admin reaches it, as in the API tests.
+    admin = AuthenticatedUser(username="alice", role="admin", groups=("skynet-admins",))
+    app.dependency_overrides[get_authenticated_user] = lambda: admin
+
+    response = TestClient(app, raise_server_exceptions=False).post(f"/optimizations/{RUN}/{action}")
+
+    assert response.status_code == 200
+    monkeypatch.undo()
+    _kill(store)
+    store.recover_orphaned_jobs()
+    job = store.get_job(RUN)
+    assert job["status"] == ("cancelled" if action == "cancel" else "paused")
+    assert job["recovery"] == INTERRUPTED
+    assert store.take_ended_orphans() == []
+    # The old pod's request settles; then the user's manual resume runs the run again.
+    service.settle(operation.id, "owner", evidence_key="in-flight", actual_cents=3, evidence={"usage": "in-flight"})
+    assert _manual_resume_waives(store, monkeypatch) == [0]
