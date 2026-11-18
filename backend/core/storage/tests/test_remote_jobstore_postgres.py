@@ -18,29 +18,34 @@ unaffected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 import pickle
 import random
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, make_url, text
+from sqlalchemy import create_engine, event, make_url, text
 from sqlalchemy.orm import Session
 
 import core.storage.remote as remote_mod
 from alembic import command
 from core.billing.budgets import BudgetService
 from core.config import app_env
+from core.constants import PROGRESS_BASELINE
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
 from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
 from core.sandbox.tests.fake_provider import InMemorySandbox
-from core.storage.models import BillingCustomerModel
+from core.storage.models import MAX_PROGRESS_EVENT_KEY_LENGTH, PROGRESS_EVENT_KEY, BillingCustomerModel
 from core.storage.remote import RemoteDBJobStore
 from core.worker.checkpoint_compat import checkpoint_manifest
 
@@ -265,6 +270,134 @@ def test_parallel_progress_writers_finish_quickly(store: RemoteDBJobStore) -> No
         assert store.get_progress_count(ids[1]) == 100
     finally:
         store.delete_jobs(ids)
+
+
+def test_replayed_keyed_progress_events_add_one_row_each(
+    store: RemoteDBJobStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A replay adds no rows for repeated keys and keeps the order of the others (SKY-808).
+
+    ``record_progress`` logs an insert error and goes on, so the test checks
+    the insert result and the log: a unique-index error must not stand in for the skip.
+    """
+    optimization_id = f"progress-key-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    key = PROGRESS_EVENT_KEY
+    now = datetime.now(UTC)
+    try:
+        inserted = [
+            store._insert_progress_event(optimization_id, "candidate", {key: f"candidate:{index}"}, now)
+            for index in (0, 1, 0, 1, 2)
+        ]
+        assert inserted == [True, True, False, False, True]
+        with caplog.at_level(logging.WARNING, logger=remote_mod.__name__):
+            store.record_progress(optimization_id, "candidate", {key: "candidate:1"})
+            store.record_progress(optimization_id, "tick", {})
+            store.record_progress(optimization_id, "tick", {})
+        assert "Failed to insert progress event" not in caplog.text
+
+        events = store.get_progress_events(optimization_id)
+        assert [e["metrics"].get(key) for e in events] == ["candidate:0", "candidate:1", "candidate:2", None, None]
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_record_progress_for_generation_replayed_keyed_event_adds_no_row(store: RemoteDBJobStore) -> None:
+    """The generation-fenced write also adds one row per key and still refreshes the metrics."""
+    optimization_id = f"progress-key-gen-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    store.update_job(optimization_id, status="running", execution_generation=1)
+    try:
+        for score in (0.5, 0.7):
+            assert store.record_progress_for_generation(
+                optimization_id,
+                "step",
+                {PROGRESS_EVENT_KEY: "step:3", "score": score},
+                source_optimization_id=optimization_id,
+                generation=1,
+            )
+        assert store.get_progress_count(optimization_id) == 1
+        assert store.get_job(optimization_id)["latest_metrics"]["score"] == 0.7
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_over_long_progress_event_key_counts_as_no_key(store: RemoteDBJobStore) -> None:
+    """An over-long key adds a row each time; the index predicate and the code agree on the limit."""
+    optimization_id = f"progress-key-long-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    metrics = {PROGRESS_EVENT_KEY: "k" * (MAX_PROGRESS_EVENT_KEY_LENGTH + 1)}
+    try:
+        store.record_progress(optimization_id, "step", metrics)
+        store.record_progress(optimization_id, "step", metrics)
+        assert store.get_progress_count(optimization_id) == 2
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_concurrent_copies_of_a_keyed_progress_event_add_one_row(store: RemoteDBJobStore) -> None:
+    """Writers that reach the insert at the same moment still add one row."""
+    optimization_id = f"progress-key-race-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    metrics = {PROGRESS_EVENT_KEY: "step:7", "score": 0.5}
+    writers = 4
+    barrier = threading.Barrier(writers)
+
+    def hold_progress_insert(*args: object) -> None:
+        """Hold each progress insert until every writer reaches its own insert.
+
+        Args:
+            *args: The ``before_cursor_execute`` arguments; the third one is the SQL text.
+        """
+        statement = str(args[2])
+        if statement.lstrip().upper().startswith("INSERT INTO JOB_PROGRESS_EVENTS"):
+            # A writer that waits on a lock before its insert breaks the barrier; the others go on.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=2)
+
+    event.listen(store.engine, "before_cursor_execute", hold_progress_insert)
+    try:
+        with ThreadPoolExecutor(max_workers=writers) as pool:
+            inserted = list(
+                pool.map(
+                    lambda _: store._insert_progress_event(optimization_id, "step", metrics, datetime.now(UTC)),
+                    range(writers),
+                )
+            )
+        assert sorted(inserted) == [False] * (writers - 1) + [True]
+        assert store.get_progress_count(optimization_id) == 1
+    finally:
+        event.remove(store.engine, "before_cursor_execute", hold_progress_insert)
+        store.delete_jobs([optimization_id])
+
+
+def test_progress_event_key_index_exists_after_migration(store: RemoteDBJobStore) -> None:
+    """The migration builds the unique partial index that the keyed insert targets."""
+    with store.engine.connect() as conn:
+        indexdef = conn.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = 'ux_job_progress_events_event_key'")
+        ).scalar()
+    assert indexdef is not None
+    assert indexdef.startswith("CREATE UNIQUE INDEX")
+    assert "jsonb_typeof" in indexdef
+
+
+def test_progress_trim_keeps_structural_events_while_keyed_events_cover_the_excess(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept keyed non-structural rows cover the excess, so the trim does not delete the baseline (SKY-808)."""
+    monkeypatch.setattr(store, "_max_progress_events", 3)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    optimization_id = f"progress-trim-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    try:
+        store.record_progress(optimization_id, PROGRESS_BASELINE, {"score": 0.1})
+        for i in range(3):
+            store.record_progress(optimization_id, "step", {PROGRESS_EVENT_KEY: f"step:{i}"})
+        events = store.get_progress_events(optimization_id)
+        assert [e["event"] for e in events] == [PROGRESS_BASELINE, "step", "step", "step"]
+    finally:
+        store.delete_jobs([optimization_id])
 
 
 def test_claim_orders_by_user_in_flight_then_age(store: RemoteDBJobStore) -> None:
