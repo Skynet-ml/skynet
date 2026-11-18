@@ -110,8 +110,15 @@ const modelConfigs = (value: unknown): ModelConfig[] =>
 function engineKnobs(source: Record<string, unknown>): Partial<OptimizerSlice> {
   const knobs: Partial<OptimizerSlice> = {};
   if (isRecord(source.budget)) knobs.budget = source.budget as unknown as OptimizerSlice["budget"];
-  if (isRecord(source.proposer))
-    knobs.proposer = source.proposer as unknown as OptimizerSlice["proposer"];
+  // A stored proposer keeps no harness the user did not pick, so a clone
+  // still lets the repository's [proposer] entry apply (SKY-753). A host CLI
+  // the server filled in is not a pick either: the clone drops it with its
+  // mark, so a CLI the user picks later is not sent as filled in.
+  if (isRecord(source.proposer)) {
+    const { host_cli_auto: hostCliAuto, ...proposer } = source.proposer;
+    if (hostCliAuto === true) delete proposer.host_cli;
+    knobs.proposer = proposer as unknown as OptimizerSlice["proposer"];
+  }
   if (isRecord(source.shinka)) knobs.shinka = source.shinka as unknown as OptimizerSlice["shinka"];
   return knobs;
 }

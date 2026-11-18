@@ -16,7 +16,7 @@ import zlib
 from collections.abc import Callable, Sequence
 from typing import Protocol, TypeVar
 
-from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore, is_git_part
 
 from .grants import Grant
 
@@ -248,6 +248,9 @@ class _NoSparseTarInfo(tarfile.TarInfo):
 def tree_to_tar(store: TreeStore, run_id: str, tree_id: str) -> bytes:
     """Return a gzip tar archive of a stored tree.
 
+    A ``.git`` entry in any letter case is left out, at any depth: a tree
+    stored before SKY-810 can hold one.
+
     Args:
         store: The tree store that holds the tree.
         run_id: The run that reads the tree.
@@ -282,6 +285,8 @@ def _add_tree(store: TreeStore, run_id: str, tree_id: str, prefix: str, archive:
     if entries is None:
         raise LookupError(f"Run {run_id} cannot see tree {tree_id}.")
     for entry in entries:
+        if is_git_part(entry.name):
+            continue
         info = tarfile.TarInfo(prefix + entry.name)
         if entry.mode == "tree":
             info.type, info.mode = tarfile.DIRTYPE, _DIR_MODE
@@ -312,9 +317,10 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
 
     Raises:
         BadArchiveError: When the archive is over a size limit, does not
-            read, a member path leaves the top level, is too deep or holds a NUL byte, a name
-            is both a file and a folder, a name is too long or not UTF-8, or
-            a hard link names no earlier file.
+            read, a member path leaves the top level, is too deep or holds a
+            NUL byte or a ``.git`` part in any letter case, a name is both a
+            file and a folder, a name is too long or not UTF-8, or a hard
+            link names no earlier file.
     """
     if len(data) > MAX_ARCHIVE_BYTES:
         raise BadArchiveError(f"The archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
@@ -454,7 +460,8 @@ def _parts(name: str) -> list[str]:
         The names, without empty and ``.`` parts.
 
     Raises:
-        BadArchiveError: When the path holds ``..`` or a NUL byte.
+        BadArchiveError: When the path holds ``..``, a NUL byte or a ``.git``
+            part in any letter case.
     """
     parts = [part for part in name.split("/") if part not in {"", "."}]
     if ".." in parts:
@@ -462,6 +469,9 @@ def _parts(name: str) -> list[str]:
     # A pax header can carry a NUL that the tree store refuses only after the blobs are stored.
     if "\0" in name:
         raise BadArchiveError(f"Archive member {name!r} holds a NUL byte.")
+    # The tree store refuses this part only after the blobs are stored (SKY-810).
+    if any(is_git_part(part) for part in parts):
+        raise BadArchiveError(f"Archive member {name!r} holds a .git part.")
     return parts
 
 

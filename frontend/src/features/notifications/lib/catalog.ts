@@ -194,6 +194,9 @@ export function itemLine(item: NotificationItem, fmt: FactFormatters): ItemLine 
     case "finished":
     case "new_best": {
       const base = item.event_type === "finished" ? "finished" : "new_best";
+      if (base === "finished" && facts.no_score === true) {
+        return { key: "notifications.item.finished_no_score", params: {} };
+      }
       if (score === null) {
         return { key: `notifications.item.${base}_plain` as MessageKey, params: {} };
       }
