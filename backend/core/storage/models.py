@@ -1572,8 +1572,8 @@ class AgentStepModel(Base):
     the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
     ``run_id`` is the job id and the shard key. On the main database, rows go
     with their job via the cascading foreign key. Another shard has no
-    ``jobs`` table, so its rows stay after a job delete until SKY-733 (tree
-    retention and purge) removes them.
+    ``jobs`` table, so a job delete (``purge_run_shards``) and an account
+    purge (``purge_user_shards``) in ``tree_purge`` delete its rows (SKY-733).
     """
 
     __tablename__ = "agent_steps"

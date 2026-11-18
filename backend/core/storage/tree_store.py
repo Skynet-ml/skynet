@@ -9,8 +9,8 @@ id.
 
 Objects travel through the :class:`StepLogStore` buffer, in the same packs
 and flushes as the steps, and each one counts toward its account's stored
-bytes. Nothing deletes them yet; the tree retention issue (SKY-733) adds
-deletion, also on account deletion. A read names its run: before the
+bytes. A run delete and an account delete erase them through ``tree_purge``
+and the compactor's rewrite of marked packs (SKY-733). A read names its run: before the
 flush only that run sees the object, after it every run of the same account.
 """
 
