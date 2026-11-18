@@ -40,6 +40,8 @@ protected = ["bot/geocode/eval", "data/labels.csv"]
 [setup]
 command = "pip install -r requirements.txt"
 """
+# The metric scores only what a [run] or a target stage gives it, so a contract needs one (SKY-761).
+_RUN = b'\n[run]\nentry = "run.py:main"\n'
 _INTENT = b"Return the coordinates of the place the sender most likely means.\nKeep the reply format unchanged.\n"
 
 
@@ -98,7 +100,7 @@ def test_a_repository_without_the_file_keeps_the_approved_settings(tmp_path: Pat
 def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path) -> None:
     """A valid file narrows the editable paths, adds protected ones, and fills in the missing setup."""
     constraints = read_constraints(
-        _archive(tmp_path, {CONSTRAINTS_FILE: _CFCA, "bot/app.py": b"", "docs/intent.md": _INTENT})
+        _archive(tmp_path, {CONSTRAINTS_FILE: _CFCA + _RUN, "bot/app.py": b"", "docs/intent.md": _INTENT})
     )
     assert constraints is not None
 
@@ -130,7 +132,7 @@ def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path
 
 def test_the_approved_setup_command_wins_and_says_so() -> None:
     """A run's own setup command is kept, with a note that the file's proposal was not used."""
-    constraints = parse_constraints(_CFCA)
+    constraints = parse_constraints(_CFCA + _RUN)
 
     environment = effective_environment(constraints, approved_editable=["."], approved_setup="uv sync")
 
@@ -138,7 +140,9 @@ def test_the_approved_setup_command_wins_and_says_so() -> None:
     assert environment.notes == (f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.",)
 
 
-_OWN_PROPOSER = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "my agent.js"]\n'
+_OWN_PROPOSER = (
+    b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "my agent.js"]\n'
+)
 
 
 def test_the_snapshot_holds_the_proposer_entry_and_setup(tmp_path: Path) -> None:
@@ -156,7 +160,7 @@ def test_the_snapshot_holds_the_proposer_entry_and_setup(tmp_path: Path) -> None
 
 def test_a_contract_without_the_proposer_keys_keeps_the_runners_own_agent() -> None:
     """With no ``entry``, nothing changes: no command and no note."""
-    environment = effective_environment(parse_constraints(_CFCA), approved_editable=["."], approved_setup=None)
+    environment = effective_environment(parse_constraints(_CFCA + _RUN), approved_editable=["."], approved_setup=None)
 
     assert environment.constraints is not None
     assert environment.constraints.proposer_entry is None
@@ -237,7 +241,7 @@ def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) 
         part: A TOML string with a control character.
     """
     entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
-    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", {part}]\n'.encode()
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = ["node", {part}]\n'.encode()
 
     with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
         parse_constraints(raw)
@@ -251,7 +255,7 @@ def test_a_proposer_entry_with_a_zwnj_or_zwj_is_kept_exactly(name: str) -> None:
     Args:
         name: A Hebrew file name with a ZWNJ, or an emoji file name with a ZWJ.
     """
-    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
 
     assert parse_constraints(raw).proposer_entry == ("node", name)
 
@@ -266,7 +270,7 @@ def test_a_proposer_entry_with_a_character_next_to_a_refused_range_is_kept(char:
         char: The character just before or just after a refused range.
     """
     name = f"agent{char}.js"
-    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
 
     assert parse_constraints(raw).proposer_entry == ("node", name)
 
@@ -281,7 +285,7 @@ def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -
         token: A gateway key token.
     """
     entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
-    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", "--key={token}"]\n'.encode()
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = ["node", "--key={token}"]\n'.encode()
 
     with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} cannot contain {token}") as caught:
         parse_constraints(raw)
@@ -296,7 +300,7 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     """
     constraints = _read(
         tmp_path,
-        b'version = 1\n[proposer]\nentry = ["node", "./agent/run.js", "--fast"]\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "./agent/run.js", "--fast"]\n',
         {"agent/run.js": b"// agent", "src/app.js": b"// app"},
     )
     assert constraints is not None
@@ -351,7 +355,7 @@ def test_a_command_path_through_a_tracked_link_is_refused(
         through: The link the error names.
     """
     entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
-    raw = f"version = 1\n[proposer]\n{entry}{key} = {command}\n".encode()
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = {command}\n'.encode()
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, **files}, link=link, link_name=link_name)
 
     with pytest.raises(ConstraintsError, match=f"symbolic link '{through}'") as caught:
@@ -372,7 +376,9 @@ def test_a_named_folder_that_holds_a_tracked_link_is_refused(tmp_path: Path, key
         link_name: The path of the link inside the folder.
     """
     entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
-    raw = f'version = 1\n[proposer]\n{entry}{key} = ["npm", "start", "--prefix", "agent"]\n'.encode()
+    raw = (
+        f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = ["npm", "start", "--prefix", "agent"]\n'
+    ).encode()
     files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib", "main.js": b"//"}
     archive = _archive(tmp_path, files, link="../src/lib.js", link_name=link_name)
 
@@ -390,7 +396,7 @@ def test_a_link_outside_the_named_folder_is_allowed(tmp_path: Path) -> None:
     Args:
         tmp_path: Folder for the packed snapshot.
     """
-    raw = b'version = 1\n[proposer]\nentry = ["npm", "start", "--prefix", "agent"]\n'
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["npm", "start", "--prefix", "agent"]\n'
     files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib"}
     archive = _archive(tmp_path, files, link="../src/lib.js", link_name="agent-tools/lib.js")
 
@@ -408,7 +414,7 @@ def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_pa
     """
     constraints = _read(
         tmp_path,
-        b'version = 1\n[proposer]\nentry = ["node", "agent/bin/run.js"]\n'
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent/bin/run.js"]\n'
         b'setup = ["npm", "ci", "--prefix", "./agent/", ".", "..", "../agent", "src/app", "missing"]\n',
         {"agent/bin/run.js": b"// agent", "agent/package.json": b"{}", "src/app.js": b"// app"},
     )
@@ -432,7 +438,8 @@ def test_the_setup_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     """
     constraints = _read(
         tmp_path,
-        b'version = 1\n[proposer]\nsetup = ["sh", "scripts/setup.sh"]\nentry = ["node", "agent/run.js"]\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[proposer]\nsetup = ["sh", "scripts/setup.sh"]\nentry = ["node", "agent/run.js"]\n',
         {"agent/run.js": b"// agent", "scripts/setup.sh": b"npm ci\n"},
     )
     assert constraints is not None
@@ -457,7 +464,7 @@ def test_an_editable_path_that_only_the_proposer_command_protects_names_the_comm
     """
     constraints = _read(
         tmp_path,
-        b'version = 1\n[proposer]\nentry = ["node", "agent/run.js"]\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent/run.js"]\n',
         {"agent/run.js": b"// agent"},
     )
     assert constraints is not None
@@ -481,7 +488,7 @@ def test_a_proposer_setup_without_entry_fails() -> None:
 
 def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
     """Asking to edit outside the approved paths fails with the path and the way to fix it."""
-    constraints = parse_constraints(b'version = 1\n[paths]\neditable = ["bot", "eval"]\n')
+    constraints = parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["bot", "eval"]\n')
 
     with pytest.raises(ConstraintsError, match="'eval' editable, which is outside the approved editable paths"):
         effective_environment(constraints, approved_editable=["bot"], approved_setup=None)
@@ -490,9 +497,12 @@ def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
 @pytest.mark.parametrize(
     ("raw", "approved"),
     [
-        (b'version = 1\n[paths]\neditable = ["bot/geocode"]\nprotected = ["bot"]\n', ["bot"]),
-        (b'version = 1\n[paths]\nprotected = ["bot"]\n', ["bot/geocode"]),
-        (b'version = 1\n[paths]\neditable = ["optimize.toml"]\n', ["."]),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["bot/geocode"]\nprotected = ["bot"]\n',
+            ["bot"],
+        ),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["bot"]\n', ["bot/geocode"]),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["optimize.toml"]\n', ["."]),
     ],
 )
 def test_a_file_that_protects_every_editable_path_fails_the_setup_check(raw: bytes, approved: list[str]) -> None:
@@ -511,7 +521,9 @@ def test_a_run_without_the_file_that_can_only_edit_the_file_fails_the_setup_chec
 
 def test_a_file_that_protects_part_of_an_editable_path_still_runs() -> None:
     """Protecting a file inside an editable folder leaves the rest of the folder editable."""
-    constraints = parse_constraints(b'version = 1\n[paths]\nprotected = ["bot/labels.csv"]\n')
+    constraints = parse_constraints(
+        b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["bot/labels.csv"]\n'
+    )
 
     environment = effective_environment(constraints, approved_editable=["bot"], approved_setup=None)
 
@@ -521,19 +533,34 @@ def test_a_file_that_protects_part_of_an_editable_path_still_runs() -> None:
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
-        (b'version = 1\n[services]\ngeocoder = ["search"]\n', "cannot grant services"),
-        (b"version = 1\n[network]\nallow = true\n", r"\[network\] is not a supported section"),
-        (b"version = 1\n[paths]\nwritable = []\n", r"\[paths\] writable is not a supported setting"),
-        (b'version = 1\n[paths]\nprotected = ["."]\n', "cannot protect the whole repository"),
-        (b"version = 1\n[paths]\neditable = []\n", r"\[paths\] editable is empty"),
-        (b'version = 1\n[paths]\neditable = ["../outside"]\n', "must be relative and stay inside"),
-        (b'version = 1\n[paths]\nprotected = [".git/hooks"]\n', "cannot name the .git folder"),
-        (b'version = 1\n[paths]\nprotected = ["data/*.csv"]\n', "looks like a pattern"),
-        (b'version = 1\n[paths]\neditable = ["bot/[ab]"]\n', "looks like a pattern"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n', "cannot grant services"),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[network]\nallow = true\n',
+            r"\[network\] is not a supported section",
+        ),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nwritable = []\n',
+            r"\[paths\] writable is not a supported setting",
+        ),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["."]\n',
+            "cannot protect the whole repository",
+        ),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = []\n', r"\[paths\] editable is empty"),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["../outside"]\n',
+            "must be relative and stay inside",
+        ),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = [".git/hooks"]\n',
+            "cannot name the .git folder",
+        ),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["data/*.csv"]\n', "looks like a pattern"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["bot/[ab]"]\n', "looks like a pattern"),
         (b"version = 2\n", "version 2 is not supported"),
-        (b"version = 1\n[paths\n", "is not valid TOML"),
-        (b"version = 1\npaths = 1\n", r"must be a \[paths\] table"),
-        (b'version = 1\n[setup]\ncommand = ""\n', r"\[setup\] command must be text"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths\n', "is not valid TOML"),
+        (b'version = 1\npaths = 1\n[run]\nentry = "run.py:main"\n', r"must be a \[paths\] table"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[setup]\ncommand = ""\n', r"\[setup\] command must be text"),
     ],
 )
 def test_unsupported_or_malformed_settings_fail_with_a_reason(raw: bytes, message: str) -> None:
@@ -554,7 +581,7 @@ def test_an_oversized_file_is_refused() -> None:
         parse_constraints(b"#" * (64 * 1024 + 1))
 
 
-_RULES = b'version = 1\n[proposer]\nillegal = "docs/rules.md"\n'
+_RULES = b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nillegal = "docs/rules.md"\n'
 _RULE_FILE = b"""# Rules for this repository
 
 - Do not hardcode answers
@@ -597,9 +624,9 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
     ("raw", "outcome"),
     [
         (None, {"target": None, "require": {}}),
-        (b"version = 1\n", {"target": None, "require": {}}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n', {"target": None, "require": {}}),
         (
-            b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n",
+            b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n',
             {"target": 0.9, "require": {"latency": 0.5}},
         ),
     ],
@@ -685,7 +712,7 @@ def test_a_missing_rule_or_instructions_file_fails_with_a_reason(tmp_path: Path)
     with pytest.raises(ConstraintsError, match=r"\[proposer\] illegal names 'docs/rules\.md', but .* no such file"):
         _read(tmp_path, _RULES, {"docs/other.md": _RULE_FILE})
     with pytest.raises(ConstraintsError, match=r"instructions names 'docs/intent\.md', but .* no such file"):
-        _read(tmp_path, _CFCA)
+        _read(tmp_path, _CFCA + _RUN)
 
 
 def test_a_linked_or_folder_rule_file_is_refused(tmp_path: Path) -> None:
@@ -697,7 +724,7 @@ def test_a_linked_or_folder_rule_file_is_refused(tmp_path: Path) -> None:
         read_constraints(linked)
     folder = tmp_path / "folder.tgz"
     with tarfile.open(folder, "w:gz") as packed:
-        raw = b'version = 1\n[proposer]\nillegal = "docs"\n'
+        raw = b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nillegal = "docs"\n'
         info = tarfile.TarInfo(CONSTRAINTS_FILE)
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
@@ -711,9 +738,9 @@ def test_a_linked_or_folder_rule_file_is_refused(tmp_path: Path) -> None:
 def test_an_empty_or_oversized_instructions_file_fails_with_a_reason(tmp_path: Path) -> None:
     """The intent is the whole instructions file, so it must hold text and fit the agent's brief."""
     with pytest.raises(ConstraintsError, match=r"instructions names 'docs/intent\.md', but that file is empty"):
-        _read(tmp_path, _CFCA, {"docs/intent.md": b"  \n\n"})
+        _read(tmp_path, _CFCA + _RUN, {"docs/intent.md": b"  \n\n"})
     with pytest.raises(ConstraintsError, match=r"'docs/intent\.md' is longer than 4000 characters"):
-        _read(tmp_path, _CFCA, {"docs/intent.md": b"x" * 4001})
+        _read(tmp_path, _CFCA + _RUN, {"docs/intent.md": b"x" * 4001})
 
 
 @pytest.mark.parametrize(
@@ -911,8 +938,8 @@ def test_a_file_without_new_sections_gets_empty_defaults(tmp_path: Path) -> None
 
 def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default() -> None:
     """``network = []`` is offline; no key keeps the role's default (open for the proposer, relay for a target)."""
-    offline = parse_constraints(b"version = 1\n[proposer]\nnetwork = []\n")
-    default = parse_constraints(b"version = 1\n[proposer]\nservices = []\n")
+    offline = parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nnetwork = []\n')
+    default = parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nservices = []\n')
 
     assert offline.proposer.network == ()
     assert default.proposer.network is None
@@ -929,9 +956,24 @@ def test_a_metric_with_no_run_and_no_target_fails_the_setup_check() -> None:
     ).targets
 
 
+def test_a_contract_with_no_metric_no_run_and_no_target_fails_the_setup_check() -> None:
+    """The metric code can come with the run request, so a file with no [metric] still needs a [run] or a stage."""
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage") as caught:
+        parse_constraints(b'version = 1\n[paths]\neditable = ["src"]\n')
+
+    assert "[metric]" not in str(caught.value)
+    assert parse_constraints(b'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/app.py:run"\n').run_entry
+
+
+def test_a_started_run_with_no_run_and_no_target_fails_the_setup_check() -> None:
+    """A started run is lenient only on ``version``: resumed runs get no exemption from the [run] rule (SKY-761)."""
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        parse_constraints(b'[paths]\neditable = ["src"]\n', require_version=False)
+
+
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
-    assert parse_constraints(b"version = 1\n[proposer]\nservices = []\n").targets == {}
+    assert parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nservices = []\n').targets == {}
 
 
 def test_a_target_stage_gets_the_default_vcpus_and_timeout() -> None:
@@ -1085,9 +1127,9 @@ def test_a_url_with_a_placeholder_fails_with_a_reason() -> None:
 
 def test_a_service_without_secrets_parses() -> None:
     """A service that needs no secret is a valid declaration."""
-    assert parse_constraints(b'version = 1\n[services.cache]\nurl = "https://cache.example.com"\n').services == {
-        "cache": ServiceSpec(url="https://cache.example.com")
-    }
+    assert parse_constraints(
+        b'version = 1\n[run]\nentry = "run.py:main"\n[services.cache]\nurl = "https://cache.example.com"\n'
+    ).services == {"cache": ServiceSpec(url="https://cache.example.com")}
 
 
 def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
@@ -1101,7 +1143,10 @@ def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "raw",
-    [b'version = 1\n[proposer]\n[run]\nentry = "a.py:f"\n[metric]\n', b'version = 1\n[paths]\neditable = ["src"]\n'],
+    [
+        b'version = 1\n[proposer]\n[run]\nentry = "a.py:f"\n[metric]\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["src"]\n',
+    ],
 )
 def test_a_file_that_names_no_rule_file_reads_as_it_parses(tmp_path: Path, raw: bytes) -> None:
     """Without instructions or rule files, reading the snapshot adds nothing to the parsed file."""
@@ -1109,8 +1154,8 @@ def test_a_file_that_names_no_rule_file_reads_as_it_parses(tmp_path: Path, raw: 
 
 
 def test_a_file_with_no_run_has_no_run_entry() -> None:
-    """With no [run], nothing runs, and existing files stay valid (E39)."""
-    constraints = parse_constraints(_CFCA)
+    """With no [run], the target stages run the version and the run entry stays empty (E39, SKY-761)."""
+    constraints = parse_constraints(_CFCA + b'\n[target.solver]\nentry = "solver.py:solve"\n')
 
     assert (constraints.run_entry, constraints.run_timeout) == (None, 60.0)
 
@@ -1261,7 +1306,7 @@ def test_run_and_metric_set_their_own_network_and_vcpus() -> None:
     assert (constraints.metric_role.network, constraints.metric_vcpus) == ((), 1)
     assert (
         parse_constraints(b'version = 1\n[run]\nentry = "a.py:f"\n').run_vcpus,
-        parse_constraints(b"version = 1\n").metric_vcpus,
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n').metric_vcpus,
     ) == (
         None,
         None,
@@ -1291,7 +1336,8 @@ def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> N
 def test_a_service_takes_its_secrets_from_its_header_placeholders() -> None:
     """Each ${NAME} in headers is a secret the service needs, sent as written (E53)."""
     raw = (
-        b'version = 1\n[services.judge]\nurl = "https://llm.example.com:8443/v1"\n'
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.judge]\nurl = "https://llm.example.com:8443/v1"\n'
         b'[services.judge.headers]\nx-api-key = "${JUDGE_KEY}"\nX-Org = "org-${ORG}"\n'
     )
     service = parse_constraints(raw).services["judge"]
@@ -1302,7 +1348,9 @@ def test_a_service_takes_its_secrets_from_its_header_placeholders() -> None:
 
 def test_a_service_with_no_headers_sends_none() -> None:
     """A service with no headers needs no secret and sends no header."""
-    service = parse_constraints(b'version = 1\n[services.a]\nurl = "https://a.example.com"\n').services["a"]
+    service = parse_constraints(
+        b'version = 1\n[run]\nentry = "run.py:main"\n[services.a]\nurl = "https://a.example.com"\n'
+    ).services["a"]
 
     assert (service.secrets, service.request_headers) == ((), {})
 
@@ -1316,7 +1364,10 @@ def test_a_service_built_in_code_with_one_secret_keeps_the_bearer_default() -> N
 
 def test_a_service_query_names_its_secret_and_drops_the_bearer_default() -> None:
     """Each query value is one ${NAME}; a query-only service sends no Authorization header (SKY-630)."""
-    raw = b'version = 1\n[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\nquery = { key = "${MAPS_KEY}" }\n'
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\nquery = { key = "${MAPS_KEY}" }\n'
+    )
     service = parse_constraints(raw).services["geocode"]
 
     assert (service.secrets, service.query, service.request_headers) == (("MAPS_KEY",), {"key": "${MAPS_KEY}"}, {})
@@ -1325,7 +1376,8 @@ def test_a_service_query_names_its_secret_and_drops_the_bearer_default() -> None
 def test_a_service_takes_its_secrets_from_headers_then_query() -> None:
     """Header and query placeholders both count as the service's secrets, each name once (SKY-630)."""
     raw = (
-        b'version = 1\n[services.judge]\nurl = "https://llm.example.com"\n'
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.judge]\nurl = "https://llm.example.com"\n'
         b'headers = { X-Org = "${ORG}" }\nquery = { key = "${JUDGE_KEY}", org = "${ORG}" }\n'
     )
 
@@ -1371,7 +1423,7 @@ def test_a_query_secret_and_a_header_secret_still_go_to_one_host() -> None:
 @pytest.mark.parametrize(
     "roles",
     [
-        b'[proposer]\nservices = ["geo"]\n',
+        b'[proposer]\nservices = ["geo"]\n[run]\nentry = "run.py:main"\n',
         b'[target.s]\nentry = "s.py:f"\nservices = ["geo"]\n',
         b'[run]\nentry = "run.py:main"\nservices = ["geo"]\n[metric]\nservices = ["geo"]\n',
     ],
@@ -1717,7 +1769,7 @@ def test_a_secret_value_in_an_mcp_url_is_refused(tmp_path: Path, run: bytes, mes
 
 
 _STDIO_ROLES = {
-    "[proposer]": b"version = 1\n[proposer]\n",
+    "[proposer]": b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n',
     "[run]": b'version = 1\n[run]\nentry = "a.py:f"\n',
     "[metric]": b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\n',
     "[target.planner]": b'version = 1\n[target.planner]\nentry = "p.py:plan"\n',
@@ -1771,7 +1823,7 @@ def test_a_uuid_key_in_a_service_header_is_refused() -> None:
         parse_constraints(raw)
 
 
-_DATA = b'version = 1\n[data]\ncases = "data/cases.jsonl"\n'
+_DATA = b'version = 1\n[run]\nentry = "run.py:main"\n[data]\ncases = "data/cases.jsonl"\n'
 _CASES = b'{"input": "Paris", "expected": [48.85, 2.35]}\n\n{"input": {"text": "Rome"}}\n'
 
 
@@ -1792,7 +1844,7 @@ def test_parsing_alone_keeps_the_cases_path_and_no_cases() -> None:
 
 def test_a_file_without_a_data_section_has_no_cases(tmp_path: Path) -> None:
     """With no ``[data]``, the run has no cases from the file and the candidate runs once with no input."""
-    constraints = _read(tmp_path, b"version = 1\n")
+    constraints = _read(tmp_path, b'version = 1\n[run]\nentry = "run.py:main"\n')
     assert constraints is not None
     assert constraints.cases_file is None
     assert constraints.cases == ()
@@ -1885,7 +1937,9 @@ def test_a_visible_setting_that_names_the_constraints_file_is_refused(setting: s
 
 def test_the_constraints_file_stays_hidden_when_a_visible_setting_names_it() -> None:
     """Parsing refuses this case; the hidden list must still never drop ``optimize.toml`` (E62)."""
-    constraints = replace(parse_constraints(b"version = 1\n"), instructions_file="optimize.toml")
+    constraints = replace(
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n'), instructions_file="optimize.toml"
+    )
 
     assert scorer_only_paths(constraints) == ("optimize.toml", ".optimize/exploits")
 
@@ -1928,10 +1982,10 @@ def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
     [
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval"),
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
-        ('version = 1\n[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
-        ("version = 1\n", ".optimize/exploits"),
+        ('version = 1\n[run]\nentry = "run.py:main"\n[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
+        ('version = 1\n[run]\nentry = "run.py:main"\n', ".optimize/exploits"),
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
-        ("version = 1\n", "optimize.toml"),
+        ('version = 1\n[run]\nentry = "run.py:main"\n', "optimize.toml"),
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
     ids=[
@@ -2026,39 +2080,57 @@ def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.
 @pytest.mark.parametrize(
     ("raw", "section", "key"),
     [
-        (b"version = 1\n[paths\n", None, None),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths\n', None, None),
         (b"version = 2\n", None, "version"),
-        (b"version = 1\npaths = 1\n", None, "paths"),
-        (b"version = 1\n[network]\nallow = true\n", "network", None),
-        (b"version = 1\n[instructions]\nintent = 'x'\n", "instructions", None),
-        (b"version = 1\n[paths]\nwritable = []\n", "paths", "writable"),
-        (b"version = 1\n[paths]\neditable = []\n", "paths", "editable"),
-        (b'version = 1\n[paths]\nprotected = ["data/*.csv"]\n', "paths", "protected"),
-        (b'version = 1\n[setup]\ncommand = ""\n', "setup", "command"),
-        (b'version = 1\ninstructions = "../intent.md"\n', None, "instructions"),
-        (b'version = 1\n[proposer]\ntools = ["search"]\n', "proposer", "tools"),
-        (b"version = 1\n[proposer]\nnetwork = ['https://a.example.com']\n", "proposer", "network"),
-        (b'version = 1\n[proposer]\nillegal = ["no"]\n', "proposer", "illegal"),
-        (b'version = 1\n[proposer]\nservices = ["maps"]\n', "proposer", "services"),
+        (b'version = 1\npaths = 1\n[run]\nentry = "run.py:main"\n', None, "paths"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[network]\nallow = true\n', "network", None),
+        (b"version = 1\n[run]\nentry = \"run.py:main\"\n[instructions]\nintent = 'x'\n", "instructions", None),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nwritable = []\n', "paths", "writable"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = []\n', "paths", "editable"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["data/*.csv"]\n', "paths", "protected"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[setup]\ncommand = ""\n', "setup", "command"),
+        (b'version = 1\ninstructions = "../intent.md"\n[run]\nentry = "run.py:main"\n', None, "instructions"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\ntools = ["search"]\n', "proposer", "tools"),
+        (
+            b"version = 1\n[run]\nentry = \"run.py:main\"\n[proposer]\nnetwork = ['https://a.example.com']\n",
+            "proposer",
+            "network",
+        ),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nillegal = ["no"]\n', "proposer", "illegal"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nservices = ["maps"]\n', "proposer", "services"),
         (b'version = 1\n[run]\nentry = "a.py:f"\nvcpus = 3\n', "run", "vcpus"),
-        (b"version = 1\n[metric]\nnetwork = 1\n", "metric", "network"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nnetwork = 1\n', "metric", "network"),
         (b'version = 1\n[run]\nentry = "a.py:f"\ntimeout = 0\n', "run", "timeout"),
         (b"version = 1\n[run]\ntimeout = 5\n", "run", "entry"),
-        (b"version = 1\n[target]\nplanner = 1\n", "target", "planner"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[target]\nplanner = 1\n', "target", "planner"),
         (b'version = 1\n[target.planner]\nentry = "a.py:f"\nvcpus = 3\n', "target.planner", "vcpus"),
         (b"version = 1\n[target.planner]\nentry = 'a.js'\n", "target.planner", "entry"),
         (b'version = 1\n[target.planner]\nentry = "a.py:f"\ncolor = 1\n', "target.planner", "color"),
         (b'version = 1\n[target.planner]\nentry = "a.py:f"\nmcp = "."\n', "target.planner", "mcp"),
-        (b'version = 1\n[services.maps]\nurl = "http://maps.example.com"\n', "services.maps", "url"),
         (
-            b'version = 1\n[services.maps]\nurl = "https://maps.example.com"\nheaders = {Authorization = "${bad"}\n',
+            b'version = 1\n[run]\nentry = "run.py:main"\n[services.maps]\nurl = "http://maps.example.com"\n',
+            "services.maps",
+            "url",
+        ),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n'
+            b'[services.maps]\nurl = "https://maps.example.com"\nheaders = {Authorization = "${bad"}\n',
             "services.maps",
             "headers",
         ),
-        (b"version = 1\n[metric]\nreference = 1\n", "metric", "reference"),
-        (b"version = 1\n[data]\nsplit = [70, 30]\ncases = 'a.jsonl'\n", "data", "split"),
-        (b"version = 1\n[data]\n", "data", "cases"),
-        (b'version = 1\n[metric]\nfiles = ["eval"]\n[proposer]\nillegal = "eval/rules.md"\n', "proposer", "illegal"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nreference = 1\n', "metric", "reference"),
+        (
+            b"version = 1\n[run]\nentry = \"run.py:main\"\n[data]\nsplit = [70, 30]\ncases = 'a.jsonl'\n",
+            "data",
+            "split",
+        ),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[data]\n', "data", "cases"),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n'
+            b'[metric]\nfiles = ["eval"]\n[proposer]\nillegal = "eval/rules.md"\n',
+            "proposer",
+            "illegal",
+        ),
         (b'version = 1\n[run]\nentry = "eval/run.py:main"\n[metric]\nfiles = ["eval"]\n', "run", "entry"),
     ],
 )
@@ -2090,7 +2162,8 @@ def test_a_constraints_error_keeps_its_section_and_key_through_pickle() -> None:
 def test_the_outcome_block_gives_the_target_and_the_minimums() -> None:
     """``[outcome]`` holds the run's target score and the minimum of each named score (SKY-690)."""
     constraints = parse_constraints(
-        b"version = 1\n\n[outcome]\ntarget = 0.9\n\n[outcome.require]\nlatency = 0.9\nno_regressions = 1\n"
+        b'version = 1\n\n[run]\nentry = "run.py:main"\n'
+        b"[outcome]\ntarget = 0.9\n\n[outcome.require]\nlatency = 0.9\nno_regressions = 1\n"
     )
 
     assert constraints.outcome_target == 0.9
@@ -2101,12 +2174,12 @@ def test_the_outcome_block_gives_the_target_and_the_minimums() -> None:
 @pytest.mark.parametrize(
     ("raw", "target", "minimums"),
     [
-        (b"version = 1\n", None, {}),
-        (b"version = 1\n[outcome]\n", None, {}),
-        (b"version = 1\n[outcome.require]\nlatency = 0.5\n", None, {"latency": 0.5}),
-        (b"version = 1\n[outcome]\ntarget = 2\n", 2.0, {}),
-        (b"version = 1\n[outcome]\ntarget = -3.5\n", -3.5, {}),
-        (b'version = 1\n[outcome.require]\n"rouge.l" = 0.5\n', None, {"rouge.l": 0.5}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n', None, {}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\n', None, {}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[outcome.require]\nlatency = 0.5\n', None, {"latency": 0.5}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 2\n', 2.0, {}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = -3.5\n', -3.5, {}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[outcome.require]\n"rouge.l" = 0.5\n', None, {"rouge.l": 0.5}),
     ],
 )
 def test_the_outcome_block_and_each_of_its_keys_are_optional(
@@ -2228,7 +2301,7 @@ def test_a_file_without_a_version_fails_and_shows_the_fix(raw: bytes) -> None:
 
 def test_a_started_run_reads_a_missing_version_as_version_1() -> None:
     """A run that started before ``version`` was required still parses its pinned commit's file (SKY-690)."""
-    raw = b'[paths]\neditable = ["src"]\n'
+    raw = b'[paths]\neditable = ["src"]\n[run]\nentry = "run.py:main"\n'
 
     lenient = parse_constraints(raw, require_version=False)
 
@@ -2252,9 +2325,14 @@ def test_a_version_that_is_not_the_integer_1_fails(require_version: bool, value:
 
 def test_tool_tables_are_accepted_and_skipped() -> None:
     """``[tool.<name>]`` is the one place for data that Skynet does not read, so its content is not checked."""
-    raw = b'version = 1\n\n[tool.anything]\ncolor = "blue"\nnested = { deep = [1, 2] }\n\n[tool.other.sub]\nx = 1\n'
+    raw = (
+        b'version = 1\n\n[run]\nentry = "run.py:main"\n'
+        b'[tool.anything]\ncolor = "blue"\nnested = { deep = [1, 2] }\n\n[tool.other.sub]\nx = 1\n'
+    )
 
-    assert replace(parse_constraints(raw), sha256="") == replace(parse_constraints(b"version = 1\n"), sha256="")
+    assert replace(parse_constraints(raw), sha256="") == replace(
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n'), sha256=""
+    )
 
 
 @pytest.mark.parametrize(
