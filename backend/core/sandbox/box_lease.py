@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Generic, TypeVar, cast
 
 from ..billing.signals import BudgetReached
-from .grants import Grant, _merge
+from .grants import Grant, merge_grants
 from .placement import MODAL, VERCEL, Placement, Quota, choose, gpu_type, network_grants
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ def _grant_key(grants: Sequence[Grant]) -> _GrantKey:
         GrantError: When a GPU grant or a host is not valid.
     """
     # The same host normalization and credential merge as resolve_grants, so its grant-list id agrees.
-    return gpu_type(grants), frozenset(_merge(network_grants(grants)).items())
+    return gpu_type(grants), frozenset(merge_grants(network_grants(grants)).items())
 
 
 @dataclass
