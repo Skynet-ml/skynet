@@ -1278,6 +1278,27 @@ def test_a_pending_entry_with_a_null_byte_is_skipped_and_refused(
     assert worker._validate({"name": "c0", "file": "agents/a\u0000b.txt"}) == "invalid candidate file"
 
 
+def test_a_candidate_file_in_a_symlink_loop_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Before Python 3.13 ``resolve`` raises RuntimeError on a symlink loop: the check refuses it, with no error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    agents = worker.work_dir / "agents"
+    (agents / "a.txt").symlink_to(agents / "b.txt")
+    (agents / "b.txt").symlink_to(agents / "a.txt")
+
+    assert worker._validate({"name": "c0", "file": "agents/a.txt"}) == "candidate file must exist under agents/"
+
+
 def test_a_best_version_with_a_non_finite_case_has_no_score(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

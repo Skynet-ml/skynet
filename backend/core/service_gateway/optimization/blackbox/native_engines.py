@@ -2257,14 +2257,15 @@ class MetaHarnessEngine:
         if "\0" in file:
             return "invalid candidate file"
         agents = (self.work_dir / "agents").resolve()
-        # An over-long name makes ``is_file`` raise "File name too long", which would end the run.
+        # An over-long name makes ``is_file`` raise "File name too long", and before Python 3.13 a symlink loop
+        # makes ``resolve`` raise RuntimeError. Either would end the run.
         try:
             path = (self.work_dir / file).resolve()
             if not path.is_relative_to(agents) or not path.is_file():
                 return "candidate file must exist under agents/"
             if path.stat().st_size > MAX_CANDIDATE_BYTES:
                 return "candidate file is larger than a version may be"
-        except OSError:
+        except (OSError, RuntimeError):
             return "candidate file must exist under agents/"
         if self.repo and path.suffix != self.suffix:
             return "candidate file must be a patch saved by save.sh"
@@ -2275,8 +2276,6 @@ class MetaHarnessEngine:
         if not text.strip():
             return "candidate file is empty"
         if self.repo:
-            if len(text.encode("utf-8")) > repo_tree.MAX_PATCH_BYTES:
-                return "patch is larger than a version may be"
             refusal = blocked_patch(self.repo, text)
             if refusal:
                 return refusal
