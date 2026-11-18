@@ -18,9 +18,23 @@ could write into the unpacked tree. No simple way kills every such process on
 every provider: a candidate can leave its process group and session. So the
 step goes back healthy only when it can show that no process is left: the
 command did not time out, and a ``ps`` scan after the pack finds no process
-that the scan before the command did not see. A box without ``ps`` or with
+that the scan before the unpack did not see. A box without ``ps`` or with
 other new processes goes back unhealthy, and the next step gets a new box.
-The limit: a candidate with root in the box can hide a process from ``ps``.
+
+The box user can write a folder on the box PATH (``/app/.venv/bin`` on
+Vercel) and its own shell profile. A tool planted there could fake the scan,
+or add files to the next step's tree in the unpack. So the scan, the unpack
+and the pack run in a clean shell that finds its tools only in ``/usr/bin``
+and ``/bin``. A planted tool would also change what the next command finds,
+which a new box on a resume does not have. So the scan also prints a state
+line, a hash over the metadata of every file in the PATH folders and of the
+shell profile files, and a changed line makes the box unhealthy too.
+
+The limits: a candidate with root in the box can hide a process or change
+the root tools. A provider that runs each command in a login shell (EC2,
+dev only) reads the box user's profile first, so a planted profile can fake
+the scan there. Other files outside the tree, such as in ``$TMPDIR``,
+``$HOME`` or the working folder, still reach the agent's next step.
 
 :meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
 one box from a :class:`BoxSource`, starts it from a state, and gives the
@@ -88,16 +102,33 @@ _MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_P
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
 _CHECK_TIMEOUT_SECONDS = 30
-# Prints one "pid start-time" line for each process, except the scan's own shell, its ancestors and its
-# children (ps, awk, sort), and the kernel threads (pid 2 and its children). A pid with its start time names
-# one process, also when the pid is used again.
-PROCESS_SCAN = (
-    "set -o pipefail; ps -A -o pid= -o ppid= -o lstart= | awk -v me=$$ '"
+# Runs a control script in a clean shell. env -i drops the box environment, so a tool comes only from the
+# root-owned /usr/bin and /bin, and not from a folder that the box user can write. The box locale passes
+# through, so tar names files as the box shell does. BOX_PATH and HOME give the scan the folders to check.
+_CLEAN_SHELL = (
+    '/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" LANG="$LANG" LC_ALL="$LC_ALL" BOX_PATH="$PATH"'
+    " /bin/bash --noprofile --norc -c "
+)
+# Prints a "state <hash>" line, then one "pid start-time" line for each process, except the scan's own shell,
+# its ancestors and its children (ps, awk, sort), and the kernel threads (pid 2 and its children, only when
+# pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A pid with its start time names one
+# process, also when the pid is used again. The hash covers the metadata of each file in the box PATH folders
+# and of the shell profile files. stat -L follows a link to its target. The change time of a file changes on
+# each write, and the box user cannot set it back. stat has GNU flags in a box and BSD flags on a macOS host.
+SCAN_SCRIPT = (
+    "set -o pipefail; if stat -c %i / >/dev/null 2>&1; then fmt=(-L -c '%n %i %s %Y %Z');"
+    " else fmt=(-L -f '%N %i %z %m %c'); fi;"
+    ' state=$({ printf "%s\\n" "$BOX_PATH" | tr : "\\n" | while IFS= read -r d; do'
+    ' find -H "$d" -maxdepth 1 -exec stat "${fmt[@]}" {} +; done;'
+    ' for f in .bash_profile .bash_login .profile .bashrc; do stat "${fmt[@]}" "$HOME/$f"; done; } 2>&1 | cksum);'
+    ' echo "state $state"; k=0; if [ "$(cat /proc/2/comm 2>/dev/null)" = kthreadd ]; then k=2; fi;'
+    " ps -A -o pid= -o ppid= -o lstart= | awk -v me=$$ -v k=$k '"
     "{parent[$1] = $2; line[$1] = $0} END {p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
-    " for (pid in line) if (!(pid in skip) && parent[pid] != me && pid != 2 && parent[pid] != 2)"
+    " for (pid in line) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
     ' {text = line[pid]; sub(/^ *[0-9]+ +[0-9]+ +/, "", text); sub(/ +$/, "", text); print pid, text}}'
     "' | LC_ALL=C sort"
 )
+PROCESS_SCAN = _CLEAN_SHELL + shlex.quote(SCAN_SCRIPT)
 
 _Result = TypeVar("_Result")
 
@@ -256,14 +287,14 @@ def _close_box(box: SandboxSession) -> None:
 
 
 def _processes(box: SandboxSession) -> frozenset[str] | None:
-    """Return the processes in a box, each as its pid and start time.
+    """Return the state line of a box and its processes, each as its pid and start time.
 
     Args:
         box: The box.
 
     Returns:
-        The process lines of :data:`PROCESS_SCAN`, or ``None`` when the scan
-        fails, so the caller cannot show that no process is left.
+        The lines of :data:`PROCESS_SCAN`, or ``None`` when the scan fails,
+        so the caller cannot show that no process is left.
 
     Raises:
         BudgetReached: And the other budget errors; the run stops.
@@ -276,6 +307,18 @@ def _processes(box: SandboxSession) -> frozenset[str] | None:
         return None
     lines = frozenset(result.stdout.splitlines())
     return lines if result.ok and not result.timed_out and lines else None
+
+
+def _clean(script: str) -> str:
+    """Wrap a control script so it runs in the clean shell.
+
+    Args:
+        script: The bash script.
+
+    Returns:
+        The command line that runs the script with only the root-owned tools.
+    """
+    return _CLEAN_SHELL + shlex.quote(script)
 
 
 def _box_alive(box: SandboxSession) -> bool:
@@ -547,8 +590,9 @@ class TreeSandbox:
                 The command's result and the new tree id, and False when a
                 process of the command can still be alive in the box.
             """
-            self._unpack(box, archive, TREE_DIR)
+            # Before the unpack, so nothing that the unpack starts can join the baseline.
             before = None if fresh else _processes(box)
+            self._unpack(box, archive, TREE_DIR)
             result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=self._timeout)
             new_tree_id = self._pack(box, step.run_id, TREE_DIR)
             if result.timed_out:
@@ -739,7 +783,10 @@ class TreeSandbox:
         files = " ".join(shlex.quote(name) for name in parts)
         # A source can give back a used box, so old files in the folder must not join the tree.
         result = box.run(
-            f"set -e; rm -rf {folder}; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder}; rm -rf {_IN_DIR}",
+            _clean(
+                f"set -e; rm -rf {folder}; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder};"
+                f" rm -rf {_IN_DIR}"
+            ),
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if not result.ok:
@@ -762,15 +809,20 @@ class TreeSandbox:
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
-            # The box checks the archive bytes against the archive limit first, so a normal oversized tree stops in the box.
+            # The box checks the archive bytes against the archive limit first, so a normal oversized tree
+            # stops in the box.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
             # The broker caps one read at 16 MiB, so the archive goes out in numbered base64 parts,
             # one read each, and the command prints the part count.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
-            f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
-            f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR}; split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
-            f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part"; i=$((i + 1)); done;'
-            " echo $i",
+            _clean(
+                f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
+                f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
+                f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR};"
+                f" split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
+                f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part";'
+                " i=$((i + 1)); done;"
+                " echo $i",
+            ),
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if result.exit_code == _TOO_LARGE_EXIT:

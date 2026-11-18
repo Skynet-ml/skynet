@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import subprocess
 import tempfile
 import threading
 import time
@@ -33,6 +34,7 @@ from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRu
 from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from core.service_gateway.optimization.blackbox.tree_sandbox import (
     PROCESS_SCAN,
+    SCAN_SCRIPT,
     RuntimeBoxLease,
     StepRef,
     TreeSandbox,
@@ -1879,9 +1881,9 @@ class _DyingBox:
         self.closed = False
         # The health check's outcome: None runs it, an exit code fakes it, an error is raised from it.
         self.check: int | BaseException | None = None
-        # The process scan's output; None runs the real scan. The host's own processes come and go, so a
-        # real scan on a test host can see a new process that no step started.
-        self.processes: str | None = "1 Tue Nov 17 00:00:00 2026\n"
+        # The process scan's output, or its whole result; None runs the real scan. The host's own processes come
+        # and go, so a real scan on a test host can see a new process that no step started.
+        self.processes: str | CommandResult | None = "1 Tue Nov 17 00:00:00 2026\n"
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write files into the inner box.
@@ -1909,6 +1911,8 @@ class _DyingBox:
             raise self.check
         if command == "true" and self.check is not None:
             return CommandResult(exit_code=self.check)
+        if command == PROCESS_SCAN and isinstance(self.processes, CommandResult):
+            return self.processes
         if command == PROCESS_SCAN and self.processes is not None:
             return CommandResult(exit_code=0, stdout=self.processes)
         if self.dead and command.startswith("cd tree"):
@@ -2130,6 +2134,164 @@ def test_the_process_scan_sees_a_background_job_and_not_itself() -> None:
         line.split()[0] for line in before.stdout.splitlines()
     }
     assert started.stdout.strip() in pids
+
+
+_SNAPSHOT = "1 Tue Nov 17 00:00:00 2026\n"
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [
+        CommandResult(exit_code=1, stdout=_SNAPSHOT),
+        CommandResult(exit_code=0, stdout=_SNAPSHOT, timed_out=True),
+        CommandResult(exit_code=0, stdout=""),
+    ],
+    ids=["fails", "times-out", "prints-nothing"],
+)
+def test_a_step_whose_process_scan_fails_gives_its_box_back_unhealthy(
+    trees: TreeStore, step_log: StepLogStore, scan: CommandResult
+) -> None:
+    """A scan that fails, times out or prints nothing cannot show that no process is left, so the box drops.
+
+    Args:
+        trees: The tree store.
+        step_log: The test step log.
+        scan: The faked result of each process scan.
+    """
+    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
+    empty = _tree(trees, {})
+    try:
+        sandbox.run(_step(1), empty, "true", [])
+        runtime.boxes[0].processes = scan
+        sandbox.run(_step(2), empty, "true", [])
+        sandbox.run(_step(3), empty, "true", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert len(runtime.boxes) == 2
+    assert runtime.boxes[0].closed
+
+
+def _fake_tools(folder: Path, marker: Path, names: Sequence[str]) -> None:
+    """Write a tool for each name that records its run in the marker file and fails.
+
+    Args:
+        folder: The folder of the fake tools.
+        marker: The file that each fake tool appends its name to.
+        names: The tool names.
+    """
+    folder.mkdir()
+    for name in names:
+        tool = folder / name
+        tool.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\nexit 1\n")
+        tool.chmod(0o755)
+
+
+def test_the_control_commands_never_run_a_tool_from_the_box_path(
+    trees: TreeStore, step_log: StepLogStore, tmp_path: Path
+) -> None:
+    """A tool that a step plants on the box PATH never runs in the scan, the unpack or the pack.
+
+    Args:
+        trees: The tree store.
+        step_log: The test step log.
+        tmp_path: Scratch folder; it holds the fake tools and their marker file.
+    """
+    marker = tmp_path / "ran.txt"
+    names = ("ps", "awk", "sort", "cat", "tr", "find", "stat", "cksum", "tar", "base64", "rm", "mkdir", "split", "wc")
+    _fake_tools(tmp_path / "bin", marker, names)
+    runtime = _Runtime()
+    spec = replace(_SPEC, env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"})
+    candidates = RuntimeBoxLease(_on_both(runtime), spec, **_LIMITS)
+    metrics = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, keep_warm=False, **_LIMITS)
+    sandbox = TreeSandbox(trees, step_log, candidates, metrics)
+    try:
+        sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "true", [])
+        runtime.boxes[0].processes = None
+        _, second = sandbox.run(_step(2), _tree(trees, {"a.txt": "two\n"}), "echo three > b.txt", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert not marker.exists()
+    assert sorted(entry.name for entry in trees.get_tree(RUN, second) or []) == ["a.txt", "b.txt"]
+
+
+def _state(box: SandboxSession) -> str:
+    """Return the state line of one process scan.
+
+    Args:
+        box: The box.
+
+    Returns:
+        The line that starts with ``state``.
+    """
+    result = box.run(PROCESS_SCAN, timeout_seconds=30)
+    assert result.ok
+    return next(line for line in result.stdout.splitlines() if line.startswith("state "))
+
+
+def test_the_scan_state_changes_when_a_path_folder_or_a_profile_changes(tmp_path: Path) -> None:
+    """A new tool on the box PATH, a rewrite with its old size and time, or a new profile changes the state line.
+
+    Args:
+        tmp_path: Scratch folder; it holds the box PATH folder.
+    """
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    (folder / "tool").write_text("aaaa\n")
+    box = LocalSubprocessRuntime().open(replace(_SPEC, env={"PATH": f"{folder}:/usr/bin:/bin"}))
+    try:
+        first = _state(box)
+        again = _state(box)
+        box.run(f"echo planted > '{folder}/python3'", timeout_seconds=30)
+        planted = _state(box)
+        # The change time has whole seconds, so the rewrite comes in a later second than the last write.
+        time.sleep(1.1)
+        box.run(
+            f"cp -p '{folder}/tool' ref; echo bbbb > '{folder}/tool'; touch -r ref '{folder}/tool'", timeout_seconds=30
+        )
+        rewritten = _state(box)
+        box.run('echo "echo hi" > "$HOME/.profile"', timeout_seconds=30)
+        profiled = _state(box)
+    finally:
+        box.close()
+
+    assert first == again
+    assert len({first, planted, rewritten, profiled}) == 4
+
+
+@pytest.mark.parametrize(("comm", "expected"), [("kthreadd", {"1"}), ("sleep", {"1", "2", "3"})])
+def test_the_scan_skips_pid_2_only_when_it_is_kthreadd(tmp_path: Path, comm: str, expected: set[str]) -> None:
+    """On Docker and gVisor pid 2 can be a normal process, so the scan keeps it and its children.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake ps and cat.
+        comm: The name that /proc/2/comm gives.
+        expected: The pids that the scan must print.
+    """
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    lines = "".join(f"{pid:>5} {ppid:>5} Tue Nov 17 00:00:0{pid} 2026\n" for pid, ppid in ((1, 0), (2, 0), (3, 2)))
+    (folder / "ps").write_text(f"#!/bin/sh\nprintf '%s' '{lines}'\n")
+    (folder / "cat").write_text(
+        f'#!/bin/sh\nif [ "$1" = /proc/2/comm ]; then echo {comm}; else exec /bin/cat "$@"; fi\n'
+    )
+    for tool in ("ps", "cat"):
+        (folder / tool).chmod(0o755)
+
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+        env={"PATH": f"{folder}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert {line.split()[0] for line in result.stdout.splitlines() if not line.startswith("state ")} == expected
 
 
 def test_a_box_that_dies_mid_step_is_replaced_and_the_step_reruns_from_its_tree(

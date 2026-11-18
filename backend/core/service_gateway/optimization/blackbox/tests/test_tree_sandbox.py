@@ -159,8 +159,9 @@ class _FailingTarSession(_DyingSession):
         Returns:
             The inner box's result.
         """
-        if "tar -czf" in command:
-            command = 'tar() { command tar "$@"; return 2; }; ' + command
+        # The pack runs in a clean shell, so the function goes into its quoted script, not the box shell.
+        tar = "set -e; COPYFILE_DISABLE=1 tar"
+        command = command.replace(tar, 'tar() { command tar "$@"; return 2; }; ' + tar, 1)
         return self._inner.run(command, **options)
 
 
