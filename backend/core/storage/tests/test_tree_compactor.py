@@ -40,7 +40,13 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.step_log_store import PACK_PREFIX, PackClaimedError, StepLogStore, _read_manifest
+from core.storage.step_log_store import (
+    PACK_PREFIX,
+    SWEEP_AGE_MARGIN_SECONDS,
+    PackClaimedError,
+    StepLogStore,
+    _read_manifest,
+)
 from core.storage.tree_compactor import (
     BROKEN_BYTE_SIZE,
     COMPACTED_PREFIX,
@@ -1658,6 +1664,27 @@ def test_a_late_apply_after_the_claim_row_went_is_refused(engine, objects, store
     with pytest.raises(PackClaimedError):
         store._apply(old, len(pack), _read_manifest(pack))
 
+    assert _pack_rows(engine) == set()
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+
+
+def test_an_apply_refuses_a_flush_pack_a_little_younger_than_the_sweep_age(
+    engine, objects, store, make_compactor
+) -> None:
+    """Inside the clock skew margin, the sweep keeps the pack, but the apply already refuses it."""
+    sweep_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
+    margin_ns = int(SWEEP_AGE_MARGIN_SECONDS * 1e9)
+    old, step_id = _orphan_an_old_flush_pack(
+        engine, objects, store, written_ns=time.time_ns() - sweep_ns + margin_ns // 2
+    )
+    pack = objects.get(old)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+    with pytest.raises(PackClaimedError):
+        store._apply(old, len(pack), _read_manifest(pack))
+
+    assert objects.list(f"{PACK_PREFIX}/") == [old]
     assert _pack_rows(engine) == set()
     with Session(engine) as session:
         assert session.get(AgentStepModel, step_id) is None

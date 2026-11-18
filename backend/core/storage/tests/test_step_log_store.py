@@ -1041,6 +1041,126 @@ def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, ob
         store.durable(other, 1, timeout=0)
 
 
+def test_a_caller_that_waits_on_a_dropped_step_gets_the_fence_error(make_store, engine, monkeypatch) -> None:
+    """A caller already blocked in ``durable`` on a later step of a lost agent gets the fence error, not the lost error."""
+    store = make_store()
+    apply = store._apply
+    later: list[str] = []
+    waiting = threading.Event()
+
+    def apply_once_waiting(*args: Any) -> Any:
+        """Wait until the caller waits on the later step, then run the real write.
+
+        Args:
+            *args: The pack key, size and manifest.
+
+        Returns:
+            The real write's result.
+        """
+        waiting.wait(5)
+        return apply(*args)
+
+    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+        """Commit the agent's next step, mark the wait on it, insert the sweep's claim row, then fail this call.
+
+        Args:
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        later.append(_commit(store, seq=2))
+        waiter = store._waiters[(later[0], 1)]
+        wait = waiter.wait
+
+        def note_wait(timeout: float | None = None) -> bool:
+            """Mark that ``durable`` waits on the waiter, then wait.
+
+            Args:
+                timeout: The most seconds to wait.
+
+            Returns:
+                Whether the waiter opened.
+            """
+            waiting.set()
+            return wait(timeout)
+
+        waiter.wait = note_wait
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        # The flusher can retry first; the retry waits until the caller waits, so the waiter settles it.
+        monkeypatch.setattr(store, "_apply", apply_once_waiting)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    _commit(store)
+    with pytest.raises(OperationalError):
+        store.flush()
+    errors: list[Exception] = []
+
+    def wait_for_step() -> None:
+        """Wait for the later step and keep the error."""
+        try:
+            store.durable(later[0], 1, timeout=10)
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=wait_for_step)
+    thread.start()
+    assert waiting.wait(5)
+    store.flush()
+    thread.join(10)
+
+    assert len(errors) == 1
+    assert type(errors[0]) is StepFenceError
+    assert _step_rows(engine) == 0
+
+
+@pytest.mark.parametrize("put_again", [False, True])
+def test_the_objects_of_a_lost_pack_go_into_the_next_pack(make_store, engine, monkeypatch, put_again) -> None:
+    """A later step of another agent names an object of the lost pack: the next pack records the object too.
+
+    With ``put_again``, the other agent puts the object while the lost pack is in flight, and the put is skipped.
+    """
+    store = make_store()
+    apply = store._apply
+    object_id = "e" * 64
+    data = b"blob\0lost"
+    later: list[str] = []
+
+    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+        """Commit a step that names the object, insert the sweep's claim row, restore the real write, then fail.
+
+        Args:
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        if put_again:
+            store.put_object("job-1", object_id, data)
+        later.append(_commit(store, agent_id="agent-b", tree_id=object_id))
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    store.put_object("job-1", object_id, data)
+    with pytest.raises(OperationalError):
+        store.flush()
+    store.flush()
+
+    store.durable(later[0], 1, timeout=5)
+    assert _step_rows(engine) == 1
+    assert store._tree_objects == {}
+    assert store.get_object("job-1", object_id) == data
+
+
 def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
     """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
     store = make_store()

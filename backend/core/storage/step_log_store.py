@@ -67,6 +67,9 @@ CLAIM_BYTE_SIZE = 0
 # also those of a deleted account, would stay forever (SKY-733). An apply refuses a pack of this age
 # itself: the sweep's claim row goes after the grace time, so it cannot keep a later apply out alone.
 UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
+# The apply refuses a pack this much younger than the sweep's age, so clock skew between the applying
+# pod and the compactor cannot let an apply record a pack that the sweep deletes.
+SWEEP_AGE_MARGIN_SECONDS = 24 * 3600.0
 _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
@@ -167,7 +170,7 @@ def _check_run_id(run_id: str) -> None:
 
 
 def _past_sweep_age(pack_key: str) -> bool:
-    """Return whether a flush pack's key time is older than ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
+    """Return whether a flush pack's key time is near the sweep's age, within ``SWEEP_AGE_MARGIN_SECONDS``.
 
     Args:
         pack_key: The pack key, ``packs/<worker>/<time>-<id>.pack``.
@@ -179,7 +182,7 @@ def _past_sweep_age(pack_key: str) -> bool:
         written_ns = int(pack_key.rsplit("/", 1)[-1][:20])
     except ValueError:
         return False
-    return time.time_ns() - written_ns >= int(UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
+    return time.time_ns() - written_ns >= int((UNRECORDED_FLUSH_PACK_AGE_SECONDS - SWEEP_AGE_MARGIN_SECONDS) * 1e9)
 
 
 def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
@@ -603,8 +606,9 @@ class StepLogStore:
                 try:
                     _, stale = self._apply(key, size, manifest)
                 except PackClaimedError:
-                    # A retry that outlived UNRECORDED_FLUSH_PACK_AGE_SECONDS: the bytes are gone, so the
-                    # batch's waiters fail rather than wait for a pack that no retry can record.
+                    # A retry near UNRECORDED_FLUSH_PACK_AGE_SECONDS: the sweep deletes the bytes, so the
+                    # batch's waiters fail rather than wait for a pack that no retry can record. Its
+                    # objects go into the next pack.
                     logger.exception("Flush pack %s was claimed by the sweep before it was recorded", key)
                     lost, stale = True, []
                 with self._cond:
@@ -644,6 +648,8 @@ class StepLogStore:
 
         When the pack is lost, each agent of the batch gets a verdict, and its pending steps leave the
         buffer with a fence verdict: a later step can name a tree whose objects were in the lost pack.
+        The batch's objects go back to the front of the buffer, so the next pack records them: a later
+        step of another agent can name them, also after its own ``put_object`` skipped them as buffered.
 
         Args:
             batch: The entries of the recorded pack.
@@ -668,7 +674,7 @@ class StepLogStore:
                 for agent_key, step_id in lost_agents.items():
                     _keep_verdict(self._agent_failures, agent_key, step_id)
                 # Under the same lock as the verdicts, so no later step of a lost agent stays in the buffer.
-                kept: list[tuple[_Step | _Object, bytes]] = []
+                kept = [entry for entry in batch if isinstance(entry[0], _Object)]
                 for entry in self._pending:
                     item = entry[0]
                     if (
@@ -685,9 +691,13 @@ class StepLogStore:
                 self._pending_bytes = sum(len(data) for _, data in kept)
                 if not kept:
                     self._first_at = None
+                elif self._first_at is None:
+                    self._first_at = time.monotonic()
             for item, _ in batch + dropped:
                 if isinstance(item, _Object):
-                    self._tree_objects.pop((item.run_id, item.object_id), None)
+                    # A lost batch's objects are in the buffer again, so reads still find them there.
+                    if not lost:
+                        self._tree_objects.pop((item.run_id, item.object_id), None)
                     continue
                 versions = self._steps.get(item.step_id)
                 if versions is not None:
@@ -787,7 +797,8 @@ class StepLogStore:
         Raises:
             PackClaimedError: When the row is the sweep's claim, so no store
                 applied the pack, or when no store applied the flush pack
-                before it reached ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
+                before it came within ``SWEEP_AGE_MARGIN_SECONDS`` of
+                ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
