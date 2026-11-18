@@ -538,7 +538,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
             when the compactor keeps moving the account's packs for
-            ``PACK_LOCK_TRIES`` tries; a retry can succeed.
+            ``PACK_LOCK_TRIES`` tries; a retry can succeed. Also when a step
+            log shard fails; the message names the shard, and a retry can
+            succeed.
     """
     deleted = 0
     anonymized = 0

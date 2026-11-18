@@ -1417,13 +1417,17 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: ID of the job to remove.
+
+        Raises:
+            TreePurgeError: When a step log shard fails; the job stays.
         """
         session = self._get_session()
         try:
             delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
             # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
-            # packs stay forever (SKY-733).
-            mark_run_packs(session, [optimization_id])
+            # packs stay forever. The cascade stops at the main database, so this also deletes the steps on
+            # the other step log shards (SKY-733).
+            mark_run_packs(session, [optimization_id], self.step_log_shards)
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
             session.commit()
         finally:
@@ -1505,6 +1509,9 @@ class RemoteDBJobStore:
 
         Returns:
             The number of job rows actually deleted.
+
+        Raises:
+            TreePurgeError: When a step log shard fails; the jobs stay.
         """
         if not optimization_ids:
             return 0
@@ -1512,8 +1519,9 @@ class RemoteDBJobStore:
         try:
             delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
             # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
-            # packs stay forever (SKY-733).
-            mark_run_packs(session, optimization_ids)
+            # packs stay forever. The cascade stops at the main database, so this also deletes the steps on
+            # the other step log shards (SKY-733).
+            mark_run_packs(session, optimization_ids, self.step_log_shards)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))
