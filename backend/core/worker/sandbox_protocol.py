@@ -29,8 +29,10 @@ SANDBOX_PROTOCOL = 18
 # older image runs the request the same way.
 # Protocol 18 (SKY-753) added ``proposer.host_cli_auto``, and the image runs the
 # contract file's ``[proposer] entry`` and ``setup``. An older image ignores the
-# staged snapshot's ``file_proposer`` and would run the default agent, so the
-# worker refuses every image before 18 for a run with a file proposer.
+# staged snapshot's ``file_proposer`` and runs the entry as a plain custom
+# command: it skips ``setup`` and ``ASCENT_TASK``, and AutoSaddler reflect
+# sessions get no default agent. The worker refuses every image before 18 for
+# a run with a file proposer.
 # The worker sends an older image the image's own protocol number.
 READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, SANDBOX_PROTOCOL})
 

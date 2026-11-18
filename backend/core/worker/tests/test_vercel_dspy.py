@@ -225,7 +225,7 @@ def test_an_image_runs_when_it_can_read_the_runs_outcome(
 def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
     image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An image before 18 ignores ``file_proposer`` and would run the default agent (SKY-753).
+    """An image before 18 runs the entry as a plain custom command, without setup or ``ASCENT_TASK`` (SKY-753).
 
     Args:
         image_protocol: The protocol the image answers to the probe.

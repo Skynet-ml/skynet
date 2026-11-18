@@ -189,7 +189,9 @@ def _require_file_proposer_support(image_protocol: int, snapshot: Any) -> None:
     """Refuse an older image for a run of the contract file's ``[proposer] entry``.
 
     An image before protocol 18 ignores the snapshot's ``file_proposer`` and
-    the setup, so it would run the default agent and report no error (SKY-753).
+    runs the entry as a plain custom command. It skips the setup and
+    ``ASCENT_TASK``, gives AutoSaddler reflect sessions no default agent, and
+    reports no error (SKY-753).
 
     Args:
         image_protocol: The image's protocol, from :func:`_require_image_protocol`.
