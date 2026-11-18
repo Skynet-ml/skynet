@@ -889,7 +889,7 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
 
 @pytest.mark.parametrize("letter", ["\x01", "א", "\U0001f600", "\udc80"])
 def test_an_output_is_cut_to_its_bytes_in_the_prompt(letter: str) -> None:
-    """A control character, a Hebrew letter or a non-BMP one takes more prompt bytes than one, and the cut counts them.
+    """A control, Hebrew, non-BMP or lone surrogate character takes more than one prompt byte, and the cut counts it.
 
     Args:
         letter: The one character of the output.
@@ -902,6 +902,35 @@ def test_an_output_is_cut_to_its_bytes_in_the_prompt(letter: str) -> None:
     assert OUTPUT_BYTES - 64 <= meta_mod._prompt_bytes(clipped) <= OUTPUT_BYTES
     assert clipped.startswith("<" + letter)
     assert clipped.endswith(letter + ">")
+
+
+def test_a_huge_output_is_cut_without_encoding_all_of_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measure only short pieces of an output far over the cap, so a 64 MiB output costs no gigabytes.
+
+    Args:
+        monkeypatch: Records the length of each text that the cut measures.
+    """
+    measured: list[int] = []
+    real_prompt_bytes = meta_mod._prompt_bytes
+
+    def prompt_bytes(text: str) -> int:
+        """Record the text length, then measure the text.
+
+        Args:
+            text: The text.
+
+        Returns:
+            Its prompt bytes.
+        """
+        measured.append(len(text))
+        return real_prompt_bytes(text)
+
+    monkeypatch.setattr(meta_mod, "_prompt_bytes", prompt_bytes)
+
+    clipped = meta_mod._clip("\x01" * 1_000_000)
+
+    assert max(measured) < 100
+    assert real_prompt_bytes(clipped) <= OUTPUT_BYTES
 
 
 def test_one_command_of_control_and_hebrew_output_leaves_room_for_the_next_model_call(

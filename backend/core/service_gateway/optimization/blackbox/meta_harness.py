@@ -217,7 +217,8 @@ def _clip(text: str) -> str:
     Returns:
         The output unchanged when it fits, else its head, a note and its tail.
     """
-    if _prompt_bytes(text) <= OUTPUT_BYTES:
+    # Each character takes at least one prompt byte, so the length check spares a huge output the full encode.
+    if len(text) <= OUTPUT_BYTES and _prompt_bytes(text) <= OUTPUT_BYTES:
         return text
     # The note for a cut of every character is the longest note, so the result always fits.
     half = (OUTPUT_BYTES - _prompt_bytes(f"\n[... {len(text)} characters cut ...]\n")) // 2
@@ -646,7 +647,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             "stderr": _clip(result.stderr),
             "timed_out": result.timed_out,
         }
-        # ``_propose`` measures the prompt with no escapes, so an escape here counts each Hebrew letter three times.
+        # ``_propose`` measures the prompt with no escapes, so an escape here makes a Hebrew letter take 7 bytes, not 2.
         return json.dumps(output, ensure_ascii=False), tree
 
     @staticmethod
