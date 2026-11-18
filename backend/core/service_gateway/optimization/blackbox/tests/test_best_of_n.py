@@ -786,6 +786,30 @@ def test_a_repository_brief_skips_a_file_larger_than_the_room_left(
     assert "END" in text
 
 
+def test_a_repository_brief_skips_a_file_whose_block_and_line_break_pass_the_room_by_one_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A block that fills the room has no byte left for its line break, so it gets the "no room" line.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
+    files = {"big.txt": b"x" * 200, "small.txt": b"ok"}
+    seed = RepoSeed("tree", editable_paths=("big.txt", "small.txt"))
+    rules = _repository_brief(seed, lambda _tree, _path: None, lambda _tree, _path: None)
+    block = best_of_n._file_entry("big.txt", files["big.txt"], 1_000)
+    assert block.startswith("Current content of `big.txt`:")
+    # The rules and the closing count line come out of the cap, so the room left is the block's size exactly.
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", len(rules) + len("\n2 more files are not shown.") + len(block))
+
+    text = _repository_brief(seed, lambda _tree, path: files.get(path), lambda _tree, _path: None)
+
+    assert "`big.txt` is not shown: the brief has no room for it." in text
+    assert "x" * 200 not in text
+    assert "Current content of `small.txt`:\n```\nok\n```" in text
+    assert "more files are not shown" not in text
+
+
 def test_a_repository_brief_names_no_hidden_path_in_its_path_rules(brief: Callable[..., str]) -> None:
     """A hidden editable or constrained path, or one inside a hidden folder, is not named in the path rules.
 
