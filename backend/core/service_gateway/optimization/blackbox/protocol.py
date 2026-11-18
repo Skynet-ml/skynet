@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -36,12 +37,19 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
+# SKY-751: the status of a case whose ``[run]`` entry failed (crash, non-zero
+# exit, timeout). The runner never invents a score, so that case has no score
+# too; it keeps its own status so the final run can report the failure text.
+RUN_FAILED_STATUS = "run_failed"
 STATUS_KEY = "status"
 # SKY-367: the pinned upstream engines need a number for every case, and they
 # use negative infinity as their own "no score" value. A single case scored
 # alone gets it; a batch fills each null case with its version's mean over the
 # scored cases (see :func:`fill_unscored`), so the null cases do not change the
 # mean upstream ranks by. Only a version with no scored case is UNSCORED.
+# SKY-751: a failed [run] entry is the version's fault, not the metric's, so it
+# gets no fill: that version is UNSCORED on every case of the batch and ranks
+# below every fully scored version.
 UNSCORED = float("-inf")
 
 
@@ -57,25 +65,37 @@ def engine_score(score: float | None) -> float:
     return UNSCORED if score is None else score
 
 
-def fill_unscored(candidates: list[Candidate], scores: list[float | None]) -> list[float]:
+def fill_unscored(
+    candidates: list[Candidate], scores: list[float | None], side_infos: list[SideInfo] | None = None
+) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
     Args:
         candidates: The version scored on each case, aligned with ``scores``.
-        scores: Each case's score, ``None`` after a metric error.
+        scores: Each case's score, ``None`` after a metric error or a failed ``[run]`` entry.
+        side_infos: Each case's side info, when known; it tells a failed ``[run]`` entry apart.
 
     Returns:
         A number for every case: the score, the mean of the same version's
         scored cases for a null case, or :data:`UNSCORED` when the version
-        has no scored case in the batch.
+        has no scored case in the batch or a failed ``[run]`` entry.
     """
+    infos = side_infos if side_infos is not None else [{} for _ in candidates]
+    # A scorer's own run_failed status with a real score is not a failed [run] entry.
+    failed = {
+        candidate_key(candidate)
+        for candidate, score, info in zip(candidates, scores, infos, strict=True)
+        if score is None and is_run_failed(info)
+    }
     scored: dict[str, list[float]] = {}
     for candidate, score in zip(candidates, scores, strict=True):
         if score is not None:
             scored.setdefault(candidate_key(candidate), []).append(score)
     filled: list[float] = []
     for candidate, score in zip(candidates, scores, strict=True):
-        if score is None:
+        if candidate_key(candidate) in failed:
+            score = UNSCORED
+        elif score is None:
             values = scored.get(candidate_key(candidate))
             score = sum(values) / len(values) if values else UNSCORED
         filled.append(score)
@@ -107,7 +127,9 @@ def score_batch(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(lambda pair: score_one(*pair), pairs))
-    filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+    filled = fill_unscored(
+        [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+    )
     return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
 
@@ -121,6 +143,18 @@ def is_metric_error(side_info: SideInfo) -> bool:
         Whether its ``status`` is :data:`METRIC_ERROR`.
     """
     return side_info.get(STATUS_KEY) == METRIC_ERROR
+
+
+def is_run_failed(side_info: SideInfo) -> bool:
+    """Return True when the side info marks a case whose ``[run]`` entry failed (SKY-751).
+
+    Args:
+        side_info: What the scorer returned for one case.
+
+    Returns:
+        Whether its ``status`` is :data:`RUN_FAILED_STATUS`.
+    """
+    return isinstance(side_info, dict) and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -212,6 +246,9 @@ class CandidateRecord:
     # Set once the metric or scorer crashed on any case: the version then has
     # no score at all, so it can never be the best or be published.
     metric_error: str | None = None
+    # SKY-751: whether any case of the version had a failed [run] entry, not
+    # only a metric crash. ``metric_error`` then holds the first run failure's text.
+    run_failed: bool = False
 
     @property
     def mean_score(self) -> float | None:
@@ -441,8 +478,12 @@ class EvalServer:
         # A nested server (an Auto lane) scores through the upstream server,
         # which hands back UNSCORED or a batch-filled number; the status marks
         # it as no score.
-        if score is None or is_metric_error(side_info):
-            return None, {**side_info, STATUS_KEY: METRIC_ERROR}
+        # A scorer's own ``run_failed`` status never drops a score; only a
+        # failed [run] entry, which sends no score, keeps it (SKY-751). In an
+        # Auto lane that entry arrives as UNSCORED, not None.
+        failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
+        if score is None or is_metric_error(side_info) or failed_run:
+            return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
         return score, side_info
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
@@ -450,24 +491,36 @@ class EvalServer:
 
         Args:
             candidate: The scored version.
-            score: Its score on the case just evaluated, or ``None`` after a metric error.
+            score: Its score on the case just evaluated, or ``None`` after a
+                metric error or a failed ``[run]`` entry (``status: run_failed``).
             side_info: What the scorer said about it on that case.
         """
         key = candidate_key(candidate)
         record = self._records.get(key)
         failed = score is None or is_metric_error(side_info)
-        error = str(side_info.get("error") or METRIC_ERROR) if failed else None
+        failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        # A failed [run] entry carries its failure text as feedback, not as an error.
+        fallback = (side_info.get("feedback") or RUN_FAILED_STATUS) if failed_run else METRIC_ERROR
+        error = str(side_info.get("error") or fallback) if failed else None
         crashed = failed or "error" in side_info
         # A failed case adds nothing to the total: the version's mean is None.
         value = 0.0 if failed or score is None else float(score)
         if record is None:
-            self._records[key] = CandidateRecord(candidate, value, 1, self._root.used, side_info, crashed, error)
+            self._records[key] = CandidateRecord(
+                candidate, value, 1, self._root.used, side_info, crashed, error, failed_run
+            )
             return
         record.total += value
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
-        record.metric_error = record.metric_error or error
+        # Any failed [run] case marks the version, whatever failed first, so
+        # the error text then is the run failure's, to match its status.
+        if failed_run and not record.run_failed:
+            record.metric_error = error
+            record.run_failed = True
+        elif record.metric_error is None:
+            record.metric_error = error
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -499,6 +552,19 @@ class EvalServer:
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.metric_error
+
+    def run_failed(self, candidate: Candidate) -> bool:
+        """Return whether any case of ``candidate`` had a failed ``[run]`` entry (SKY-751).
+
+        Args:
+            candidate: The version to look up.
+
+        Returns:
+            ``True`` when a ``[run]`` entry of the version failed on any case,
+            also after a metric crash, else ``False`` (also when it was not scored).
+        """
+        record = self._records.get(candidate_key(candidate))
+        return record is not None and record.run_failed
 
     @property
     def best_candidate(self) -> Candidate | None:

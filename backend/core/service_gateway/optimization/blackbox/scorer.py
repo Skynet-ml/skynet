@@ -20,7 +20,7 @@ from ....config import settings
 from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxScorer
 from . import runner
-from .protocol import Candidate, SideInfo
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY, Candidate, SideInfo
 from .remote_evaluator import RemoteEvaluatorClient
 from .sandbox import SandboxRuntime, scorer_runtime_from_settings
 from .sandbox_scorer import SandboxPythonScorer, ScorerUsage, scorer_gateway
@@ -31,7 +31,7 @@ class JobScorer(Protocol):
 
     usage: ScorerUsage | None
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case``.
 
         Args:
@@ -39,7 +39,7 @@ class JobScorer(Protocol):
             case: The case to score it on, if the task has cases.
 
         Returns:
-            The score and side information.
+            The score (``None`` for a failed ``[run]`` entry) and side information.
         """
         ...
 
@@ -48,21 +48,32 @@ class JobScorer(Protocol):
         ...
 
 
-def normalize_score(raw: Any) -> tuple[float, SideInfo]:
+def normalize_score(raw: Any) -> tuple[float | None, SideInfo]:
     """Coerce a scorer's return value into ``(score, side_info)``, feedback required.
 
-    See :func:`runner.normalize_score` for the accepted shapes.
+    See :func:`runner.normalize_score` for the accepted shapes. A result with
+    no score and the ``run_failed`` status is a failed ``[run]`` entry: it
+    keeps no score (SKY-751), but it still needs feedback, like every result.
 
     Args:
         raw: Whatever the scorer returned.
 
     Returns:
-        The float score and side info carrying ``feedback`` and any named ``scores``.
+        The float score, or ``None`` for a failed ``[run]`` entry, and side
+        info carrying ``feedback`` and any named ``scores``.
 
     Raises:
         ServiceError: When the value has none of the accepted shapes or lacks feedback.
     """
     try:
+        if isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            # A remote endpoint can send this shape too; the proposer learns
+            # only from the feedback, so it stays required here.
+            side_info = {key: value for key, value in raw.items() if key != "score"}
+            side_info["feedback"] = runner.feedback(side_info.get("feedback"), "The failed run")
+            if "scores" in side_info:
+                side_info["scores"] = runner.named_scores(side_info["scores"])
+            return None, side_info
         return runner.normalize_score(raw)
     except runner.ScorerError as exc:
         raise ServiceError(str(exc)) from exc
@@ -123,7 +134,7 @@ class RemoteScorer:
             else None
         )
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case`` via one HTTP request.
 
         Args:
@@ -131,7 +142,7 @@ class RemoteScorer:
             case: The case to score it on, if the task has cases.
 
         Returns:
-            The normalized score and side information.
+            The normalized score (``None`` for a failed ``[run]`` entry) and side information.
 
         Raises:
             ServiceError: When the request fails, returns an error status,
