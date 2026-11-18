@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import pyarrow.feather as feather
@@ -36,7 +37,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ...billing.budgets import BudgetService
-from ...billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
+from ...billing.service import LOCAL_CUSTOMER_PREFIX, StripeBillingService, local_customer_id
 from ...config import app_env, settings
 from ...storage.models import (
     AgentConversationModel,
@@ -833,3 +834,64 @@ def test_deletion_releases_the_open_holds_so_the_sweep_skips_them(full_schema_en
         assert (closed.settled_units, closed.wallet_settled_units) == (130, 130)
         live = session.get(ExecutionBudgetModel, f"budget-{_OTHER}")
         assert (live.state, live.blocked_reason, live.reserved_units) == ("attached", None, 270)
+
+
+def test_refund_that_resolved_the_email_before_deletion_reverses_the_closure(full_schema_engine: Engine) -> None:
+    """A refund webhook that resolved the email before the deletion finds the closed wallet (SKY-601)."""
+    with Session(full_schema_engine) as session:
+        session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus_real", balance_cents=300))
+        session.add(
+            WalletLedgerModel(
+                username=_EMAIL,
+                delta_cents=500,
+                kind="topup",
+                description="Top-up",
+                stripe_payment_intent_id="pi_race",
+            )
+        )
+        session.commit()
+    service = StripeBillingService(engine=full_schema_engine)
+    resolve = service._pi_clawback_context
+    deleted: list[bool] = []
+
+    def _resolve_then_delete(session: Session, payment_intent: str) -> tuple[str | None, int, int]:
+        """Resolve the owner, then let the deletion commit once before the webhook locks the wallet.
+
+        Args:
+            session: The webhook's open session.
+            payment_intent: The refunded PaymentIntent id.
+
+        Returns:
+            The owner, granted and clawed cents that the ledger holds at the call.
+        """
+        context = resolve(session, payment_intent)
+        if not deleted:
+            deleted.append(True)
+            _delete(full_schema_engine)
+        return context
+
+    with (
+        patch.object(service, "_pi_clawback_context", _resolve_then_delete),
+        patch("core.billing.service.send_alert"),
+        Session(full_schema_engine) as session,
+    ):
+        service._on_charge_refunded(session, "evt_race", {"payment_intent": "pi_race", "amount_refunded": 500})
+        session.commit()
+
+    with Session(full_schema_engine) as session:
+        assert session.get(BillingCustomerModel, _EMAIL) is None
+        wallet = session.scalars(select(BillingCustomerModel)).one()
+        assert wallet.username.startswith(_anonymized_username(_EMAIL))
+        # The refund returns the 300 forfeited cents; only the 200 spent cents stay owed.
+        assert (wallet.balance_cents, wallet.debt_cents) == (0, 200)
+        ledger = session.scalars(
+            select(WalletLedgerModel)
+            .where(WalletLedgerModel.kind.in_(("closure", "refund")))
+            .order_by(WalletLedgerModel.id)
+        ).all()
+        assert {row.username for row in ledger} == {wallet.username}
+        assert [(row.kind, row.delta_cents, row.uncollected_cents) for row in ledger] == [
+            ("closure", -300, None),
+            ("closure", 300, None),
+            ("refund", -300, 200),
+        ]

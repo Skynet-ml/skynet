@@ -1302,6 +1302,10 @@ class JobModel(Base):
         String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # The step log shard of the run (SKY-731). The shard map or the first step log flush
+    # sets it once, and nothing changes it later, so a new shard never moves a run.
+    # NULL and ``main`` both mean the main database.
+    step_log_shard: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
@@ -1314,6 +1318,15 @@ class JobModel(Base):
         # the alembic migration so two concurrent submits with the same key
         # cannot both create rows.
         Index("ix_jobs_username_idempotency_key", "username", "idempotency_key"),
+        # Each new shard map with no extra shard looks for a job that records a shard other than
+        # ``main`` (SKY-731). Almost every run records ``main``, so the index leaves those rows out:
+        # it stays empty while no run uses an extra shard, and the lookup does not scan ``jobs``.
+        Index(
+            "ix_jobs_step_log_shard",
+            "step_log_shard",
+            postgresql_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+            sqlite_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+        ),
     )
 
 
@@ -1526,9 +1539,17 @@ class StoragePackModel(Base):
     The row commits in the same transaction as the pack's steps and tree
     objects, so a pack without a row is a flush that crashed after its PUT;
     recovery applies it.
+
+    ``byte_size = -1`` marks a broken pack: the tree compactor found its object
+    missing or shorter than its rows (SKY-716). Its rows stay on it, and the
+    compactor no longer merges it. ``created_at`` is the write time, and for a
+    pack that the compactor merged, the retire time.
     """
 
     __tablename__ = "storage_packs"
+    # The compactor's candidate and retired-pack queries filter on created_at and sort by
+    # (created_at, pack_key) with a LIMIT (SKY-802).
+    __table_args__ = (Index("ix_storage_packs_created_at_pack_key", "created_at", "pack_key"),)
 
     pack_key: Mapped[str] = mapped_column(String(512), primary_key=True)
     worker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -1543,12 +1564,18 @@ class AgentStepModel(Base):
 
     ``step_id`` is ``<run_id>:<agent_id>:<seq>``, so a retried commit maps to
     the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
-    ``run_id`` is the job id and the shard key. Rows go with their job via the
-    cascading foreign key.
+    ``run_id`` is the job id and the shard key. On the main database, rows go
+    with their job via the cascading foreign key. Another shard has no
+    ``jobs`` table, so its rows stay after a job delete until SKY-733 (tree
+    retention and purge) removes them.
     """
 
     __tablename__ = "agent_steps"
-    __table_args__ = (Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),)
+    __table_args__ = (
+        Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),
+        # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+        Index("ix_agent_steps_pack_key", "pack_key"),
+    )
 
     # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
     step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
@@ -1580,6 +1607,8 @@ class TreeObjectModel(Base):
     """
 
     __tablename__ = "tree_objects"
+    # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+    __table_args__ = (Index("ix_tree_objects_pack_key", "pack_key"),)
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
     object_id: Mapped[str] = mapped_column(String(64), primary_key=True)
