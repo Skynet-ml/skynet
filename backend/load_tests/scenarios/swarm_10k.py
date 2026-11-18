@@ -8,9 +8,10 @@ odd step is a command step. A command step opens a box on an in-process
 fake box provider, puts the new tree object, closes the box and commits the
 step with the tree id. About 100 agents share one run (one ``jobs`` row).
 
-Each step-log shard runs in its own OS process, with its own database and
-its own step log worker, as one Cloudflare Durable Object owns its own
-storage. Run ``i`` goes to shard ``i % shards``. The shard processes start
+Each step-log shard runs in its own OS process, with its own database on
+SQLite (one shared Postgres database otherwise) and its own step log worker,
+as one Cloudflare Durable Object owns its own storage. Run ``i`` goes to
+shard ``i % shards``. The shard processes start
 their agents together at a barrier. In each shard process, at most
 ``MAX_DRIVERS_PER_SHARD`` driver threads serve the agents, whatever the
 agent count. Each agent is due to commit one step every ``step_interval``
@@ -1078,8 +1079,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
                 process.join()
         # Each shard gets its cleanup, also after another shard's cleanup fails; the first error wins.
         cleanup_error: Exception | None = None
-        # Only a database that passed every check gets a reset. The pass's rows point at packs that the cleanup
-        # deletes, and a later worker's orphan sweep must not take its running jobs.
+        # Only a database that passed every check and got this pass's rows gets the row cleanup.
         try:
             if reset_engine is not None:
                 try:

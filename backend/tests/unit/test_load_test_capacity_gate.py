@@ -728,6 +728,109 @@ def test_swarm_measures_a_commit_call_that_waits_for_durability(
     assert 1000 * calls[len(calls) // 2] > swarm_10k.MAX_COMMIT_CALL_P99_MS
 
 
+class _BrokenBarrier:
+    """A start barrier that another shard's failure aborted, so its wait raises."""
+
+    def __init__(self) -> None:
+        """Start with no abort."""
+        self.aborted = 0
+
+    def wait(self, timeout: float) -> None:
+        """Raise as ``threading.Barrier.wait`` does after an abort.
+
+        Args:
+            timeout: Not used.
+
+        Raises:
+            threading.BrokenBarrierError: Always.
+        """
+        raise threading.BrokenBarrierError
+
+    def abort(self) -> None:
+        """Count the abort."""
+        self.aborted += 1
+
+
+@pytest.mark.parametrize("broken", [True, False])
+def test_swarm_shard_closes_its_step_log_and_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: bool
+) -> None:
+    """Check that a shard closes its step log and disposes its engine once, after a broken barrier or a good pass.
+
+    Args:
+        monkeypatch: Records each step log close and each engine dispose.
+        tmp_path: The folder for the shard's database and objects.
+        broken: Whether the start barrier raises ``BrokenBarrierError``.
+    """
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    closed: list[str] = []
+    disposed: list[str] = []
+    real_close = StepLogStore.close
+    real_create_engine = swarm_10k.create_engine
+
+    def close(self: StepLogStore) -> None:
+        """Record the close, then close the step log.
+
+        Args:
+            self: The step log.
+        """
+        closed.append(self._worker_id)
+        real_close(self)
+
+    def create(url: str, **kwargs: Any) -> Engine:
+        """Create the shard's engine and record each dispose of it.
+
+        Args:
+            url: The database URL.
+            **kwargs: The other ``create_engine`` arguments.
+
+        Returns:
+            The engine.
+        """
+        engine = real_create_engine(url, **kwargs)
+        real_dispose = engine.dispose
+
+        def dispose(*args: Any, **kwargs: Any) -> None:
+            """Record the dispose, then dispose the engine.
+
+            Args:
+                *args: The ``Engine.dispose`` arguments.
+                **kwargs: The ``Engine.dispose`` keyword arguments.
+            """
+            disposed.append(url)
+            real_dispose(*args, **kwargs)
+
+        engine.dispose = dispose  # type: ignore[method-assign]
+        return engine
+
+    url = f"sqlite:///{tmp_path / 'db.sqlite'}"
+    run_id = swarm_10k.run_id_for("test", 0)
+    setup = create_engine(url)
+    swarm_10k._reset(setup, [run_id])
+    setup.dispose()
+    monkeypatch.setattr(StepLogStore, "close", close)
+    monkeypatch.setattr(swarm_10k, "create_engine", create)
+    results: queue.Queue[dict[str, Any]] = queue.Queue()
+    shard = {
+        "url": url,
+        "folder": str(tmp_path),
+        "worker_id": "swarm-w",
+        "flush_max_bytes": swarm_10k.SQLITE_FLUSH_MAX_BYTES,
+    }
+    barrier: Any = _BrokenBarrier() if broken else threading.Barrier(1)
+    config = _swarm_config(agents=1, steps_per_agent=2, flush_window_seconds=0.01)
+    swarm_10k._shard_process(config, shard, [(run_id, "agent-00000")], barrier, results)
+    report = results.get_nowait()
+    assert closed == ["swarm-w"]
+    assert disposed == [url]
+    if broken:
+        assert "BrokenBarrierError" in report["error"]
+        assert barrier.aborted == 1
+    else:
+        assert "error" not in report, report.get("error")
+        assert len(report["times"]) == 2
+
+
 def test_swarm_pass_cleans_every_shard_and_keeps_the_first_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
