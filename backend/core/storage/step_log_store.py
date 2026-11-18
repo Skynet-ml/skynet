@@ -57,6 +57,9 @@ logger = logging.getLogger(__name__)
 STEP_KINDS = frozenset({"command", "model"})
 PACK_VERSION = 1
 PACK_PREFIX = "packs"
+# The byte_size of the row that the compactor's sweep inserts to claim an old flush pack with no row.
+# An applied pack is never empty: it always holds its manifest.
+CLAIM_BYTE_SIZE = 0
 _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
@@ -90,6 +93,19 @@ class StepFenceError(RuntimeError):
         """
         super().__init__(f"step {step_id} failed: its execution_generation is stale")
         self.step_id = step_id
+
+
+class PackClaimedError(RuntimeError):
+    """The compactor's sweep claimed a flush pack before any store recorded it, so none of its steps landed."""
+
+    def __init__(self, pack_key: str) -> None:
+        """Name the claimed pack in the error.
+
+        Args:
+            pack_key: The key of the claimed pack.
+        """
+        super().__init__(f"pack {pack_key} was claimed by the sweep before it was recorded; none of its steps landed")
+        self.pack_key = pack_key
 
 
 def step_id_for(run_id: str, agent_id: str, seq: int) -> str:
@@ -181,6 +197,8 @@ class _Waiter(threading.Event):
     failure: str | None = None
     # Set when the last flush of ``close`` failed: no flusher is left to open the waiter.
     closed: bool = False
+    # Set when the compactor's sweep claimed the step's pack before the flush recorded it.
+    lost: bool = False
 
 
 def _encode_body(body: dict[str, Any]) -> bytes:
@@ -455,7 +473,8 @@ class StepLogStore:
             TimeoutError: When the flush does not commit in time.
             KeyError: When the store knows no such step and it has no row.
             RuntimeError: When the last flush of :meth:`close` failed before
-                the step was durable.
+                the step was durable, or the compactor's sweep deleted the
+                step's pack before a flush recorded it.
         """
         key = (step_id, execution_generation)
         with self._cond:
@@ -466,6 +485,8 @@ class StepLogStore:
                 raise TimeoutError(f"step {step_id} is not durable yet")
             if waiter.closed:
                 raise RuntimeError(f"the step log closed before step {step_id} was durable")
+            if waiter.lost:
+                raise RuntimeError(f"the pack of step {step_id} was deleted before it was recorded")
             failure = waiter.failure
         elif failure is None:
             with Session(self._engine) as session:
@@ -549,10 +570,17 @@ class StepLogStore:
         with self._flush_lock:
             if self._unapplied is not None:
                 key, size, manifest, batch = self._unapplied
-                _, stale = self._apply(key, size, manifest)
+                lost = False
+                try:
+                    _, stale = self._apply(key, size, manifest)
+                except PackClaimedError:
+                    # A retry that outlived UNRECORDED_FLUSH_PACK_AGE_SECONDS: the bytes are gone, so the
+                    # batch's waiters fail rather than wait for a pack that no retry can record.
+                    logger.exception("Flush pack %s was claimed by the sweep before it was recorded", key)
+                    lost, stale = True, []
                 with self._cond:
                     self._unapplied = None
-                self._settle(batch, stale)
+                self._settle(batch, stale, lost=lost)
             with self._cond:
                 batch, first_at = self._pending, self._first_at
                 self._pending, self._pending_bytes, self._first_at = [], 0, None
@@ -580,12 +608,15 @@ class StepLogStore:
                 raise
             self._settle(batch, stale)
 
-    def _settle(self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]]) -> None:
+    def _settle(
+        self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]], lost: bool = False
+    ) -> None:
         """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
 
         Args:
             batch: The entries of the recorded pack.
             stale: The manifest entries of the batch's steps that did not land.
+            lost: Whether the sweep claimed the pack first, so every waiter opens with an error.
         """
         with self._cond:
             # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
@@ -609,6 +640,7 @@ class StepLogStore:
                 waiter = self._waiters.pop(step_key, None)
                 if waiter is not None:
                     waiter.failure = verdicts.get(step_key)
+                    waiter.lost = lost
                     waiter.set()
 
     def recover(self) -> int:
@@ -638,7 +670,11 @@ class StepLogStore:
                     # The compactor's sweep claimed and deleted the pack after the list; its claim row
                     # also keeps a late apply of the pack out.
                     continue
-                claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
+                try:
+                    claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
+                except PackClaimedError:
+                    # The sweep claimed the pack after the list; the claim row keeps its steps out.
+                    continue
                 applied += claimed
             return applied
 
@@ -666,6 +702,8 @@ class StepLogStore:
 
         The ``storage_packs`` row makes the apply happen once: a second apply
         of the same pack, by recovery or a retry, finds the row and stops.
+        A row that the compactor's sweep inserted to claim the pack is not an
+        apply: none of the pack's entries got a row.
         The fence comes first: a step whose generation is not the job's
         current one fails, also when a row with its id exists. A current step
         whose id has a row is done and not inserted again, so the first
@@ -687,6 +725,10 @@ class StepLogStore:
             fence. When another store applied it first, those are the steps
             with a stale generation and the current steps with no row: the
             other store fenced them.
+
+        Raises:
+            PackClaimedError: When the row is the sweep's claim, so no store
+                applied the pack.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
@@ -719,8 +761,14 @@ class StepLogStore:
                 elif entry["step_id"] not in stored:
                     fresh.append(entry)
             if not claimed:
+                row_size = session.scalar(
+                    select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == pack_key)
+                )
                 session.rollback()
-                # The store that applied this pack inserted every current step that had no row.
+                if row_size == CLAIM_BYTE_SIZE:
+                    raise PackClaimedError(pack_key)
+                # Another store applied this pack and inserted every current step that had no row then,
+                # so a current step with no row now failed its fence.
                 return False, stale + fresh
             landed = 0
             if fresh:

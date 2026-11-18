@@ -13,6 +13,7 @@ import time
 import uuid
 import weakref
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -927,6 +928,74 @@ def test_durable_returns_when_the_flusher_records_the_kept_pack(make_store, engi
     assert _step_rows(engine) == 1
 
 
+def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine, objects, monkeypatch) -> None:
+    """A retry that finds the sweep's claim row opens its waiters with an error and does not report the step as landed."""
+    store = make_store()
+    apply = store._apply
+
+    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+        """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
+
+        The claim goes in before the failure: the flusher retries a kept pack at once.
+
+        Args:
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        # The row that TreeCompactor._claim_flush_packs inserts for a flush pack older than its age limit.
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    step_id = _commit(store)
+    # The waiter must be open before the retry settles it: the flusher may retry first.
+    waiter = store._waiters[(step_id, 1)]
+    waiting = threading.Event()
+    wait = waiter.wait
+
+    def note_wait(timeout: float | None = None) -> bool:
+        """Mark that ``durable`` waits on the waiter, then wait.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            Whether the waiter opened.
+        """
+        waiting.set()
+        return wait(timeout)
+
+    waiter.wait = note_wait
+    errors: list[Exception] = []
+
+    def wait_for_step() -> None:
+        """Wait for the step and keep the error."""
+        try:
+            store.durable(step_id, 1, timeout=10)
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=wait_for_step)
+    thread.start()
+    assert waiting.wait(5)
+    with pytest.raises(OperationalError):
+        store.flush()
+
+    store.flush()
+    thread.join(10)
+
+    assert len(errors) == 1
+    assert type(errors[0]) is RuntimeError
+    assert "was deleted before it was recorded" in str(errors[0])
+    assert _step_rows(engine) == 0
+
+
 def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
     """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
     store = make_store()
@@ -1279,7 +1348,7 @@ def test_a_failed_flush_at_close_opens_the_waiters_with_an_error(make_store, obj
     """A waiter with no time limit does not block forever when the last flush of ``close`` fails."""
     store = make_store()
     step_id = _commit(store)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def wait() -> None:
         """Wait for the step without a time limit and keep the error."""

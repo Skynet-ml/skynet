@@ -85,7 +85,7 @@ from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from .object_store import S3ObjectStore
-from .step_log_store import PACK_PREFIX
+from .step_log_store import CLAIM_BYTE_SIZE, PACK_PREFIX
 
 try:
     import boto3
@@ -527,6 +527,23 @@ class TreeCompactor:
             keys: The pack keys.
         """
         with Session(self._engine) as session:
+            # A plain UPDATE of many rows waits on their locks in no fixed order, and an account purge
+            # holds pack locks in key order, so the two could deadlock. The rows are locked in key order
+            # with NOWAIT, as the merge does: the compactor never makes a purge wait, and a broken pack
+            # that is not marked stays out of this pass and is found broken again by the next one.
+            try:
+                for chunk in _chunks(sorted(keys)):
+                    session.execute(
+                        select(StoragePackModel.pack_key)
+                        .where(StoragePackModel.pack_key.in_(chunk))
+                        .order_by(StoragePackModel.pack_key)
+                        .with_for_update(nowait=True)
+                    ).all()
+            except OperationalError as error:
+                if getattr(error.orig, "pgcode", None) != _LOCK_NOT_AVAILABLE:
+                    raise
+                logger.info("Another transaction holds a broken pack; the next pass marks it")
+                return
             for chunk in _chunks(sorted(keys)):
                 session.execute(
                     update(StoragePackModel)
@@ -664,16 +681,28 @@ class TreeCompactor:
         Returns:
             The keys that this sweep claimed; a pack that an apply recorded first is not one of them.
         """
+        recorded: set[str] = set()
+        for chunk in _chunks(keys):
+            recorded.update(
+                session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.in_(chunk)))
+            )
+        # Most old flush packs have a row; only the rest get a claim, so the sweep's writes do not grow
+        # with the stored data. The insert still has ON CONFLICT: an apply can record a pack after the read.
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
         claimed: list[str] = []
-        for chunk in _chunks(sorted(keys)):
+        for chunk in _chunks(sorted(key for key in keys if key not in recorded)):
             claimed.extend(
                 session.scalars(
                     insert(StoragePackModel)
                     .values(
                         [
-                            {"pack_key": key, "worker_id": key.split("/")[1], "byte_size": 0, "created_at": now}
+                            {
+                                "pack_key": key,
+                                "worker_id": key.split("/")[1],
+                                "byte_size": CLAIM_BYTE_SIZE,
+                                "created_at": now,
+                            }
                             for key in chunk
                         ]
                     )

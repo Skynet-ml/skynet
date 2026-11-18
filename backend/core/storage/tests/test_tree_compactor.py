@@ -1624,6 +1624,21 @@ def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
         assert session.get(StoragePackModel, old).byte_size > 0
 
 
+def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(engine, objects, store, make_compactor) -> None:
+    """The sweep reads which old flush packs have a row and sends no claim INSERT for them."""
+    _orphan_an_old_flush_pack(engine, objects, store)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 1
+    finally:
+        recovering.close()
+    statements = _record_statements(engine)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+
+    assert [statement for statement, _ in statements if statement.startswith("INSERT INTO storage_packs")] == []
+
+
 def test_a_pass_sweeps_the_packs_with_no_row_at_most_once_an_interval(engine, objects, make_compactor) -> None:
     """Two passes inside the sweep interval list the prefixes once; with no interval, each pass sweeps."""
     for interval, expected in ((3600.0, 1), (0.0, 2)):
@@ -1837,6 +1852,58 @@ def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
     assert "ORDER BY jobs.optimization_id FOR KEY SHARE NOWAIT" in locks[0]
     assert "FROM storage_packs" in locks[1]
     assert "ORDER BY storage_packs.pack_key FOR UPDATE NOWAIT" in locks[1]
+
+
+@needs_postgres
+def test_postgres_the_broken_mark_locks_packs_in_key_order_with_nowait(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """The broken mark locks its packs sorted by key and with NOWAIT before its UPDATE, as an account purge locks them."""
+    _fill(postgres_store)
+    missing = sorted(objects.list("packs/w1/"))[:2]
+    for key in missing:
+        objects._path(key).unlink()
+    recorded = _record_statements(postgres_engine)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+
+    assert compactor.merge() == 0
+
+    statements = [statement for statement, _ in recorded]
+    mark = next(
+        i for i, statement in enumerate(statements) if statement.startswith("UPDATE storage_packs SET byte_size")
+    )
+    locks = [statement for statement in statements[:mark] if "NOWAIT" in statement]
+    assert len(locks) == 1
+    assert "FROM storage_packs" in locks[0]
+    assert "ORDER BY storage_packs.pack_key FOR UPDATE NOWAIT" in locks[0]
+    with Session(postgres_engine) as session:
+        assert {session.get(StoragePackModel, key).byte_size for key in missing} == {BROKEN_BYTE_SIZE}
+
+
+@needs_postgres
+def test_postgres_the_broken_mark_does_not_wait_for_a_locked_pack(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """A broken pack that another transaction holds stays unmarked, and the pass does not wait for the lock."""
+    _fill(postgres_store)
+    missing = min(objects.list("packs/w1/"))
+    objects._path(missing).unlink()
+    results: list[int] = []
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        holder.execute(
+            select(StoragePackModel.pack_key).where(StoragePackModel.pack_key == missing).with_for_update()
+        ).all()
+        thread = threading.Thread(target=lambda: results.append(compactor.merge()))
+        thread.start()
+        thread.join(10)
+        waited = thread.is_alive()
+        holder.rollback()
+    thread.join(30)
+
+    assert not waited
+    with Session(postgres_engine) as session:
+        assert session.get(StoragePackModel, missing).byte_size != BROKEN_BYTE_SIZE
 
 
 @needs_postgres
