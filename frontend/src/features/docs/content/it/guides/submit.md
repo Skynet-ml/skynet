@@ -90,7 +90,7 @@ La procedura guidata non ti fa proseguire se il limite o il tuo saldo è inferio
 
 ### Scorer
 
-Scrivi `scorer.py`. Definisce `score(repo_path, case)` e restituisce un punteggio con un feedback. L'assistente può scriverlo per te. Leggi [Metriche e scorer](/docs/concepts/scorers).
+Scrivi `scorer.py`. Definisce `score(repo_path, case, output=None)` e restituisce un punteggio con un feedback. Lo scorer legge `output`, cioè ciò che la entry `[run]` ha restituito per il caso. Non gira nella cartella della versione e non importa codice dal repository. L'assistente può scriverlo per te. Leggi [Metriche e scorer](/docs/concepts/scorers).
 
 Il repository può avere un file `serve.py` con `def serve(input)`. Skynet lo usa per servire la versione migliore dopo l'esecuzione. Leggi [Leggere i risultati](/docs/guides/results).
 

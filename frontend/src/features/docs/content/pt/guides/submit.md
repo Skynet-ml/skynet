@@ -90,7 +90,7 @@ O assistente não deixa você continuar se o limite ou o seu saldo estiver abaix
 
 ### Avaliador
 
-Escreva `scorer.py`. Ele define `score(repo_path, case)` e retorna uma pontuação com feedback. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
+Escreva `scorer.py`. Ele define `score(repo_path, case, output=None)` e retorna uma pontuação com feedback. O avaliador lê `output`, o que a entrada `[run]` retornou para o caso. Ele não roda na pasta da versão e não importa código do repositório. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
 O repositório pode ter um arquivo `serve.py` com `def serve(input)`. O Skynet o usa para servir a melhor versão depois da execução. Leia [Ler os resultados](/docs/guides/results).
 

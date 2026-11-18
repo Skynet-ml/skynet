@@ -90,7 +90,7 @@ Skynet 会把每个候选推送到各自的分支。`skynet/best` 分支指向�
 
 ### 评分器
 
-编写 `scorer.py`。它定义 `score(repo_path, case)`，并返回一个分数和反馈。助手可以为你编写它。请阅读[指标与评分器](/docs/concepts/scorers)。
+编写 `scorer.py`。它定义 `score(repo_path, case, output=None)`，并返回一个分数和反馈。评分器读取 `output`，即 `[run]` 入口为该用例返回的值。评分器不在版本文件夹中运行，也不会从仓库导入代码。助手可以为你编写它。请阅读[指标与评分器](/docs/concepts/scorers)。
 
 仓库可以有一个包含 `def serve(input)` 的 `serve.py` 文件。运行结束后，Skynet 用它来部署最佳版本。请阅读[查看结果](/docs/guides/results)。
 

@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-Quando la entry `[run]` fallisce su un caso, quel caso non ha punteggio. Se l'entry non parte, supera il timeout o un segnale la ferma, il feedback è `Run failed: …`, e Skynet non chiama lo scorer. Un codice di uscita diverso da zero non è un fallimento: lo scorer lo riceve in `output`. Una versione con un caso così non ha punteggio. Non può essere la versione migliore, non raggiunge nessun `[outcome] target` e non apre nessuna pull request. Se un fallimento deve contare come un numero, intercetta il fallimento nel tuo programma, scrivi un output e lascia che lo scorer gli dia un punteggio. Leggi le [regole del repository](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Quando la entry `[run]` fallisce su un caso, quel caso non ha punteggio. Se l'entry non parte, supera il timeout o un segnale la ferma, oppure se una entry di funzione solleva un'eccezione o esce prima di restituire un valore, il feedback è `Run failed: …`, e Skynet non chiama lo scorer. Un codice di uscita diverso da zero di una entry di comando non è un fallimento: lo scorer lo riceve in `output`. Una versione con un caso così non ha punteggio. Non può essere la versione migliore, non raggiunge nessun `[outcome] target` e non apre nessuna pull request. Se un fallimento deve contare come un numero, intercetta il fallimento nel tuo programma, scrivi un output e lascia che lo scorer gli dia un punteggio. Leggi le [regole del repository](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modello come giudice
 

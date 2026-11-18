@@ -90,7 +90,7 @@ Limit veya bakiyeniz başlamak için gereken tutarın altındaysa sihirbaz devam
 
 ### Puanlayıcı
 
-`scorer.py` dosyasını yazın. Bu dosya `score(repo_path, case)` fonksiyonunu tanımlar ve geri bildirimle birlikte bir puan döndürür. Asistan onu sizin için yazabilir. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
+`scorer.py` dosyasını yazın. Bu dosya `score(repo_path, case, output=None)` fonksiyonunu tanımlar ve geri bildirimle birlikte bir puan döndürür. Puanlayıcı `output` değerini, yani `[run]` giriş noktasının o durum için döndürdüğü değeri okur. Puanlayıcı sürümün klasöründe çalışmaz ve depodan kod içe aktarmaz. Asistan onu sizin için yazabilir. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
 
 Depoda `def serve(input)` içeren bir `serve.py` dosyası olabilir. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için bu dosyayı kullanır. [Sonuçları okuyun](/docs/guides/results) sayfasını okuyun.
 

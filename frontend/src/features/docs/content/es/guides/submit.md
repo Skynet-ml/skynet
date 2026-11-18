@@ -90,7 +90,7 @@ El asistente no te deja continuar si el límite o tu saldo es inferior al import
 
 ### Evaluador
 
-Escribe `scorer.py`. Define `score(repo_path, case)` y devuelve una puntuación con comentarios. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
+Escribe `scorer.py`. Define `score(repo_path, case, output=None)` y devuelve una puntuación con comentarios. El evaluador lee `output`, lo que la entrada `[run]` devolvió para el caso. No se ejecuta en la carpeta de la versión ni importa código del repositorio. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
 
 El repositorio puede tener un archivo `serve.py` con `def serve(input)`. Skynet lo usa para servir la mejor versión después de la ejecución. Lee [Leer los resultados](/docs/guides/results).
 

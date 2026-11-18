@@ -90,7 +90,7 @@ L'assistant ne vous laisse pas continuer si le plafond ou votre solde est infér
 
 ### Évaluateur
 
-Rédigez `scorer.py`. Ce fichier définit `score(repo_path, case)` et renvoie un score avec un retour. L'assistant IA peut le rédiger pour vous. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
+Rédigez `scorer.py`. Ce fichier définit `score(repo_path, case, output=None)` et renvoie un score avec un retour. L'évaluateur lit `output`, ce que l'entrée `[run]` a renvoyé pour le cas. Il ne s'exécute pas dans le dossier de la version et n'importe pas de code du dépôt. L'assistant IA peut le rédiger pour vous. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
 
 Le dépôt peut contenir un fichier `serve.py` avec `def serve(input)`. Skynet l'utilise pour servir la meilleure version après l'exécution. Lisez [Lire les résultats](/docs/guides/results).
 

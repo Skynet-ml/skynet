@@ -15,12 +15,12 @@ C runs. M gets the metric files and C's output only after C ended, and runs
 the metric files at their repository paths (E41). A check that needs the
 version's code belongs in the ``[run]`` entry: without one, the metric sees
 no version code at all. A run that times out, raises, returns no JSON, is
-killed by a signal or cannot start has no score (status ``run_failed``, SKY-751)
-with ``Run failed: ...`` as its feedback, and the metric is not called. A nonzero exit of a command entry is
-an output like any other. Neither box gets the run's secrets: only the model
-route reaches the box. Both the ``[run]`` entry and the metric run through
-the tree sandbox session API (SKY-785), and the metric box never gets the
-candidate tree.
+killed by a signal or cannot start has no score (status ``run_failed``,
+SKY-751) with ``Run failed: ...`` as its feedback, and the metric is not
+called. A nonzero exit of a command entry is an output like any other.
+Neither box gets the run's secrets: only the model route reaches the box.
+Both the ``[run]`` entry and the metric run through the tree sandbox session
+API (SKY-785), and the metric box never gets the candidate tree.
 
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to

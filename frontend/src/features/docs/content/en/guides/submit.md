@@ -90,7 +90,7 @@ The wizard does not let you continue if the limit or your balance is below the a
 
 ### Scorer
 
-Write `scorer.py`. It defines `score(repo_path, case)` and returns a score with feedback. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
+Write `scorer.py`. It defines `score(repo_path, case, output=None)` and returns a score with feedback. It reads `output`, what the `[run]` entry returned for the case. The scorer does not run in the version folder and does not import code from the repository. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
 
 The repository can have a `serve.py` file with `def serve(input)`. Skynet uses it to serve the best version after the run. Read [Read the results](/docs/guides/results).
 

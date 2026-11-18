@@ -90,7 +90,7 @@ Skynet 會將每個候選版本推去佢自己嘅分支。`skynet/best` 分支�
 
 ### 評分器
 
-寫 `scorer.py`。佢定義 `score(repo_path, case)`，並回傳一個分數同回饋。助手可以幫你寫。睇 [指標同評分器](/docs/concepts/scorers)。
+寫 `scorer.py`。佢定義 `score(repo_path, case, output=None)`，並回傳一個分數同回饋。評分器會讀 `output`，即係 `[run]` 入口為嗰個案例回傳嘅嘢。評分器唔會喺版本嘅資料夾入面運行，亦唔會由儲存庫匯入程式碼。助手可以幫你寫。睇 [指標同評分器](/docs/concepts/scorers)。
 
 個倉庫可以有一個 `serve.py` 檔案，入面有 `def serve(input)`。運行完之後，Skynet 會用佢嚟提供最佳版本。睇 [睇結果](/docs/guides/results)。
 

@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-`[run]` giriş noktası bir durumda başarısız olursa o durumun puanı olmaz. Giriş noktası başlayamazsa, zaman aşımına uğrarsa veya bir sinyal onu durdurursa geri bildirim `Run failed: …` olur ve Skynet puanlayıcıyı çağırmaz. Sıfır olmayan bir çıkış kodu başarısızlık değildir: puanlayıcı onu `output` içinde alır. Böyle bir durumu olan sürümün puanı olmaz. O sürüm en iyi sürüm olamaz, hiçbir `[outcome] target` değerine ulaşmaz ve pull request açmaz. Bir başarısızlığın sayı olarak sayılması gerekiyorsa başarısızlığı programınızda yakalayın, bir çıktı yazın ve puanlayıcının onu puanlamasına izin verin. [Depo kuralları](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) sayfasını okuyun.
+`[run]` giriş noktası bir durumda başarısız olursa o durumun puanı olmaz. Giriş noktası başlayamazsa, zaman aşımına uğrarsa veya bir sinyal onu durdurursa ya da bir fonksiyon giriş noktası değer döndürmeden önce hata fırlatır veya çıkarsa geri bildirim `Run failed: …` olur ve Skynet puanlayıcıyı çağırmaz. Bir komut giriş noktasının sıfır olmayan çıkış kodu başarısızlık değildir: puanlayıcı onu `output` içinde alır. Böyle bir durumu olan sürümün puanı olmaz. O sürüm en iyi sürüm olamaz, hiçbir `[outcome] target` değerine ulaşmaz ve pull request açmaz. Bir başarısızlığın sayı olarak sayılması gerekiyorsa başarısızlığı programınızda yakalayın, bir çıktı yazın ve puanlayıcının onu puanlamasına izin verin. [Depo kuralları](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) sayfasını okuyun.
 
 ### Hakem olarak model
 

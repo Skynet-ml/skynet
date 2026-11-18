@@ -90,7 +90,7 @@ Skynet은 각 후보를 별도 브랜치에 푸시합니다. `skynet/best` 브�
 
 ### 채점기
 
-`scorer.py`를 작성합니다. 이 파일은 `score(repo_path, case)`를 정의하고 점수와 피드백을 반환합니다. 어시스턴트가 대신 작성할 수 있습니다. [지표와 채점기](/docs/concepts/scorers)를 읽어 보세요.
+`scorer.py`를 작성합니다. 이 파일은 `score(repo_path, case, output=None)`를 정의하고 점수와 피드백을 반환합니다. 채점기는 `output`, 즉 `[run]` 엔트리가 그 케이스에 반환한 값을 읽습니다. 채점기는 버전 폴더에서 실행되지 않으며 저장소의 코드를 가져오지 않습니다. 어시스턴트가 대신 작성할 수 있습니다. [지표와 채점기](/docs/concepts/scorers)를 읽어 보세요.
 
 리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일을 둘 수 있습니다. Skynet은 실행 후 이 파일로 최고 버전을 서빙합니다. [결과 읽기](/docs/guides/results)를 읽어 보세요.
 

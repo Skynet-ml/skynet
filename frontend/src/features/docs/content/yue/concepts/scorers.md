@@ -98,7 +98,7 @@ def score(repo_path, case, output=None):
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
-如果 `[run]` 入口喺某個案例失敗，嗰個案例就冇分數。如果入口開唔到、超時，或者俾信號停咗，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。非零嘅結束碼唔算失敗：評分器會喺 `output` 收到佢。有呢種案例嘅版本冇分數。佢唔可以係最好嘅版本，唔會達到任何 `[outcome] target`，亦唔會開 pull request。如果失敗一定要算做一個數字，就喺你個程式入面捕捉個失敗，寫一個輸出，再俾評分器幫佢評分。睇 [儲存庫規則](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
+如果 `[run]` 入口喺某個案例失敗，嗰個案例就冇分數。如果入口開唔到、超時，或者俾信號停咗，又或者函數入口喺返回之前拋出異常或者退出，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。命令入口嘅非零結束碼唔算失敗：評分器會喺 `output` 收到佢。有呢種案例嘅版本冇分數。佢唔可以係最好嘅版本，唔會達到任何 `[outcome] target`，亦唔會開 pull request。如果失敗一定要算做一個數字，就喺你個程式入面捕捉個失敗，寫一個輸出，再俾評分器幫佢評分。睇 [儲存庫規則](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
 
 ### 用模型做評判
 
