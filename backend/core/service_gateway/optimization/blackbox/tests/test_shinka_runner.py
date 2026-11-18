@@ -1737,7 +1737,9 @@ class _IdleRunner:
 def test_execute_rejects_a_version_that_writes_through_a_shipped_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reject, without scoring, a version that writes through a symlink the tree ships, in the scorer ``execute`` builds.
+    """Reject, without scoring, a version that writes through a symlink the tree ships.
+
+    The scorer under test is the one ``execute`` builds.
 
     Args:
         tmp_path: Scratch folder.

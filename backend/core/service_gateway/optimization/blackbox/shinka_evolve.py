@@ -23,7 +23,6 @@ import json
 import logging
 import math
 import os
-import resource
 import shutil
 import signal
 import subprocess
@@ -52,7 +51,7 @@ from .native_runtime import (
     run_native_engine,
     sanitize_side_info,
 )
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task
+from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, candidate_key
 from .runner import side_info_json_default
 
 logger = logging.getLogger(__name__)
@@ -96,6 +95,15 @@ _LINE_CHARS = 64 * 1024**2
 _CHILD_FILE_BYTES = 4 * 1024**3
 # Only the end of the stderr log goes into a failure message.
 _STDERR_TAIL_BYTES = 64 * 1024
+# ``preexec_fn`` is not safe in a parent with threads, such as the worker, so
+# the child's first program sets its limits and then becomes the runner. The
+# limits stay through ``exec``.
+_LIMIT_THEN_RUN = (
+    "import json, os, resource, sys\n"
+    "for name, limit in json.loads(sys.argv[1]).items():\n"
+    "    resource.setrlimit(getattr(resource, name), (limit, limit))\n"
+    "os.execv(sys.executable, [sys.executable, *sys.argv[2:]])\n"
+)
 
 
 class ShinkaEvolveEngine:
@@ -261,16 +269,14 @@ class ShinkaEvolveEngine:
             # the loop, not the child, prices and bills every call.
             "SHINKA_PRICING_MODE": "offline",
             # Per-thread buffers and malloc arenas inflate the address space
-            # that ``_limit_resources`` bounds; the child needs no parallel math.
+            # that ``_child_limits`` bounds; the child needs no parallel math.
             "OPENBLAS_NUM_THREADS": "1",
             "OMP_NUM_THREADS": "1",
             "MALLOC_ARENA_MAX": "2",
         }
         with (workdir / "stderr.log").open("w", encoding="utf-8") as stderr:
-            # ``preexec_fn`` is unsafe in a threaded parent only when it takes a
-            # lock; ``_limit_resources`` makes only system calls.
             child = subprocess.Popen(
-                [self.python, _RUNNER_FILE, _INPUT_FILE],
+                [self.python, "-c", _LIMIT_THEN_RUN, json.dumps(_child_limits()), _RUNNER_FILE, _INPUT_FILE],
                 cwd=workdir,
                 env=env,
                 stdin=subprocess.PIPE,
@@ -283,7 +289,6 @@ class ShinkaEvolveEngine:
                 # ``evaluate.py`` jobs, which would otherwise poll for days and
                 # write into the folder a resume starts again.
                 start_new_session=True,
-                preexec_fn=_limit_resources,  # noqa: PLW1509
             )
             assert child.stdin is not None
             assert child.stdout is not None
@@ -314,7 +319,12 @@ class ShinkaEvolveEngine:
                     # An overlong line ends the drain; the stop keeps the versions before it.
                     with contextlib.suppress(_OverlongLineError):
                         while (line := _read_line(child.stdout)) is not None:
-                            requests.line(line, None)
+                            # The drain reads only untrusted progress and logs: no
+                            # error of one line may replace the stop.
+                            try:
+                                requests.line(line, None)
+                            except Exception:
+                                logger.warning("ShinkaEvolve wrote a line the drain could not read.", exc_info=True)
                     raise
             finally:
                 killer.cancel()
@@ -440,16 +450,16 @@ def _stderr_tail(workdir: Path) -> str:
         return log.read().decode("utf-8", errors="replace")[-2000:]
 
 
-def _limit_resources() -> None:
-    """Bound the child's memory, CPU time and file sizes; it runs in the forked child before ``exec``.
+def _child_limits() -> dict[str, int]:
+    """Return the limits of the child's memory, CPU time and file sizes, which ``_LIMIT_THEN_RUN`` sets.
 
-    It makes only system calls, so it takes no lock that another worker thread
-    could hold at the fork.
+    Returns:
+        Each limit's ``resource`` name and its value, used as both the soft and the hard limit.
     """
+    limits = {"RLIMIT_CPU": _CHILD_CPU_SECONDS, "RLIMIT_FSIZE": _CHILD_FILE_BYTES}
     if _MEMORY_LIMITED:
-        resource.setrlimit(resource.RLIMIT_AS, (_CHILD_MEMORY_BYTES, _CHILD_MEMORY_BYTES))
-    resource.setrlimit(resource.RLIMIT_CPU, (_CHILD_CPU_SECONDS, _CHILD_CPU_SECONDS))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (_CHILD_FILE_BYTES, _CHILD_FILE_BYTES))
+        limits = {"RLIMIT_AS": _CHILD_MEMORY_BYTES, **limits}
+    return limits
 
 
 class _GroupKiller:
@@ -509,6 +519,9 @@ class _Requests:
         self.scrub = sandbox_log.Scrubber(())
         self.cost_cents = Decimal(0)
         self.best: dict[str, Any] | None = None
+        # The cases ``_evaluate`` scored for each version: the server's mean
+        # covers only these, so a version is a result only once it covers all.
+        self.covered: dict[str, set[int]] = {}
         # Every evaluation the child asked for, so a stop reports the run's
         # total, not the total when the best version was found.
         self.evals = 0
@@ -538,9 +551,11 @@ class _Requests:
 
         Returns:
             The finite mean score, or ``None`` for a malformed version, one the
-            server never scored, or one with a metric error.
+            server never scored on every case, or one with a metric error.
         """
         if not _candidate_shape_ok(candidate, self.task.str_mode):
+            return None
+        if self.task.cases and len(self.covered.get(candidate_key(candidate), ())) < len(self.task.cases):
             return None
         score = self.server.mean_score(candidate)
         return score if score is not None and math.isfinite(score) else None
@@ -558,6 +573,8 @@ class _Requests:
 
         Raises:
             ServiceError: When a request, its candidate or its case is malformed.
+            BudgetReached: When the budget stops the run during an evaluation.
+            BudgetExhaustedError: When no scorer call remains for an evaluation.
         """
         for prefix, handle in (
             (_RPC_PREFIX, self._request),
@@ -572,17 +589,18 @@ class _Requests:
                         return False
                     try:
                         request = json.loads(body)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         request = None
                     if not isinstance(request, dict):
                         raise ServiceError("ShinkaEvolve sent a malformed request.")
                     reply = self._request(request)
                 else:
                     # A broken log or progress line must not stop the run the
-                    # way a broken request does, so it stays as plain output.
+                    # way a broken request does, so it stays as plain output. Deep
+                    # nesting makes the parser raise ``RecursionError``.
                     try:
                         data = json.loads(body)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         data = None
                     if not isinstance(data, dict):
                         sandbox_log.stream_line(body, owner=None, scrub=self.scrub, label="stdout")
@@ -660,15 +678,22 @@ class _Requests:
             request: The candidate, the case the child names by position, and the version number.
 
         Returns:
-            The score and the side information a proposer may see.
+            The score and the side information a proposer may see, or an error
+            that stops the child when it names no case of a task with cases.
 
         Raises:
             ServiceError: When the candidate or the case is malformed.
+            BudgetReached: When the budget stops the run before or after the scorer call.
+            BudgetExhaustedError: When no scorer call remains.
         """
         candidate = request.get("candidate")
         if not _candidate_shape_ok(candidate, self.task.str_mode):
             raise ServiceError("ShinkaEvolve sent an invalid candidate shape.")
         example = request.get("example")
+        if example is None and self.task.cases:
+            # The server would score the version with no case. The child stops,
+            # and the run keeps its best version scored on every case.
+            return {"error": "The evaluation names no case."}
         case = None
         if example is not None:
             index = example.get("id") if isinstance(example, dict) else None
@@ -684,6 +709,8 @@ class _Requests:
         ):
             score, info = self.server.evaluate(candidate, case)
         self.evals += 1
+        if example is not None:
+            self.covered.setdefault(candidate_key(candidate), set()).add(example["id"])
         if self.ctx.check_budget is not None:
             self.ctx.check_budget()
         if score is not None and isinstance(info, dict) and type(candidate_id) is int:
