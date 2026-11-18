@@ -336,6 +336,49 @@ def test_swarm_driver_stops_when_the_shard_stops(tmp_path: Path) -> None:
         engine.dispose()
 
 
+def test_swarm_shard_stops_its_drivers_when_one_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a shard process reports a driver failure soon, and does not wait for its other drivers.
+
+    Args:
+        monkeypatch: Replaces ``_drive`` with a driver that waits for the stop and a driver that fails.
+        tmp_path: The folder for the shard's database and objects.
+    """
+
+    def drive(agents: list[tuple[str, str]], *args: Any) -> list[Any]:
+        """Wait for the stop as a long driver does, or fail at once.
+
+        Args:
+            agents: The driver's agents; agent 0 waits and the other one fails.
+            *args: The other ``_drive`` arguments; the last one is the stop.
+
+        Returns:
+            No steps.
+
+        Raises:
+            RuntimeError: For the failed driver.
+        """
+        if agents[0][1] == "agent-0":
+            args[-1].wait(10)
+            return [[]]
+        raise RuntimeError("driver failed")
+
+    monkeypatch.setattr(swarm_10k, "_drive", drive)
+    results: queue.Queue[dict[str, Any]] = queue.Queue()
+    shard = {
+        "url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+        "folder": str(tmp_path),
+        "worker_id": "swarm-w",
+        "flush_max_bytes": swarm_10k.SQLITE_FLUSH_MAX_BYTES,
+    }
+    started = time.monotonic()
+    swarm_10k._shard_process(
+        _swarm_config(agents=2), shard, [("run", "agent-0"), ("run", "agent-1")], threading.Barrier(1), results
+    )
+    assert time.monotonic() - started < 5
+    report = results.get_nowait()
+    assert "driver failed" in report["error"]
+
+
 def test_swarm_driver_failure_stops_the_other_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a failed driver stops an earlier driver, which ``pool.map`` would otherwise wait for.
 

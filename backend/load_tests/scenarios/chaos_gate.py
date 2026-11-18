@@ -63,7 +63,8 @@ class ChaosGateConfig:
         rounds: The fake engine's model rounds for each run.
         workers: How many runs go at once; at most ``MAX_WORKERS`` start.
         kill_interval_seconds: The chaos job's mean wait between kills.
-        seed: The chaos job's random seed, so a failed gate can run again the same way.
+        seed: The chaos job's random seed. It fixes the order of the kill kinds and of the picks, but not when
+            the kills fire, which depends on the threads.
         model_wait_seconds: The assumed wait of one real model call, for the old-path price.
     """
 
