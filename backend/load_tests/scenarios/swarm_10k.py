@@ -80,10 +80,10 @@ all shards share the database. Its name must start with
 ``THROWAWAY_DB_PREFIX`` (``loadtest``), and its ``jobs`` table must hold no
 job that is not a swarm run (an id that does not start with ``swarm-``).
 Each invocation puts its own stamp in its run ids and worker ids, and deletes
-only the rows and packs of those ids, so it keeps the rows of any other swarm. A session advisory lock allows one swarm pass per
-database. The lock is per database, so it does not stop a pass on another
-database of the same server. The
-objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
+only the rows and packs of those ids, so it keeps the rows of any other swarm.
+A session advisory lock allows one swarm pass per database. The lock is per
+database, so it does not stop a pass on another database of the same server.
+The objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
 bucket on a local S3 server such as MinIO; then ``LOAD_TEST_SWARM_S3_ENDPOINT``
 must name that server on ``localhost``, ``127.0.0.1`` or ``::1``, and the
 swarm deletes its packs at the end. The flush window and the size cap come
