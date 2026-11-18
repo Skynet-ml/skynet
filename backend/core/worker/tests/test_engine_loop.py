@@ -2512,6 +2512,21 @@ def test_a_box_failure_record_past_the_last_seq_is_refused_by_the_agent(
     assert len(_steps(engine)) == 1
 
 
+def test_a_model_failure_with_an_unknown_bill_settles_nothing_on_the_lease(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A failed call whose bill the client cannot know costs 0: Skynet takes the loss (Gilad, 2026-11-17)."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.error = TimeoutError("the provider did not answer")
+
+    with pytest.raises(ModelCallFailedError, match="TimeoutError"):
+        loop.model("improve seed")
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "TimeoutError"
+    assert Decimal(failed["body"]["cost_cents"]) == 0
+    assert loop.remaining_cost_usd() == pytest.approx(10.0)
+
+
 def test_a_billed_model_failure_settles_its_known_cost_and_records_it_in_the_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
