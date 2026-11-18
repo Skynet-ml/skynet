@@ -117,12 +117,10 @@ BLACKBOX_REPO_ENGINES = frozenset(
         BLACKBOX_ENGINE_SHINKA_EVOLVE,
     }
 )
-# Engines that cannot use the contract file's [proposer] entry: ShinkaEvolve
-# never runs it, and AutoResearch and Meta-Harness call the proposer from their
-# lab folder, so its changed files are not their versions (SKY-753; Gilad, 2026-11-18).
-FILE_PROPOSER_REFUSED_ENGINES = frozenset(
-    {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
-)
+# Engines that cannot use the contract file's [proposer] entry: AutoResearch and
+# Meta-Harness call the proposer from their lab folder, so its changed files are
+# not their versions (SKY-753; Gilad, 2026-11-18). ShinkaEvolve runs it (SKY-815).
+FILE_PROPOSER_REFUSED_ENGINES = frozenset({BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS})
 # Single-mode engines that honor an explicit iteration cap.
 BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
     {BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}

@@ -20,6 +20,7 @@ import sys
 import textwrap
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -2162,3 +2163,186 @@ def test_an_evaluation_with_no_case_in_a_task_with_cases_is_refused_to_the_child
 
     assert json.loads(replies.getvalue()) == {"id": "0", "error": "The evaluation names no case."}
     assert (requests.server.used, requests.evals) == (0, 0)
+
+
+def _proposer_options(entry: str, setup: list[str] | None = None) -> SimpleNamespace:
+    """Build native options whose contract file names a ``[proposer] entry`` (SKY-815).
+
+    Args:
+        entry: The ``[proposer] entry`` command line.
+        setup: The ``[proposer] setup`` argv, or None.
+
+    Returns:
+        The options; the run has no model gateway, so the command gets no network grant.
+    """
+    repo = {
+        "chunks": [],
+        "editable_paths": [],
+        "readonly_paths": [],
+        "hidden_hashes": {},
+        "file_proposer": True,
+        "proposer_setup": setup or [],
+        "proposer_hosts": [],
+    }
+    return SimpleNamespace(
+        shinka={},
+        shinka_models=None,
+        budget_route=None,
+        repo=repo,
+        proposer=SimpleNamespace(run_command=entry),
+        gateway=None,
+        model="test-model",
+    )
+
+
+def _propose(requests: shinka_evolve._Requests, request_id: str, files: dict[str, str], task: str) -> dict:
+    """Send one ``propose`` request as the child does, and read the reply.
+
+    Args:
+        requests: The engine's request handler.
+        request_id: The request id.
+        files: The parent's files.
+        task: The mutation task.
+
+    Returns:
+        The reply.
+    """
+    replies = io.StringIO()
+    body = json.dumps({"id": request_id, "kind": "propose", "files": files, "task": task})
+    assert requests.line(f"APP_NATIVE_RPC n {body}", replies) is True
+    return json.loads(replies.getvalue())
+
+
+def test_each_proposal_runs_the_file_command_on_the_parents_tree_and_files_the_tree_it_leaves(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Run ``[proposer] entry`` once for each mutation, after ``[proposer] setup`` runs once (SKY-815).
+
+    The command sees the parent's files and the task in ``ASCENT_TASK``. The child version is the text files of
+    the tree the command leaves, without the setup's output and the task file.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    options = _proposer_options(
+        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$APP_MODEL" > model.txt'
+        " && printf 'child\\n' > main.py",
+        setup=["sh", "-c", "printf built > .cache.txt"],
+    )
+    proposer = shinka_evolve._Proposer(ctx, options)
+    requests = shinka_evolve._Requests(
+        Task("seed"), loop.server(lambda *args: (1.0, {}), max_evals=5), ctx, "n", proposer
+    )
+
+    first = _propose(requests, "1", {"main.py": "parent\n"}, "Improve this program:\nparent\n")
+    second = _propose(requests, "2", {"main.py": "child\n"}, "Improve this program:\nchild\n")
+
+    assert first == {
+        "id": "1",
+        "files": {
+            "main.py": "child\n",
+            "model.txt": "test-model",
+            "parent.txt": "parent\n",
+            "seen.md": "Improve this program:\nparent\n",
+        },
+    }
+    assert second["files"]["parent.txt"] == "child\n"
+    assert second["files"]["seen.md"] == "Improve this program:\nchild\n"
+    # One setup command and one command for each proposal.
+    assert [kind for _, kind, _ in _steps(engine)].count("command") == 3
+    assert not any(boxes.open.values())
+
+
+def test_a_failed_proposer_command_is_a_failed_mutation_and_a_failed_setup_stops_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Send a failed command's exit code and stderr back as the mutation's error, and stop on a failed setup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    server = loop.server(lambda *args: (1.0, {}), max_evals=5)
+    failing = shinka_evolve._Proposer(ctx, _proposer_options("echo no model >&2; exit 3"))
+    requests = shinka_evolve._Requests(Task("seed"), server, ctx, "n", failing)
+
+    reply = _propose(requests, "1", {"main.py": "parent\n"}, "task")
+
+    assert reply == {"id": "1", "error": "The [proposer] entry failed with exit code 3. no model"}
+    broken = shinka_evolve._Proposer(ctx, _proposer_options("true", setup=["sh", "-c", "exit 4"]))
+    with pytest.raises(ServiceError, match=r"\[proposer\] setup .* exit code 4"):
+        broken.propose({}, "task")
+    with pytest.raises(ServiceError, match="malformed proposal"):
+        requests.line('APP_NATIVE_RPC n {"id": "2", "kind": "propose", "files": {"a": 1}, "task": "t"}', io.StringIO())
+
+
+def test_a_run_with_a_file_proposer_tells_the_child_to_ask_the_worker_for_each_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mark the child's input for the command editor, and refuse a run with no engine loop or no boxes (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's start.
+    """
+    inputs: list[dict[str, object]] = []
+
+    def drive(self: object, requests: object, workdir: Path) -> None:
+        """Keep the child's input and stop.
+
+        Args:
+            self: The engine.
+            requests: The request handler.
+            workdir: The child's folder.
+
+        Raises:
+            ServiceError: Always.
+        """
+        inputs.append(json.loads((workdir / shinka_evolve._INPUT_FILE).read_text()))
+        raise ServiceError("stop")
+
+    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", drive)
+    options = _proposer_options("node agent.js")
+    no_boxes = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path / "a"),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=options,  # type: ignore[arg-type]
+        repo_seed=RepoSeed("tree"),
+    )
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
+    sandbox = replace(no_boxes, call_model=None)
+    with pytest.raises(ServiceError, match="only on the worker's engine loop"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), sandbox
+        )
+    with pytest.raises(ServiceError, match="engine loop's boxes"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), no_boxes
+        )
+    assert inputs == []
+
+    boxes = replace(
+        no_boxes,
+        run_dir=str(tmp_path / "b"),
+        run_command=lambda *args: None,  # type: ignore[arg-type,return-value]
+        put_files=lambda *args: None,  # type: ignore[arg-type,return-value]
+        read_file=lambda *args: None,
+        list_files=lambda *args: None,
+    )
+    with pytest.raises(ServiceError, match="stop"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), boxes
+        )
+    assert inputs[0]["shinka_command"] is True

@@ -28,7 +28,10 @@ unchanged. Skynet contributes only:
   kept inside it;
 * optionally, an agent editor: each new version is written by a Pi coding
   agent (file tools only) editing the parent's files in a scratch directory,
-  instead of upstream's single model call answering with a patch.
+  instead of upstream's single model call answering with a patch;
+* or, on the engine loop, a command editor: the worker runs the contract
+  file's ``[proposer] entry`` command on the parent's tree, and the tree it
+  leaves is the new version (SKY-815).
 """
 
 from __future__ import annotations
@@ -1603,6 +1606,25 @@ class AgentEditor:
                 return report
         finally:
             self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+
+    @staticmethod
+    def _save_version(
+        report: dict[str, Any], parent_code: str, code: str, patch: str, changed: int, patch_dir: Path
+    ) -> dict[str, Any]:
+        """Write a new version where upstream reads it, and add it to the session report.
+
+        Args:
+            report: The session report.
+            parent_code: The parent's program text or bundle.
+            code: The new version's program text or bundle.
+            patch: The unified diff from the parent.
+            changed: How many files the version changes.
+            patch_dir: Upstream's generation folder.
+
+        Returns:
+            The report with ``code``, ``patch``, ``patch_path`` and ``changed``.
+        """
         patch_dir.mkdir(parents=True, exist_ok=True)
         (patch_dir / f"original.{_LANGUAGE_EXT}").write_text(parent_code, encoding="utf-8")
         (patch_dir / f"main.{_LANGUAGE_EXT}").write_text(code, encoding="utf-8")
@@ -1705,6 +1727,74 @@ class AgentEditor:
         if self.bundle is not None:
             with self._git_lock, contextlib.suppress(RuntimeError):
                 _git(self.bundle.checkout, "worktree", "prune")
+
+
+class CommandEditor(AgentEditor):
+    """Write a new version by running the contract file's ``[proposer] entry`` command (SKY-815).
+
+    The worker runs the command once in a proposer box over the parent's tree, with this editor's task in the
+    ``ASCENT_TASK`` file, and sends back the files of the tree the command leaves. That tree is the new version:
+    it goes through the same path rules and bundle limits as an agent session's workspace.
+    """
+
+    def __init__(self, mailbox: EvaluatorMailbox, workdir: Path, *, ledger: UsageLedger, bundle: Any) -> None:
+        """Bind the editor to the worker.
+
+        Args:
+            mailbox: Sends each proposal to the worker.
+            workdir: Run folder the scratch directories go under.
+            ledger: Usage ledger; the command's own model use is not in it.
+            bundle: ``shinka_bundle.RepoBundle`` of the run; the command works only on a repository.
+        """
+        super().__init__({}, workdir, ledger=ledger, deadline=math.inf, bundle=bundle)
+        self.mailbox = mailbox
+
+    def edit(self, parent_code: str, prompt: str, model_name: str, patch_dir: Path) -> dict[str, Any]:
+        """Have the worker run the command on the parent's files, and read back the version it leaves.
+
+        Args:
+            parent_code: The parent's bundle.
+            prompt: The task, which the command reads from ``ASCENT_TASK``.
+            model_name: Upstream model name the bandit picked; the command picks its own model.
+            patch_dir: Upstream's generation folder; the new version is written there.
+
+        Returns:
+            The report of :meth:`AgentEditor.edit`, with no cost and no tool calls.
+
+        Raises:
+            EvaluationStopped: When the run stopped or the worker did not reply.
+        """
+        report: dict[str, Any] = {
+            "cost": 0.0,
+            "tool_calls": 0,
+            "tool_cap_reached": False,
+            "name": None,
+            "description": None,
+        }
+        reply = self.mailbox.ask("propose", {"files": shinka_bundle.decode_bundle(parent_code), "task": prompt})
+        files = reply.get("files")
+        if "error" in reply or not isinstance(files, dict):
+            report["error"] = str(reply.get("error") or "The worker sent no new version.")
+            return report
+        if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
+            report["error"] = "The worker sent a malformed version."
+            return report
+        workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        with self._git_lock:
+            _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
+        try:
+            for path, text in files.items():
+                target = checked_target(workspace, path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            code, patch, changed = self._collect(parent_code, workspace)
+        except ValueError as exc:
+            report["error"] = str(exc)
+            return report
+        finally:
+            self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
 
 
 def install_agent_editor(editor: AgentEditor, runner: Any) -> None:
@@ -2245,7 +2335,12 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if bundle is not None:
         install_repo_mode(bundle, runner)
     editor = None
-    if payload.get("shinka_editor"):
+    if payload.get("shinka_command"):
+        if bundle is None:
+            raise ValueError("The [proposer] entry command needs a repository target.")
+        editor = CommandEditor(mailbox, workdir, ledger=ledger, bundle=bundle)
+        install_agent_editor(editor, runner)
+    elif payload.get("shinka_editor"):
         editor = AgentEditor(
             payload["shinka_editor"],
             workdir,

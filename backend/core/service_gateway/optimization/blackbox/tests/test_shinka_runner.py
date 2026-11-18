@@ -2105,3 +2105,106 @@ def test_runner_git_refuses_a_bare_repository_layout(
         shinka_runner._git(repo, "rev-parse", "--git-dir")
     monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     assert shinka_runner._git(repo, "rev-parse", "--git-dir").strip() == "."
+
+
+class _ProposalMailbox:
+    """Answer each ``propose`` request as the worker does after it runs the ``[proposer] entry`` command."""
+
+    def __init__(self, reply: dict[str, Any]) -> None:
+        """Set the worker's reply.
+
+        Args:
+            reply: The reply to each request.
+        """
+        self.reply = reply
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def ask(self, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Record one request and answer it.
+
+        Args:
+            kind: The request kind.
+            fields: The request fields.
+
+        Returns:
+            The set reply.
+        """
+        self.requests.append((kind, fields))
+        return self.reply
+
+
+def _install_command_editor(tmp_path: Path, mailbox: _ProposalMailbox) -> Any:
+    """Make a stand-in upstream runner write each version with the command editor.
+
+    Args:
+        tmp_path: Run folder.
+        mailbox: The fake worker.
+
+    Returns:
+        The runner.
+    """
+    _, bundle = _repo(tmp_path)
+    editor = shinka_runner.CommandEditor(mailbox, tmp_path, ledger=shinka_runner.UsageLedger(None), bundle=bundle)
+    sampler = SimpleNamespace(task_sys_msg="TASK", use_text_feedback=True)
+    runner = SimpleNamespace(
+        llm=SimpleNamespace(get_kwargs=lambda model_sample_probs=None: {"model_name": _EDITOR_MODEL}),
+        llm_selection=_Selection(),
+        prompt_sampler=sampler,
+        results_dir=str(tmp_path / "results"),
+    )
+    shinka_runner.install_agent_editor(editor, runner)
+    return runner
+
+
+def test_the_command_editor_files_the_tree_the_command_leaves_as_the_child(tmp_path: Path) -> None:
+    """Send the parent's files and the mutation task to the worker, and file the files it sends back (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    mailbox = _ProposalMailbox({"files": {"src/util.py": "SCALE = 5\n", "src/new.py": "NEW = 1\n"}})
+    runner = _install_command_editor(tmp_path, mailbox)
+    parent = SimpleNamespace(code=shinka_bundle.encode_bundle({"src/util.py": "SCALE = 3\n"}))
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(parent, [], [], 2))
+
+    assert success is True
+    [(kind, fields)] = mailbox.requests
+    assert kind == "propose"
+    assert fields["files"] == {"src/util.py": "SCALE = 3\n"}
+    assert "SCALE = 3" in fields["task"]
+    assert "+SCALE = 5" in patch
+    written = (tmp_path / "results" / "gen_2" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == {"src/util.py": "SCALE = 5\n", "src/new.py": "NEW = 1\n"}
+    assert (meta["api_costs"], meta["tool_calls"], meta["num_applied"]) == (0.0, 0, 2)
+    assert not list((tmp_path / "command-edits").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"error": "The [proposer] entry command failed with exit code 3."}, "exit code 3"),
+        ({"files": {"src/util.py": 7}}, "malformed version"),
+        ({"files": {"../escape.py": "x"}}, ""),
+        ({"files": {}}, ""),
+    ],
+)
+def test_the_command_editor_reports_a_failed_attempt_for_a_failed_or_bad_version(
+    reply: dict[str, Any], error: str, tmp_path: Path
+) -> None:
+    """Hand upstream a failed attempt when the command failed, left no change or sent a path outside the checkout.
+
+    Args:
+        reply: The worker's reply.
+        error: Words the attempt's error holds.
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox(reply))
+    parent = SimpleNamespace(code=shinka_bundle.encode_bundle({}))
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(parent, [], [], 1))
+
+    assert (patch, success) == (None, False)
+    assert error in str(meta["last_error_msg"])
+    assert meta["last_error_msg"]
+    assert not (tmp_path / "results" / "gen_1").exists()
