@@ -41,6 +41,9 @@ catches it and calls again gets it again, before any work.
 
 A step's own failure is no stop: a failed model call, or a box step that
 raises one of the box errors, commits a record that a replay raises again.
+Model output is untrusted, so a reply that nests deeper than
+``_MAX_REPLY_DEPTH`` or is larger than ``_MAX_REPLY_BYTES`` is a failed model
+call too, and its step settles the reply's cost (SKY-817).
 Every other error of a step is a stop. It can come after the step committed,
 for example from a settle or the durable wait, so the live engine must not
 act on it: a resume would replay the committed result instead. A stop gives
@@ -138,6 +141,7 @@ from ..service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     EvalServer,
     ModelReply,
+    ModelReplyTooDeepError,
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
@@ -163,6 +167,12 @@ _LANE_AGENT_PREFIX = f"{ROOT_AGENT_ID}/"
 _MAX_LINK_HOPS = 40
 # Links can reach a path count that grows fast with their nesting, so a tree that reaches more stops the loop.
 _MAX_LINKED_PATHS = 100_000
+# The step commit's JSON encoder recurses for each level, and a resume reads the reply again. So a reply that nests
+# near Python's default recursion limit of 1000 would stop the run on every resume (SKY-817). 100 levels keeps a wide
+# margin for the stack under the encoder, and no real tool call nests that deep.
+_MAX_REPLY_DEPTH = 100
+# Far above the largest reply that a model's output token limit allows, but bounds the memory of a bad reply.
+_MAX_REPLY_BYTES = 4 * 1024 * 1024
 # A box step that fails with one of these still commits a record, so a replay raises it at the same place.
 _BOX_ERRORS = {
     error.__name__: error for error in (BoxFailureError, GrantDeniedError, MetricFailedError, TreeRejectedError)
@@ -231,6 +241,39 @@ class ModelCallBilledError(RuntimeError):
         """
         super().__init__(f"The provider billed a failed model call {cost_cents} cents.")
         self.cost_cents = Decimal(str(cost_cents))
+
+
+class ModelReplyTooLargeError(ValueError):
+    """A model reply is larger than ``_MAX_REPLY_BYTES`` (SKY-817)."""
+
+
+def _check_reply(body: dict[str, Any]) -> None:
+    """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
+
+    The walk keeps its own stack, so no depth of reply can raise :class:`RecursionError` here.
+
+    Args:
+        body: The model step body that holds the reply; it is one level of depth.
+
+    Raises:
+        ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
+        ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
+    """
+    stack: list[tuple[Any, int]] = [(body, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, dict):
+            children: Any = value.values()
+        elif isinstance(value, list | tuple):
+            children = value
+        else:
+            continue
+        if depth > _MAX_REPLY_DEPTH:
+            raise ModelReplyTooDeepError(f"The model reply nests more than {_MAX_REPLY_DEPTH} levels.")
+        stack.extend((child, depth + 1) for child in children)
+    size = len(json.dumps(body, ensure_ascii=False).encode())
+    if size > _MAX_REPLY_BYTES:
+        raise ModelReplyTooLargeError(f"The model reply is {size} bytes, more than {_MAX_REPLY_BYTES}.")
 
 
 def _loop_agent(agent_id: str) -> bool:
@@ -514,8 +557,8 @@ class EngineLoop:
             LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
-            ModelCallFailedError: When the model call fails; its step settles the cost of a
-                :class:`ModelCallBilledError`, and a replay raises a committed failure again. Its ``cost_cents``
+            ModelCallFailedError: When the model call fails, or its reply nests too deep or is too large; its step
+                settles the cost of a :class:`ModelCallBilledError` or of the refused reply, and a replay raises a committed failure again. Its ``cost_cents``
                 is the committed cost, live and on a replay.
         """
         with self._stops():
@@ -558,6 +601,12 @@ class EngineLoop:
                     body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
                     if reply.tool_calls:
                         body["tool_calls"] = reply.tool_calls
+                    try:
+                        _check_reply(body)
+                    except (ModelReplyTooDeepError, ModelReplyTooLargeError) as error:
+                        failures.append(error)
+                        # The provider billed the reply, so its failed step settles the reply's cost.
+                        return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, reply.cost_cents)
                     return StepResult(body, reply.cost_cents)
 
                 try:

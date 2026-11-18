@@ -1455,6 +1455,111 @@ def test_converted_openai_tool_calls_commit_and_a_resume_replays_them_unchanged(
     assert resumed_model.prompts == []
 
 
+def _nested(levels: int) -> dict[str, Any]:
+    """Build tool call arguments nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested objects, the outer one included.
+
+    Returns:
+        ``{"a": {"a": ... {}}}``, ``levels`` objects deep.
+    """
+    value: dict[str, Any] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A reply too deep for the commit's JSON encoder gives the engine a failed call, not a stop, and keeps its cost.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # 2000 levels is past Python's default recursion limit, so the commit's JSON encoder raised RecursionError.
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": _nested(2000)}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "ModelReplyTooDeepError"
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model"]
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as replayed:
+        resumed.call_model("improve seed", _TOOLS)
+    assert replayed.value.cost_cents == Decimal(1)
+    assert resumed.call_model("improve other", _TOOLS).text == "otherx"
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_at_the_depth_bound_commits_and_one_level_deeper_fails(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A reply that nests exactly ``_MAX_REPLY_DEPTH`` levels commits and replays; one more level fails.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # The step body, its tool call list and the call hold the arguments: three levels above them.
+    arguments = _nested(engine_loop._MAX_REPLY_DEPTH - 3)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
+    reply = first.call_model("improve seed", _TOOLS)
+    assert reply.tool_calls == model.reply_calls
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {"a": arguments}}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError"):
+        first.call_model("improve other", _TOOLS)
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_larger_than_the_bound_is_a_failed_model_call_with_its_cost(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply past ``_MAX_REPLY_BYTES`` gives a failed call with its cost, and the run goes on.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to make the bound small.
+    """
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", 1000)
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {"text": "y" * 1000}}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooLargeError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+
 def test_a_tool_only_reply_with_no_text_gives_an_empty_text_live_and_on_a_resume(
     owner: tuple[User, int],
     engine: Engine,
