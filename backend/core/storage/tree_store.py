@@ -71,15 +71,17 @@ def encode_tree(entries: Iterable[TreeEntry]) -> bytes:
         The tree header and the sorted JSON entry list.
 
     Raises:
-        ValueError: When a name is empty, repeated, ``.``, ``..`` or holds
-            ``/`` or a NUL byte, or a mode or object id is not valid.
+        ValueError: When a name is empty, repeated, ``.``, ``..``, ``.git`` in
+            any letter case or holds ``/`` or a NUL byte, or a mode or object
+            id is not valid.
     """
     rows = sorted((entry.name, entry.mode, entry.object_id) for entry in entries)
     names = [name for name, _, _ in rows]
     if len(set(names)) != len(names):
         raise ValueError("a tree holds the same name twice")
     for name, mode, object_id in rows:
-        if name in {"", ".", ".."} or "/" in name or "\0" in name:
+        # Case-insensitive file systems (macOS, Windows) treat ``.GIT`` as ``.git`` (SKY-810).
+        if name in {"", ".", ".."} or "/" in name or "\0" in name or name.lower() == ".git":
             raise ValueError(f"bad tree entry name: {name!r}")
         if mode not in TREE_MODES:
             raise ValueError(f"bad tree entry mode: {mode!r}")
