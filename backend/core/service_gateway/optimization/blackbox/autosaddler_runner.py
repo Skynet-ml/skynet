@@ -96,6 +96,9 @@ _HARNESS_CAPABILITY_TOOLS = dict.fromkeys(
     ("read_workspace", "edit_workspace", "run_commands", "load_skills", "network"), ()
 )
 _HARNESS_SKILL_DIRECTORY = ".agents/skills"
+# This file ships into the box alone, so it repeats ``repo_tree.SAFE_GIT``:
+# git refuses a folder in the tree shaped as a bare repository (SKY-812).
+_SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 _GIT_IDENTITY = ("-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false")
 # Repository runs read their prompts and skills from this plugin subfolder.
 _REPO_ASSETS = "repo/"
@@ -288,7 +291,7 @@ def _git_output(cwd: Path, *arguments: str, env: Mapping[str, str] | None = None
         UnicodeDecodeError: When the output is not UTF-8.
     """
     result = subprocess.run(
-        ["git", "--literal-pathspecs", *_GIT_IDENTITY, *arguments],
+        ["git", "--literal-pathspecs", *_SAFE_GIT, *_GIT_IDENTITY, *arguments],
         cwd=cwd,
         env=None if env is None else dict(env),
         capture_output=True,

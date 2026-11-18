@@ -30,7 +30,7 @@ from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.tests.fake_provider import InMemorySandbox
 
 from .. import sandbox as sandbox_mod
-from .. import sandbox_log, sandbox_runtime
+from .. import sandbox_log
 from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
@@ -429,7 +429,7 @@ def test_async_session_run_logs_through_the_job_logger(monkeypatch: pytest.Monke
         assert session.run("true").ok
     finally:
         session.close()
-    assert seen == [("true", "job-7", ["fake-secret-value", *sandbox_runtime.BOX_GIT_ENV.values()])]
+    assert seen == [("true", "job-7", ["fake-secret-value"])]
 
 
 @pytest.mark.parametrize(

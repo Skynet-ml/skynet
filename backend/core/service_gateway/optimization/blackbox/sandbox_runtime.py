@@ -122,17 +122,6 @@ def sandbox_runtime_context(runtime: SandboxRuntime) -> Iterator[SandboxRuntime]
 # later box command: the reset, the metric install and the metric step (E38).
 _SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 
-# A stored tree may hold a folder with ``HEAD``, ``objects/``, ``refs/`` and
-# ``config`` but no ``.git``. Git takes it as a bare repository and reads its
-# config (``core.fsmonitor``, aliases, textconv drivers) when a box command
-# runs git there, so every box refuses implicit bare repositories (SKY-812).
-# Git reads ``safe.bareRepository`` only from protected config; the command
-# scope that this variable sets is protected, and box git calls that clear the
-# system and global config files still inherit it. One variable, and not
-# ``GIT_CONFIG_COUNT``: the log and egress scrubbers mask every box env value
-# of 8 or more characters, and ``explicit`` alone would mask an ordinary word.
-BOX_GIT_ENV = {"GIT_CONFIG_PARAMETERS": "'safe.bareRepository'='explicit'"}
-
 
 def _contained_environment(environment: Mapping[str, str], relay: str) -> dict[str, str]:
     """Route every supported model protocol to the outer sandbox mailbox.
@@ -204,7 +193,6 @@ class LocalSubprocessSession:
             "PYTHONDONTWRITEBYTECODE": "1",
             **{name: os.environ[name] for name in _LOCAL_ENV_PASSTHROUGH if name in os.environ},
             **spec.env,
-            **BOX_GIT_ENV,
         }
 
     @property
@@ -689,13 +677,13 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         spec: The blackbox spec.
 
     Returns:
-        The same sandbox, with ``vcpus`` moved into the resource request, the
-        Skynet sandbox tag added and ``BOX_GIT_ENV`` in its environment.
+        The same sandbox, with ``vcpus`` moved into the resource request and
+        the Skynet sandbox tag added.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,
         resources=ResourceRequest(cpus=spec.vcpus),
-        env={**spec.env, **BOX_GIT_ENV},
+        env=spec.env,
         name=spec.name,
         tags={**SANDBOX_TAG, **spec.tags},
         image=spec.image,

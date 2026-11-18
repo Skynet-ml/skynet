@@ -4044,3 +4044,18 @@ def test_suite_scratch_git_reads_no_config_from_the_scratch_root(tmp_path: Path)
     assert repo_staging._git(root, "write-tree").strip()
 
     assert not marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path) -> None:
+    """The suite scratch git does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        tmp_path: Pytest fixture.
+    """
+    bare = tmp_path / "bare"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True, capture_output=True)
+    assert subprocess.run(["git", "rev-parse", "--git-dir"], cwd=bare, check=True, capture_output=True).stdout
+    with pytest.raises(subprocess.CalledProcessError) as refused:
+        repo_staging._git(bare, "rev-parse", "--git-dir")
+    assert "safe.bareRepository" in refused.value.stderr

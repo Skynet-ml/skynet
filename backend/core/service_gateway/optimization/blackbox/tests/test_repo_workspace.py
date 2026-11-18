@@ -36,7 +36,7 @@ from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
 
-from .. import repo_workspace
+from .. import repo_tree, repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_tree import unpack_tree, version_patch
@@ -1909,3 +1909,38 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
     finally:
         session.close()
     assert _containers(tag) == []
+
+
+def test_box_git_apply_runs_no_filter_from_a_bare_repository_layout(planted_bare_repo: tuple[Path, Path]) -> None:
+    """The box ``GIT`` prefix gives ``git apply`` no config from a bare-repository layout (SKY-812).
+
+    The candidate and stage boxes apply a version with this prefix. The same
+    command without the flag runs the planted filter, so the plant is live.
+
+    Args:
+        planted_bare_repo: Fixture.
+    """
+    repo, marker = planted_bare_repo
+    (repo.parent / "version.patch").write_text(
+        "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+hi\n"
+    )
+
+    def apply(git: str) -> None:
+        """Apply the version in the bare layout with one git prefix.
+
+        Args:
+            git: The git command prefix.
+        """
+        (repo / "y").unlink(missing_ok=True)
+        subprocess.run(
+            ["bash", "-c", f"{git} apply --binary --whitespace=nowarn ../version.patch"], cwd=repo, check=True
+        )
+
+    apply(repo_workspace.GIT)
+    assert (repo / "y").read_text() == "hi\n"
+    assert not marker.exists()
+
+    unsafe = repo_workspace.GIT.replace(f" {shlex.join(repo_tree.SAFE_GIT)}", "")
+    assert unsafe != repo_workspace.GIT
+    apply(unsafe)
+    assert marker.exists()

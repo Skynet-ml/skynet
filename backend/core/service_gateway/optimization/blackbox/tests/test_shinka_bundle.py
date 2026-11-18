@@ -446,3 +446,33 @@ def test_hidden_paths_stay_out_of_the_file_list_and_other_files_still_open(tmp_p
     _, _, message = bundle.apply({}, "<OPEN>src/util.py</OPEN>")
     assert "SCALE = 2" in str(message)
     assert refusals == []
+
+
+def test_bundle_git_reads_nothing_from_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each direct git call of the bundle refuses a bare-repository layout (SKY-812).
+
+    The bundle is built without ``SAFE_GIT``, so the same calls read the
+    commit when the flag is gone: the layout is a working repository.
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, marker = planted_bare_repo
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    bundle = RepoBundle(repo, ["."], [])
+    assert bundle.paths() == ["x"]
+    monkeypatch.undo()
+
+    assert bundle.start_text("x") is None
+    assert not bundle.exists_at_start("x")
+    assert bundle._grep_text_files() == []
+
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    bundle._texts.clear()
+    assert bundle.start_text("x") == "hi\n"
+    assert bundle.exists_at_start("x")
+    assert bundle._grep_text_files() == [f"{bundle.start}:x"]
+    assert not marker.exists()

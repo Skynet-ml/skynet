@@ -86,6 +86,7 @@ from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_comma
 from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
+    SAFE_GIT,
     drop_paths,
     inside,
     linked_hidden_paths,
@@ -102,7 +103,6 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     run_log_emitter,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
-from ..service_gateway.optimization.blackbox.sandbox_runtime import BOX_GIT_ENV
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
@@ -1775,7 +1775,6 @@ _SCRATCH_GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_ATTR_NOSYSTEM": "1",
-    **BOX_GIT_ENV,
 }
 
 
@@ -1790,7 +1789,7 @@ def _git(cwd: Path, *arguments: str) -> str:
         Standard output.
     """
     return subprocess.run(
-        ["git", "-c", "core.autocrlf=false", *arguments],
+        ["git", "-c", "core.autocrlf=false", *SAFE_GIT, *arguments],
         cwd=cwd,
         check=True,
         capture_output=True,
