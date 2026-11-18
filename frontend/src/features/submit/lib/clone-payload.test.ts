@@ -15,6 +15,9 @@ registerHooks({
   },
 });
 const { cloneToSlices } = await import("./clone-payload.ts");
+const { hostCliPatch, withSupportedHostCli } = await import(
+  "../../local-runtime/lib/subscription-model.ts"
+);
 
 test("a metric model equal to reflection is not pinned when cloning", () => {
   const slices = cloneToSlices({
@@ -216,6 +219,26 @@ test("a clone of a run without a stored harness picks none, so the file's propos
   assert.ok(slices.optimizer.proposer);
   assert.equal("harness" in slices.optimizer.proposer, false);
   assert.equal(slices.optimizer.proposer.max_tool_calls, 100);
+});
+
+test("a clone drops a host CLI the server filled in, with its mark, and keeps a picked one", () => {
+  const filled = { ...LEGACY_REPO_RUN.proposer, host_cli: "claude", host_cli_auto: true };
+  const slices = cloneToSlices({ ...LEGACY_REPO_RUN, proposer: filled });
+  assert.deepEqual(slices.optimizer.proposer, LEGACY_REPO_RUN.proposer);
+  const picked = { ...LEGACY_REPO_RUN.proposer, host_cli: "claude" };
+  assert.deepEqual(cloneToSlices({ ...LEGACY_REPO_RUN, proposer: picked }).optimizer.proposer, picked);
+});
+
+test("a CLI picked on a clone goes out as a pick, without the server's filled-in mark", () => {
+  const filled = { ...LEGACY_REPO_RUN.proposer, host_cli: "codex", host_cli_auto: true };
+  const proposer = cloneToSlices({ ...LEGACY_REPO_RUN, proposer: filled }).optimizer.proposer;
+  assert.ok(proposer);
+  // The same merge as the proposer host CLI select in ModelsSection.
+  const sent = JSON.parse(
+    JSON.stringify(withSupportedHostCli({ ...proposer, ...hostCliPatch("claude", undefined) })),
+  );
+  assert.equal(sent.host_cli, "claude");
+  assert.equal("host_cli_auto" in sent, false);
 });
 
 test("a repository run clone keeps the setup draft's files", () => {
