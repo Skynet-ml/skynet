@@ -228,6 +228,12 @@ class ModelReplyTooDeepError(ValueError):
     """A model reply nests deeper than the code that reads or stores it can follow (SKY-817)."""
 
 
+# A tool call keeps this text in place of arguments that nest too deep to read, write or commit. The text is not JSON
+# and its brackets nest past the engine loop's 100-level reply bound, so every engine's argument depth bound refuses
+# it: the engine gives that call an error result and the run goes on (SKY-817).
+TOO_DEEP_ARGUMENTS = "[" * 101
+
+
 class ToolDefinition(TypedDict):
     """One tool that the model may call, in the engine loop's flat form.
 
@@ -281,18 +287,14 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
     already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
     list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+    Text that nests too deep to read stays raw text, and a value too deep to write becomes
+    :data:`TOO_DEEP_ARGUMENTS`, so the engine refuses only that call.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
 
     Returns:
         The flat tool calls in their order; empty when the message asks for none.
-
-    Raises:
-        ModelReplyTooDeepError: When the arguments nest too deep for JSON to read or write. The model client
-            raises it. The engine loop records it as a failed model call with no cost. A client that got a billed
-            reply must wrap this error in ``core.worker.engine_loop.ModelCallBilledError`` with the cost to keep
-            the cost.
     """
     calls: list[ToolCall] = []
     for call in message.get("tool_calls") or []:
@@ -300,22 +302,20 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         raw = function.get("arguments")
         if raw is None or raw == "":
             raw = "{}"
-        try:
-            if isinstance(raw, dict):
-                # Some clients parse the arguments already.
-                arguments: dict[str, Any] | str = raw
-            elif not isinstance(raw, str):
+        if isinstance(raw, dict):
+            # Some clients parse the arguments already.
+            arguments: dict[str, Any] | str = raw
+        elif not isinstance(raw, str):
+            try:
                 arguments = json.dumps(raw, default=str)
-            else:
-                try:
-                    parsed = json.loads(raw)
-                except (TypeError, ValueError):
-                    parsed = None
-                arguments = parsed if isinstance(parsed, dict) else raw
-        except RecursionError as error:
-            raise ModelReplyTooDeepError(
-                f"The arguments of tool call {call['id']!r} nest too deep for JSON to read or write."
-            ) from error
+            except RecursionError:
+                arguments = TOO_DEEP_ARGUMENTS
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError, RecursionError):
+                parsed = None
+            arguments = parsed if isinstance(parsed, dict) else raw
         calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
     return calls
 

@@ -44,7 +44,9 @@ raises one of the box errors, commits a record that a replay raises again.
 Model output is untrusted, so a reply that nests deeper than
 ``_MAX_REPLY_DEPTH``, is larger than ``_MAX_REPLY_BYTES`` or is not UTF-8
 JSON is a failed model call too, and its step settles the reply's cost
-(SKY-817).
+(SKY-817). Tool call arguments that nest too deep fail only their call: the
+step commits ``TOO_DEEP_ARGUMENTS`` in their place, which every engine refuses
+with an error result for that call.
 Every other error of a step is a stop. It can come after the step committed,
 for example from a settle or the durable wait, so the live engine must not
 act on it: a resume would replay the committed result instead. A stop gives
@@ -138,6 +140,7 @@ from ..sandbox.trees import (
 from ..service_gateway.optimization.blackbox.harness_bridge import hashed_kind
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes as path_hashes
 from ..service_gateway.optimization.blackbox.protocol import (
+    TOO_DEEP_ARGUMENTS,
     Candidate,
     EngineContext,
     EvalServer,
@@ -253,6 +256,48 @@ class ModelReplyNotJSONError(ValueError):
     """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
 
 
+def _nests_deeper(value: Any, levels: int) -> bool:
+    """Tell whether a value nests more than a number of levels of objects and arrays, with no recursion.
+
+    Args:
+        value: The value; a mapping, a list or a tuple is one level.
+        levels: The most levels that the value may nest.
+
+    Returns:
+        ``True`` when a mapping, a list or a tuple sits deeper than ``levels``.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list | tuple):
+            children = item
+        else:
+            continue
+        if depth > levels:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def _bounded_call(call: Any) -> Any:
+    """Put ``TOO_DEEP_ARGUMENTS`` in place of tool call arguments that push the step body past its depth bound.
+
+    A bad tool call fails only itself: the engine gives that call an error result, and the run goes on (SKY-817).
+
+    Args:
+        call: One tool call of a model reply.
+
+    Returns:
+        The call, or a copy of it with ``TOO_DEEP_ARGUMENTS`` as its arguments.
+    """
+    # The step body, its tool call list and the call sit above the arguments.
+    if isinstance(call, dict) and _nests_deeper(call.get("arguments"), _MAX_REPLY_DEPTH - 3):
+        return {**call, "arguments": TOO_DEEP_ARGUMENTS}
+    return call
+
+
 def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
     """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
 
@@ -267,18 +312,8 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
         ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
         ModelReplyNotJSONError: When it holds a value that is not JSON, or a lone surrogate that UTF-8 cannot hold.
     """
-    stack: list[tuple[Any, int]] = [(body, 1)]
-    while stack:
-        value, depth = stack.pop()
-        if isinstance(value, dict):
-            children: Any = value.values()
-        elif isinstance(value, list | tuple):
-            children = value
-        else:
-            continue
-        if depth > _MAX_REPLY_DEPTH:
-            raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
-        stack.extend((child, depth + 1) for child in children)
+    if _nests_deeper(body, _MAX_REPLY_DEPTH):
+        raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
     # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
     # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
     cost = _ledger_cents(cost_cents)
@@ -572,10 +607,10 @@ class EngineLoop:
             LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
-            ModelCallFailedError: When the model call fails, or its reply nests too deep, is too large or is not
-                UTF-8 JSON; its step settles the cost of a :class:`ModelCallBilledError` or of the refused reply, and
-                a replay raises a committed failure again. Its ``cost_cents`` is the committed cost, live and on a
-                replay.
+            ModelCallFailedError: When the model call fails, or its reply nests too deep outside tool call arguments,
+                is too large or is not UTF-8 JSON; its step settles the cost of a :class:`ModelCallBilledError` or
+                of the refused reply, and a replay raises a committed failure again. Its ``cost_cents`` is the
+                committed cost, live and on a replay.
         """
         with self._stops():
             # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
@@ -616,7 +651,7 @@ class EngineLoop:
                     replies.append(reply)
                     body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
                     if reply.tool_calls:
-                        body["tool_calls"] = reply.tool_calls
+                        body["tool_calls"] = [_bounded_call(call) for call in reply.tool_calls]
                     try:
                         _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:

@@ -10,10 +10,10 @@ import pytest
 
 from ..protocol import (
     METRIC_ERROR,
+    TOO_DEEP_ARGUMENTS,
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
-    ModelReplyTooDeepError,
     ScorerAbortError,
     Task,
     candidate_key,
@@ -472,19 +472,29 @@ def _deep_list(levels: int) -> list[Any]:
     return value
 
 
-@pytest.mark.parametrize("arguments", ["[" * 5000 + "]" * 5000, _deep_list(5000)], ids=["text", "value"])
-def test_tool_calls_from_openai_gives_a_clear_error_for_arguments_that_nest_too_deep(arguments: Any) -> None:
-    """Arguments past Python's recursion limit, as text or as a value, raise a named error, not RecursionError.
+@pytest.mark.parametrize(
+    ("arguments", "kept"),
+    [("[" * 5000 + "]" * 5000, "[" * 5000 + "]" * 5000), (_deep_list(5000), TOO_DEEP_ARGUMENTS)],
+    ids=["text", "value"],
+)
+def test_tool_calls_from_openai_keeps_arguments_that_nest_too_deep_as_text(arguments: Any, kept: str) -> None:
+    """Arguments past Python's recursion limit give text that the engine refuses, not a raise that loses the reply.
 
     Args:
         arguments: The deep arguments, as JSON text to read or as a value to write as JSON text.
+        kept: The text that the call keeps: the raw text, or ``TOO_DEEP_ARGUMENTS`` for a value.
     """
     message = {
-        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+        ]
     }
 
-    with pytest.raises(ModelReplyTooDeepError, match="'call_x' nest too deep"):
-        tool_calls_from_openai(message)
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": kept},
+        {"id": "call_y", "name": "bash", "arguments": {"command": "ls"}},
+    ]
 
 
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:

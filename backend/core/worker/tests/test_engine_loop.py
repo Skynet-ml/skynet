@@ -33,6 +33,7 @@ from core.sandbox.trees import GrantDeniedError, MetricFailedError, TreeRejected
 from core.service_gateway.optimization.blackbox import auto
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import (
+    TOO_DEEP_ARGUMENTS,
     EngineContext,
     EvalServer,
     ModelReply,
@@ -1488,7 +1489,7 @@ def _nested_tuples(levels: int) -> dict[str, Any]:
 
 # An in-process model client can give tool calls that hold tuples, which the JSON encoder also walks recursively.
 @pytest.mark.parametrize("arguments", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
-def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
+def test_tool_arguments_nested_past_the_bound_commit_as_refused_text_and_a_resume_replays_them(
     arguments: dict[str, Any],
     owner: tuple[User, int],
     engine: Engine,
@@ -1496,7 +1497,7 @@ def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A reply too deep for the commit's JSON encoder gives the engine a failed call, not a stop, and keeps its cost.
+    """Arguments too deep for the commit's JSON encoder fail only their call: the reply commits, with its cost.
 
     Args:
         arguments: Tool call arguments nested 2000 levels, in objects or in tuples.
@@ -1507,8 +1508,48 @@ def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_
         tmp_path: Pytest's temporary folder.
     """
     first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
-    # 2000 levels is past Python's default recursion limit, so the commit's JSON encoder raised RecursionError.
-    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
+    # 2000 levels is past Python's default recursion limit, so the commit's JSON encoder would raise RecursionError.
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": arguments},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.cost_cents == Decimal(1)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    committed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert "error" not in committed["body"]
+    assert Decimal(committed["body"]["cost_cents"]) == 1
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+@pytest.mark.parametrize("deep", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
+def test_a_reply_nested_past_the_bound_outside_tool_arguments_is_a_failed_model_call_with_its_cost(
+    deep: dict[str, Any],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A deep part of the reply that is not tool call arguments gives the engine a failed call, not a stop.
+
+    Args:
+        deep: A value nested 2000 levels, in objects or in tuples.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": deep, "arguments": {}}]  # type: ignore[typeddict-item]
     with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
         first.call_model("improve seed", _TOOLS)
     assert live.value.cost_cents == Decimal(1)
@@ -1528,10 +1569,10 @@ def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_
     assert resumed_model.prompts == []
 
 
-def test_a_reply_at_the_depth_bound_commits_and_one_level_deeper_fails(
+def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as_refused_text(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A reply that nests exactly ``_MAX_REPLY_DEPTH`` levels commits and replays; one more level fails.
+    """Arguments that fill the body to exactly ``_MAX_REPLY_DEPTH`` levels commit as they are; deeper ones are refused.
 
     Args:
         owner: Alice and her budget generation.
@@ -1547,12 +1588,13 @@ def test_a_reply_at_the_depth_bound_commits_and_one_level_deeper_fails(
     reply = first.call_model("improve seed", _TOOLS)
     assert reply.tool_calls == model.reply_calls
     model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {"a": arguments}}]
-    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError"):
-        first.call_model("improve other", _TOOLS)
+    deeper = first.call_model("improve other", _TOOLS)
+    assert deeper.tool_calls == [{"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS}]
 
     _new_generation(engine)
     resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed.call_model("improve other", _TOOLS) == deeper
     assert resumed_model.prompts == []
 
 
