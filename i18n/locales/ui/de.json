@@ -706,6 +706,7 @@
   "submit.blackbox.proposer.max_tool_calls": "Max. Tool-Aufrufe pro Kandidat",
   "submit.blackbox.proposer.ralph": "Forschungsrunden ausführen, bis das Budget aufgebraucht ist",
   "submit.blackbox.review.proposer": "Vorschlagsagent",
+  "submit.blackbox.review.proposer_file": "Befehl aus der Vertragsdatei: {command}",
   "tooltip.submit.blackbox.proposer": "Der Coding-Agent, der Kandidaten in der Sandbox schreibt und überarbeitet — jedes installierte Harness kann die Engine antreiben",
   "tooltip.submit.blackbox.proposer_candidates": "Wie viele Kandidatenvarianten Meta-Harness in jeder Iteration vom Agenten anfordert (1–8)",
   "tooltip.submit.blackbox.proposer_max_tool_calls": "Die höchste Zahl an Tool-Aufrufen (Dateien lesen, durchsuchen und bearbeiten, Befehle ausführen), die der Coding-Agent beim Schreiben eines Kandidaten machen darf (1–1000). Ein niedriges Limit hält jeden Kandidaten günstiger; ein hohes lässt Raum für größere Änderungen.",

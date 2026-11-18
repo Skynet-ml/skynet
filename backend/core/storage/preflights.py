@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from ..billing.budgets import BudgetConflictError, BudgetNotFoundError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..config import settings
+from ..models.blackbox import HOST_CLI_AUTO_KEY
 from .models import JSON_STORE, Base, BillingProviderKeyModel, ExecutionBudgetModel, ExecutionOperationModel
 
 _COSMETIC_FIELDS = {
@@ -127,6 +128,11 @@ def verification_fingerprint(
         and not key.startswith("_")
         and (scope != "evaluation" or key in _EVALUATION_FIELDS)
     }
+    # A submit sends back the CLI that the check filled in, without the mark
+    # that says it was filled in (SKY-753). Both name the same CLI.
+    proposer = inputs.get("proposer")
+    if isinstance(proposer, dict) and HOST_CLI_AUTO_KEY in proposer:
+        inputs["proposer"] = {key: value for key, value in proposer.items() if key != HOST_CLI_AUTO_KEY}
     connections = session.execute(
         select(BillingProviderKeyModel.id, BillingProviderKeyModel.updated_at, BillingProviderKeyModel.status)
         .where(BillingProviderKeyModel.username == username)

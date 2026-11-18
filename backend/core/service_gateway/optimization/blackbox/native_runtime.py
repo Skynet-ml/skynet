@@ -1194,6 +1194,11 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             },
             "task": native_task_payload(engine_id, task),
         }
+        if (options.repo or {}).get("file_proposer"):
+            # The guest runs the setup in the checkout before each session that
+            # lacks its output, also in a protected run, where the bootstrap installs nothing.
+            payload["proposer"]["file_command"] = True
+            payload["proposer"]["setup"] = list(options.repo.get("proposer_setup") or ())
         if shinka:
             payload["shinka"] = dict(options.shinka or {})
             payload["shinka_models"] = [
@@ -1228,9 +1233,6 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 # The Shinka bundle refuses the model's opens and edits of these (E62).
                 "hidden_hashes": dict(options.repo.get("hidden_hashes") or {}),
             }
-            # The guest runs it once in its checkout, also in a protected run, where the bootstrap installs nothing.
-            if options.repo.get("proposer_setup"):
-                payload["repo"]["proposer_setup"] = list(options.repo["proposer_setup"])
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)
         session.write_files(

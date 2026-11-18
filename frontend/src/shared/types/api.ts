@@ -397,8 +397,11 @@ interface BlackboxRepoSource {
   draft_files?: Record<string, string>;
   /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
   draft_base?: string;
-  /** What the server recorded from optimize.toml; `outcome.target` is the score that stops the search. */
-  environment?: { outcome?: { target?: number | null } } | null;
+  /**
+   * What the server recorded from optimize.toml; `outcome.target` is the score that stops the search,
+   * and `proposer_entry` is the `[proposer] entry` command when the run uses it.
+   */
+  environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;
 }
 
 export interface BlackboxTarget {

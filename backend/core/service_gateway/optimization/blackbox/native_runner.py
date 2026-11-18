@@ -683,14 +683,15 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Held-out examples must not enter the native optimizer.")
     task = Task(**payload["task"])
     proposer = payload.get("proposer") or {}
-    _install_proposer(proposer)
     config_values: dict[str, Any] = {"model": payload["model"], **_engine_knobs(payload["engine_id"], proposer)}
     repo = payload.get("repo")
     if repo is not None:
         checkout = repo_tree.unpack_tree((Path(chunk) for chunk in repo["chunks"]), Path("repo-checkout").resolve())
         repo_tree.exclude_paths(checkout, harness_bridge.workspace_files(proposer))
-        if repo.get("proposer_setup"):
-            harness_bridge.run_setup(list(repo["proposer_setup"]), checkout)
+        if proposer.get("file_command"):
+            # AutoResearch and Meta-Harness call the proposer from their lab folder;
+            # the contract file's command runs in the checkout in every engine (SKY-753).
+            proposer = {**proposer, "workdir": str(checkout)}
         config_values["repo"] = {
             "checkout": str(checkout),
             "base": repo_tree.BASE_REF,
@@ -699,6 +700,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             "constrained": bool(repo.get("constrained")),
             "tools": str(Path(__file__).resolve().parent),
         }
+    _install_proposer(proposer)
     if payload["engine_id"] == "meta_harness" and payload.get("max_iterations") is not None:
         config_values["max_iterations"] = payload["max_iterations"]
     output_dir = Path("upstream-artifacts").resolve()

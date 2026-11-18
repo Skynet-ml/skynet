@@ -706,6 +706,7 @@
   "submit.blackbox.proposer.max_tool_calls": "Appels d’outils max. par candidat",
   "submit.blackbox.proposer.ralph": "Enchaîner des tours de recherche jusqu'à épuisement du budget",
   "submit.blackbox.review.proposer": "Agent proposeur",
+  "submit.blackbox.review.proposer_file": "Commande du fichier de contrat : {command}",
   "tooltip.submit.blackbox.proposer": "L'agent de codage qui écrit et révise les candidats dans le bac à sable — tout harnais installé peut piloter le moteur",
   "tooltip.submit.blackbox.proposer_candidates": "Nombre de variantes candidates que Meta-Harness demande à l'agent à chaque itération (1–8)",
   "tooltip.submit.blackbox.proposer_max_tool_calls": "Le nombre maximal d’appels d’outils (lire, rechercher et modifier des fichiers, lancer des commandes) que l’agent de code peut faire pour écrire un candidat (1–1000). Une limite basse rend chaque candidat moins coûteux ; une limite haute laisse place à des changements plus importants.",

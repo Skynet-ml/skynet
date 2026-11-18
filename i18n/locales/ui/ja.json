@@ -706,6 +706,7 @@
   "submit.blackbox.proposer.max_tool_calls": "候補あたりの最大ツール呼び出し数",
   "submit.blackbox.proposer.ralph": "予算を使い切るまで研究ラウンドを実行",
   "submit.blackbox.review.proposer": "提案エージェント",
+  "submit.blackbox.review.proposer_file": "契約ファイルのコマンド: {command}",
   "tooltip.submit.blackbox.proposer": "サンドボックス内で候補を作成・改訂するコーディングエージェント。インストール済みのどのハーネスでもエンジンを動かせます",
   "tooltip.submit.blackbox.proposer_candidates": "Meta-Harness が各反復でエージェントに求める候補バリエーションの数（1〜8）",
   "tooltip.submit.blackbox.proposer_max_tool_calls": "コーディングエージェントが 1 つの候補を書く間に実行できるツール呼び出し（ファイルの読み取り・検索・編集、コマンドの実行）の上限です（1〜1000）。上限を低くすると候補ごとのコストを抑えられ、高くするとより大きな変更の余地が生まれます。",

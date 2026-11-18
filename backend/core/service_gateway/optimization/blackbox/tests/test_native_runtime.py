@@ -560,42 +560,173 @@ def test_the_proposer_gets_hidden_path_hashes_and_never_their_names(
     assert harness_bridge.guard_check(policy, "read", {"file_path": "src/app.py"}) is None
 
 
-def test_a_files_proposer_ships_its_setup_to_the_checkout_and_keeps_its_command_exact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A protected run sends the file's setup to the guest's checkout, and no placeholder fills the entry (SKY-753).
+# The fake contract-file proposer logs whether the setup's output is in its
+# working folder, then changes a file so the session leaves a version.
+_FILE_AGENT = """
+import os, pathlib, sys
+with open(sys.argv[1], "a") as log:
+    log.write(f"agent {os.getcwd()} {pathlib.Path('setup-out/ready').exists()}\\n")
+pathlib.Path("src.txt").write_text(f"{pathlib.Path('src.txt').read_text()}+")
+print("Added a plus.")
+"""
+_FILE_SETUP = """
+import os, pathlib, sys
+pathlib.Path("setup-out").mkdir()
+pathlib.Path("setup-out/ready").write_text("ok")
+with open(sys.argv[1], "a") as log:
+    log.write(f"setup {os.getcwd()}\\n")
+"""
 
-    The bootstrap skips install steps in a protected run, so the setup must
-    not depend on it.
+
+class _ConfiguredError(Exception):
+    """Stops ``native_runner.execute`` once the checkout and the proposer are ready."""
+
+
+def _guest_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: dict[str, Any]) -> Path:
+    """Run the guest's ``execute`` up to the engine, on a small real repository.
 
     Args:
-        tmp_path: Artifact destination.
-        monkeypatch: Pinned source fixture and gateway stop.
+        tmp_path: Scratch folder for the guest.
+        monkeypatch: Working folder, home folder, path and engine config stop.
+        document: The parent's ``native_input.json``.
+
+    Returns:
+        The guest's repository checkout, with ``claude`` installed for the proposer.
+    """
+    tree = io.BytesIO()
+    with tarfile.open(fileobj=tree, mode="w:gz") as packed:
+        for name, text in (("src.txt", "v"), ("agent.py", _FILE_AGENT)):
+            info = tarfile.TarInfo(name)
+            info.size = len(text.encode())
+            packed.addfile(info, io.BytesIO(text.encode()))
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    chunk = guest / "chunk-0"
+    chunk.write_text(base64.b64encode(tree.getvalue()).decode("ascii"))
+    monkeypatch.chdir(guest)
+    monkeypatch.setenv("HOME", str(guest / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setenv(harness_bridge.CONFIG_ENV, "")
+    configs: list[dict[str, Any]] = []
+
+    def stop(**options: Any) -> None:
+        """Keep the engine config and stop before the engine starts.
+
+        Args:
+            **options: The upstream config fields.
+
+        Raises:
+            _ConfiguredError: Always.
+        """
+        configs.append(options["engine_config"])
+        raise _ConfiguredError
+
+    monkeypatch.setattr(native_runner, "OptimizeAnythingConfig", stop)
+    with pytest.raises(_ConfiguredError):
+        native_runner.execute({**document, "repo": {**document["repo"], "chunks": [str(chunk)]}})
+    return Path(configs[0]["repo"]["checkout"])
+
+
+def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup's output is in the checkout at every GEPA and Best-of-N session, also after a reset (SKY-753).
+
+    The bootstrap skips install steps in a protected run, so the setup goes
+    with the proposer. ``git clean -fdx`` removes its output between
+    sessions, so the next session runs it again, and none of it joins a version.
+
+    Args:
+        tmp_path: Artifact destination and guest folder.
+        monkeypatch: Pinned source fixture, gateway stop and guest environment.
     """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
     session = FakeSession()
     session.candidate = ""
     ctx = _context(tmp_path, FakeRuntime(session))
-    repo: dict[str, Any] = {
-        "chunks": [],
-        "editable_paths": ["."],
-        "readonly_paths": [],
-        "file_proposer": True,
-        "proposer_setup": ["npm", "ci"],
-    }
+    log = tmp_path / "proposer.log"
     ctx.native_options = replace(
         ctx.native_options,
-        proposer=BlackboxProposer(harness="custom", run_command="node agent.js {model}"),
+        proposer=BlackboxProposer(harness="custom", run_command=shlex.join([sys.executable, "agent.py", str(log)])),
         budget_route={"url": "https://gateway.example/v1", "token": "scoped"},
-        repo=repo,
+        repo={
+            "chunks": [],
+            "editable_paths": ["."],
+            "readonly_paths": [],
+            "file_proposer": True,
+            "proposer_setup": [sys.executable, "-c", _FILE_SETUP, str(log)],
+        },
     )
     run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
-
     document = json.loads(session.files["native_input.json"])
-    assert document["repo"]["proposer_setup"] == ["npm", "ci"]
-    assert document["proposer"]["run_command"] == "node agent.js {model}"
-    assert "npm ci" not in session.calls[0][0]
+    assert document["proposer"]["setup"] == [sys.executable, "-c", _FILE_SETUP, str(log)]
+    assert document["proposer"]["file_command"] is True
+
+    checkout = _guest_checkout(tmp_path, monkeypatch, document)
+    proposer = native_engines.AgentProposer(
+        model="openai/task",
+        checkout=checkout,
+        editable_paths=["."],
+        readonly_paths=[],
+        log_dir=tmp_path / "logs",
+        max_token_cost=None,
+    )
+    first = proposer({"repo": ""}, {}, ["repo"])["repo"]
+    second = proposer({"repo": first}, {}, ["repo"])["repo"]
+
+    assert log.read_text().splitlines() == [
+        f"setup {checkout}",
+        f"agent {checkout} True",
+        f"setup {checkout}",
+        f"agent {checkout} True",
+    ]
+    assert "src.txt" in second
+    assert "setup-out" not in first + second
+    assert harness_bridge.SETUP_MARKER not in first + second
+
+
+def test_a_files_proposer_runs_in_the_checkout_when_the_engine_calls_it_from_a_lab_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AutoResearch and Meta-Harness call ``claude`` from their lab folder; the file's command still runs in the checkout.
+
+    Args:
+        tmp_path: Artifact destination and guest folder.
+        monkeypatch: Pinned source fixture, gateway stop and guest environment.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    log = tmp_path / "proposer.log"
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="custom", run_command=shlex.join([sys.executable, "agent.py", str(log)])),
+        budget_route={"url": "https://gateway.example/v1", "token": "scoped"},
+        repo={
+            "chunks": [],
+            "editable_paths": ["."],
+            "readonly_paths": [],
+            "file_proposer": True,
+            "proposer_setup": [sys.executable, "-c", _FILE_SETUP, str(log)],
+        },
+    )
+    run_native_engine("autoresearch", Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+    checkout = _guest_checkout(tmp_path, monkeypatch, json.loads(session.files["native_input.json"]))
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (lab / "repo").symlink_to(checkout)
+
+    outcome = native_engines.run_proposer(
+        "Improve it.", work_dir=lab, log_dir=tmp_path / "logs", name="iter1", model="openai/task", session_id="s1"
+    )
+
+    assert not outcome.is_error, outcome.stderr_tail
+    assert log.read_text().splitlines() == [f"setup {checkout}", f"agent {checkout} True"]
+    assert not (lab / "setup-out").exists()
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])

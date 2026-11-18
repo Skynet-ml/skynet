@@ -36,7 +36,14 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.i18n_keys import I18nKey
-from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxRunRequest, BlackboxTarget
+from core.models.blackbox import (
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CUSTOM,
+    HOST_CLI_AUTO_KEY,
+    BlackboxProposer,
+    BlackboxRunRequest,
+    BlackboxTarget,
+)
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import harness_bridge, runner
@@ -418,7 +425,9 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
     assert proposer.install_command is None
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
-        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'"
+        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
+        "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
+        " contract file.",
     ]
     # The launch as native_runtime builds it for a protected run.
     launch = build_launch(
@@ -494,6 +503,66 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
 
     assert staged_payload["proposer"] == proposer
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+
+
+_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+
+
+def test_a_single_shinka_evolve_run_with_a_files_proposer_fails_the_setup_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ShinkaEvolve never runs ``[proposer] entry``, so a single ShinkaEvolve run names the key (SKY-753)."""
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}}
+
+    with pytest.raises(ConstraintsError, match="ShinkaEvolve never runs the \\[proposer\\] entry command") as caught:
+        _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+
+
+def test_an_auto_run_with_a_files_proposer_notes_that_it_leaves_out_shinka_evolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Auto run uses the file's command, and its record says why it has no ShinkaEvolve lane (SKY-753)."""
+    payload = {**_payload("c" * 40), "strategy": {"mode": "auto"}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        "The run uses the proposer command in the contract file: node agent.js",
+        "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
+        " contract file.",
+    ]
+
+
+def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A filled-in host CLI is not the run's own proposer, and the staged proposer drops it (SKY-753)."""
+    proposer = BlackboxProposer()
+    proposer.host_cli = "codex"
+    proposer.model_fields_set.discard("host_cli")
+    stored = proposer.model_dump(mode="json")
+    assert stored[HOST_CLI_AUTO_KEY] is True
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": "gepa"}, "proposer": stored}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["harness"] == BLACKBOX_HARNESS_CUSTOM
+    assert staged_payload["proposer"]["host_cli"] is None
+    assert HOST_CLI_AUTO_KEY not in staged_payload["proposer"]
+
+
+def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host CLI in the request, with no marker, is the run's own proposer (SKY-753)."""
+    payload = {**_payload("c" * 40), "proposer": {"host_cli": "codex"}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+    assert staged_payload["proposer"] == {"host_cli": "codex"}
 
 
 def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3096,6 +3096,7 @@
   "submit.blackbox.basics.name_suggested_hint": "Blank keeps the name suggested from your objective.",
   "submit.blackbox.review.edit": "Edit",
   "submit.blackbox.review.proposer": "Proposer",
+  "submit.blackbox.review.proposer_file": "Contract file command: {command}",
   "submit.blackbox.review.models": "Models",
   "submit.blackbox.review.name_suggested": "Suggested from your objective",
   "submit.budget.label": "Spending limit",

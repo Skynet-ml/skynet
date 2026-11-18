@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from ...billing.service import FREE_GRANT_CENTS, free_grant_cents
 from ...config import settings
 from ...local.cli_probe import clear_probe_cache
-from ...models.blackbox import BlackboxProposer
+from ...models.blackbox import HOST_CLI_AUTO_KEY, BlackboxProposer
 from ...registry.core import ServiceRegistry
 from ...storage.models import (
     AgentEnginePreferenceModel,
@@ -27,6 +27,7 @@ from ...storage.models import (
     UserIdentityModel,
     UserModel,
 )
+from ...worker import repo_staging
 from .. import agent_engine
 from ..agent_engine import fill_proposer_host_cli
 from ..app import create_app
@@ -905,6 +906,28 @@ def test_blackbox_proposer_follows_the_agent_engine(monkeypatch: pytest.MonkeyPa
     fill_proposer_host_cli(None, "alice", request)
 
     assert request.proposer.host_cli == "claude"
+
+
+def test_a_filled_in_proposer_cli_is_not_the_runs_own_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stored request marks a filled-in CLI, so a repository's ``[proposer] entry`` still applies (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    request = SimpleNamespace(proposer=BlackboxProposer())
+
+    fill_proposer_host_cli(None, "alice", request)
+    stored = request.proposer.model_dump(mode="json")
+    again = BlackboxProposer.model_validate(stored)
+
+    assert stored["host_cli"] == "claude"
+    assert stored[HOST_CLI_AUTO_KEY] is True
+    assert again.host_cli == "claude"
+    assert again.model_dump(mode="json") == stored
+    assert not repo_staging._names_proposer({"proposer": stored})
+    assert repo_staging._names_proposer({"proposer": BlackboxProposer(host_cli="claude").model_dump(mode="json")})
 
 
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])

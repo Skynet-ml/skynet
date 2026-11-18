@@ -19,7 +19,7 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,7 @@ from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
-from ..models.blackbox import BLACKBOX_HARNESS_CUSTOM
+from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE, BLACKBOX_HARNESS_CUSTOM, HOST_CLI_AUTO_KEY
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
@@ -75,6 +75,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
+    RepoEnvironment,
     RoleEnvironment,
     ServiceSpec,
     TargetStage,
@@ -428,6 +429,8 @@ def stage_repository(
         # A custom command runs without the relay's MCP servers, so it would run without the file's tools.
         if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
             raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
+        if environment.proposer_entry is not None:
+            environment = _without_shinka(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -510,7 +513,10 @@ def stage_repository(
             "run_command": shlex.join(environment.proposer_entry),
             # The guest runs the file's setup in its checkout (``proposer_setup`` below), not in the bootstrap.
             "install_command": None,
+            # Only a filled-in host CLI reaches here, and it would replace the file's command.
+            "host_cli": None,
         }
+        result["proposer"].pop(HOST_CLI_AUTO_KEY, None)
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
@@ -576,12 +582,48 @@ def stage_repository(
     )
 
 
+def _without_shinka(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
+    """Refuse a ShinkaEvolve run with ``[proposer] entry``, and say Auto leaves its lane out.
+
+    ShinkaEvolve writes versions with its own editor and never runs the file's
+    command (SKY-753).
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        strategy: The stored run request's ``strategy``.
+
+    Returns:
+        The environment, with a note for an Auto run.
+
+    Raises:
+        ConstraintsError: When the run is a single ShinkaEvolve run.
+    """
+    if strategy.get("mode", "auto") == "single":
+        if strategy.get("engine") == BLACKBOX_ENGINE_SHINKA_EVOLVE:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: ShinkaEvolve never runs the [proposer] entry command. Remove [proposer]"
+                " entry, or choose another engine.",
+                section="proposer",
+                key="entry",
+            )
+        return environment
+    return replace(
+        environment,
+        notes=(
+            *environment.notes,
+            "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
+            " contract file.",
+        ),
+    )
+
+
 def _names_proposer(payload: Mapping[str, Any]) -> bool:
     """Tell whether a run request names its own proposer.
 
     The stored request keeps ``proposer.harness`` only when the client sent
     it (SKY-753), so a default does not replace ``[proposer] entry``. A host
-    CLI, a run command and an install command are the user's own choice too.
+    CLI, a run command and an install command are the user's own choice too,
+    but not a host CLI that local mode filled in.
 
     Args:
         payload: The stored run request.
@@ -593,7 +635,7 @@ def _names_proposer(payload: Mapping[str, Any]) -> bool:
     proposer = payload.get("proposer")
     return isinstance(proposer, dict) and (
         "harness" in proposer
-        or proposer.get("host_cli") is not None
+        or (proposer.get("host_cli") is not None and not proposer.get(HOST_CLI_AUTO_KEY))
         or bool(proposer.get("run_command") or proposer.get("install_command"))
     )
 

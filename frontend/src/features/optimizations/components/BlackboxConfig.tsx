@@ -136,9 +136,9 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
 
 /**
  * The harness a run's proposer uses. A stored run omits a harness it did not
- * choose (SKY-753), so this is Codex. Staging writes the contract file's
- * command as "custom". Before staging, a repository run may still get that
- * command, so it shows no harness yet.
+ * choose (SKY-753), so this is Codex, or "custom" when the stored environment
+ * record names the contract file's `[proposer] entry` command. Before staging,
+ * a repository run may still get that command, so it shows no harness yet.
  */
 export function runProposerHarness(
   proposer: Partial<BlackboxProposer> | null,
@@ -146,7 +146,21 @@ export function runProposerHarness(
 ): string | null {
   if (!proposer) return null;
   if (proposer.harness) return proposer.harness;
+  if (target.repo?.environment?.proposer_entry) return "custom";
   return target.repo && !target.repo.environment ? null : "codex";
+}
+
+/** The proposer row's text: the contract file's command when the run uses it, else the harness name. */
+export function runProposerLabel(
+  proposer: Partial<BlackboxProposer> | null,
+  target: Partial<BlackboxTarget>,
+): string | null {
+  const harness = runProposerHarness(proposer, target);
+  if (!proposer || !harness) return null;
+  const entry = target.repo?.environment?.proposer_entry;
+  return entry && !proposer.harness
+    ? formatMsg("submit.blackbox.review.proposer_file", { command: entry.join(" ") })
+    : harnessLabel(harness);
 }
 
 /**
@@ -185,7 +199,7 @@ export function BlackboxConfigCard({
   // A single ShinkaEvolve run has no coding-agent proposer; its proposer block
   // only carries the agent editor's tool-call cap.
   const shinkaRun = strategy.mode === "single" && strategy.engine === "shinka_evolve";
-  const proposerHarness = runProposerHarness(proposer, target);
+  const proposerLabel = runProposerLabel(proposer, target);
   const reflectionCard = toModelCard(payload.reflection_model_config);
   const taskCard = toModelCard(payload.task_model_config);
   const scorerModelCard = toModelCard(scorer.model);
@@ -352,14 +366,14 @@ export function BlackboxConfigCard({
     value: String(calls),
     icon: <Wrench />,
   });
-  if (proposer && proposerHarness && !shinkaRun) {
+  if (proposer && proposerLabel && !shinkaRun) {
     optimizationRows.push({
       label: (
         <HelpTip text={tip("submit.blackbox.proposer")}>
           {msg("submit.blackbox.review.proposer")}
         </HelpTip>
       ),
-      value: harnessLabel(proposerHarness),
+      value: proposerLabel,
       icon: <Robot />,
     });
     if (proposer.max_candidates_per_iter != null) {

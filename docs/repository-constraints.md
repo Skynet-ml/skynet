@@ -85,7 +85,7 @@ metric lives with the judge.
 ## Your own proposer: `[proposer] entry` and `setup`
 
 `entry` names the command that proposes each new version. `setup` names a
-command that runs once before it. Write each one as a list of strings, for
+command that prepares the repository for it. Write each one as a list of strings, for
 example `["node", "agent/my-agent.js"]`. A plain string, an empty list or an
 empty part fails the setup check, and the message names the key.
 
@@ -93,21 +93,32 @@ empty part fails the setup check, and the message names the key.
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
 - `setup` without `entry` fails the setup check.
-- `setup` runs once in the repository, before the first proposer session,
-  also in a protected run. If it fails, the run stops, and the message names
-  the command and its output.
+- `setup` runs in the repository checkout where the command runs, before a
+  proposer session, also in a protected run. It runs again each time that
+  checkout loses its output: GEPA and Best-of-N reset the checkout before and
+  after each version, and AutoSaddler gives each session a new worktree. So
+  write a `setup` that you can run again with the same result. The files it
+  adds never join a version. It has 30 minutes. If it fails or runs out of
+  time, the run stops, and the message names the command and its output.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
-  working directory is the repository. It gets the absolute task file path in
+  working directory is the repository checkout in every engine, also in
+  AutoResearch and Meta-Harness. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
   `APP_MODEL`, the model relay in `APP_GATEWAY_URL` and the relay key in
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. The files it changes are
   the new version.
 - The run record names the command in a note: "The run uses the proposer
-  command in the contract file: ...".
-- `optimize.toml` is always protected, but the entry script is not. Keep the
-  script outside `[paths] editable`, or list it in `[paths] protected`, so no
-  version can change its own proposer.
+  command in the contract file: ...". The run page shows the command as the
+  proposer.
+- ShinkaEvolve writes versions with its own editor and never runs the
+  command. A single ShinkaEvolve run with `entry` fails the setup check, and
+  the message names `[proposer] entry`. Auto leaves out its ShinkaEvolve lane,
+  and the run record says so in a note.
+- Every repository file that `entry` names, such as `agent/my-agent.js`, is
+  protected, like `optimize.toml`, so no version can change its own proposer.
+- `entry` and `setup` cannot contain `__APP_API_KEY__` or
+  `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
   check, and the run's tool-call limit does not apply to your command.
 
@@ -493,7 +504,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, under the `[proposer]` rules. A proposer that the run names replaces it. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` names are protected. A proposer that the run names replaces it. ShinkaEvolve never runs it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
@@ -509,8 +520,10 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
-- A `[proposer] entry` or `setup` that is not a list of non-empty strings.
-  A `setup` without `entry`. An `entry` together with `[proposer] mcp`.
+- A `[proposer] entry` or `setup` that is not a list of non-empty strings,
+  or that contains `__APP_API_KEY__` or `__SKYNET_API_KEY__`. A `setup`
+  without `entry`. An `entry` together with `[proposer] mcp`. An `entry` in a
+  single ShinkaEvolve run.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.

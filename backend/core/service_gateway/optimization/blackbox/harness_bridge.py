@@ -43,6 +43,15 @@ KEY_ENV = "APP_API_KEY"
 KEY_TOKEN = "__APP_API_KEY__"
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
+# The same allowance as repo_workspace's setup command; this file runs alone
+# in the sandbox, so it cannot import that constant.
+SETUP_TIMEOUT_SECONDS = 1_800.0
+# Written into a checkout once ``[proposer] setup`` succeeds there. A reset
+# (``git clean -fdx``) or a fresh worktree has no marker and none of the
+# setup's output, so the next session runs the setup again (SKY-753).
+SETUP_MARKER = ".ascent-proposer-setup"
+# An exclude line is a pattern, so these characters in a setup's file name are escaped.
+_GLOB_CHARS = re.compile(r"([*?[\\])")
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
@@ -363,33 +372,106 @@ def workspace_files(proposer: dict[str, Any]) -> list[str]:
     return paths
 
 
-def run_setup(command: list[str], checkout: Path) -> None:
-    """Run the contract file's ``[proposer] setup`` once, in the repository checkout.
+def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
+    """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
-        checkout: The unpacked repository the proposer works on.
+        checkout: The repository checkout or worktree of the next session.
+        timeout_seconds: Stop the setup, and every process it started, after this long.
 
     Raises:
-        RuntimeError: When the command cannot start or exits with an error,
-            so the run stops before its first session.
+        RuntimeError: When the command cannot start, runs out of time or
+            exits with an error, so no session starts without its setup.
     """
     label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
     try:
-        done = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=checkout,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            check=False,
+            start_new_session=True,
         )
     except OSError as error:
         raise RuntimeError(f"{label} could not start: {error}") from error
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # A package install leaves children behind; the group kill stops them with the setup.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.") from None
+    if process.returncode != 0:
+        detail = (stderr or stdout).strip()[-2000:]
+        raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
+
+
+def _checkout_git(arguments: list[str], checkout: Path) -> str:
+    """Run one git command in a checkout and return its output.
+
+    Args:
+        arguments: Arguments after ``git``.
+        checkout: The checkout or worktree.
+
+    Returns:
+        The command's standard output.
+
+    Raises:
+        RuntimeError: When git fails.
+    """
+    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, text=True, check=False)
     if done.returncode != 0:
-        detail = (done.stderr or done.stdout).strip()[-2000:]
-        raise RuntimeError(f"{label} failed with exit code {done.returncode}: {detail}")
+        raise RuntimeError(f"git {arguments[0]} failed: {(done.stderr or done.stdout).strip()[-2000:]}")
+    return done.stdout
+
+
+def _untracked(checkout: Path) -> set[str]:
+    """List the untracked, not ignored files and folders of a checkout.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Checkout-relative paths; a folder that holds only untracked files ends with ``/``.
+    """
+    output = _checkout_git(["ls-files", "-z", "--others", "--exclude-standard", "--directory"], checkout)
+    return {path for path in output.split("\0") if path}
+
+
+def ensure_setup(command: list[str], checkout: Path) -> None:
+    """Run ``[proposer] setup`` in a checkout unless its output is still there.
+
+    The same command in the same folder gives the same result, so a session
+    after a reset or in a fresh worktree gets the setup again. What the setup
+    adds is excluded from every version, like the harness files (SKY-753).
+
+    Args:
+        command: The exact argument list from ``optimize.toml``.
+        checkout: The repository checkout or worktree the proposer command runs in.
+
+    Raises:
+        RuntimeError: When the setup or git fails.
+    """
+    marker = checkout / SETUP_MARKER
+    if marker.exists():
+        return
+    # Files the parent version added are untracked too; only the setup's new paths are excluded.
+    before = _untracked(checkout)
+    run_setup(command, checkout)
+    added = sorted((_untracked(checkout) - before) | {SETUP_MARKER})
+    exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
+    exclude = (exclude if exclude.is_absolute() else checkout / exclude) / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in added]
+    known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+    with exclude.open("a", encoding="utf-8") as stream:
+        stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+    marker.write_text(shlex.join(command) + "\n", encoding="utf-8")
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
@@ -1426,7 +1508,11 @@ def run_session(
             ``exec_commands`` (command names the exec shim records), and
             ``resume_command`` (:func:`main` runs it in place of
             ``run_command`` for a ``--resume`` of a known session, so a
-            harness with native resume continues its own session state).
+            harness with native resume continues its own session state),
+            ``setup`` (the contract file's ``[proposer] setup``, run by
+            :func:`ensure_setup` before a session in a checkout) and
+            ``file_command`` (``run_command`` is the contract file's exact
+            ``[proposer] entry``, so no key token is filled into it).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1442,6 +1528,9 @@ def run_session(
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
+    # A session outside a checkout (an AutoSaddler diagnosis folder) edits no repository, so it needs no setup.
+    if proposer.get("setup") and (workspace / ".git").exists():
+        ensure_setup(list(proposer["setup"]), workspace)
     if api_key is None:
         api_key = _env(KEY_ENV)
     for relative_path, content in (proposer.get("files") or {}).items():
@@ -1480,7 +1569,9 @@ def run_session(
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
     env[TASK_ENV] = str(prompt_file.resolve())
     shell = shutil.which("bash") or "/bin/sh"
-    command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
+    run_command = proposer["run_command"]
+    # The file's command is the user's own text: a key token in it must stay text, not become the relay key.
+    command = [shell, "-c", run_command if proposer.get("file_command") else _with_key(run_command, api_key)]
     if sys.platform == "linux" and sys.executable:
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
@@ -1806,6 +1897,9 @@ def main(argv: list[str]) -> int:
     session_id = args.session_id or resumed or uuid.uuid4().hex
     model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
     workspace = Path.cwd()
+    # The contract file's command always runs in the repository checkout,
+    # also where the engine works in its own lab folder (SKY-753).
+    work_dir = Path(proposer["workdir"]) if proposer.get("workdir") else workspace
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
@@ -1822,7 +1916,7 @@ def main(argv: list[str]) -> int:
     max_cost = float(args.max_budget_usd) if args.max_budget_usd else None
     outcome = run_session(
         proposer,
-        workspace=workspace,
+        workspace=work_dir,
         prompt=prompt,
         model=model,
         session_dir=session_dir,

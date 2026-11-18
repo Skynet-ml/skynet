@@ -418,9 +418,8 @@ def repo_space(
     """Unpack the shipped repository and open upstream's Git candidate space on it.
 
     Args:
-        repo: Parent payload's ``repo`` entry: tree chunks, path rules,
-            whether a constraints file governs the run, and the file's
-            ``[proposer] setup`` command, if any.
+        repo: Parent payload's ``repo`` entry: tree chunks, path rules and
+            whether a constraints file governs the run.
         seed_patch: Starting version as a patch against the fetched commit, or empty.
         run_dir: Upstream run directory.
         proposer: Serialized harness launch, whose workspace files never join a version.
@@ -443,9 +442,6 @@ def repo_space(
         _git_output(checkout, "add", "--all")
         _git_output(checkout, "commit", "--quiet", "--no-verify", "-m", "seed")
         start = _git_output(checkout, "rev-parse", "HEAD").strip()
-    # After the seed commit, so the setup's own files never join the seed version.
-    if repo.get("proposer_setup"):
-        harness_bridge.run_setup(list(repo["proposer_setup"]), checkout)
     editable = [str(path) for path in repo["editable_paths"]]
     readonly = [str(path) for path in repo["readonly_paths"]]
     space = GitHarnessSpace(

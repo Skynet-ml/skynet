@@ -89,6 +89,9 @@ _MAX_NAME_CHARS = 100
 _MAX_HOSTS = 100
 _MAX_TABLES = 20
 _MAX_COMMAND_PARTS = 50
+# harness_bridge's gateway key tokens. A launch command with one gets the
+# proposer's relay key in its text, so the file's own commands cannot name them.
+_KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
@@ -308,6 +311,8 @@ class RepoConstraints:
     # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
     proposer_entry: tuple[str, ...] | None = None
     proposer_setup: tuple[str, ...] | None = None
+    # The repository files that entry names; read_constraints fills them, and the file proposer protects them.
+    proposer_entry_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
@@ -418,6 +423,8 @@ class RepoEnvironment:
                 "target": file.outcome_target if file else None,
                 "require": dict(file.outcome_minimums) if file else {},
             },
+            # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
+            **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
         }
 
 
@@ -740,7 +747,8 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
         The command as a tuple, or ``None`` when the key is absent.
 
     Raises:
-        ConstraintsError: When the value is not a non-empty list of non-empty strings.
+        ConstraintsError: When the value is not a non-empty list of non-empty
+            strings, or names a gateway key token.
     """
     if key not in section:
         return None
@@ -752,6 +760,13 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
     ):
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: {label} {key} must be a command list such as ["node", "my-agent.js"].',
+            **_at(f"{label} {key}"),
+        )
+    token = next((token for token in _KEY_TOKENS if any(token in part for part in value)), None)
+    if token is not None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} {key} cannot contain {token}. The command reads the model key"
+            " from the APP_API_KEY environment variable.",
             **_at(f"{label} {key}"),
         )
     return tuple(value)
@@ -1607,7 +1622,26 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
         return None
     constraints = _load_mcp_files(parse_constraints(raw, require_version=require_version), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
-    return _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
+    constraints = _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
+    return _load_entry_files(constraints, archive)
+
+
+def _load_entry_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Find the repository files that ``[proposer] entry`` names, such as ``agent/run.js``.
+
+    Args:
+        constraints: The parsed proposal.
+        archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
+
+    Returns:
+        The proposal with ``proposer_entry_files`` filled, unchanged without an entry.
+    """
+    if constraints.proposer_entry is None:
+        return constraints
+    with tarfile.open(archive, "r:gz") as packed:
+        files = {str(PurePosixPath(member.name)) for member in packed.getmembers() if member.isfile()}
+    named = (posixpath.normpath(part) for part in constraints.proposer_entry if not part.startswith("/"))
+    return replace(constraints, proposer_entry_files=tuple(dict.fromkeys(path for path in named if path in files)))
 
 
 def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
@@ -2162,8 +2196,19 @@ def effective_environment(
                 key="editable",
             )
         editable = constraints.editable_paths
+    use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
+    # A version must not rewrite the proposer command that writes the next versions.
+    entry_files = constraints.proposer_entry_files if use_file_proposer else ()
     protected = tuple(
-        dict.fromkeys((CONSTRAINTS_FILE, *constraints.rule_files, *constraints.mcp_files, *constraints.protected_paths))
+        dict.fromkeys(
+            (
+                CONSTRAINTS_FILE,
+                *constraints.rule_files,
+                *constraints.mcp_files,
+                *constraints.protected_paths,
+                *entry_files,
+            )
+        )
     )
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.
@@ -2191,11 +2236,9 @@ def effective_environment(
             notes.append(f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.")
     else:
         setup = constraints.setup_command
-    use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
     if constraints.proposer_entry is not None and approved_proposer:
         notes.append("The run's own proposer replaces the one in the contract file.")
     elif use_file_proposer:
-        # The run record has no proposer field, so this note is how the run detail names the proposer.
         notes.append(
             f"The run uses the proposer command in the contract file: {shlex.join(constraints.proposer_entry)}"
         )

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from core.models.blackbox import BlackboxRunRequest, BlackboxStrategy
+from core.models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE, BlackboxRunRequest, BlackboxStrategy
 
 from .. import auto, gepa_engine
 from ..gepa_engine import GepaEngine
@@ -142,6 +143,30 @@ def test_auto_on_a_repository_explores_five_lanes_then_continues_gepa_from_the_w
     assert continuation["seed"] == _patch("meta_harness")
     assert result.best_candidate == _patch("meta_harness")
     assert result.best_score == 1.0
+
+
+def test_auto_with_the_files_proposer_leaves_out_the_shinka_evolve_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ShinkaEvolve never runs ``[proposer] entry``, so Auto explores without its lane (SKY-753).
+
+    Args:
+        tmp_path: Artifact directory.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    RepoFixtureEngine.calls = []
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: RepoFixtureEngine(name))
+    native = replace(_native(), repo={**REPO, "file_proposer": True})
+    server = EvalServer(score, max_evals=2 * len(AUTO_ENGINES))
+
+    _, lanes = auto.run_strategy(
+        BlackboxStrategy(), Task(""), server, make_ctx(str(tmp_path), native_options=native), caps=CAPS
+    )
+
+    explored = sorted(lane.engine for lane in lanes if lane.phase == "explore")
+    assert explored == sorted(name for name in AUTO_ENGINES if name != BLACKBOX_ENGINE_SHINKA_EVOLVE)
+    assert BLACKBOX_ENGINE_SHINKA_EVOLVE not in {call["name"] for call in RepoFixtureEngine.calls}
+    assert [lane.phase for lane in lanes][-1] == "continue"
 
 
 def test_gepa_on_a_repository_runs_the_native_repository_engine(

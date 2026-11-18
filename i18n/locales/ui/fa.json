@@ -706,6 +706,7 @@
   "submit.blackbox.proposer.max_tool_calls": "حداکثر فراخوانی ابزار برای هر نامزد",
   "submit.blackbox.proposer.ralph": "اجرای دورهای پژوهشی تا پایان بودجه",
   "submit.blackbox.review.proposer": "عامل پیشنهاددهنده",
+  "submit.blackbox.review.proposer_file": "فرمان فایل قرارداد: {command}",
   "tooltip.submit.blackbox.proposer": "عامل کدنویسی که نامزدها را در سندباکس می‌نویسد و بازبینی می‌کند — هر هارنس نصب‌شده می‌تواند موتور را پیش ببرد",
   "tooltip.submit.blackbox.proposer_candidates": "تعداد نسخه‌های نامزدی که Meta-Harness در هر تکرار از عامل می‌خواهد (۱ تا ۸)",
   "tooltip.submit.blackbox.proposer_max_tool_calls": "بیشترین تعداد فراخوانی ابزار (خواندن، جست‌وجو و ویرایش فایل‌ها، اجرای دستورها) که عامل کدنویسی هنگام نوشتن یک نامزد مجاز به انجام آن است (۱–۱۰۰۰). سقف پایین‌تر هر نامزد را ارزان‌تر نگه می‌دارد و سقف بالاتر جا برای تغییرات بزرگ‌تر باقی می‌گذارد.",

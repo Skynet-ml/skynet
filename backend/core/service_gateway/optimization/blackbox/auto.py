@@ -20,7 +20,7 @@ from gepa.oa.task import Task as UpstreamTask
 from ....billing.usage_tags import LANE_KEY, usage_scope
 from ....constants import PROGRESS_LANE_COMPLETED, PROGRESS_LANE_HANDOFF, PROGRESS_LANE_STARTED
 from ....exceptions import ServiceError
-from ....models.blackbox import BlackboxStrategy
+from ....models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE, BlackboxStrategy
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
 from .protocol import (
@@ -365,9 +365,13 @@ def run_strategy(
 
     if not task.str_mode:
         raise ServiceError("The upstream Auto recipe requires a text starting point; use GEPA for named parts.")
-    for name in AUTO_ENGINES:
+    # ShinkaEvolve writes its own versions and never runs the repository's
+    # [proposer] entry, so a run that uses that command leaves its lane out (SKY-753).
+    file_proposer = bool(ctx.native_options is not None and (ctx.native_options.repo or {}).get("file_proposer"))
+    engines = tuple(name for name in AUTO_ENGINES if not (file_proposer and name == BLACKBOX_ENGINE_SHINKA_EVOLVE))
+    for name in engines:
         get_engine(name, caps)
-    lane_count = len(AUTO_ENGINES)
+    lane_count = len(engines)
     # One even share per exploration lane plus a matching share for the GEPA continuation.
     share = 1.0 / (lane_count + 1)
     if strategy.mode == "auto" and server.remaining < lane_count + 1:
@@ -427,7 +431,7 @@ def run_strategy(
         continuation_allowance = server.remaining - lane_count * per_lane
         winner = optimize_best_of(
             **kwargs,
-            configs=[configuration(name, "explore", per_lane, share) for name in AUTO_ENGINES],
+            configs=[configuration(name, "explore", per_lane, share) for name in engines],
             max_workers=lane_count,
         )
     except BudgetReached as exc:

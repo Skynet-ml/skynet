@@ -131,3 +131,6 @@ def fill_proposer_host_cli(job_store: object | None, username: str, payload: Any
     engine = _turn_engine(job_store, username)
     if engine is not None and engine != OPENROUTER_ENGINE:
         proposer.host_cli = engine
+        # Filled in, not picked: the stored request marks it, so a repository's
+        # [proposer] entry still applies (SKY-753).
+        proposer.model_fields_set.discard("host_cli")

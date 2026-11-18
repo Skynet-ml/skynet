@@ -2020,3 +2020,93 @@ def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_
     done = subprocess.run(["pp"], env=env, capture_output=True, timeout=10, check=False)
 
     assert (done.returncode, done.stdout, done.stderr) == (0, b"status 141 0\n", b"")
+
+
+def test_a_setup_that_runs_too_long_stops_with_every_process_it_started(tmp_path: Path) -> None:
+    """The setup's whole process group stops at the deadline, and the message names the command (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the child's pid file.
+    """
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(
+        RuntimeError, match=r"(?s)\[proposer\] setup command in optimize.toml .* did not finish within 2 seconds"
+    ):
+        harness_bridge.run_setup([sys.executable, "-c", script], tmp_path, timeout_seconds=2)
+
+    assert time.monotonic() - started < 30
+    child = int(pid_file.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("The setup's child process still runs.")
+
+
+def test_the_setup_runs_once_per_checkout_until_a_reset_removes_its_output(tmp_path: Path) -> None:
+    """A second session in the same checkout skips the setup; ``git clean -fdx`` brings it back (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "a [1].txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    (checkout / "parent.txt").write_text("from the parent version")
+    log = tmp_path / "setup.log"
+    command = [sys.executable, "-c", f"open('out [x].txt', 'w'); open({str(log)!r}, 'a').write('ran\\n')"]
+
+    harness_bridge.ensure_setup(command, checkout)
+    harness_bridge.ensure_setup(command, checkout)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    subprocess.run(["git", "clean", "-fdxq"], cwd=checkout, check=True)
+    harness_bridge.ensure_setup(command, checkout)
+
+    assert log.read_text() == "ran\nran\n"
+    # Only the setup's own output is hidden; the parent version's new file stays in the version.
+    assert status == "?? parent.txt\n"
+
+
+def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) -> None:
+    """The bridge fills the relay key into a harness command, but never into the file's own command (SKY-753).
+
+    Args:
+        tmp_path: The workspace and the session folder.
+    """
+    proposer = {**_PLAIN, "run_command": f"echo {harness_bridge.KEY_TOKEN}"}
+
+    filled = run_session(
+        proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s1", api_key="k"
+    )
+    exact = run_session(
+        {**proposer, "file_command": True},
+        workspace=tmp_path / "w",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "s2",
+        api_key="k",
+    )
+
+    assert filled.stdout.strip() == "k"
+    assert exact.stdout.strip() == harness_bridge.KEY_TOKEN

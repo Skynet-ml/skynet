@@ -21,7 +21,7 @@ registerHooks({
 });
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { BlackboxConfigCard, runProposerHarness, runStopScore } = await import("./BlackboxConfig");
+const { BlackboxConfigCard, runProposerHarness, runProposerLabel, runStopScore } = await import("./BlackboxConfig");
 
 const job = { optimization_id: "run-1", status: "running" } as OptimizationStatusResponse;
 
@@ -68,9 +68,42 @@ void describe("runProposerHarness", () => {
     );
   });
 
+  void it("is custom when the stored environment record names the contract file's command", () => {
+    // The stored shape: the worker saves the environment record, not the staged proposer.
+    const fromFile = {
+      kind: "repo",
+      repo: {
+        repository: "o/r",
+        editable_paths: ["."],
+        environment: { outcome: { target: null }, proposer_entry: ["node", "agent/run.js"] },
+      },
+    } as never;
+    assert.equal(runProposerHarness({ max_tool_calls: 5 }, fromFile), "custom");
+  });
+
   void it("is none for a repository run that staging has not read yet, or with no proposer", () => {
     assert.equal(runProposerHarness({}, unstaged), null);
     assert.equal(runProposerHarness(null, {}), null);
+  });
+});
+
+void describe("runProposerLabel", () => {
+  // The proposer row is on the Optimization tab, which a static render does not show.
+  void it("names the contract file's command for a stored run that uses it", () => {
+    setClientLocale("en");
+    const fromFile = {
+      kind: "repo",
+      repo: {
+        repository: "o/r",
+        editable_paths: ["."],
+        environment: { outcome: { target: null }, proposer_entry: ["node", "agent/run.js"] },
+      },
+    } as never;
+    const label = runProposerLabel({ max_tool_calls: 5 }, fromFile);
+    // The UI catalog does not load under jiti, so the row text is its key, not "Codex".
+    assert.match(label ?? "", /submit\.blackbox\.review\.proposer_file/);
+    assert.notEqual(label, runProposerLabel({ max_tool_calls: 5 }, {}));
+    assert.equal(runProposerLabel({ harness: "pi" }, fromFile), runProposerLabel({ harness: "pi" }, {}));
   });
 });
 

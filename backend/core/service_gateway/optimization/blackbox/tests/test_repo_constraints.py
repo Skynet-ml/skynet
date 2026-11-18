@@ -194,6 +194,48 @@ def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value:
     assert caught.value.key == key
 
 
+@pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
+def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
+    """The bridge would fill the relay key into the file's command text, so the setup check refuses the token.
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        token: A gateway key token.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", "--key={token}"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} cannot contain {token}") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
+    """A version cannot rewrite the script that proposes the next versions, like ``optimize.toml`` (SKY-753)."""
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "./agent/run.js", "--fast"]\n',
+        {"agent/run.js": b"// agent", "src/app.js": b"// app"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    replaced = effective_environment(constraints, approved_editable=["."], approved_setup=None, approved_proposer=True)
+
+    assert constraints.proposer_entry_files == ("agent/run.js",)
+    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
+    patch = "diff --git a/agent/run.js b/agent/run.js\n--- a/agent/run.js\n+++ b/agent/run.js\n@@ -1 +1 @@\n-// agent\n+// mine\n"
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+    assert environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())["proposer_entry"] == [
+        "node",
+        "./agent/run.js",
+        "--fast",
+    ]
+    assert replaced.protected_paths == (CONSTRAINTS_FILE,)
+    assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+
+
 def test_a_proposer_setup_without_entry_fails() -> None:
     """``setup`` only prepares the file's own command, so it needs ``entry``."""
     with pytest.raises(ConstraintsError, match=r"\[proposer\] setup needs \[proposer\] entry") as caught:

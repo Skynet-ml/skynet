@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import os
+import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from .. import autosaddler_runner, native_runtime, repo_tree
+from .. import autosaddler_runner, harness_bridge, native_runtime, repo_tree
 
 # The runner needs the pinned upstream package on Python 3.12, which the
 # backend venv does not carry; point this at an interpreter that has it.
@@ -549,3 +553,81 @@ def test_harness_sessions_send_each_refusal_to_the_run_log(
     record = json.loads(lines[0].split(" ", 2)[2])
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
+
+
+# The setup marks its own output; the fake proposer logs whether that output
+# is in the folder it runs in, and prints a reply.
+_SESSION_SETUP = """
+import os, pathlib, sys
+pathlib.Path("setup-out").mkdir()
+pathlib.Path("setup-out/ready").write_text("ok")
+with open(sys.argv[1], "a") as log:
+    log.write(f"setup {os.getcwd()}\\n")
+"""
+_SESSION_AGENT = """
+import os, pathlib, sys
+with open(sys.argv[1], "a") as log:
+    log.write(f"agent {os.getcwd()} {pathlib.Path('setup-out/ready').exists()}\\n")
+print("done")
+"""
+
+
+def test_each_autosaddler_session_worktree_gets_the_files_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upstream gives each session a new worktree, so the setup runs in each one, where the command runs (SKY-753).
+
+    Args:
+        tmp_path: Guest folder.
+        monkeypatch: Working folder, home folder and the upstream classes the guest builds.
+    """
+    tree = io.BytesIO()
+    with tarfile.open(fileobj=tree, mode="w:gz") as packed:
+        info = tarfile.TarInfo("src.txt")
+        info.size = 1
+        packed.addfile(info, io.BytesIO(b"v"))
+    chunk = tmp_path / "chunk-0"
+    chunk.write_text(base64.b64encode(tree.getvalue()).decode("ascii"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    monkeypatch.setattr(autosaddler_runner, "GitHarnessSpace", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "SessionUsage", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "TransportOutcome", SimpleNamespace)
+    log = tmp_path / "proposer.log"
+    proposer = {
+        "run_command": shlex.join([sys.executable, "-c", _SESSION_AGENT, str(log)]),
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "file_command": True,
+        "setup": [sys.executable, "-c", _SESSION_SETUP, str(log)],
+    }
+    repo = {"chunks": [str(chunk)], "editable_paths": ["."], "readonly_paths": []}
+    mailbox = autosaddler_runner.EvaluatorMailbox("testnonce", 1.0)
+
+    space, _base = autosaddler_runner.repo_space(repo, "", tmp_path / "run", proposer, mailbox)
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    worktrees = [tmp_path / "run" / "worktrees" / name for name in ("w1", "w2")]
+    for index, worktree in enumerate(worktrees):
+        subprocess.run(
+            ["git", "worktree", "add", "--quiet", "--detach", str(worktree), space.base_revision],
+            cwd=space.source_repo,
+            check=True,
+        )
+        session = SimpleNamespace(workspace=worktree, task_prompt="Improve it.", session_id=f"s{index}")
+        asyncio.run(transport.run(session, 30.0))
+
+    assert log.read_text().splitlines() == [
+        line for worktree in worktrees for line in (f"setup {worktree}", f"agent {worktree} True")
+    ]
+    assert not (space.source_repo / "setup-out").exists()
+    for worktree in worktrees:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status == ""

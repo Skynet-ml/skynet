@@ -72,6 +72,9 @@ BLACKBOX_HARNESS_HERMES = "hermes"
 BLACKBOX_HARNESS_EVE = "eve"
 BLACKBOX_HARNESS_CODE_PUPPY = "code_puppy"
 BLACKBOX_HARNESS_CUSTOM = "custom"
+# Stored next to a ``host_cli`` that local mode filled in, not one the client
+# picked, so the stored request still lets ``[proposer] entry`` apply (SKY-753).
+HOST_CLI_AUTO_KEY = "host_cli_auto"
 BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_PI,
     BLACKBOX_HARNESS_CODEX,
@@ -535,6 +538,23 @@ class BlackboxProposer(BaseModel):
 
     _refuse_removed_cli = field_validator("host_cli", mode="before")(refuse_removed_cli)
 
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_host_cli_auto(cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxProposer]) -> BlackboxProposer:
+        """Keep a filled-in ``host_cli`` out of the client's choices when a stored request is read again.
+
+        Args:
+            data: The raw proposer before field validation.
+            handler: The standard validation of the proposer fields.
+
+        Returns:
+            The validated proposer.
+        """
+        proposer = handler(data)
+        if isinstance(data, dict) and data.get(HOST_CLI_AUTO_KEY):
+            proposer.model_fields_set.discard("host_cli")
+        return proposer
+
     @model_validator(mode="after")
     def _ensure_launchable(self) -> BlackboxProposer:
         """Require a known harness and a run command for a custom one.
@@ -564,6 +584,8 @@ class BlackboxProposer(BaseModel):
         A repository run then uses the ``[proposer] entry`` of its contract
         file, and the stored request still tells that apart from a chosen
         Codex (SKY-753). Validating the dump gives the same default again.
+        A ``host_cli`` that local mode filled in gets :data:`HOST_CLI_AUTO_KEY`
+        for the same reason.
 
         Args:
             handler: Pydantic's default serializer.
@@ -574,6 +596,8 @@ class BlackboxProposer(BaseModel):
         data = handler(self)
         if "harness" not in self.model_fields_set and isinstance(data, dict):
             data.pop("harness", None)
+        if self.host_cli is not None and "host_cli" not in self.model_fields_set and isinstance(data, dict):
+            data[HOST_CLI_AUTO_KEY] = True
         return data
 
 
