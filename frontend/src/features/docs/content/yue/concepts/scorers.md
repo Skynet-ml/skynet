@@ -3,19 +3,23 @@
 ## 合約
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | 參數        | 裝住乜嘢                                                                         |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | 倉庫某個版本嘅資料夾，安裝指令已經喺入面運行過                                   |
+| `repo_path` | 一個只裝住你啲指標檔案嘅資料夾。佢冇其他倉庫檔案，亦冇版本程式碼 |
 | `case`      | 一個 dict。`case["input"]` 裝住輸入欄位。`case["expected"]` 裝住預期值，或者係 `None` |
+| `output`    | `[run]` 入口為呢個案例回傳嘅嘢；如果檔案冇 `[run]`，就係 `None` |
 
-如果你個函數只收一個參數，Skynet 會呼叫 `score(repo_path)`。如果評分器會運行自己嘅測試、唔需要案例，就用呢個形式。
+倉庫嘅 `optimize.toml` 檔案一定要有一個 `[run]` 部分或者一個 `[target.<name>]` 階段。`[run]` 嘅 `entry` 會喺自己嘅沙盒入面，用一個案例運行一個版本。如果兩樣都冇，Skynet 會拒絕個檔案，因為每個版本都會攞到一樣嘅分數。
 
-評分器喺沙盒入面、喺個版本嘅資料夾入面運行。佢可以由倉庫匯入程式碼、運行指令，或者呼叫 `serve.py` 入面嘅 `serve()`。睇 [最佳化點樣運作](/docs/concepts/optimization)。
+- 函數入口，例如 `entry = "serve.py:serve"`，會收到 `case["input"]` 做參數。`output` 係佢嘅回傳值。
+- 指令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，會由 stdin 收到 JSON 格式嘅輸入。`output` 係 `{"exit_code": ..., "stdout": "..."}`。
+
+評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案。評分器唔可以匯入或者運行版本嘅程式碼。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from skynet import call` 匯入 `call`。睇 [最佳化點樣運作](/docs/concepts/optimization)。
 
 ## 回傳值
 
@@ -58,54 +62,63 @@ GEPA 同 Auto 會讀回饋文字，用嚟寫下一個版本。講清楚錯咗喺
 
 ### 完全符合
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` 係一個 dict，用你嘅輸出欄位名稱做鍵。睇 [數據集同分割](/docs/concepts/datasets)。
 
 ### 運行倉庫嘅測試
 
-```python tab="scorer.py"
-import subprocess
+`[run]` 入口會運行測試。評分器會讀結束碼同測試輸出。
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
+```
+
+如果 `[run]` 入口喺某個案例失敗，嗰個案例就冇分數。如果入口開唔到、超時，或者俾信號停咗，又或者函數入口喺返回之前拋出異常或者退出，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。命令入口嘅非零結束碼唔算失敗：評分器會喺 `output` 收到佢。有呢種案例嘅版本冇分數。佢唔可以係最好嘅版本，唔會達到任何 `[outcome] target`，亦唔會開 pull request。如果失敗一定要算做一個數字，就喺你個程式入面捕捉個失敗，寫一個輸出，再俾評分器幫佢評分。睇 [儲存庫規則](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
 
 ### 用模型做評判
 
 評分器可以呼叫模型。由 `skynet` 輔助模組匯入 `llm`。呼叫會經 Skynet 嘅模型閘道，去到今次運行嘅評分器模型。
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -118,7 +131,7 @@ def score(repo_path, case):
 ## 模型呼叫同密鑰
 
 - 用 Skynet 金鑰嘅呼叫會計入運行預算。用你自己嘅金鑰（BYOK）嘅話，呼叫會計落你嘅供應商金鑰，Skynet 唔收模型費用。睇 [預算同收費](/docs/concepts/billing)。
-- 運行密鑰會以環境變數嘅形式去到評分器。變數名就係密鑰名，例如 `os.environ["SEARCH_API_KEY"]`。
+- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表，或者 `[metric] mcp` 檔案入面嘅伺服器，去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `SKYNET_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
 - Skynet 會喺評分器輸出同日誌入面隱藏密鑰嘅值。
 
 ## 限制

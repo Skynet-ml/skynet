@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 Important fields:
 
 - `target.repo.repository` is the GitHub repository as `owner/name`. Connect GitHub in **Settings → Connectors** first.
 - `target.repo.editable_paths` lists the files and folders that the optimizer may change. `"."` means the whole repository.
 - `target.repo.commit` is optional. It is a 40-character SHA. Without it, Skynet uses the latest commit on the branch.
-- `target.repo.secrets` is optional. Each secret has a `name` and a `value`. It reaches your code and your scorer as an environment variable.
-- `scorer.metric_code` defines `score(repo_path, case)`. `scorer.model` is the model that your code and your scorer can call through the model gateway.
+- `target.repo.secrets` is optional. Each secret has a `name` and a `value`. It reaches your code or your scorer only through a `[services.<name>]` header or a server in the role's `mcp` file, never as an environment variable.
+- `scorer.metric_code` defines `score(repo_path, case, output=None)`. `output` is what the `[run]` entry returned for the case. The `optimize.toml` tab shows the `[run]` entry of the example repository. `scorer.model` is the model that your code and your scorer can call through the model gateway.
 - `strategy.mode` is `auto` (the default) or `single`. With `single`, set `strategy.engine` to one engine name from `GET /blackbox/engines`.
 - `max_cost_cents` is the spending limit for this run, in US cents.
 - `is_private` is `false` by default. Set it to `true` to keep the run private.

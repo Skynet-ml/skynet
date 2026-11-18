@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 重要なフィールド:
 
 - `target.repo.repository` は `owner/name` 形式の GitHub リポジトリです。先に **設定 → コネクタ** で GitHub を接続してください。
 - `target.repo.editable_paths` は、オプティマイザーが変更できるファイルとフォルダーの一覧です。`"."` はリポジトリ全体を意味します。
 - `target.repo.commit` は任意です。40 文字の SHA です。省略すると、Skynet はブランチの最新のコミットを使います。
-- `target.repo.secrets` は任意です。各シークレットには `name` と `value` があります。シークレットは環境変数としてコードとスコアラーに渡されます。
-- `scorer.metric_code` は `score(repo_path, case)` を定義します。`scorer.model` は、コードとスコアラーがモデルゲートウェイ経由で呼び出せるモデルです。
+- `target.repo.secrets` は任意です。各シークレットには `name` と `value` があります。シークレットは `[services.<name>]` のヘッダーか、ロールの `mcp` ファイルにあるサーバーを通してだけコードやスコアラーに届きます。環境変数としては届きません。
+- `scorer.metric_code` は `score(repo_path, case, output=None)` を定義します。`output` は、`[run]` エントリーがケースに対して返した値です。`optimize.toml` タブは、例のリポジトリの `[run]` エントリーを示します。`scorer.model` は、コードとスコアラーがモデルゲートウェイ経由で呼び出せるモデルです。
 - `strategy.mode` は `auto`（既定）または `single` です。`single` の場合は、`strategy.engine` に `GET /blackbox/engines` が返すエンジン名を 1 つ設定します。
 - `max_cost_cents` はこの実行の支出上限で、単位は米セントです。
 - `is_private` の既定値は `false` です。実行を非公開にするには `true` に設定します。

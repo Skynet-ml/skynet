@@ -3,19 +3,23 @@
 ## العقد
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | الوسيطة     | ما تحتويه                                                                       |
 | ----------- | ------------------------------------------------------------------------------- |
-| `repo_path` | مجلد نسخة واحدة من المستودع، بعد تشغيل أمر الإعداد                               |
+| `repo_path` | مجلد يحتوي ملفات المقياس فقط. لا يحتوي أي ملف آخر من المستودع ولا كود أي نسخة |
 | `case`      | dict. يحتوي `case["input"]` على حقول الإدخال. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` |
+| `output`    | ما أرجعه `entry` في `[run]` للحالة، أو `None` إذا لم يحتوِ الملف على `[run]` |
 
-إذا كانت دالتك تأخذ وسيطة واحدة فقط، يستدعي Skynet `score(repo_path)`. استخدم هذا الشكل عندما يشغّل المُقيِّم اختباراته الخاصة ولا يحتاج إلى حالات.
+يجب أن يحتوي ملف `optimize.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
 
-يعمل المُقيِّم في البيئة المعزولة، في مجلد النسخة. يمكنه استيراد كود من المستودع، أو تشغيل أمر، أو استدعاء `serve()` من `serve.py`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
+- مدخل من نوع دالة، مثل `entry = "serve.py:serve"`، يتلقى `case["input"]` كوسيطة. و`output` هو قيمة الإرجاع منه.
+- مدخل من نوع أمر، مثل `entry = ["python", "-m", "pytest", "-q"]`، يتلقى الإدخال بصيغة JSON على stdin. و`output` هو `{"exit_code": ..., "stdout": "..."}`.
+
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from skynet import call`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
 
 ## قيمة الإرجاع
 
@@ -58,54 +62,63 @@ def score(repo_path, case):
 
 ### تطابق تام
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` هو dict مفتاحه اسم عمود المخرج لديك. اقرأ [مجموعات البيانات والتقسيمات](/docs/concepts/datasets).
 
 ### تشغيل اختبارات المستودع
 
-```python tab="scorer.py"
-import subprocess
+يشغّل `entry` في `[run]` الاختبارات. ويقرأ المُقيِّم رمز الخروج ومخرجات الاختبارات.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
+```
+
+عندما يفشل `entry` في `[run]` على حالة، لا تحصل تلك الحالة على درجة. إذا لم يبدأ `entry`، أو تجاوز المهلة، أو أوقفته إشارة، أو إذا رفع `entry` من نوع الدالة استثناءً أو خرج قبل أن يُرجع قيمة، تكون الملاحظات `Run failed: …`، ولا يستدعي Skynet المُقيِّم. رمز الخروج غير الصفري لـ `entry` من نوع الأمر ليس فشلًا: يتلقاه المُقيِّم في `output`. النسخة التي فيها حالة كهذه لا تحصل على درجة. لا يمكن أن تكون أفضل نسخة، ولا تصل إلى أي `[outcome] target`، ولا تفتح أي pull request. إذا كان يجب أن يُحسب الفشل رقمًا، فالتقط الفشل في برنامجك، واكتب مخرجًا، ودع المُقيِّم يعطيه درجة. اقرأ [قواعد المستودع](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### النموذج كحَكَم
 
 يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `skynet`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -118,7 +131,7 @@ def score(repo_path, case):
 ## استدعاءات النماذج والأسرار
 
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل. بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك، دون رسوم نموذج من Skynet. اقرأ [الفوترة](/docs/concepts/billing).
-- تصل أسرار التشغيل إلى المُقيِّم كمتغيرات بيئة. اسم المتغير هو اسم السر، مثل `os.environ["SEARCH_API_KEY"]`.
+- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`، أو عبر خادم في ملف `[metric] mcp`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `SKYNET_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
 - يُخفي Skynet قيم الأسرار في مخرجات المُقيِّم وفي السجلات.
 
 ## الحدود
