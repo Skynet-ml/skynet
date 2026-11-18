@@ -309,8 +309,9 @@ class EngineLoop:
                 call that the provider billed raises :class:`ModelCallBilledError` with the cost. When the client
                 cannot know the bill of a failed call, it raises any other error: the call fails with no cost, and
                 the lease bills nothing. Skynet takes that loss, up to ``model_max_cents``, on purpose (Gilad,
-                2026-11-17). A :class:`UsagePendingError` (also a :class:`ProviderFailedError`) can come only from a
-                client that bills through the budget runtime, so it stops the loop and the lease bills nothing.
+                2026-11-17). A :class:`UsagePendingError`, or its subclass :class:`ProviderFailedError`, can come
+                only from a client that bills through the budget runtime, so it stops the loop and the lease bills
+                nothing.
             model_max_cents: The most that one model call can cost; at most one lease.
             run_dir: The loop's local folder.
             registry: The capability registry that the grant lists resolve against.
