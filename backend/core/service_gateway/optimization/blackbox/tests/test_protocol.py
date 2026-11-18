@@ -411,6 +411,32 @@ def test_a_failed_run_after_a_clean_case_marks_the_version_as_run_failed() -> No
     assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
 
 
+def test_a_failed_run_after_a_metric_error_marks_the_version_as_run_failed() -> None:
+    """A metric error on one case, then a failed [run] case, still marks the version as run-failed (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 1:
+            return None, {"error": "metric boom"}
+        return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
 def test_score_batch_keeps_order_and_metric_error_status() -> None:
     """A batch scores each pair once, keeps the order, and still marks the filled case as a metric error."""
     server = EvalServer(lambda c, e: _crashing("boom" if e == 2 else c, e), max_evals=10)

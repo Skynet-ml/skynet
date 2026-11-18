@@ -199,7 +199,8 @@ class GepaEngine:
             Returns:
                 The score, :data:`UNSCORED` after a metric error, and side
                 information. A version with a failed ``[run]`` entry on any
-                case scored so far gets :data:`UNSCORED`, as a batch gives it.
+                case scored so far, also after a metric error, gets :data:`UNSCORED`,
+                as a batch gives it.
             """
             score, side_info = score_one(candidate, example)
             # A single call has no batch to fill, so the server's record carries

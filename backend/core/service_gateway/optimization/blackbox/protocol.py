@@ -246,8 +246,8 @@ class CandidateRecord:
     # Set once the metric or scorer crashed on any case: the version then has
     # no score at all, so it can never be the best or be published.
     metric_error: str | None = None
-    # SKY-751: whether the failure in ``metric_error`` (the first one) is a
-    # failed [run] entry, not a metric crash. ``metric_error`` holds its text.
+    # SKY-751: whether any case of the version had a failed [run] entry, not
+    # only a metric crash. ``metric_error`` then holds the first run failure's text.
     run_failed: bool = False
 
     @property
@@ -513,9 +513,13 @@ class EvalServer:
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
-        if record.metric_error is None:
+        # Any failed [run] case marks the version, whatever failed first, so
+        # the error text then is the run failure's, to match its status.
+        if failed_run and not record.run_failed:
             record.metric_error = error
-            record.run_failed = failed_run
+            record.run_failed = True
+        elif record.metric_error is None:
+            record.metric_error = error
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -549,14 +553,14 @@ class EvalServer:
         return None if record is None else record.metric_error
 
     def run_failed(self, candidate: Candidate) -> bool:
-        """Return whether ``candidate``'s first failed case is a failed ``[run]`` entry (SKY-751).
+        """Return whether any case of ``candidate`` had a failed ``[run]`` entry (SKY-751).
 
         Args:
             candidate: The version to look up.
 
         Returns:
-            ``True`` when a ``[run]`` entry of the version failed before any
-            metric crash, else ``False`` (also when it was not scored).
+            ``True`` when a ``[run]`` entry of the version failed on any case,
+            also after a metric crash, else ``False`` (also when it was not scored).
         """
         record = self._records.get(candidate_key(candidate))
         return record is not None and record.run_failed
