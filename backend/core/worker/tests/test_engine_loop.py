@@ -1821,3 +1821,119 @@ def test_a_command_that_writes_a_hidden_path_fails_as_a_box_step_and_a_resume_re
     assert str(live_error.value) == str(replayed_error.value)
     assert loop.run(seed, "cat src/a.py") == (result, after)
     assert boxes.opened == 0
+
+
+def test_a_seed_link_loop_that_reaches_a_hidden_path_stops_the_loop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """``a -> .`` reaches the hidden ``a/secret.txt``; the walk cannot follow the loop, so the tree stops the loop."""
+    loop, _, boxes = _loop(
+        owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["a/secret.txt"])
+    )
+    tree = _store(trees, {"secret.txt": b"TOPSECRET", "src/x.py": b"x"}, {"a": "."})
+
+    with pytest.raises(LoopStoppedError, match="symlink loop"):
+        loop.run(tree, "cat a/secret.txt")
+    assert boxes.opened == 0
+    with pytest.raises(LoopStoppedError, match="symlink loop"):
+        loop.model("hi")
+
+
+def test_a_seed_link_that_leaves_the_tree_stops_the_loop_when_the_run_hides_a_path(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """``eval -> /abs/real`` can reach the hidden ``eval/answer.txt`` in a box, also in a tree with no hidden path."""
+    hidden = hidden_hashes(["eval/answer.txt"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    tree = _store(trees, {"real/answer.txt": b"TOPSECRET"}, {"eval": "/abs/real"})
+
+    with pytest.raises(LoopStoppedError, match="names an absolute path or leaves the tree"):
+        loop.list_files(tree)
+
+    bad, _, _ = _loop(owner, engine, step_log, trees, tmp_path / "bad", generation=1, hidden=hidden)
+    with pytest.raises(LoopStoppedError, match="names an absolute path or leaves the tree"):
+        bad.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
+
+
+def test_put_files_over_a_seed_keeps_the_strict_link_rule(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A tree that put_files writes over the seed can still hold the seed's content, so its links are walked."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["a/secret.txt"]))
+    seed = _store(trees, {"secret.txt": b"TOPSECRET"}, {"a": "."})
+    changed = loop.put_files({"src/x.py": b"x"}, seed)
+
+    with pytest.raises(LoopStoppedError, match="symlink loop"):
+        loop.read_file(changed, "src/x.py")
+
+
+def test_with_only_the_exploit_suite_hidden_a_seed_link_loop_is_kept(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The exploit suite alone does not make the walk strict, so repositories with link loops still run."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    tree = _store(trees, {"src/a.py": b"a"}, {"src/self": "..", "venv/python": "/usr/bin/python3"})
+
+    assert loop.read_file(tree, "src/a.py") == b"a"
+
+
+def test_a_link_with_a_hidden_name_that_a_command_makes_does_not_stop_the_loop_or_its_resume(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A run output holds no hidden content, so a link at a hidden name shows only what the box wrote."""
+    hidden = hidden_hashes(["eval/answer.txt"])
+    seed = _store(trees, {"src/a.py": b"a"})
+    command = "mkdir real && echo hi > real/answer.txt && ln -s real eval"
+
+    def drive(loop: EngineLoop) -> tuple[Any, ...]:
+        """Make the link, then read, list, run and call the model over the tree after it.
+
+        Args:
+            loop: The engine loop.
+
+        Returns:
+            What each call gave.
+        """
+        made, after = loop.run(seed, command)
+        changed = loop.put_files({"src/b.py": b"b"}, after)
+        again, _ = loop.run(changed, "cat eval/answer.txt")
+        return (
+            made.exit_code,
+            loop.read_file(after, "src/a.py"),
+            loop.list_files(changed),
+            again.stdout,
+            loop.model("hi"),
+        )
+
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    live = drive(first)
+    assert live[:4] == (0, b"a", ["real/answer.txt", "src/a.py", "src/b.py"], "hi\n")
+
+    _new_generation(engine)
+    loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden)
+    assert drive(loop) == live
+    assert boxes.opened == 0
+    assert model.prompts == []
+
+
+def test_a_run_output_with_more_linked_paths_than_the_limit_does_not_stop_the_loop(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run output holds no hidden content, so many links (a pnpm node_modules) are kept; a seed keeps the limit."""
+    monkeypatch.setattr(engine_loop, "_MAX_LINKED_PATHS", 3)
+    hidden = hidden_hashes(["eval"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    seed = _store(trees, {"src/a.py": b"a"})
+
+    made, after = loop.run(seed, "for n in 1 2 3 4 5; do ln -s src link$n; done")
+    assert made.exit_code == 0
+    assert loop.read_file(after, "src/a.py") == b"a"
+
+    many = _store(trees, {"src/a.py": b"a"}, {f"link{n}": "src" for n in range(5)})
+    with pytest.raises(LoopStoppedError, match="reaches more than 3 paths"):
+        loop.read_file(many, "src/a.py")

@@ -59,11 +59,16 @@ always hides ``.optimize/exploits`` the same way, as the native runtime hides
 the exploit suite from the proposer. A tree with a symlink that is, lies
 below or holds a hidden path stops the loop at its first read, listing or run,
 and a seed tree stops it in ``context``: the filter matches paths, so the
-link's target would stay visible. In a tree that holds a hidden path, a link
-that names an absolute path or leaves the tree stops the loop too, since the
-loop cannot tell what it reaches. ``put_files`` refuses to write, replace or
-remove a hidden path, and a ``run`` whose command writes one fails with
-:class:`TreeRejectedError`, as a box error that a replay raises again.
+link's target would stay visible. When the run hides paths of its own, a link
+loop or a link that names an absolute path or leaves the tree stops the loop
+too, since the loop cannot tell what it reaches. A tree that a ``run`` step
+gave, live or replayed, or that ``put_files`` wrote over such a tree, is not
+walked: a candidate box never gets a hidden file, so these trees hold no
+hidden content, and their links can show none. ``put_files`` refuses to
+write, replace or remove a hidden path, and a ``run`` whose command writes one
+fails with :class:`TreeRejectedError`, as a box error that a replay raises
+again. A refusal confirms that a guessed path is hidden, but never gives its
+content.
 :meth:`EngineLoop.remaining_cost_usd`
 commits the budget room that it reads as a step with no cost, as a durable
 workflow step does, and a replay gives the committed room. An engine that
@@ -255,8 +260,8 @@ class EngineLoop:
             hidden_hashes: The run's hidden-path hashes, as in :attr:`RepoSeed.hidden_hashes`. Every candidate
                 box, file read and file listing of the loop leaves these paths out, and ``.optimize/exploits``
                 too; no call can turn that off. A tree must have no symlink that is, lies below or holds one of
-                these paths, and, when it holds one of them, no symlink that names an absolute path or leaves the
-                tree: the loop stops at the
+                these paths. When these hashes are not empty, a tree that no run step gave must also have no
+                symlink loop and no symlink that names an absolute path or leaves the tree. The loop stops at the
                 first read, listing or run of such a tree, or in :meth:`context` for a seed tree.
 
         Raises:
@@ -275,8 +280,16 @@ class EngineLoop:
         self._seed_hidden = dict(hidden_hashes or {})
         # The native runtime hides the exploit suite from the proposer (a scorer-only path), so the loop hides it
         # too, also when a run's hidden hashes leave it out.
-        self._hidden = {**path_hashes([HARDENING_EXPLOITS_DIR]), **self._seed_hidden}
+        exploits = path_hashes([HARDENING_EXPLOITS_DIR])
+        self._hidden = {**exploits, **self._seed_hidden}
+        # Only the run's own hidden paths make the walk strict: with the exploit suite alone, a repository's link
+        # loops and absolute links (a checked-in venv) would stop every run.
+        self._strict_links = bool(self._seed_hidden.keys() - exploits.keys())
         self._link_checked: set[str] = set()
+        # Trees that a run step gave, live or replayed, and trees that put_files wrote over one of them. A candidate
+        # box gets no hidden file and a run output with a hidden path is refused, so these trees hold no hidden
+        # content and are not walked. A replay adds the same trees in the same order as the live run.
+        self._run_outputs: set[str] = set()
         # The loop builds its sandbox, so the sandbox uses the run's step log and the loop's registry.
         self._sandbox = TreeSandbox(trees, run.step_log, candidates, metrics, registry=self._registry)
         self._model = model
@@ -443,7 +456,8 @@ class EngineLoop:
         This is no step: it commits nothing, opens no box and costs nothing. The tree id is the hash of the
         tree's content, so the same files over the same base give the same id, also on a resume. A hidden path
         cannot be written, replaced or removed: a tree id would otherwise confirm a guess of its content. The
-        loop does not enforce the editable, read-only and constrained paths of a :class:`RepoSeed`; the caller
+        refusal confirms that a guessed path is hidden, but it gives no hidden content. A tree over a base that a
+        run step gave is not walked for symlinks, as its base is not. The loop does not enforce the editable, read-only and constrained paths of a :class:`RepoSeed`; the caller
         enforces them where it accepts a candidate.
 
         Args:
@@ -455,13 +469,17 @@ class EngineLoop:
 
         Raises:
             ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part, or is both a file and a folder;
-                or when a write would change a hidden path, with the same message for each such path.
+                or when a write would change a hidden path. The message names only the written path, so it does not
+                name another hidden path.
             LookupError: When the run cannot see the base tree or one of its folders.
         """
         for path in files:
             if hashed_kind(self._hidden, path) is not None:
                 raise ValueError(f"path {path} may not be changed")
-        return self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
+        tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
+        if base_tree_id in self._run_outputs:
+            self._run_outputs.add(tree_id)
+        return tree_id
 
     def read_file(self, tree_id: str, path: str) -> bytes | None:
         """Read one file of a tree with no box, unless the loop hides it.
@@ -570,6 +588,8 @@ class EngineLoop:
 
         The box gets the tree without the loop's hidden paths and without ``.optimize/exploits``, so the command cannot
         read them; the tree after the command does not hold them either. Only the metric box gets the hidden files.
+        So the tree after the command holds no hidden content, and the loop does not walk its symlinks: a link
+        that the command makes, also one with a hidden path's name, can reach only files that the box wrote or saw.
 
         Args:
             tree_id: The tree the command starts from.
@@ -587,7 +607,7 @@ class EngineLoop:
             GrantDeniedError, BoxFailureError, TreeRejectedError: The box errors of :meth:`TreeSandbox.run`;
                 each commits a record, and a replay raises it again. ``TreeRejectedError`` also comes when the
                 command writes a hidden path: a tree id is a content hash, so that tree would confirm a guess
-                of the hidden content.
+                of the hidden content. The refusal confirms that the path is hidden, but gives no hidden content.
         """
         grant_list_id = self._grant_list_id(grants)
         with self._stops():
@@ -596,10 +616,10 @@ class EngineLoop:
                 record = self._replayed(log, "run", {"command": command}, grant_list_id=grant_list_id)
                 if record is not None:
                     body = record["body"]
-                    return CommandResult(body["exit_code"], body["stdout"], body["stderr"], body["timed_out"]), str(
-                        record["tree_id"]
-                    )
-                return self._box_step(
+                    after = str(record["tree_id"])
+                    self._run_outputs.add(after)
+                    return CommandResult(body["exit_code"], body["stdout"], body["stderr"], body["timed_out"]), after
+                result, after = self._box_step(
                     log,
                     "run",
                     command,
@@ -613,6 +633,8 @@ class EngineLoop:
                         refuse=self._holds_hidden,
                     ),
                 )
+                self._run_outputs.add(after)
+                return result, after
 
     def score(self, outputs_tree_id: str, metric_tree_id: str, command: str) -> float:
         """Run the metric in its own box over an outputs tree, as one ``command`` step.
@@ -745,7 +767,7 @@ class EngineLoop:
         return self._trees.put_tree(self._run.run_id, kept)
 
     def _check_links(self, tree_id: str) -> str:
-        """Stop the loop when a symlink of the tree is, lies below or holds a hidden path.
+        """Stop the loop when a symlink of a tree that can hold hidden content could show a hidden path.
 
         The hidden filter matches tree paths. A hidden path that is a symlink, or lies below a symlinked folder,
         loses only that path, and the link's target stays visible under its real path. The loop holds only path
@@ -754,7 +776,9 @@ class EngineLoop:
         ``_MAX_LINKED_PATHS`` paths reached through links, also stops the loop, since the walk cannot check all
         of them. So does a link that names an absolute path, or a path that leaves the tree, also one that comes
         back in: the loop does not know where a box puts the tree, so it cannot tell what such a link reaches.
-        A link loop and a link that leaves the tree stop the loop only in a tree that holds a hidden path.
+        When the run hides no path of its own, a link loop and a link that leaves the tree stop the loop only in
+        a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over one, holds
+        no hidden content, so the loop does not walk it.
 
         Args:
             tree_id: The tree.
@@ -766,7 +790,7 @@ class EngineLoop:
             LoopStoppedError: When the tree has such a link; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
         """
-        if tree_id in self._link_checked:
+        if tree_id in self._link_checked or tree_id in self._run_outputs:
             return tree_id
         folders: dict[tuple[str, ...], dict[str, TreeEntry]] = {}
         self._index_folders(tree_id, (), folders)
@@ -820,9 +844,10 @@ class EngineLoop:
     def _link_problem(self, folders: Mapping[tuple[str, ...], Mapping[str, TreeEntry]]) -> str | None:
         """Walk a tree through its links to folders, and find a link that could show a hidden path.
 
-        A link that leaves the tree, or a link loop, refuses the tree only when the walk reaches a hidden path.
-        A box over a tree with no hidden path has nothing to show, and a candidate command makes such links on
-        its own: ``python -m venv`` writes an absolute link on Linux.
+        A link that leaves the tree, or a link loop, hides from the walk what it reaches, and a hidden path can
+        lie behind it: ``a -> .`` reaches ``a/secret.txt``. So when the run hides paths of its own, such a link
+        refuses the tree. With the exploit suite alone, it refuses the tree only when the walk reaches a hidden
+        path, since repositories hold such links: ``python -m venv`` writes an absolute link on Linux.
 
         Args:
             folders: The entries by name of each folder, by path parts from the tree's root.
@@ -864,7 +889,7 @@ class EngineLoop:
                     pending.append((path, target, True, above | {target}))
                 elif entry.mode == "tree":
                     pending.append((path, (*real, name), linked, above | {(*real, name)}))
-        return problem if holds_hidden else None
+        return problem if holds_hidden or self._strict_links else None
 
     def _link_target(
         self, folders: Mapping[tuple[str, ...], Mapping[str, TreeEntry]], link: tuple[str, ...]
@@ -997,7 +1022,7 @@ class EngineLoop:
 
         Raises:
             ValueError: When a path below the folder is hidden. The message names only ``path``, as for a write
-                to a hidden path, so the engine cannot tell which hidden path exists below it.
+                to a hidden path, so it does not name the hidden path below it.
             LookupError: When the run cannot see a folder below the entry.
         """
         if any(hashed_kind(self._hidden, below) is not None for below in self._below(folder, path)):

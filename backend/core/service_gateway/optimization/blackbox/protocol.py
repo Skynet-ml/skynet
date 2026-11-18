@@ -238,9 +238,9 @@ class RepoSeed:
     """The run's repository seed tree and the rules for its paths, all repository-relative.
 
     A symlink of the tree must not be, lie below or hold a hidden path: the engine loop stops on such a tree,
-    because the link's target would stay visible under its real path. A tree that holds a hidden path must
-    also have no symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell
-    what it reaches. The engine loop does not enforce the editable, read-only and constrained paths; the caller
+    because the link's target would stay visible under its real path. When the seed hides paths, the tree must
+    also have no symlink loop and no symlink that names an absolute path or a path that leaves the tree, since
+    the loop cannot tell what it reaches. The engine loop does not enforce the editable, read-only and constrained paths; the caller
     enforces them where it accepts a candidate.
     """
 
@@ -248,9 +248,9 @@ class RepoSeed:
     editable_paths: tuple[str, ...] = ()
     readonly_paths: tuple[str, ...] = ()
     constrained_paths: tuple[str, ...] = ()
-    # The engine never learns the hidden names: each key is the SHA-256 of a normalized repository-relative
-    # path, built by harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case.
-    # The value is its kind. A folder key hides its whole subtree, so check a path with
+    # The engine never reads hidden content. It can confirm a guessed hidden name, because writes to it are
+    # refused. Each key is the SHA-256 of a normalized repository-relative path, built by
+    # harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case. The value is its kind. A folder key hides its whole subtree, so check a path with
     # harness_bridge.hashed_kind, never with ``path in hidden_hashes``.
     hidden_hashes: Mapping[str, str] = field(default_factory=dict)
 
