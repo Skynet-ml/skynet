@@ -75,6 +75,7 @@ from ...storage.models import (
 )
 from ...storage.remote import RemoteDBJobStore
 from ...storage.run_call_store import PostgresRunCallStore
+from ...storage.shard_map import ShardMap
 from ...storage.tree_purge import TreePurgeError, delete_unused_packs, mark_run_packs
 from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
@@ -1425,12 +1426,13 @@ def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(
     errors: list[BaseException] = []
     real_mark = mark_run_packs
 
-    def _mark_after_the_account_delete_waits(session: Session, run_ids: list[str]) -> None:
+    def _mark_after_the_account_delete_waits(session: Session, run_ids: list[str], shards: ShardMap) -> None:
         """Hold the run delete after its run rows until the account delete waits for one of its locks.
 
         Args:
             session: The run delete's open session.
             run_ids: The runs being deleted.
+            shards: The store's step log shard map.
 
         Raises:
             AssertionError: When the account delete never waits for a lock.
@@ -1441,7 +1443,7 @@ def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(
             if time.monotonic() > deadline:
                 raise AssertionError("the account delete never waited for a lock of the run delete")
             time.sleep(0.05)
-        real_mark(session, run_ids)
+        real_mark(session, run_ids, shards)
 
     def _delete_run() -> None:
         """Delete the run and keep any error."""
