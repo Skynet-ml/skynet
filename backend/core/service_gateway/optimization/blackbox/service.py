@@ -113,6 +113,7 @@ from .protocol import (
     candidate_key,
     is_metric_error,
     is_run_failed,
+    warn_once_without_feedback,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
 from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
@@ -606,7 +607,9 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
         if len(side_infos) == 1:
             feedback = entries[0][1]["feedback"]
         else:
-            feedback = "\n".join(f"Case {position}: {entry['feedback']}" for position, entry in entries)
+            feedback = "\n".join(
+                f"Case {position}: {entry['feedback']}" for position, entry in entries if entry["feedback"]
+            )
         merged[name] = BlackboxNamedScore(
             score=sum(entry["score"] for _, entry in entries) / (len(entries) + len(failed)),
             feedback=feedback[:MINIBATCH_FEEDBACK_CHAR_CAP],
@@ -1288,7 +1291,11 @@ def _run_job(
         counts.selection_split,
         counts.report_split,
     )
-    server = EvalServer(scorer, max_evals=job.budget.max_scorer_runs, on_eval=_progress_listener(progress_callback))
+    server = EvalServer(
+        warn_once_without_feedback(scorer),
+        max_evals=job.budget.max_scorer_runs,
+        on_eval=_progress_listener(progress_callback),
+    )
     engine_progress = _without_unscored(progress_callback)
     seed_candidate = job.seed_candidate
 

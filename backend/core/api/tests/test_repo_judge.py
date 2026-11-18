@@ -235,7 +235,10 @@ def _session(
     attached = budgets.attach_to_job(budget.id, USER, session_id, expected_revision=budget.revision)
     payload = {
         "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"], "commit": BASE}},
-        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case):\n    return 1.0, 'ok'\n"},
+        "scorer": {
+            "kind": "python",
+            "metric_code": "def score(repo_path, case):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+        },
         "cases": cases,
         "seed": 7,
         "judge": {"version": 1, "draft_id": draft, "base_commit": BASE, "floor_cents": floor},
@@ -1917,7 +1920,10 @@ def _open_request() -> repo_judge.BlackboxRunRequest:
     return repo_judge.BlackboxRunRequest.model_validate(
         {
             "recipe": "repo",
-            "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return 1.0, 'ok'\n"},
+            "scorer": {
+                "kind": "python",
+                "metric_code": "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+            },
             "target": {"kind": "repo", "repo": {"repository": "acme/app", "branch": "main", "editable_paths": ["src"]}},
             "strategy": {"mode": "single", "engine": "gepa"},
             "reflection_model_config": {"name": "openai/gpt-5"},

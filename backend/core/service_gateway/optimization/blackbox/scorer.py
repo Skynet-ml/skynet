@@ -48,33 +48,35 @@ class JobScorer(Protocol):
         ...
 
 
-def normalize_score(raw: Any) -> tuple[float | None, SideInfo]:
-    """Coerce a scorer's return value into ``(score, side_info)``, feedback required.
+def normalize_score(raw: Any, *, own_keys: bool = True) -> tuple[float | None, SideInfo]:
+    """Read a scorer's reply into ``(score, side_info)``.
 
-    See :func:`runner.normalize_score` for the accepted shapes. A result with
-    no score and the ``run_failed`` status is a failed ``[run]`` entry: it
-    keeps no score (SKY-751), but it still needs feedback, like every result.
+    A relay reply is a document that Skynet built from a checked metric
+    answer, so it may hold Skynet's own keys, such as ``status``; see
+    :func:`runner.normalize_score` for the answer form. A reply with no
+    score and the ``run_failed`` status is a failed ``[run]`` entry: it
+    keeps no score (SKY-751).
 
     Args:
-        raw: Whatever the scorer returned.
+        raw: The scorer's reply.
+        own_keys: Whether the reply comes from Skynet. ``False`` for a
+            metric answer itself, which gets the full check.
 
     Returns:
         The float score, or ``None`` for a failed ``[run]`` entry, and side
-        info carrying ``feedback`` and any named ``scores``.
+        info carrying ``feedback`` (``""`` when none) and any named ``scores``.
 
     Raises:
-        ServiceError: When the value has none of the accepted shapes or lacks feedback.
+        ServiceError: When the reply does not have the valid form.
     """
     try:
-        if isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
-            # A remote endpoint can send this shape too; the proposer learns
-            # only from the feedback, so it stays required here.
+        if own_keys and isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
             side_info = {key: value for key, value in raw.items() if key != "score"}
-            side_info["feedback"] = runner.feedback(side_info.get("feedback"), "The failed run")
+            side_info["feedback"] = runner.feedback(side_info.get("feedback"), "the failed run")
             if "scores" in side_info:
                 side_info["scores"] = runner.named_scores(side_info["scores"])
             return None, side_info
-        return runner.normalize_score(raw)
+        return runner.normalize_score(raw, own_keys=own_keys)
     except runner.ScorerError as exc:
         raise ServiceError(str(exc)) from exc
 
@@ -119,7 +121,7 @@ class RemoteScorer:
         """Create a remote scorer.
 
         Args:
-            url: Endpoint that returns a JSON number or ``{"score": ..., ...}``.
+            url: Endpoint that returns ``{"score": ..., "feedback": ..., "scores": ...}``.
             secret: Shared secret sent as a bearer token, if any.
             timeout_seconds: Per-request timeout.
             protected_route: Parent-issued capability for a protected evaluator endpoint.
@@ -164,7 +166,8 @@ class RemoteScorer:
             raise ServiceError(f"remote scorer request failed: {exc}") from exc
         except ValueError as exc:
             raise ServiceError("remote scorer returned a non-JSON body.") from exc
-        return normalize_score(body)
+        # The endpoint's body is the metric answer itself, so it gets the full check.
+        return normalize_score(body, own_keys=False)
 
     def close(self) -> None:
         """Nothing to release: each call is one stateless request."""

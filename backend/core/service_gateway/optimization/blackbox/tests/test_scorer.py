@@ -18,53 +18,64 @@ from ..scorer import RemoteScorer, build_scorer, load_scorer_from_code, normaliz
 from .mocks import FakeSandboxRuntime, FakeSandboxSession
 
 
-class _WithScore:
-    """Object exposing a numeric ``score`` and a ``feedback`` attribute."""
-
-    score = 0.25
-    feedback = "attr"
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ((0.5, {"feedback": "ok"}), (0.5, {"feedback": "ok"})),
-        ([0.5, "just text"], (0.5, {"feedback": "just text"})),
-        ({"score": 0.75, "feedback": "f", "note": "n"}, (0.75, {"feedback": "f", "note": "n"})),
-        (_WithScore(), (0.25, {"feedback": "attr"})),
+        ({"score": 0.75, "feedback": "f"}, (0.75, {"feedback": "f"})),
+        ({"score": 0.75}, (0.75, {"feedback": ""})),
+        ({"score": 0.75, "feedback": "f", "status": "x"}, (0.75, {"feedback": "f", "status": "x"})),
     ],
 )
-def test_normalize_score_accepts_documented_shapes(raw: Any, expected: tuple[float, dict[str, Any]]) -> None:
-    """Every documented return shape normalizes to ``(score, side_info)``.
+def test_normalize_score_reads_a_relay_reply_with_skynet_keys(raw: Any, expected: tuple[float, dict[str, Any]]) -> None:
+    """A relay reply is Skynet's document: it may hold Skynet's own keys, and no feedback is ``""``.
 
     Args:
-        raw: What the scorer returned.
+        raw: The relay reply.
         expected: The normalized pair.
     """
     assert normalize_score(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["0.5", None, {"feedback": "no score"}, (0.5, {}, "extra"), 0.5, {"score": 1}])
-def test_normalize_score_rejects_other_shapes(raw: Any) -> None:
-    """Anything else, including a score without feedback, is a scorer contract violation.
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ("0.5", "must be an object, not str"),
+        (None, "must be an object, not NoneType"),
+        (0.5, "must be an object, not a bare number"),
+        ((0.5, "f"), "must be an object, not a pair"),
+        ({"feedback": "no score"}, 'has no "score"'),
+        ({"score": "high"}, "must be a finite number"),
+    ],
+)
+def test_normalize_score_rejects_a_reply_that_is_not_an_answer_object(raw: Any, match: str) -> None:
+    """A reply that is not an object with a finite score is an error.
 
     Args:
-        raw: An unsupported return value.
+        raw: An unsupported reply.
+        match: A part of the expected message.
     """
-    with pytest.raises(ServiceError, match="must return feedback"):
+    with pytest.raises(ServiceError, match=match):
         normalize_score(raw)
 
 
+def test_normalize_score_checks_every_key_of_a_metric_answer() -> None:
+    """With ``own_keys=False`` the reply is the metric answer itself, so Skynet's keys are unknown keys too."""
+    with pytest.raises(ServiceError, match="unknown key `status`"):
+        normalize_score({"score": None, "feedback": "x", "status": "run_failed"}, own_keys=False)
+    with pytest.raises(ServiceError, match="Did you mean `feedback`"):
+        normalize_score({"score": 0.5, "feedbak": "x"}, own_keys=False)
+
+
 def test_normalize_score_keeps_no_score_for_a_failed_run_with_feedback() -> None:
-    """A failed ``[run]`` entry with feedback keeps no score and its feedback (SKY-751)."""
+    """The run-failed answer that Skynet builds passes the second read with its ``status`` (SKY-751, SKY-769)."""
     raw = {"score": None, "feedback": "Run failed: boom", "status": "run_failed"}
 
     assert normalize_score(raw) == (None, {"feedback": "Run failed: boom", "status": "run_failed"})
 
 
 @pytest.mark.parametrize("feedback", [None, "", "   "])
-def test_normalize_score_rejects_a_failed_run_without_feedback(feedback: str | None) -> None:
-    """A failed ``[run]`` entry needs feedback like any other result, also from a remote endpoint (SKY-751).
+def test_normalize_score_keeps_a_failed_run_without_feedback(feedback: str | None) -> None:
+    """A failed ``[run]`` entry with no feedback passes, with ``""`` as its feedback (SKY-769).
 
     Args:
         feedback: Missing or blank feedback.
@@ -73,13 +84,12 @@ def test_normalize_score_rejects_a_failed_run_without_feedback(feedback: str | N
     if feedback is not None:
         raw["feedback"] = feedback
 
-    with pytest.raises(ServiceError, match="must return feedback"):
-        normalize_score(raw)
+    assert normalize_score(raw) == (None, {"status": "run_failed", "feedback": ""})
 
 
 @pytest.mark.parametrize(
     "scores",
-    [{"acc": {"score": "bad", "feedback": "x"}}, {"acc": {"score": 0.5}}, "not a mapping"],
+    [{"acc": {"score": "bad", "feedback": "x"}}, {"acc": 0.5}, {"acc": (1, "ok")}, "not a mapping"],
 )
 def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_one(scores: Any) -> None:
     """A failed ``[run]`` entry validates its named scores like a scored result does (SKY-751).
@@ -91,13 +101,13 @@ def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_
     scored = {"score": 0.5, "feedback": "x", "scores": scores}
 
     for raw in (failed, scored):
-        with pytest.raises(ServiceError, match="must return feedback"):
+        with pytest.raises(ServiceError, match="score"):
             normalize_score(raw)
 
 
 def test_normalize_score_keeps_valid_named_scores_on_a_failed_run() -> None:
     """A failed ``[run]`` entry keeps its valid named scores in the normalized form (SKY-751)."""
-    raw = {"score": None, "status": "run_failed", "feedback": "x", "scores": {"acc": (1, "ok")}}
+    raw = {"score": None, "status": "run_failed", "feedback": "x", "scores": {"acc": {"score": 1, "feedback": "ok"}}}
 
     assert normalize_score(raw) == (
         None,
@@ -212,13 +222,16 @@ def test_remote_scorer_omits_auth_header_without_secret(monkeypatch: pytest.Monk
     [
         (_FakeResponse(None, status_error=True), "remote scorer request failed"),
         (_FakeResponse(None, non_json=True), "non-JSON body"),
-        (_FakeResponse({"feedback": "no score"}), "must return feedback"),
+        (_FakeResponse({"feedback": "no score"}), 'has no "score"'),
+        (_FakeResponse(0.5), "must be an object, not a bare number"),
+        (_FakeResponse({"score": 0.5, "predicted": 41}), "unknown key `predicted`"),
+        (_FakeResponse({"score": None, "status": "run_failed"}), "unknown key `status`"),
     ],
 )
 def test_remote_scorer_reports_bad_replies(
     monkeypatch: pytest.MonkeyPatch, response: _FakeResponse, message: str
 ) -> None:
-    """HTTP errors, non-JSON bodies and score-less bodies all become ``ServiceError``.
+    """HTTP errors, non-JSON bodies and wrong metric answers all become ``ServiceError``.
 
     Args:
         monkeypatch: Pytest fixture.
@@ -248,7 +261,8 @@ def test_build_scorer_dispatches_on_kind() -> None:
     """``build_scorer`` returns a remote adapter for ``remote`` and a sandboxed scorer otherwise."""
     remote = build_scorer(BlackboxScorer(kind="remote", url="https://scorer.example"))
     python = build_scorer(
-        BlackboxScorer(metric_code="def score(c, case=None): return 1.0, 'f'"), runtime=LocalSubprocessRuntime()
+        BlackboxScorer(metric_code="def score(c, case=None): return {'score': 1.0, 'feedback': 'f'}"),
+        runtime=LocalSubprocessRuntime(),
     )
 
     assert isinstance(remote, RemoteScorer)

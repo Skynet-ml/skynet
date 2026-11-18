@@ -400,8 +400,18 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     notes: list[str] = []
     if _returns_bare_number(scorer):
         issues.append(
-            f"The scorer function {scorer.name} returns a bare number. Return (score, feedback) "
-            "or {'score': ..., 'feedback': ...}, because the engines learn from the feedback."
+            f"The scorer function {scorer.name} returns a bare number. Return an object with score: "
+            "{'score': ..., 'feedback': ...}. The feedback is optional."
+        )
+    if _returns_pair(scorer):
+        issues.append(
+            f"The scorer function {scorer.name} returns a pair. Return an object with score: "
+            "{'score': ..., 'feedback': ...}. The feedback is optional."
+        )
+    if _gives_no_feedback(scorer):
+        notes.append(
+            f"The scorer function {scorer.name} returns no feedback, so the proposer sees only the scores. "
+            "Add 'feedback' to say what was wrong or missing."
         )
     if has_cases and args.vararg is None and positional < 2:
         # The runner calls a one-argument scorer without the case, so this runs.
@@ -448,9 +458,8 @@ def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.Async
 def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Tell whether ``function`` has a ``return`` of a number literal.
 
-    The first bare-number score stops the whole run, also on an error path,
-    so this catches the mistake before the paid run. Nested functions are
-    not checked.
+    A bare number is not a metric answer, also on an error path, so this
+    catches the mistake before the paid run. Nested functions are not checked.
 
     Args:
         function: The scorer function node.
@@ -467,6 +476,41 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
             if isinstance(value, ast.Constant) and isinstance(value.value, int | float):
                 return True
     return False
+
+
+def _returns_pair(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Tell whether ``function`` has a ``return`` of a two-item tuple literal.
+
+    A pair is not a metric answer (SKY-769). Nested functions are not checked.
+
+    Args:
+        function: The scorer function node.
+
+    Returns:
+        True when one of its own ``return`` statements gives a two-item tuple.
+    """
+    return any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2
+        for node in _own_nodes(function)
+    )
+
+
+def _gives_no_feedback(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Tell whether every ``return`` of ``function`` is a dict literal with no ``feedback`` key.
+
+    Any other return value, or a ``**`` unpacking, can hold feedback, so it
+    gives no note. Nested functions are not checked.
+
+    Args:
+        function: The scorer function node.
+
+    Returns:
+        True when the function returns only dict literals and none names ``feedback``.
+    """
+    values = [node.value for node in _own_nodes(function) if isinstance(node, ast.Return)]
+    if not values or not all(isinstance(value, ast.Dict) and None not in value.keys for value in values):
+        return False
+    return not any(isinstance(key, ast.Constant) and key.value == "feedback" for value in values for key in value.keys)
 
 
 def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
@@ -1373,8 +1417,9 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 description="Python that defines score(repo_path), score(repo_path, case) or "
                 "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
                 "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
-                "entry's run time in seconds, which Skynet measures outside the version's code. It returns a "
-                "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
+                "entry's run time in seconds, which Skynet measures outside the version's code. It returns one "
+                "object: {'score': float, 'feedback': str, 'scores': {name: {'score': float, 'feedback': str}}}. "
+                "Only score is required; feedback is recommended. Any other form or key is an error.",
             ),
         ],
         timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 60,
