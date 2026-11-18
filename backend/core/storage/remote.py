@@ -108,6 +108,25 @@ def _mark_resume_budget_stop(job: JobModel) -> None:
     job.recovery = None
 
 
+def _clear_sweep_recovery(session: Session, optimization_id: str, generation: int) -> None:
+    """Drop the recovery marker of a run that a requeue gave up, and commit.
+
+    A user's cancel or pause does not clear ``recovery``, and the UI hides the
+    status of a run whose marker says ``recovering`` (SKY-814).
+
+    Args:
+        session: The requeue's session.
+        optimization_id: The run that the requeue gave up.
+        generation: The generation that the requeue fenced; a run past it
+            belongs to another writer, which keeps its marker.
+    """
+    session.query(JobModel).filter(
+        JobModel.optimization_id == optimization_id,
+        JobModel.execution_generation == generation,
+    ).update({JobModel.recovery: None}, synchronize_session=False)
+    session.commit()
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1873,6 +1892,7 @@ class RemoteDBJobStore:
                         .one_or_none()
                     )
                     if job is None:
+                        _clear_sweep_recovery(session, optimization_id, fenced_generation)
                         return None
                 budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.pending_operations or budget.reserved_cents:
@@ -1920,6 +1940,7 @@ class RemoteDBJobStore:
                     # The user cancelled or paused the run while this sweep held it.
                     # The user wins: the cancel's status write ends the run, and its
                     # budget stays closed (SKY-814).
+                    _clear_sweep_recovery(session, optimization_id, int(job.execution_generation or 0))
                     return None
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
                     if budget.blocked_reason is None:
@@ -1935,6 +1956,23 @@ class RemoteDBJobStore:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
             held_generation = int(job.execution_generation or 0)
+            # SQLite has no row lock, so a user's cancel or pause can land after the
+            # reads above. This compare-and-set requeues only the row as it was read,
+            # so the user's status write is never lost (SKY-814). A user stop closed
+            # admission before its status write, so the budget stays closed.
+            claimed = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status == job.status,
+                    JobModel.execution_generation == held_generation,
+                )
+                .update({JobModel.execution_generation: held_generation + 1}, synchronize_session=False)
+            )
+            if not claimed:
+                session.rollback()
+                _clear_sweep_recovery(session, optimization_id, held_generation)
+                return None
             job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None

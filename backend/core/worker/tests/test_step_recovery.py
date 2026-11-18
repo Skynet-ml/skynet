@@ -21,7 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, text, update
+from sqlalchemy import create_engine, event, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -1117,10 +1117,10 @@ def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
         assert store.update_job_if_status(
             RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
         )
-        # A cancel keeps the generation, so only the status guard protects the run. The count
-        # write makes this sweep take the path that ends the run. A cancel that this sweep
-        # sees on its budget read stops the sweep earlier (SKY-814), so this cancel lands
-        # after that read.
+        # A cancel keeps the generation, so only the status guard protects the run. The
+        # requeue's compare-and-set now stops this sweep before the count write, which would
+        # take the path that ends the run. A cancel that this sweep sees on its budget read
+        # stops the sweep earlier (SKY-814), so this cancel lands after that read.
         _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
         return result
 
@@ -1131,6 +1131,144 @@ def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
 
     job = store.get_job(RUN)
     assert job["status"] == "cancelled"
+    assert job["execution_generation"] == held["generation"]
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+
+
+def test_a_cancel_after_the_last_read_is_not_lost_to_the_requeue_write(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel between the sweep's last read and its requeue write keeps the run cancelled (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the cancel wait; only SQLite has this window")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+    read = BudgetService.get
+    held: dict[str, int] = {}
+
+    def waived(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Note that this sweep waived the interrupted work, so its next budget read is the last one.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        held["waived"] = 1
+        return waive(self, *args, **kwargs)
+
+    def user_cancels(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Cancel the run as the cancel route does, after this sweep's last read and before its write.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The read's positional arguments.
+            **kwargs: The read's keyword arguments.
+
+        Returns:
+            The budget as this sweep read it, before the cancel.
+        """
+        result = read(self, *args, **kwargs)
+        if held.pop("waived", None) is None:
+            return result
+        job = store.get_job(RUN)
+        held["generation"] = int(job["execution_generation"])
+        self.stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
+        assert store.update_job_if_status(
+            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
+        )
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", waived)
+    monkeypatch.setattr(BudgetService, "get", user_cancels)
+
+    assert store.recover_orphaned_jobs() == 0
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    assert job["execution_generation"] == held["generation"]
+    assert _automatic_resumes(store) == 0
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+
+
+def test_a_cancel_right_after_the_fence_commit_clears_the_recovery_marker(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that lands just after the sweep commits its fence leaves no ``recovering`` marker (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    fence = BudgetService.fence_generation
+    held: dict[str, int] = {}
+
+    def fenced(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Note that this sweep fenced the run, so its next commit is the fence commit.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The fence's positional arguments.
+            **kwargs: The fence's keyword arguments.
+
+        Returns:
+            The fence's result.
+        """
+        held["fenced"] = 1
+        return fence(self, *args, **kwargs)
+
+    def user_cancels(session: Session) -> None:
+        """Cancel the run as the cancel route does, once the sweep's fence commit ends.
+
+        Args:
+            session: The session that committed.
+        """
+        if held.pop("fenced", None) is None:
+            return
+        job = store.get_job(RUN)
+        held["generation"] = int(job["execution_generation"])
+        BudgetService(engine=store.engine).stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
+        assert store.update_job_if_status(
+            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
+        )
+
+    monkeypatch.setattr(BudgetService, "fence_generation", fenced)
+    event.listen(Session, "after_commit", user_cancels)
+    try:
+        assert store.recover_orphaned_jobs() == 0
+    finally:
+        event.remove(Session, "after_commit", user_cancels)
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
     assert job["execution_generation"] == held["generation"]
     assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
@@ -1205,6 +1343,8 @@ def test_a_sweep_does_not_reopen_a_budget_that_the_user_closed_before_its_resume
 
     job = store.get_job(RUN)
     assert job["status"] == status
+    # The sweep fenced the run before the user's stop; it must not leave a recovering marker.
+    assert job["recovery"] is None
     assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
     assert (budget.state, budget.blocked_reason) == ("closed", reason)
