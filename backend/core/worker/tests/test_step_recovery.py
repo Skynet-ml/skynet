@@ -1080,10 +1080,106 @@ def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
     _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
     _kill(store)
     waive = BudgetService.waive_interrupted_work
-    held = {}
+    read = BudgetService.get
+    held: dict[str, int] = {}
+
+    def waived(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Note that this sweep waived the interrupted work, so its next budget read is the last one.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        held["waived"] = 1
+        return waive(self, *args, **kwargs)
 
     def user_cancels(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
-        """Cancel the run as the cancel route does, after this sweep fenced it.
+        """Cancel the run as the cancel route does, after this sweep's last budget read.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The read's positional arguments.
+            **kwargs: The read's keyword arguments.
+
+        Returns:
+            The budget as this sweep read it, before the cancel.
+        """
+        result = read(self, *args, **kwargs)
+        if held.pop("waived", None) is None:
+            return result
+        job = store.get_job(RUN)
+        held["generation"] = int(job["execution_generation"])
+        self.stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
+        assert store.update_job_if_status(
+            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
+        )
+        # A cancel keeps the generation, so only the status guard protects the run. The count
+        # write makes this sweep take the path that ends the run. A cancel that this sweep
+        # sees on its budget read stops the sweep earlier (SKY-814), so this cancel lands
+        # after that read.
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", waived)
+    monkeypatch.setattr(BudgetService, "get", user_cancels)
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == held["generation"]
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+
+
+# The cancel and pause routes stop admission first, then compare-and-set the status.
+USER_STOPS = [
+    ("user_cancelled", ("pending", "validating", "running"), "cancelled"),
+    ("user_paused", ("running",), "paused"),
+]
+
+
+@pytest.mark.parametrize("status_write", ["during_sweep", "after_sweep"])
+@pytest.mark.parametrize(("reason", "expected", "status"), USER_STOPS, ids=["cancel", "pause"])
+def test_a_sweep_does_not_reopen_a_budget_that_the_user_closed_before_its_resume(
+    store: StepJobStore,
+    step_logs: Any,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    status_write: str,
+    reason: str,
+    expected: tuple[str, ...],
+    status: str,
+) -> None:
+    """A user stop that closes admission after the sweep fenced the run, but before its resume, keeps it closed.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+        status_write: When the user's status write lands: inside the sweep, or after the sweep.
+        reason: The reason the user's route closes admission with.
+        expected: The statuses that the route's status write requires.
+        status: The status that the route writes.
+    """
+    if status_write == "during_sweep" and "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the status write wait for the sweep")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+
+    def user_stops(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Close admission as the user's route does, after this sweep fenced the run.
 
         Args:
             self: The budget service of this sweep.
@@ -1094,24 +1190,60 @@ def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
             The waiver's result.
         """
         result = waive(self, *args, **kwargs)
-        job = store.get_job(RUN)
-        held["generation"] = int(job["execution_generation"])
-        self.stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
-        assert store.update_job_if_status(
-            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
-        )
-        # A cancel keeps the generation, so only the status guard protects the run. The count
-        # write makes this sweep take the path that ends the run.
-        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        self.stop_admission(store.get_job(RUN)["execution_budget_id"], "owner", reason=reason)
+        if status_write == "during_sweep":
+            assert store.update_job_if_status(RUN, expected, status=status, completed_at=datetime.now(UTC))
         return result
 
-    monkeypatch.setattr(BudgetService, "waive_interrupted_work", user_cancels)
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", user_stops)
 
+    assert store.recover_orphaned_jobs() == 0
+    if status_write == "after_sweep":
+        assert store.update_job_if_status(RUN, expected, status=status, completed_at=datetime.now(UTC))
+    monkeypatch.undo()
     store.recover_orphaned_jobs()
 
     job = store.get_job(RUN)
-    assert job["status"] == "cancelled"
-    assert job["execution_generation"] == held["generation"]
+    assert job["status"] == status
     assert store.take_ended_orphans() == []
-    # The budget is not checked here: the sweep's resume_admission reopens a budget that
-    # the user's cancel closed. That bug is older than SKY-801 (SKY-814).
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", reason)
+
+
+@pytest.mark.parametrize("claimed", [False, True], ids=["requeued", "requeued-and-claimed"])
+def test_a_cancel_after_the_requeue_commit_closes_the_budget(
+    store: StepJobStore, step_logs: Any, claimed: bool
+) -> None:
+    """A cancel through the route after the sweep requeued the run ends it and closes its budget for good.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        claimed: Whether a worker claimed the requeued run before the cancel.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["status"] == "pending"
+    if claimed:
+        _claim(store, "pod-b")
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    # The run's payload names no owner, so only an admin reaches it, as in the API tests.
+    admin = AuthenticatedUser(username="alice", role="admin", groups=("skynet-admins",))
+    app.dependency_overrides[get_authenticated_user] = lambda: admin
+
+    response = TestClient(app, raise_server_exceptions=False).post(f"/optimizations/{RUN}/cancel")
+
+    assert response.status_code == 200
+    # A later sweep sees the cancelled run and its closed budget, and leaves both alone.
+    _kill(store)
+    store.recover_orphaned_jobs()
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")

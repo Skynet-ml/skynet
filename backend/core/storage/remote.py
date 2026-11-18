@@ -24,7 +24,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
 from .. import run_log
-from ..billing.budgets import BudgetConflictError, BudgetError, BudgetInFlightError, BudgetService
+from ..billing.budgets import (
+    USER_STOP_REASONS,
+    BudgetConflictError,
+    BudgetError,
+    BudgetInFlightError,
+    BudgetService,
+)
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_TAGGING,
@@ -1905,8 +1911,16 @@ class RemoteDBJobStore:
                     budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.state == "closed" and budget.available_cents > 0:
                     budget = budget_service.resume_admission(
-                        job.execution_budget_id, job.username, expected_generation=job.execution_budget_generation
+                        job.execution_budget_id,
+                        job.username,
+                        expected_generation=job.execution_budget_generation,
+                        automatic=automatic,
                     )
+                if automatic and budget.blocked_reason in USER_STOP_REASONS:
+                    # The user cancelled or paused the run while this sweep held it.
+                    # The user wins: the cancel's status write ends the run, and its
+                    # budget stays closed (SKY-814).
+                    return None
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
                     if budget.blocked_reason is None:
                         budget_service.stop_admission(
