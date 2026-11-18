@@ -18,8 +18,10 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import ColumnElement, Engine, case, create_engine, func, or_, text
-from sqlalchemy.engine import make_url
+from sqlalchemy import ColumnElement, Engine, TextClause, and_, case, create_engine, func, or_, text, true
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
@@ -55,6 +57,7 @@ from .log_quota import LogQuotaGate
 from .migrate import stamp_if_unadopted, upgrade_if_adopted
 from .models import (
     EMBEDDING_DIM,
+    PROGRESS_EVENT_KEY_SQL,
     AgentStagedDatasetModel,
     AgentStepModel,
     Base,
@@ -74,6 +77,7 @@ from .models import (
     UserQuotaAuditModel,
     UserQuotaOverrideModel,
     UserStorageQuotaOverrideModel,
+    progress_event_key,
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
@@ -208,6 +212,49 @@ def _end_user_stopped_requeue(
 logger = logging.getLogger(__name__)
 
 
+def _add_progress_event(
+    session: Session,
+    optimization_id: str,
+    message: str | None,
+    metrics: dict[str, Any],
+    timestamp: datetime,
+) -> bool:
+    """Add one progress event row in the session's transaction.
+
+    An event with a string of 1 to ``MAX_PROGRESS_EVENT_KEY_LENGTH``
+    characters under ``PROGRESS_EVENT_KEY`` goes through
+    ``ON CONFLICT DO NOTHING`` on the unique key index, so a replayed event
+    whose key the job already stores adds no row (SKY-808). The index also
+    holds back a concurrent copy until the first one commits.
+
+    Args:
+        session: Open database session.
+        optimization_id: ID of the job emitting the event.
+        message: Human-readable event marker, or ``None``.
+        metrics: Metric payload to persist with the event.
+        timestamp: Timestamp assigned to the event row.
+
+    Returns:
+        Whether a row was added.
+    """
+    if progress_event_key(metrics) is None:
+        session.add(
+            ProgressEventModel(optimization_id=optimization_id, timestamp=timestamp, event=message, metrics=metrics)
+        )
+        return True
+    dialect = session.get_bind().dialect.name
+    key_sql, where_sql = PROGRESS_EVENT_KEY_SQL[dialect]
+    insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
+    statement = (
+        insert(ProgressEventModel)
+        .values(optimization_id=optimization_id, timestamp=timestamp, event=message, metrics=metrics)
+        .on_conflict_do_nothing(
+            index_elements=[ProgressEventModel.optimization_id, text(key_sql)], index_where=text(where_sql)
+        )
+    )
+    return cast(CursorResult[Any], session.execute(statement)).rowcount == 1
+
+
 def _usage_wait_start(recovery: dict[str, Any]) -> datetime | None:
     """Read when a run's current usage wait window started.
 
@@ -266,6 +313,11 @@ def _track_usage_wait(recovery: dict[str, Any], budget: Any) -> dict[str, Any] |
 
 
 MAX_PROGRESS_EVENTS = 5000
+# The normal trim keeps keyed rows, so a replay cannot add them again (SKY-808).
+# A user subprocess can set any key, so this multiple of the cap still bounds
+# all rows of a job: past it the trim deletes the oldest rows, keyed or not.
+# A replay of a key deleted here adds it again, acceptable only past this hard cap.
+PROGRESS_EVENTS_HARD_CAP_FACTOR = 2
 ORPHANED_RUN_MESSAGE = "The run stopped because its worker went away. Resume, retry or clone it to continue."
 ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
     "The run stopped because its worker went away, and it cannot continue by itself. Retry or clone it."
@@ -3334,6 +3386,9 @@ class RemoteDBJobStore:
     ) -> bool:
         """Publish progress only while its source worker owns the active generation.
 
+        A keyed event that the job already stores adds no row; it still
+        refreshes the latest metrics.
+
         Args:
             optimization_id: Job receiving the event.
             message: Event name.
@@ -3364,11 +3419,7 @@ class RemoteDBJobStore:
             target = jobs.get(optimization_id)
             if target is None or target.status not in {"running", "validating"}:
                 return False
-            session.add(
-                ProgressEventModel(
-                    optimization_id=optimization_id, timestamp=datetime.now(UTC), event=message, metrics=metrics
-                )
-            )
+            _add_progress_event(session, optimization_id, message, metrics, datetime.now(UTC))
             target.latest_metrics = {**(target.latest_metrics or {}), **metrics}
             session.commit()
         finally:
@@ -3444,6 +3495,8 @@ class RemoteDBJobStore:
     ) -> bool:
         """Insert one progress event if the parent job still exists.
 
+        A keyed event whose key the job already stores adds no row.
+
         Args:
             optimization_id: ID of the job emitting the event.
             message: Human-readable event marker, or ``None``.
@@ -3458,16 +3511,9 @@ class RemoteDBJobStore:
             exists = session.query(JobModel.optimization_id).filter(JobModel.optimization_id == optimization_id).first()
             if exists is None:
                 return False
-            session.add(
-                ProgressEventModel(
-                    optimization_id=optimization_id,
-                    timestamp=timestamp,
-                    event=message,
-                    metrics=metrics,
-                )
-            )
+            inserted = _add_progress_event(session, optimization_id, message, metrics, timestamp)
             session.commit()
-            return True
+            return inserted
         finally:
             session.close()
 
@@ -3541,6 +3587,12 @@ class RemoteDBJobStore:
     def _trim_progress_events(self, optimization_id: str) -> None:
         """Delete the oldest excess progress events for a job in one batch.
 
+        The trim deletes only unkeyed rows down to the cap: a replay of a
+        deleted key would add it again (SKY-808). It deletes a structural row
+        only for the excess that all non-structural rows, keyed ones included,
+        cannot cover. Past the hard cap of ``PROGRESS_EVENTS_HARD_CAP_FACTOR``
+        times the cap, it also deletes the oldest keyed rows.
+
         Args:
             optimization_id: ID of the job whose retained progress rows should
                 be brought back down to the configured cap.
@@ -3550,30 +3602,70 @@ class RemoteDBJobStore:
             event_count = (
                 session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id == optimization_id).count()
             )
-            excess = event_count - self._progress_events_cap
-            if excess <= 0 or self._is_auto_run(session, optimization_id):
+            cap = self._progress_events_cap
+            if event_count <= cap or self._is_auto_run(session, optimization_id):
                 return
 
-            # One ordered DELETE replaces the prior count→select→top-up→delete
-            # round trips. Structural events sort last (flag 1) so they are
-            # evicted only when non-structural rows alone cannot cover the
-            # excess — identical preference to the old two-phase selection.
-            structural_last = case(
-                (ProgressEventModel.event.in_(STRUCTURAL_PROGRESS_EVENTS), 1),
-                else_=0,
+            _, keyed_sql = PROGRESS_EVENT_KEY_SQL[session.get_bind().dialect.name]
+            keyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 1")
+            unkeyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 0")
+            non_structural = or_(
+                ProgressEventModel.event.is_(None), ProgressEventModel.event.not_in(STRUCTURAL_PROGRESS_EVENTS)
             )
-            old_ids = (
-                session.query(ProgressEventModel.id)
-                .filter(ProgressEventModel.optimization_id == optimization_id)
-                .order_by(structural_last.asc(), ProgressEventModel.timestamp.asc(), ProgressEventModel.id.asc())
-                .limit(excess)
+            event_count -= self._delete_oldest_progress_events(
+                session, optimization_id, event_count - cap, and_(unkeyed, non_structural)
             )
-            session.query(ProgressEventModel).filter(ProgressEventModel.id.in_(old_ids.scalar_subquery())).delete(
-                synchronize_session=False
-            )
+            if event_count > cap:
+                # Kept keyed non-structural rows still count against the excess, so a
+                # structural row goes only when non-structural rows cannot cover it.
+                keyed_non_structural = (
+                    session.query(ProgressEventModel)
+                    .filter(ProgressEventModel.optimization_id == optimization_id, keyed, non_structural)
+                    .count()
+                )
+                structural_excess = event_count - cap - keyed_non_structural
+                if structural_excess > 0:
+                    event_count -= self._delete_oldest_progress_events(
+                        session, optimization_id, structural_excess, unkeyed
+                    )
+            hard_excess = event_count - cap * PROGRESS_EVENTS_HARD_CAP_FACTOR
+            if hard_excess > 0:
+                self._delete_oldest_progress_events(session, optimization_id, hard_excess, true())
             session.commit()
         finally:
             session.close()
+
+    @staticmethod
+    def _delete_oldest_progress_events(
+        session: Session, optimization_id: str, limit: int, condition: ColumnElement[bool] | TextClause
+    ) -> int:
+        """Delete up to ``limit`` of a job's oldest progress rows that match a condition.
+
+        Args:
+            session: Open database session.
+            optimization_id: ID of the job whose rows are trimmed.
+            limit: Largest number of rows to delete.
+            condition: Extra filter on the rows that the trim may delete.
+
+        Returns:
+            The number of deleted rows.
+        """
+        # Structural rows sort last, so a filter that admits them deletes non-structural rows first.
+        structural_last = case(
+            (ProgressEventModel.event.in_(STRUCTURAL_PROGRESS_EVENTS), 1),
+            else_=0,
+        )
+        old_ids = (
+            session.query(ProgressEventModel.id)
+            .filter(ProgressEventModel.optimization_id == optimization_id, condition)
+            .order_by(structural_last.asc(), ProgressEventModel.timestamp.asc(), ProgressEventModel.id.asc())
+            .limit(limit)
+        )
+        return (
+            session.query(ProgressEventModel)
+            .filter(ProgressEventModel.id.in_(old_ids.scalar_subquery()))
+            .delete(synchronize_session=False)
+        )
 
     @staticmethod
     def _is_auto_run(session: Session, optimization_id: str) -> bool:

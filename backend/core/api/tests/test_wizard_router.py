@@ -283,6 +283,7 @@ def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
         ),
         ("version = 1\n[paths]\neditable = []\n", "paths", "editable", "editable is empty"),
         ("version = 2\n", None, "version", "version 2 is not supported"),
+        ('version = 1\n[paths]\neditable = ["src"]\n', None, None, "Add a [run] section or a [target.<name>] stage"),
         ("[paths\n", None, None, "is not valid TOML"),
     ],
 )

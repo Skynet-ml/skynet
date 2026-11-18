@@ -98,7 +98,7 @@ The repository can have a `serve.py` file with `def serve(input)`. Skynet uses i
 
 Add secrets, such as API keys that your code needs. Each secret reaches your code and your scorer as an environment variable with the same name. The coding agent cannot see them. Skynet hides their values in the logs.
 
-The repository's `optimize.toml` can set a `[run] entry`, the function or command that runs each version on one case, and its `timeout` in seconds. That code gets no secrets. If it calls an API, declare the API as a `[services.<name>]` table and add the name to `[run] services`. Write each secret in the table's `headers` as `${NAME}`. The code sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox and sends it only to the host of that service. If the secret does not allow that host, the run does not start.
+The repository's `optimize.toml` needs a `[run] entry` or a `[target.<name>]` stage. The `[run] entry` is the function or command that runs each version on one case, and `[run] timeout` sets its time limit in seconds. That code gets no secrets. If it calls an API, declare the API as a `[services.<name>]` table and add the name to `[run] services`. Write each secret in the table's `headers` as `${NAME}`. The code sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox and sends it only to the host of that service. If the secret does not allow that host, the run does not start.
 
 ### Check
 

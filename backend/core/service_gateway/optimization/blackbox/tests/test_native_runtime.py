@@ -1555,6 +1555,7 @@ def test_shinka_runner_files_carry_the_pinned_requirements() -> None:
         "shinka_runner.py",
         "shinka_bundle.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "shinka_requirements.txt",
     }
@@ -1780,6 +1781,7 @@ def test_autosaddler_runner_files_bundle_the_scenario_plugin() -> None:
     assert set(files) == {
         "autosaddler_runner.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "autosaddler_plugin/LICENSE",
         "autosaddler_plugin/NOTICE.md",
@@ -1801,6 +1803,7 @@ def test_autosaddler_runner_files_bundle_the_scenario_plugin() -> None:
         "native_runner.py",
         "native_engines.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "upstream_prompts/meta_harness/SKILL.md",
         "upstream_prompts/meta_harness/LICENSE",
@@ -2458,6 +2461,151 @@ def _child_server(mailbox: _RecordingMailbox, tmp_path: Path, max_evals: int = 2
     return native_runner.ProgressEvalServer(task, mailbox, config, tmp_path)
 
 
+def _run_fails_on(fails: dict[str, set[str]]) -> _RecordingMailbox:
+    """Build a mailbox that fails the [run] entry on chosen cases of chosen versions.
+
+    Args:
+        fails: Case ids whose [run] entry fails, keyed by version text.
+
+    Returns:
+        A recording mailbox that scores every other case by vowel density.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Give negative infinity with a ``run_failed`` status, as the parent sends a failed [run] entry.
+
+        Args:
+            candidate: The version to score.
+            example: The case to score, or ``None`` for a whole sweep.
+            **kwargs: Other mailbox options, not used.
+
+        Returns:
+            Negative infinity and the run-failed status for a failed case, else
+            the vowel density and empty side info.
+        """
+        if example is not None and example["id"] in fails.get(candidate, set()):
+            return float("-inf"), {"status": native_engines.RUN_FAILED_STATUS, "feedback": "Run failed: boom"}
+        return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    return mailbox
+
+
+def test_a_sweep_with_a_failed_run_case_has_no_score(tmp_path: Path) -> None:
+    """A sweep with a failed [run] case gets no fill, so a lower, fully scored version ranks above it (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+
+    crashed, crashed_info = server.evaluate_examples("aeio", split="train")
+    scored, _ = server.evaluate_examples("axyz", split="train")
+    for candidate, score in (("aeio", crashed), ("axyz", scored)):
+        server.log_progress(score, candidate=candidate)
+
+    assert crashed == float("-inf")
+    assert crashed_info["scores"] == {"a": 1.0, "b": float("-inf")}
+    assert crashed_info[native_engines.UNSCORED_CASES_KEY] == ["a", "b"]
+    assert scored == 0.25
+    assert native_engines.best_aggregate_candidate(server) == ("axyz", 0.25)
+
+
+def test_native_fill_unscored_gives_a_failed_run_version_no_score() -> None:
+    """A version with a failed [run] case is negative infinity on every case; a scorer's own status stays (SKY-751)."""
+    inf = float("-inf")
+    failed = {"status": native_engines.RUN_FAILED_STATUS}
+
+    assert native_engines.fill_unscored(["x", "x", "y"], [0.9, inf, 0.3], [{}, failed, {}]) == [inf, inf, 0.3]
+    assert native_engines.fill_unscored(["x", "x"], [0.4, 0.6], [failed, {}]) == [0.4, 0.6]
+
+
+def test_meta_harness_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path) -> None:
+    """Meta-Harness ranks a failed [run] version below a lower scored one, and its files show null (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "crashed", "aeio")
+    engine._benchmark(server, "ok", "axyz")
+
+    assert engine._best() == ("axyz", 0.25)
+    assert engine.incumbent(server) == ("axyz", 0.25)
+    record = json.loads((engine.logs_dir / "results" / "crashed" / "val.json").read_text(encoding="utf-8"))
+    assert record["avg_val"] is None
+    assert record["scores"] == {"a": 1.0, "b": None}
+
+
+@pytest.mark.parametrize(
+    ("seed", "proposed", "expected"),
+    [("axyz", "aeio", (None, None, "no score")), ("aeio", "axyz", (0.25, None, "0.2500"))],
+)
+def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: str,
+    proposed: str,
+    expected: tuple[float | None, float | None, str],
+) -> None:
+    """The evolution summary shows "no score" for a failed [run] version and no delta from a failed seed (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's work and log folders.
+        monkeypatch: Replaces the proposer CLI.
+        seed: The seed's text; ``aeio`` fails its [run] entry on case ``b``.
+        proposed: The proposed version's text.
+        expected: The row's ``avg_val``, ``delta`` and ``outcome``.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.work_dir = tmp_path / "work"
+    engine.results = {}
+    engine.session_ids = []
+    engine.cost_usd = 0.0
+    engine.repo = None
+    engine.model = "fake"
+    engine.candidates_per_iter = 2
+    engine.logs_dir.mkdir()
+    (engine.work_dir / "agents").mkdir(parents=True)
+    engine._benchmark(server, "seed", seed)
+    monkeypatch.setattr(engine, "_task_prompt", lambda iteration: "")
+    monkeypatch.setattr(engine, "skill", lambda: "")
+
+    def propose(*args: Any, **kwargs: Any) -> native_engines.ProposerOutcome:
+        """Write one proposed candidate, as the agent would.
+
+        Args:
+            *args: The prompt.
+            **kwargs: The CLI options.
+
+        Returns:
+            A clean session outcome.
+        """
+        (engine.work_dir / "agents" / "proposed.txt").write_text(proposed, encoding="utf-8")
+        pending = {"candidates": [{"name": "proposed", "file": "agents/proposed.txt"}]}
+        (engine.logs_dir / "pending_eval.json").write_text(json.dumps(pending), encoding="utf-8")
+        return native_engines.ProposerOutcome("s", 0.0, False, "", False, False)
+
+    monkeypatch.setattr(native_engines, "run_proposer", propose)
+
+    engine._iteration(server, 1, None)
+
+    lines = (engine.logs_dir / "evolution_summary.jsonl").read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[-1])
+    assert (row["avg_val"], row["delta"], row["outcome"]) == expected
+    assert "inf" not in lines[-1].lower()
+    assert engine._leader() == ("axyz", 0.25)
+
+
 def test_native_fill_unscored_fills_per_version() -> None:
     """A null case takes its own version's scored mean; a version with no scored case stays negative infinity."""
     inf = float("-inf")
@@ -2518,6 +2666,59 @@ def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_pat
     assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", "metric_error", None]
     assert [sample.get("score") for sample in result.metadata["samples"]] == [None, None, 0.25]
     assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
+
+
+def _best_of_n_repo(patches: list[str]) -> Any:
+    """Build a Best-of-N repository engine whose agent returns ``patches`` in order.
+
+    Args:
+        patches: The version text each sample's agent session returns.
+
+    Returns:
+        The engine, with no target score and no token budget.
+    """
+    drawn = iter(patches)
+    engine = native_engines.BestOfNRepoEngine.__new__(native_engines.BestOfNRepoEngine)
+    engine.proposer = lambda *_: {"candidate": next(drawn)}  # type: ignore[assignment]
+    engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
+    engine.proposer.session_ids = []  # type: ignore[attr-defined]
+    engine.max_token_cost = None
+    engine.stop_at_score = None
+    engine.samples = []
+    engine.best = None
+    return engine
+
+
+def test_best_of_n_repo_keeps_the_seed_when_every_sample_fails_its_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every sample with a failed [run] case leaves the seed with no score, not a failed run (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+        caplog: Captures the engine's run log.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}, "axyz": {"a"}}), tmp_path, max_evals=4)
+    engine = _best_of_n_repo(["aeio", "axyz"])
+
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        result = engine.run(replace(server.task, seed_candidate="base"), server)
+
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["run_failed", "run_failed"]
+    assert (result.best_candidate, result.best_score) == ("base", None)
+    assert native_engines.NO_VERSION_SCORED_MESSAGE in caplog.messages
+
+
+def test_best_of_n_repo_fails_when_no_sample_was_scored(tmp_path: Path) -> None:
+    """A budget too small for one sample stops the run before any scoring, so it still fails.
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_run_fails_on({}), tmp_path, max_evals=1)
+
+    with pytest.raises(RuntimeError, match="before any repository version"):
+        _best_of_n_repo(["aeio"]).run(replace(server.task, seed_candidate="base"), server)
 
 
 def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:

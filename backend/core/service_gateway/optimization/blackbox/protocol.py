@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from gepa.oa.budget import BudgetExhausted
 
@@ -24,7 +26,9 @@ from ..timing import STAGE_TRAINING
 from .runner import FEEDBACK_REQUIRED
 
 if TYPE_CHECKING:
+    from ....sandbox.grants import Grant
     from .native_runtime import NativeOptions
+    from .sandbox_contract import CommandResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +40,19 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
+# SKY-751: the status of a case whose ``[run]`` entry failed (crash, non-zero
+# exit, timeout). The runner never invents a score, so that case has no score
+# too; it keeps its own status so the final run can report the failure text.
+RUN_FAILED_STATUS = "run_failed"
 STATUS_KEY = "status"
 # SKY-367: the pinned upstream engines need a number for every case, and they
 # use negative infinity as their own "no score" value. A single case scored
 # alone gets it; a batch fills each null case with its version's mean over the
 # scored cases (see :func:`fill_unscored`), so the null cases do not change the
 # mean upstream ranks by. Only a version with no scored case is UNSCORED.
+# SKY-751: a failed [run] entry is the version's fault, not the metric's, so it
+# gets no fill: that version is UNSCORED on every case of the batch and ranks
+# below every fully scored version.
 UNSCORED = float("-inf")
 
 
@@ -57,25 +68,37 @@ def engine_score(score: float | None) -> float:
     return UNSCORED if score is None else score
 
 
-def fill_unscored(candidates: list[Candidate], scores: list[float | None]) -> list[float]:
+def fill_unscored(
+    candidates: list[Candidate], scores: list[float | None], side_infos: list[SideInfo] | None = None
+) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
     Args:
         candidates: The version scored on each case, aligned with ``scores``.
-        scores: Each case's score, ``None`` after a metric error.
+        scores: Each case's score, ``None`` after a metric error or a failed ``[run]`` entry.
+        side_infos: Each case's side info, when known; it tells a failed ``[run]`` entry apart.
 
     Returns:
         A number for every case: the score, the mean of the same version's
         scored cases for a null case, or :data:`UNSCORED` when the version
-        has no scored case in the batch.
+        has no scored case in the batch or a failed ``[run]`` entry.
     """
+    infos = side_infos if side_infos is not None else [{} for _ in candidates]
+    # A scorer's own run_failed status with a real score is not a failed [run] entry.
+    failed = {
+        candidate_key(candidate)
+        for candidate, score, info in zip(candidates, scores, infos, strict=True)
+        if score is None and is_run_failed(info)
+    }
     scored: dict[str, list[float]] = {}
     for candidate, score in zip(candidates, scores, strict=True):
         if score is not None:
             scored.setdefault(candidate_key(candidate), []).append(score)
     filled: list[float] = []
     for candidate, score in zip(candidates, scores, strict=True):
-        if score is None:
+        if candidate_key(candidate) in failed:
+            score = UNSCORED
+        elif score is None:
             values = scored.get(candidate_key(candidate))
             score = sum(values) / len(values) if values else UNSCORED
         filled.append(score)
@@ -107,7 +130,9 @@ def score_batch(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(lambda pair: score_one(*pair), pairs))
-    filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+    filled = fill_unscored(
+        [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+    )
     return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
 
@@ -121,6 +146,18 @@ def is_metric_error(side_info: SideInfo) -> bool:
         Whether its ``status`` is :data:`METRIC_ERROR`.
     """
     return side_info.get(STATUS_KEY) == METRIC_ERROR
+
+
+def is_run_failed(side_info: SideInfo) -> bool:
+    """Return True when the side info marks a case whose ``[run]`` entry failed (SKY-751).
+
+    Args:
+        side_info: What the scorer returned for one case.
+
+    Returns:
+        Whether its ``status`` is :data:`RUN_FAILED_STATUS`.
+    """
+    return isinstance(side_info, dict) and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -212,6 +249,9 @@ class CandidateRecord:
     # Set once the metric or scorer crashed on any case: the version then has
     # no score at all, so it can never be the best or be published.
     metric_error: str | None = None
+    # SKY-751: whether any case of the version had a failed [run] entry, not
+    # only a metric crash. ``metric_error`` then holds the first run failure's text.
+    run_failed: bool = False
 
     @property
     def mean_score(self) -> float | None:
@@ -219,6 +259,187 @@ class CandidateRecord:
         if self.metric_error is not None:
             return None
         return self.total / self.count
+
+
+class ToolDefinition(TypedDict):
+    """One tool that the model may call, in the engine loop's flat form.
+
+    ``input_schema`` is the JSON Schema of the call's arguments. :func:`openai_tools` gives the OpenAI form.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class ToolCall(TypedDict):
+    """One tool call that a model reply asks for, in the engine loop's flat form.
+
+    ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object. The engine gives
+    the model an error tool result for raw text, so the model can correct its call.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] | str
+
+
+def openai_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+    """Convert flat tool definitions to the OpenAI ``tools`` form that LiteLLM takes.
+
+    Args:
+        tools: The flat tool definitions.
+
+    Returns:
+        One ``{"type": "function", "function": {"name", "description", "parameters"}}`` item for each tool.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
+    """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
+
+    Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
+    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
+    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+
+    Args:
+        message: The assistant message, for example ``response.choices[0].message.model_dump()``.
+
+    Returns:
+        The flat tool calls in their order; empty when the message asks for none.
+    """
+    calls: list[ToolCall] = []
+    for call in message.get("tool_calls") or []:
+        function = call["function"]
+        raw = function.get("arguments")
+        if raw is None or raw == "":
+            raw = "{}"
+        if isinstance(raw, dict):
+            # Some clients parse the arguments already.
+            arguments: dict[str, Any] | str = raw
+        elif not isinstance(raw, str):
+            arguments = json.dumps(raw, default=str)
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                parsed = None
+            arguments = parsed if isinstance(parsed, dict) else raw
+        calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
+    return calls
+
+
+@dataclass(frozen=True)
+class ModelReply:
+    """One model response: its text, the tool calls that it asks for, and its cost in cents."""
+
+    text: str
+    cost_cents: Decimal
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RepoSeed:
+    """The run's repository seed tree and the rules for its paths, all repository-relative.
+
+    A symlink of the tree must not be at a hidden path, and no hidden path may be reached through a symlinked
+    folder: the engine loop stops on such a tree, because the link's target would stay visible under its real
+    path. Links inside a hidden folder count only when the folder is reached through a link, since no box gets
+    the folder itself. When the seed hides paths of its own, the tree must also have no other symlink loop and no
+    other symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell what it
+    reaches. A candidate may change a constrained path, but only within the rules of the constraints file
+    (``optimize.toml``). The engine loop does not enforce the editable, read-only and constrained paths; the
+    caller enforces them where it accepts a candidate.
+    """
+
+    tree_id: str
+    editable_paths: tuple[str, ...] = ()
+    readonly_paths: tuple[str, ...] = ()
+    constrained_paths: tuple[str, ...] = ()
+    # The engine never reads hidden content. It can confirm a guessed hidden name, because writes to it are
+    # refused. Each key is the SHA-256 of a normalized repository-relative path, built by
+    # harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case. The value is its
+    # kind. A folder key hides its whole subtree, so check a path with
+    # harness_bridge.hashed_kind, never with ``path in hidden_hashes``.
+    hidden_hashes: Mapping[str, str] = field(default_factory=dict)
+
+
+class CallModel(Protocol):
+    """Call the model once, as one step of the worker engine loop."""
+
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None = None) -> ModelReply:
+        """Call the model with a prompt and optional tool definitions.
+
+        Args:
+            prompt: The prompt text or messages.
+            tools: The tool definitions that the model may call; ``None`` for no tools.
+
+        Returns:
+            The reply, its tool calls and its cost in cents.
+        """
+        ...
+
+
+class RunCommand(Protocol):
+    """Run one command in a box over a tree, as one step of the worker engine loop."""
+
+    def __call__(self, tree_id: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+        """Run a command over a tree.
+
+        Args:
+            tree_id: The tree the command starts from.
+            command: The shell command.
+            grants: The box's network grants; empty means no network.
+
+        Returns:
+            The command's result and the tree id after it.
+        """
+        ...
+
+
+class PutFiles(Protocol):
+    """Write files over a tree with no box."""
+
+    def __call__(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+        """Write files over a base tree.
+
+        Args:
+            files: The file bytes by ``/``-separated path.
+            base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+
+        Returns:
+            The new tree id.
+        """
+        ...
+
+
+class ListFiles(Protocol):
+    """List the files under one folder of a tree with no box."""
+
+    def __call__(self, tree_id: str, path: str = "") -> list[str] | None:
+        """List the files below a folder.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated folder; ``""`` is the tree's root.
+
+        Returns:
+            The sorted file paths, or ``None`` when the folder is missing or hidden.
+        """
+        ...
 
 
 @dataclass
@@ -245,6 +466,13 @@ class EngineContext:
     # Job-level progress sink. Engines that can narrate their run (GEPA via
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
+    # The worker engine loop (SKY-719) sets these; each model call and command is one step there.
+    call_model: CallModel | None = None
+    run_command: RunCommand | None = None
+    put_files: PutFiles | None = None
+    read_file: Callable[[str, str], bytes | None] | None = None
+    list_files: ListFiles | None = None
+    repo_seed: RepoSeed | None = None
 
 
 class Engine(Protocol):
@@ -441,8 +669,12 @@ class EvalServer:
         # A nested server (an Auto lane) scores through the upstream server,
         # which hands back UNSCORED or a batch-filled number; the status marks
         # it as no score.
-        if score is None or is_metric_error(side_info):
-            return None, {**side_info, STATUS_KEY: METRIC_ERROR}
+        # A scorer's own ``run_failed`` status never drops a score; only a
+        # failed [run] entry, which sends no score, keeps it (SKY-751). In an
+        # Auto lane that entry arrives as UNSCORED, not None.
+        failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
+        if score is None or is_metric_error(side_info) or failed_run:
+            return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
         return score, side_info
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
@@ -450,24 +682,36 @@ class EvalServer:
 
         Args:
             candidate: The scored version.
-            score: Its score on the case just evaluated, or ``None`` after a metric error.
+            score: Its score on the case just evaluated, or ``None`` after a
+                metric error or a failed ``[run]`` entry (``status: run_failed``).
             side_info: What the scorer said about it on that case.
         """
         key = candidate_key(candidate)
         record = self._records.get(key)
         failed = score is None or is_metric_error(side_info)
-        error = str(side_info.get("error") or METRIC_ERROR) if failed else None
+        failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        # A failed [run] entry carries its failure text as feedback, not as an error.
+        fallback = (side_info.get("feedback") or RUN_FAILED_STATUS) if failed_run else METRIC_ERROR
+        error = str(side_info.get("error") or fallback) if failed else None
         crashed = failed or "error" in side_info
         # A failed case adds nothing to the total: the version's mean is None.
         value = 0.0 if failed or score is None else float(score)
         if record is None:
-            self._records[key] = CandidateRecord(candidate, value, 1, self._root.used, side_info, crashed, error)
+            self._records[key] = CandidateRecord(
+                candidate, value, 1, self._root.used, side_info, crashed, error, failed_run
+            )
             return
         record.total += value
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
-        record.metric_error = record.metric_error or error
+        # Any failed [run] case marks the version, whatever failed first, so
+        # the error text then is the run failure's, to match its status.
+        if failed_run and not record.run_failed:
+            record.metric_error = error
+            record.run_failed = True
+        elif record.metric_error is None:
+            record.metric_error = error
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -499,6 +743,19 @@ class EvalServer:
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.metric_error
+
+    def run_failed(self, candidate: Candidate) -> bool:
+        """Return whether any case of ``candidate`` had a failed ``[run]`` entry (SKY-751).
+
+        Args:
+            candidate: The version to look up.
+
+        Returns:
+            ``True`` when a ``[run]`` entry of the version failed on any case,
+            also after a metric crash, else ``False`` (also when it was not scored).
+        """
+        record = self._records.get(candidate_key(candidate))
+        return record is not None and record.run_failed
 
     @property
     def best_candidate(self) -> Candidate | None:
