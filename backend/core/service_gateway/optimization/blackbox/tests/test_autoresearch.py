@@ -10,6 +10,7 @@ import dataclasses
 import errno
 import functools
 import json
+import logging
 import math
 import re
 from collections.abc import Callable
@@ -1451,21 +1452,15 @@ def test_an_over_cap_lab_file_never_loads_for_evaluate_or_the_carried_lab(
 
 
 @pytest.mark.parametrize(
-    ("arguments", "kept"),
+    "arguments",
     [
-        (
-            '{"file": ' + "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "]" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "}",
-            True,
-        ),
-        (
-            {
-                "file": "work/c1.txt",
-                "pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH), 0),
-            },
-            False,
-        ),
-        ({"file": "work/c1.txt", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}, False),
-        ('{"file": "' + "x" * loop_tools.MAX_ARGUMENT_CHARS + '"}', False),
+        '{"file": ' + "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "]" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "}",
+        {
+            "file": "work/c1.txt",
+            "pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH), 0),
+        },
+        {"file": "work/c1.txt", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS},
+        '{"file": "' + "x" * loop_tools.MAX_ARGUMENT_CHARS + '"}',
     ],
     ids=["deep-text", "deep-mapping", "long-mapping", "long-text"],
 )
@@ -1476,11 +1471,10 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
     trees: TreeStore,
     tmp_path: Path,
     arguments: Any,
-    kept: bool,
 ) -> None:
     """Refused evaluate arguments get the bound error, not the path error, and the transcript holds ``{}``.
 
-    Text in the length bound and valid as UTF-8 stays in the transcript as the model sent it.
+    No case keeps its text: each breaks the length or the depth bound, as text or as a mapping.
 
     Args:
         owner: Alice and her budget generation.
@@ -1489,7 +1483,6 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
         arguments: The arguments past a bound, as JSON text or as a mapping.
-        kept: Whether the transcript keeps the arguments as they are.
     """
     bad: Turn = lambda n: {"id": "bad", "name": "evaluate", "arguments": arguments}  # noqa: E731
     model = _Researcher([_WRITE, bad, _evaluate()])
@@ -1501,7 +1494,7 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
     assert error.startswith("Send the evaluate tool arguments as JSON")
     assert f"nested at most {loop_tools.MAX_ARGUMENT_DEPTH} levels" in error
     transcript = model.calls[2][-2]["tool_calls"][0]["function"]["arguments"]
-    assert transcript == (arguments if kept else "{}")
+    assert transcript == "{}"
     assert (result.best_candidate, result.total_evals) == ("seedx", 2)
 
 
@@ -1992,3 +1985,131 @@ def test_arguments_with_a_raw_lone_surrogate_get_the_bound_error_and_an_empty_tr
     assert json.loads(output)["error"].startswith("Send the bash tool arguments as JSON")
     assert tree == "t"
     assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
+
+
+def test_each_scored_case_and_version_writes_the_native_run_log_events(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full sweep logs ``case.scored`` for each case and ``candidate.scored`` once, as the native runner does.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    with caplog.at_level(logging.INFO, logger=ar_mod.logger.name):
+        _run(loop)
+
+    logged = [
+        (record.run_log["event"], record.run_log["candidate"], record.run_log["case"], record.run_log["fields"])
+        for record in caplog.records
+        if record.name == ar_mod.logger.name
+    ]
+    assert logged == [
+        ("case.scored", "0", "0", {"score": 5.0, "total": 2}),
+        ("case.scored", "0", "1", {"score": 5.0, "total": 2}),
+        ("candidate.scored", "0", None, {"score": 5.0, "total_evals": 2}),
+        ("case.scored", "1", "0", {"score": 6.0, "total": 2}),
+        ("case.scored", "1", "1", {"score": 6.0, "total": 2}),
+        ("candidate.scored", "1", None, {"score": 6.0, "total_evals": 4}),
+    ]
+
+
+def test_the_result_names_the_upstream_source_and_revision(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The result metadata names the AutoResearch source and version, as the native runtime's result does.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    result = _run(loop)
+
+    assert result.metadata["upstream_source"] == f"skynet:autoresearch@{native_engines.AUTORESEARCH_VERSION}"
+    assert result.metadata["upstream_revision"] == native_engines.AUTORESEARCH_VERSION
+
+
+def test_an_unknown_tool_with_over_long_arguments_gets_the_misuse_error() -> None:
+    """The tool name is checked before the bounds, so an unknown tool never gets the bash bound error."""
+    call = {"id": "x", "name": "edit", "arguments": "x" * (loop_tools.MAX_ARGUMENT_CHARS + 1)}
+
+    def run_command(tree: str, command: str, env: Any) -> Any:
+        """Fail the test: a refused call must not run.
+
+        Args:
+            tree: Not used.
+            command: Not used.
+            env: Not used.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the command ran")
+
+    output, tree = loop_tools.run_bash(SimpleNamespace(run_command=run_command), "t", call, misuse="misuse")
+
+    assert json.loads(output) == {"error": "misuse"}
+    assert tree == "t"
+
+
+def test_text_arguments_past_the_depth_bound_get_an_empty_transcript() -> None:
+    """Text arguments get the same depth bound as mapping arguments in the transcript; at the bound they stay."""
+    at_bound = {"pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH - 1), 0)}
+    past_bound = json.dumps({"pad": [at_bound["pad"]]})
+    past_parser = "[" * 100_000 + "]" * 100_000
+
+    def sent(arguments: Any) -> Any:
+        """Return the transcript arguments of a bash call.
+
+        Args:
+            arguments: The call's arguments.
+
+        Returns:
+            The arguments as the transcript holds them.
+        """
+        return loop_tools.openai_call({"id": "c", "name": "bash", "arguments": arguments})["function"]["arguments"]
+
+    assert sent(json.dumps(at_bound)) == json.dumps(at_bound)
+    assert sent(past_bound) == "{}"
+    assert sent(past_parser) == "{}"
+    assert sent({"pad": [at_bound["pad"]]}) == "{}"
+    assert sent("not json") == "not json"
+
+
+def test_an_evaluation_of_the_lab_parent_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """``file=".."`` names the folder above the lab, so the evaluate tool refuses it and spends nothing.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    parent: Turn = lambda n: {"id": "p", "name": "evaluate", "arguments": {"file": ".."}}  # noqa: E731
+    model = _Researcher([parent])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
+        _run(loop)
+
+    assert boxes.opened == 0
+    assert _tool_result(model, 1) == {"error": "Give `file` as a path inside the lab."}

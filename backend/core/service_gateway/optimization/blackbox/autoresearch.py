@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import posixpath
 import shutil
@@ -35,6 +36,7 @@ from gepa.oa.budget import BudgetExhausted
 from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
+from .... import run_log
 from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxProposer
 from ....worker.engine_loop import ModelCallFailedError
@@ -51,6 +53,7 @@ from .protocol import (
     candidate_key,
 )
 from .runner import side_info_json_default
+from .upstream import AUTORESEARCH_SOURCE
 
 BASH_TOOL = {
     "name": "bash",
@@ -103,6 +106,8 @@ _MAX_CARRY_BYTES = 4 * native_engines.MAX_CANDIDATE_BYTES
 # hundreds of typical ones, keep the lab tree with ``work/`` well under that limit. The worker's own archive, the
 # frontier and the ids stay complete; only the copy in the lab tree is cut.
 _MAX_ARCHIVE_BYTES = 8 * native_engines.MAX_CANDIDATE_BYTES
+
+logger = logging.getLogger(__name__)
 
 
 class _UpstreamServer:
@@ -244,6 +249,20 @@ class _UpstreamServer:
             raw.append(score)
             infos[eid] = info
             if trial is not None and math.isfinite(score):
+                # The run log gets the same events as from the native runner and the Meta-Harness port.
+                logger.info(
+                    "Candidate %s scored %.4f on case %s",
+                    trial,
+                    score,
+                    eid,
+                    extra=run_log.event_extra(
+                        source="engine",
+                        event="case.scored",
+                        fields={"score": score, "total": len(ids)},
+                        candidate=trial,
+                        case=eid,
+                    ),
+                )
                 emit_case_scored(self._progress, trial=trial, example_id=eid, score=score, total=len(ids))
         if trial is not None:
             self._sweeps[candidate_key(candidate)] = [
@@ -289,6 +308,18 @@ class _UpstreamServer:
             sweep = self._sweeps.pop(candidate_key(candidate), [])
             # A version with a crashed case shows no score (SKY-350, SKY-367).
             shown = None if self.crashed(candidate) else val_score
+            logger.info(
+                "Candidate %s scored %s after %s evaluations",
+                entry["candidate_id"],
+                "no score (a case crashed)" if shown is None else f"{shown:.4f}",
+                self._server.used,
+                extra=run_log.event_extra(
+                    source="engine",
+                    event="candidate.scored",
+                    fields={"score": shown, "total_evals": self._server.used},
+                    candidate=entry["candidate_id"],
+                ),
+            )
             emit_candidate(
                 self._progress,
                 candidate_id=str(entry["candidate_id"]),
@@ -557,8 +588,6 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         # Only a missing key, null or an empty list asks for a full sweep: any other value that is not a list of
         # strings, such as "" or 0, gets the error and spends nothing.
         example_ids = arguments.get("example_ids")
-        if example_ids == []:
-            example_ids = None
         path = posixpath.normpath(file) if isinstance(file, str) and file else ""
         if not path or path == ".." or path.startswith(("../", "/")):
             return json.dumps({"error": "Give `file` as a path inside the lab."}, ensure_ascii=False)
@@ -708,5 +737,9 @@ class AutoResearchEngine:
             best_candidate=upstream.best_candidate,
             best_score=None if crashed else upstream.best_score,
             total_evals=server.used,
-            metadata=dict(upstream.metadata),
+            metadata={
+                **upstream.metadata,
+                "upstream_source": AUTORESEARCH_SOURCE,
+                "upstream_revision": native_engines.AUTORESEARCH_VERSION,
+            },
         )

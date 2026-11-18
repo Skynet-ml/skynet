@@ -167,7 +167,7 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     # ``run_bash`` refuses arguments past the depth or length bound or not valid UTF-8, so the transcript holds an
     # empty object in their place.
     if isinstance(value, str):
-        if _refused_text(value):
+        if _refused_text(value) or _too_deep_text(value):
             value = _REFUSED_ARGUMENTS
     else:
         # Sorted keys give the same text for a live reply and for its replay from the step log. ``_parse`` measures
@@ -183,6 +183,24 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {"name": call.get("name"), "arguments": value},
     }
+
+
+def _too_deep_text(text: str) -> bool:
+    """Tell whether JSON text nests deeper than ``MAX_ARGUMENT_DEPTH``.
+
+    Args:
+        text: The arguments as JSON text, inside the length bound.
+
+    Returns:
+        ``True`` when the parsed value is too deep or too deep for the parser; ``False`` for text that is not JSON.
+    """
+    try:
+        return _too_deep(json.loads(text))
+    # JSON nested past the parser's recursion limit is past the depth bound too.
+    except RecursionError:
+        return True
+    except ValueError:
+        return False
 
 
 def _too_deep(value: Any) -> bool:
@@ -330,13 +348,16 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
         The tool result as JSON text, and the tree after the command.
     """
     assert ctx.run_command is not None
+    # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop. The name comes
+    # first, so a call to an unknown tool never gets the bash bound error.
+    if call.get("name") != "bash":
+        return json.dumps({"error": misuse}, ensure_ascii=False), tree
     refused = refused_arguments(call, "bash")
     if refused is not None:
         return refused, tree
     parsed, _ = _parse(call)
     command = parsed.get("command") if isinstance(parsed, dict) else None
-    if call.get("name") != "bash" or not isinstance(command, str):
-        # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
+    if not isinstance(command, str):
         return json.dumps({"error": misuse}, ensure_ascii=False), tree
     # ``_parse`` refuses a lone surrogate first; ``surrogatepass`` keeps this measure from ever raising.
     if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
