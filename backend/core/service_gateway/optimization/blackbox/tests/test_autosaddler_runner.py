@@ -556,15 +556,12 @@ def test_runner_git_refuses_a_bare_repository_layout(
 ) -> None:
     """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
 
-    The runner ships into the box alone, so its copy of the flag must match ``repo_tree``.
-
     Args:
         planted_bare_repo: Fixture.
         monkeypatch: Pytest fixture.
     """
-    assert autosaddler_runner._SAFE_GIT == repo_tree.SAFE_GIT
     repo, _ = planted_bare_repo
     with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
         autosaddler_runner._git_output(repo, "rev-parse", "--git-dir")
-    monkeypatch.setattr(autosaddler_runner, "_SAFE_GIT", ())
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     assert autosaddler_runner._git_output(repo, "rev-parse", "--git-dir").strip() == "."
