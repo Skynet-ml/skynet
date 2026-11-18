@@ -690,7 +690,11 @@ def test_a_constrained_agent_edit_outside_the_paths_is_an_illegal_action(tmp_pat
 
 
 def test_rule_blocker_writes_a_rule_block_run_event(capsys: pytest.CaptureFixture[str]) -> None:
-    """Frame a path-rule block as a structured log line the parent forwards as ``rule.block``."""
+    """Frame a path-rule block as a structured log line the parent forwards as ``rule.block``.
+
+    Args:
+        capsys: Captures the line the blocker prints.
+    """
     shinka_runner.rule_blocker(shinka_runner.EvaluatorMailbox("testnonce", 1.0))("Cannot change 'app.py'.")
 
     lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
@@ -702,7 +706,11 @@ def test_rule_blocker_writes_a_rule_block_run_event(capsys: pytest.CaptureFixtur
 
 
 def test_refusal_logger_writes_a_proposer_refusal_run_event(capsys: pytest.CaptureFixture[str]) -> None:
-    """Frame a hidden-path refusal as a run-log line with the tool and kind only."""
+    """Frame a hidden-path refusal as a run-log line with the tool and kind only.
+
+    Args:
+        capsys: Captures the line the logger prints.
+    """
     shinka_runner.refusal_logger(shinka_runner.EvaluatorMailbox("testnonce", 1.0))({"tool": "read", "kind": "config"})
 
     lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
