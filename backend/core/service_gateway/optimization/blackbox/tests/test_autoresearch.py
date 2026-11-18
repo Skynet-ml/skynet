@@ -225,6 +225,23 @@ def _run(
     return AutoResearchEngine().run(task, loop.server(_score, max_evals=max_evals), ctx)
 
 
+def _options(
+    *, max_token_cost: float | None = None, max_tool_calls: int = 100, max_no_eval_seconds: float | None = None
+) -> SimpleNamespace:
+    """Build the native options that the engine reads.
+
+    Args:
+        max_token_cost: The proposer spend cap in dollars, or ``None``.
+        max_tool_calls: The tool calls of one session.
+        max_no_eval_seconds: The no-evaluation watchdog, or ``None``.
+
+    Returns:
+        The options.
+    """
+    proposer = SimpleNamespace(ralph=True, max_tool_calls=max_tool_calls, max_no_eval_seconds=max_no_eval_seconds)
+    return SimpleNamespace(model="m", max_token_cost=max_token_cost, proposer=proposer)
+
+
 def _lab(tmp_path: Path, generation: int = 1) -> Path:
     """Return the local lab folder of a loop.
 
@@ -373,10 +390,10 @@ def test_the_climb_view_gets_events_only_for_full_sweeps(
     ]
 
 
-def test_a_spent_budget_answers_the_marker_and_ends_the_run(
+def test_a_refused_sweep_answers_the_marker_and_a_round_with_no_evaluation_ends_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With one scorer call left for two cases, round two's evaluation answers the marker and the run ends."""
+    """With one scorer call left for two cases, round two's sweep gets the marker; the round scored nothing."""
     model = _Researcher()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -384,7 +401,23 @@ def test_a_spent_budget_answers_the_marker_and_ends_the_run(
 
     assert (result.best_candidate, result.best_score) == ("seedx", 5.0)
     assert result.metadata["rounds"] == 2
+    assert result.total_evals == 2
     assert _tool_result(model, 5) == {"error": native_engines.BUDGET_EXHAUSTED_MARKER}
+
+
+def test_a_partly_refused_sweep_lets_another_round_spend_the_rest(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one's last sweep is refused with one unit left; round two starts and spends it on a probe."""
+    model = _Researcher([_WRITE, _evaluate(), _evaluate(example_ids=["0"]), _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=4, stop_at_score=None)
+
+    assert _tool_result(model, 4) == {"error": native_engines.BUDGET_EXHAUSTED_MARKER}
+    assert result.metadata["rounds"] == 2
+    assert result.total_evals == 4
+    assert len(model.calls) == 10
 
 
 def test_a_task_without_cases_scores_the_whole_candidate(
@@ -421,7 +454,9 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
 ) -> None:
     """A call to an unknown tool, or an evaluation of a path outside the lab, goes back to the model as an error."""
     edit: Turn = lambda n: {"id": "x", "name": "edit", "arguments": "{}"}  # noqa: E731
-    model = _Researcher([edit, _evaluate(), lambda n: {"id": "y", "name": "evaluate", "arguments": {"file": "../x"}}])
+    model = _Researcher(
+        [edit, _evaluate(), lambda n: {"id": "y", "name": "evaluate", "arguments": {"file": "a/../../x"}}]
+    )
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
     with pytest.raises(RuntimeError, match="without scoring any candidate"):
@@ -434,15 +469,58 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
     assert "inside the lab" in _tool_result(model, 3)["error"]
 
 
+def test_a_lab_file_whose_name_starts_with_two_dots_is_scored(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Only a path that leaves the lab is refused; ``..notes.txt`` is a file inside it."""
+    notes: Turn = lambda n: {"id": "z", "name": "evaluate", "arguments": {"file": "..notes.txt"}}  # noqa: E731
+    model = _Researcher([_bash("printf %s seedx > ..notes.txt"), notes])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=2)
+
+    assert _tool_result(model, 2)["average_score"] == 5.0
+    assert (result.best_candidate, result.best_score) == ("seedx", 5.0)
+
+
+def test_a_session_that_only_runs_commands_stops_at_the_tool_call_cap(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no cost cap, an agent that never evaluates stops before its fourth tool call; the command never runs."""
+    model = _Researcher([], rest=_bash("true"))
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(RuntimeError, match="without scoring any candidate"):
+        _run(loop, native_options=_options(max_tool_calls=3))
+
+    assert len(model.calls) == 4
+    assert boxes.opened == 3
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 3 + ["model"]
+
+
+def test_the_no_evaluation_watchdog_counts_model_turns_since_the_budget_last_changed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Sixty seconds is two turns: each round gets two turns after its sweep, then stops, and the run goes on."""
+    model = _Researcher(rest=_bash("true"))
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, native_options=_options(max_no_eval_seconds=60))
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert result.metadata["rounds"] == 2
+    assert len(model.calls) == 8
+    round_steps = ["model", "command", "model", "model", "command", "model", "command"]
+    assert [kind for _, kind, _ in _steps(engine)] == round_steps * 2
+
+
 def test_the_proposer_cost_cap_stops_the_session(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """With a cap of two cents, the round runs its two replies' tools and then asks the model no more."""
     model = _Researcher(cost="1")
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
-    options = SimpleNamespace(model="m", max_token_cost=0.02, proposer=SimpleNamespace(ralph=True))
-
-    result = _run(loop, native_options=options)
+    result = _run(loop, native_options=_options(max_token_cost=0.02))
 
     assert result.best_candidate == "seedx"
     assert boxes.opened == 1
@@ -465,7 +543,9 @@ def test_a_repository_run_is_refused(
 def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path) -> None:
     """The lab has no ``eval.sh``, so the brief tells the agent to use the ``evaluate`` tool."""
     config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(tmp_path), engine_config={"model": ""})
-    worker = ar_mod._WorkerAutoResearch(config, EngineContext(reflection_lm=str, run_dir=str(tmp_path)))
+    worker = ar_mod._WorkerAutoResearch(
+        config, EngineContext(reflection_lm=str, run_dir=str(tmp_path)), max_tool_calls=100
+    )
     worker.example_ids = ["0", "1"]
 
     brief = worker._brief()

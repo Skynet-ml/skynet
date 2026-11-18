@@ -13,9 +13,10 @@ upstream HTTP handler does. The lab is a tree that the engine builds again from
 its local files before each round, so the frontier can lose a file. After a
 round, only the agent's ``work/`` and ``notebook.md`` come back from the tree.
 
-The session watchdogs count model turns, not seconds, so a resume stops a
-session at the same place. A run outside the worker engine loop still uses the
-native box runtime until the SKY-728 cutover; the loop path never calls it.
+The session watchdogs count model turns and tool calls, not seconds, so a
+resume stops a session at the same place. A run outside the worker engine loop
+still uses the native box runtime until the SKY-728 cutover; the loop path
+never calls it.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
 from ....exceptions import ServiceError
+from ....models.blackbox import BlackboxProposer
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from . import native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
@@ -80,6 +82,9 @@ EVALUATE_TOOL = {
 # The native session gets 90 seconds to write up after it spends its round's allowance. A clock would stop
 # a resumed session at another place, so the worker counts model turns.
 _WRITE_UP_TURNS = 3
+# ``max_no_eval_seconds`` becomes model turns with no budget change, at a nominal 30 seconds for one model reply
+# and its tool calls. The native watchdog reads a clock; a turn count stops a resumed session at the same place.
+_SECONDS_PER_TURN = 30
 
 
 class _Budget:
@@ -323,15 +328,22 @@ def _arguments(call: dict[str, Any]) -> dict[str, Any] | None:
 class _WorkerAutoResearch(native_engines.AutoResearchEngine):
     """The native AutoResearch loop, with each round's session as a tool loop on the engine context."""
 
-    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext) -> None:
+    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext, *, max_tool_calls: int) -> None:
         """Build the native engine and bind the context.
 
         Args:
             config: The native engine's config.
             ctx: The engine loop's context, with its model, command and tree calls.
+            max_tool_calls: The tool calls one round's session may start.
         """
         super().__init__(config)
         self._ctx = ctx
+        self._max_tool_calls = max_tool_calls
+        self._no_eval_turns = (
+            None
+            if self.max_no_eval_seconds is None
+            else max(1, math.ceil(self.max_no_eval_seconds / _SECONDS_PER_TURN))
+        )
 
     def _layout(self, task: UpstreamTask, server: Any) -> None:
         """Create the native lab, without ``eval.sh``: the ``evaluate`` tool takes its place.
@@ -374,8 +386,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
     def _session(self, server: Any, directive: str, *, max_budget_usd: float | None) -> native_engines.ProposerOutcome:
         """Run one round's session as a tool loop: one step per model reply and per command.
 
-        The cost cap counts only committed costs and the write-up grace counts model turns, so a resume makes the
-        same choices.
+        The cost cap counts only committed costs, and the write-up grace, the no-evaluation watchdog and the
+        tool-call cap count model turns and tool calls, so a resume makes the same choices. As in the native
+        harness, the session stops before the tool call past the cap; the run then goes on to the native
+        stop rules.
 
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
@@ -403,9 +417,18 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         exhausted = False
         killed = False
         write_up = 0
+        tool_calls = 0
+        idle_turns = 0
+        last_used = start_used
         while True:
             if max_budget_usd is not None and float(spent) / 100 >= max_budget_usd:
                 exhausted = True
+                break
+            if server.budget.used != last_used:
+                last_used = server.budget.used
+                idle_turns = 0
+            if self._no_eval_turns is not None and idle_turns >= self._no_eval_turns:
+                killed = True
                 break
             if quota is not None and server.budget.used - start_used >= quota:
                 if write_up >= _WRITE_UP_TURNS:
@@ -413,6 +436,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                     break
                 write_up += 1
             reply = ctx.call_model(messages, [BASH_TOOL, EVALUATE_TOOL])
+            idle_turns += 1
             spent += reply.cost_cents
             text = reply.text
             messages.append(
@@ -425,12 +449,18 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             if not reply.tool_calls:
                 break
             for call in reply.tool_calls:
+                tool_calls += 1
+                if tool_calls > self._max_tool_calls:
+                    killed = True
+                    break
                 if call.get("name") == EVALUATE_TOOL["name"]:
                     output, out_of_budget = self._evaluate(server, tree, call)
                     exhausted = exhausted or out_of_budget
                 else:
                     output, tree = self._exec(tree, call)
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
+            if killed:
+                break
         self._pull(tree)
         return native_engines.ProposerOutcome(
             session_id=f"round{self.round}",
@@ -481,14 +511,14 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             call: The tool call.
 
         Returns:
-            The tool result as JSON text, and whether the budget is spent.
+            The tool result as JSON text, and whether no scorer call is left.
         """
         assert self._ctx.read_file is not None
         arguments = _arguments(call) or {}
         file = arguments.get("file")
         example_ids = arguments.get("example_ids") or None
         path = posixpath.normpath(file) if isinstance(file, str) and file else ""
-        if not path or path.startswith(("/", "..")):
+        if not path or path == ".." or path.startswith(("../", "/")):
             return json.dumps({"error": "Give `file` as a path inside the lab."}), False
         if example_ids is not None and not (
             isinstance(example_ids, list) and all(isinstance(eid, str) for eid in example_ids)
@@ -501,9 +531,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             candidate = data.decode("utf-8")
         except UnicodeDecodeError:
             return json.dumps({"error": f"{path} is not UTF-8 text."}), False
-        exhausted = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER}), True
+        marker = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER})
         if server.budget.remaining <= 0:
-            return exhausted
+            return marker, True
         budget = server.budget
         try:
             if not server.task.has_dataset:
@@ -525,7 +555,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                     "num_evaluated": info.get("num_evaluated", 1),
                 }
         except BudgetExhausted:
-            return exhausted
+            # A sweep larger than the units left is refused, but the run ends only when none is left: the next
+            # round can spend the rest on probes, as in the native run.
+            return marker, server.budget.remaining <= 0
         body["budget"] = {"used": budget.used, "remaining": budget.remaining}
         return json.dumps(body), False
 
@@ -580,9 +612,12 @@ class AutoResearchEngine:
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
         options = ctx.native_options
-        engine_config: dict[str, Any] = {"model": options.model if options else ""}
-        if options is not None:
-            engine_config["ralph"] = options.proposer.ralph
+        proposer = options.proposer if options is not None else BlackboxProposer()
+        engine_config: dict[str, Any] = {
+            "model": options.model if options else "",
+            "ralph": proposer.ralph,
+            "max_no_eval_seconds": proposer.max_no_eval_seconds,
+        }
         config = OptimizeAnythingConfig(
             engine=self.name,
             max_token_cost=options.max_token_cost if options else None,
@@ -593,7 +628,7 @@ class AutoResearchEngine:
             sandbox=False,
             engine_config=engine_config,
         )
-        upstream = _WorkerAutoResearch(config, ctx).run(
+        upstream = _WorkerAutoResearch(config, ctx, max_tool_calls=proposer.max_tool_calls).run(
             UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, task, ctx)
         )
         return Result(
