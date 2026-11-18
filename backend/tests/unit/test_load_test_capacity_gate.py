@@ -3563,6 +3563,17 @@ def test_swarm_late_step_does_not_push_back_the_next_step(monkeypatch: pytest.Mo
     assert [begun for _, begun, _, _ in steps[0]] == [4.0, 10.0, 20.0]
 
 
+def test_swarm_step_that_lands_late_pushes_back_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a step that is durable after the next due moment makes the next step ready at that time.
+
+    Args:
+        monkeypatch: Replaces the clock, the pace, the commit and the barrier.
+    """
+    clock = _FakeClock(limit=100.0)
+    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=15.0, late=4.0)
+    assert [ready for ready, _, _, _ in steps[0]][:2] == [0.0, 19.0]
+
+
 def test_swarm_driver_times_out_a_step_that_never_lands(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a driver raises when a step is not durable in ``DURABLE_TIMEOUT_SECONDS``.
 
