@@ -378,9 +378,9 @@ A manual hold on a change or on a promotion still stops it.
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
   other batch PR is open.
 - After an approval, the orchestrator does not merge the PR outside a
-  batch. It moves the issue to **Ready to Merge**, adds the `ready-to-merge` label,
-  a PR comment and the `agent-review/ready-to-merge` status on the approved
-  head.
+  batch. It moves the issue to **Ready to Merge**, adds the
+  `ready-to-merge` label, a PR comment and the `agent-review/ready-to-merge`
+  status on the approved head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
 - The orchestrator builds one batch from every PR in **Ready to Merge**
