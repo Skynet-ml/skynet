@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import random
 import subprocess
+import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,7 +132,19 @@ def test_config_maps_every_setting_onto_upstream_fields(tmp_path: Path) -> None:
     assert database["num_islands"] == 3
     assert database["parent_selection_strategy"] == "power_law"
     assert database["db_path"] == str(tmp_path / "programs.sqlite")
-    assert runner["max_evaluation_jobs"] == 2
+    assert (runner["max_evaluation_jobs"], runner["max_proposal_jobs"]) == (2, 2)
+
+
+def test_on_the_engine_loop_the_config_runs_one_seeded_job_of_each_kind(tmp_path: Path) -> None:
+    """Seed the model bandit and run one job of each kind, so the worker's step order is fixed (SKY-724).
+
+    Args:
+        tmp_path: Results directory.
+    """
+    config = shinka_runner.build_config(_payload(transport="stdio", seed=7), str(tmp_path), 2)
+
+    assert config["evolution"]["llm_dynamic_selection_kwargs"] == {"cost_aware_coef": 0.0, "seed": 7}
+    assert (config["runner"]["max_evaluation_jobs"], config["runner"]["max_proposal_jobs"]) == (1, 1)
 
 
 def test_config_turns_meta_notes_off(tmp_path: Path) -> None:
@@ -926,3 +942,458 @@ def test_agent_editor_runs_on_a_real_checkout_of_a_repository_version(tmp_path: 
     assert "+SCALE = 9" in patch
     assert meta["num_applied"] == 2
     assert not list((tmp_path / "agent-edits").iterdir())
+
+
+class _QueryResult:
+    """Stand in for upstream's ``QueryResult``: keep every field it is built with."""
+
+    def __init__(self, **fields: Any) -> None:
+        """Keep the fields.
+
+        Args:
+            **fields: The result's fields.
+        """
+        self.__dict__.update(fields)
+
+
+def _connected_mailbox(
+    reply: Callable[[dict[str, Any]], dict[str, Any]],
+) -> tuple[shinka_runner.EvaluatorMailbox, list[dict[str, Any]]]:
+    """Connect a mailbox to a fake worker that answers each request on the mailbox's reply stream.
+
+    Args:
+        reply: Builds the worker's reply fields for one request.
+
+    Returns:
+        The mailbox and the requests it sent.
+    """
+    mailbox = shinka_runner.EvaluatorMailbox("testnonce", 5.0)
+    read_end, write_end = os.pipe()
+    replies = os.fdopen(write_end, "w", encoding="utf-8")
+    mailbox.listen(os.fdopen(read_end, encoding="utf-8"))
+    sent: list[dict[str, Any]] = []
+
+    def emit(prefix: str, payload: dict[str, Any]) -> None:
+        """Answer one request the way the worker does: one JSON line with the request's id.
+
+        Args:
+            prefix: The event family.
+            payload: The request.
+        """
+        assert prefix == "APP_NATIVE_RPC "
+        sent.append(payload)
+        replies.write(json.dumps({"id": payload["id"], **reply(payload)}) + "\n")
+        replies.flush()
+
+    mailbox.emit = emit  # type: ignore[method-assign]
+    return mailbox, sent
+
+
+def test_every_upstream_query_becomes_one_worker_model_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send upstream's sync and async queries to the worker's model and build upstream's result from the reply.
+
+    Args:
+        monkeypatch: Replaces upstream's ``shinka.llm.llm`` module and ``QueryResult``.
+    """
+    llm = SimpleNamespace(query=None, query_async=None)
+    monkeypatch.setattr(shinka_runner, "shinka_llm", llm)
+    monkeypatch.setattr(shinka_runner, "QueryResult", _QueryResult)
+    mailbox, sent = _connected_mailbox(lambda request: {"text": f"reply {len(request['messages'])}"})
+    shinka_runner.install_worker_models(mailbox)
+    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"}]
+
+    first = llm.query(model_name="local/m", msg="improve", system_msg="system", msg_history=history, temperature=0.5)
+    second = asyncio.run(llm.query_async(model_name="local/m", msg="again", system_msg="", msg_history=[]))
+
+    assert [request["kind"] for request in sent] == ["model", "model"]
+    assert sent[0]["messages"] == [
+        {"role": "system", "content": "system"},
+        *history,
+        {"role": "user", "content": "improve"},
+    ]
+    assert sent[1]["messages"] == [{"role": "user", "content": "again"}]
+    assert (first.content, first.input_tokens, first.output_tokens, first.kwargs) == (
+        "reply 4",
+        0,
+        0,
+        {"temperature": 0.5},
+    )
+    assert first.new_msg_history[-2:] == [
+        {"role": "user", "content": "improve"},
+        {"role": "assistant", "content": "reply 4"},
+    ]
+    assert second.content == "reply 1"
+
+
+def test_concurrent_upstream_queries_reach_the_worker_in_creation_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send gathered async queries in the order upstream creates them, every run, so a replay never diverges.
+
+    Upstream gathers meta-note queries concurrently. The worker commits each
+    model reply as one step by position, so a resume replays them only if the
+    order is the same every run.
+
+    Args:
+        monkeypatch: Replaces upstream's ``shinka.llm.llm`` module and ``QueryResult``.
+    """
+    llm = SimpleNamespace(query=None, query_async=None)
+    monkeypatch.setattr(shinka_runner, "shinka_llm", llm)
+    monkeypatch.setattr(shinka_runner, "QueryResult", _QueryResult)
+    draws = random.Random(7)
+
+    async def gathered() -> list[Any]:
+        """Start three queries at once, the way upstream's meta summarizer does.
+
+        Returns:
+            The query results.
+        """
+        queries = (llm.query_async(model_name="local/m", msg=word, system_msg="", msg_history=[]) for word in "abc")
+        return await asyncio.wait_for(asyncio.gather(*queries), timeout=10)
+
+    committed: list[tuple[str, str]] | None = None
+    # Each run leaves one idle reply-reader thread, so the run count stays small.
+    for _ in range(10):
+        mailbox, sent = _connected_mailbox(lambda request: {"text": request["messages"][-1]["content"]})
+        send = mailbox.emit
+
+        def jittered(prefix: str, payload: dict[str, Any], send: Callable[..., None] = send) -> None:
+            """Delay each send by a random time, the way thread scheduling does.
+
+            Args:
+                prefix: The event family.
+                payload: The request.
+                send: The fake worker's send.
+            """
+            time.sleep(draws.uniform(0, 0.01))
+            send(prefix, payload)
+
+        mailbox.emit = jittered  # type: ignore[method-assign]
+        shinka_runner.install_worker_models(mailbox)
+        results = asyncio.run(gathered())
+        steps = [(request["id"], request["messages"][-1]["content"]) for request in sent]
+        # The step log matches each committed step by its position on a replay.
+        if committed is None:
+            committed = steps
+        assert steps == committed
+        assert [result.content for result in results] == ["a", "b", "c"]
+    assert committed == [("0", "a"), ("1", "b"), ("2", "c")]
+
+
+def test_a_failed_worker_model_call_raises_an_error_upstream_retries() -> None:
+    """Raise an ``Exception`` for a failed model call, so upstream's own retry loop handles it."""
+    mailbox, _ = _connected_mailbox(lambda request: {"error": "ModelCallFailedError"})
+
+    with pytest.raises(RuntimeError, match="ModelCallFailedError"):
+        mailbox.complete([{"role": "user", "content": "hi"}])
+    assert not mailbox.stopped.is_set()
+
+
+def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
+    """Score a version through the worker's reply line, and count the evaluation."""
+    mailbox, sent = _connected_mailbox(lambda request: {"score": 0.75, "info": {"feedback": "ok"}})
+
+    assert mailbox.evaluate("text", {"id": 0}, candidate_id=3) == (0.75, {"feedback": "ok"})
+    assert sent == [{"kind": "evaluate", "candidate": "text", "example": {"id": 0}, "candidate_id": 3, "id": "0"}]
+    assert mailbox.total_evals == 1
+
+
+def test_a_closed_reply_stream_stops_the_run() -> None:
+    """Stop at once when the worker closes the reply stream, instead of waiting for the timeout."""
+    mailbox = shinka_runner.EvaluatorMailbox("testnonce", 60.0)
+    mailbox.emit = lambda prefix, payload: None  # type: ignore[method-assign]
+    mailbox.listen(iter(())).join(5.0)
+
+    with pytest.raises(shinka_runner.EvaluationStopped, match="closed its reply stream"):
+        mailbox.evaluate("text")
+    assert mailbox.stopped.is_set()
+
+
+def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_filed() -> None:
+    """Start upstream's next proposal only once no job, completed-job work or side effect is in flight."""
+    order: list[str] = []
+    runner = SimpleNamespace(running_jobs=["job"], pending=1, side_effects=True)
+
+    async def propose(generation: int, task_id: str) -> str:
+        """Record the proposal.
+
+        Args:
+            generation: Upstream's generation number.
+            task_id: Upstream's task id.
+
+        Returns:
+            The task id.
+        """
+        order.append(f"propose {generation}")
+        return task_id
+
+    runner._generate_proposal_async = propose
+    runner._get_completed_job_work_count = lambda: runner.pending
+    runner._has_background_side_effect_work = lambda: runner.side_effects
+    shinka_runner.install_sequential_gate(runner)
+
+    async def scenario() -> str:
+        """Finish the job, its filing and its side effects one after another while the proposal waits.
+
+        Returns:
+            The proposal's result.
+        """
+        proposal = asyncio.create_task(runner._generate_proposal_async(1, "task-1"))
+        for step in ("job", "filing", "side effects"):
+            await asyncio.sleep(0.12)
+            order.append(f"{step} done")
+            if step == "job":
+                runner.running_jobs = []
+            elif step == "filing":
+                runner.pending = 0
+            else:
+                runner.side_effects = False
+        return await proposal
+
+    assert asyncio.run(scenario()) == "task-1"
+    assert order == ["job done", "filing done", "side effects done", "propose 1"]
+
+
+def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Draw the same random numbers and program ids after the same seed.
+
+    Args:
+        monkeypatch: Restores ``uuid.uuid4`` and the ``random`` state.
+    """
+    monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    state = random.getstate()
+    try:
+        shinka_runner.seed_randomness(5)
+        first = (random.random(), str(uuid.uuid4()), str(uuid.uuid4()))
+        shinka_runner.seed_randomness(5)
+        second = (random.random(), str(uuid.uuid4()), str(uuid.uuid4()))
+    finally:
+        random.setstate(state)
+
+    assert first == second
+    assert uuid.UUID(first[1]).version == 4
+    assert first[1] != first[2]
+
+
+def test_in_the_sandbox_an_evaluation_waits_for_the_runtime_reply_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send a uuid4 hex id with no kind, and read the reply from ``rpc/<id>.json``, as the sandbox runtime expects."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rpc").mkdir()
+    mailbox = shinka_runner.EvaluatorMailbox("testnonce", 5.0)
+    sent: list[dict[str, Any]] = []
+
+    def emit(prefix: str, payload: dict[str, Any]) -> None:
+        """Record the request and write the runtime's reply file.
+
+        Args:
+            prefix: The frame prefix.
+            payload: The request.
+        """
+        sent.append(payload)
+        (tmp_path / "rpc" / f"{payload['id']}.json").write_text(json.dumps({"score": 0.5, "info": {}}))
+
+    mailbox.emit = emit  # type: ignore[method-assign]
+
+    assert mailbox.evaluate("text", {"id": 0}, candidate_id=3) == (0.5, {})
+    assert uuid.UUID(hex=sent[0]["id"]).hex == sent[0]["id"]
+    assert sent == [{"id": sent[0]["id"], "candidate": "text", "example": {"id": 0}, "candidate_id": 3}]
+
+
+@pytest.mark.parametrize(
+    ("path", "problem"),
+    [("../outside.py", "outside the repository"), ("/tmp/outside.py", "outside the repository")],
+)
+def test_a_path_that_leaves_the_checkout_is_refused(tmp_path: Path, path: str, problem: str) -> None:
+    """Refuse a ``..`` path and an absolute path by where they resolve.
+
+    Args:
+        tmp_path: Scratch folder.
+        path: The path a version writes.
+        problem: Words the refusal names.
+    """
+    (tmp_path / "checkout").mkdir()
+
+    with pytest.raises(ValueError, match=problem):
+        shinka_runner.checked_target(tmp_path / "checkout", path)
+
+
+def test_a_path_through_a_symlinked_folder_is_refused_even_inside_the_checkout(tmp_path: Path) -> None:
+    """Refuse a path whose parent folder is a symlink, also when the link points inside the checkout."""
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "docs").symlink_to("src")
+
+    with pytest.raises(ValueError, match="crosses a symlink"):
+        shinka_runner.checked_target(checkout, "docs/app.py")
+    assert shinka_runner.checked_target(checkout, "src/app.py") == checkout.resolve() / "src/app.py"
+
+
+def _symlink_patch(target: str) -> str:
+    """Write a seed patch that adds ``src/link``, a symlink to a target.
+
+    Args:
+        target: Where the link points.
+
+    Returns:
+        The patch, as ``git diff`` writes it.
+    """
+    return (
+        "diff --git a/src/link b/src/link\n"
+        "new file mode 120000\n"
+        "--- /dev/null\n"
+        "+++ b/src/link\n"
+        "@@ -0,0 +1 @@\n"
+        f"+{target}\n"
+        "\\ No newline at end of file\n"
+    )
+
+
+def _ship(tmp_path: Path, source: Path) -> list[str]:
+    """Pack a folder as the run's tree chunks.
+
+    Args:
+        tmp_path: Scratch folder.
+        source: The folder.
+
+    Returns:
+        The chunk files.
+    """
+    archive = tmp_path / "tree.tgz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
+    chunks = []
+    for index, chunk in enumerate(repo_tree.archive_chunks(archive)):
+        chunks.append(str(tmp_path / f"tree.{index}.b64"))
+        Path(chunks[-1]).write_text(chunk)
+    return chunks
+
+
+def test_a_version_cannot_write_past_its_editable_paths_through_a_shipped_symlink(tmp_path: Path) -> None:
+    """Refuse a write through a symlink the repository ships, which would reach a file outside the editable paths."""
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "scoring").mkdir()
+    (source / "scoring/metric.py").write_text("SCORE = 1\n")
+    (source / "src/cfg").symlink_to("../scoring")
+    bundle = shinka_bundle.RepoBundle.prepare(
+        {"chunks": _ship(tmp_path, source), "editable_paths": ["src"]}, "", tmp_path / "checkout"
+    )
+    shinka_runner.guard_materialize(bundle)
+
+    with pytest.raises(ValueError, match="crosses a symlink"):
+        bundle.materialize({"src/cfg/metric.py": "SCORE = 100\n"})
+    assert (tmp_path / "checkout/scoring/metric.py").read_text() == "SCORE = 1\n"
+
+
+def test_a_version_cannot_write_outside_the_checkout_through_a_seeded_symlink(tmp_path: Path) -> None:
+    """Refuse a write through a symlink to a folder outside the checkout, before any file is written."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/app.py").write_text("x = 1\n")
+    bundle = shinka_bundle.RepoBundle.prepare(
+        {"chunks": _ship(tmp_path, source), "editable_paths": ["src"]},
+        _symlink_patch(str(outside)),
+        tmp_path / "checkout",
+    )
+    shinka_runner.guard_materialize(bundle)
+
+    with pytest.raises(ValueError, match="outside the repository"):
+        bundle.materialize({"src/link/planted.py": "x = 2\n"})
+    assert not (outside / "planted.py").exists()
+
+
+def _repo_payload(tmp_path: Path, seed: str, chunks: list[str]) -> dict[str, Any]:
+    """Build a repository run's payload.
+
+    Args:
+        tmp_path: Scratch folder.
+        seed: The seed version's patch.
+        chunks: The tree's chunk files.
+
+    Returns:
+        The payload.
+    """
+    return _payload(
+        nonce="testnonce",
+        timeout_seconds=5.0,
+        task={"seed_candidate": seed, "train_set": []},
+        repo={"chunks": chunks, "editable_paths": ["src"]},
+    )
+
+
+def test_a_seed_patch_that_adds_a_symlink_is_refused_before_the_checkout_is_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a seed version that adds a symlink, before git applies it."""
+    chunks, _ = _repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.execute(_repo_payload(tmp_path, _symlink_patch("/etc"), chunks))
+    assert not (tmp_path / "shinka-run" / "repo-checkout").exists()
+
+
+def test_a_tree_that_ships_git_metadata_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a shipped tree with a ``.git`` folder, whose hooks and config git would run on the worker."""
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / ".git/config").write_text("[core]\n\tfsmonitor = touch planted\n")
+    (source / "src").mkdir()
+    (source / "src/app.py").write_text("x = 1\n")
+    chunks = _ship(tmp_path, source)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
+
+    with pytest.raises(ValueError, match="unsafe entry"):
+        shinka_runner.execute(_repo_payload(tmp_path, "", chunks))
+    assert not (tmp_path / "shinka-run" / "repo-checkout").exists()
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["new file mode\t120000", "new file mode 120000\r", "new file mode  120000 "],
+    ids=["tab", "carriage-return", "extra-blanks"],
+)
+def test_a_symlink_mode_with_odd_blanks_or_line_ends_is_refused(line: str) -> None:
+    """Refuse a symlink mode line whatever blanks or line end surround the mode.
+
+    Args:
+        line: The patch's mode line.
+    """
+    patch = _symlink_patch("/etc").replace("new file mode 120000", line)
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.refuse_unsafe_patch(patch)
+
+
+def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the checkout when the applied seed made a symlink the shipped tree did not have."""
+    chunks, _ = _repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
+    monkeypatch.setattr(shinka_runner, "refuse_unsafe_patch", lambda patch: None)
+
+    with pytest.raises(ValueError, match="adds or changes the symlink 'src/link'"):
+        shinka_runner.execute(_repo_payload(tmp_path, _symlink_patch("/etc"), chunks))
+
+
+def test_a_symlink_the_tree_ships_unchanged_is_kept(tmp_path: Path) -> None:
+    """Keep a repository's own symlink: only a new or retargeted one is refused."""
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/app.py").write_text("x = 1\n")
+    (source / "src/alias.py").symlink_to("app.py")
+    chunks = _ship(tmp_path, source)
+    links = shinka_runner.refuse_unsafe_tree(chunks)
+    bundle = shinka_bundle.RepoBundle.prepare({"chunks": chunks, "editable_paths": ["src"]}, "", tmp_path / "checkout")
+
+    assert links == {"src/alias.py": "app.py"}
+    shinka_runner.refuse_new_links(bundle.checkout, links)
+    (bundle.checkout / "src/alias.py").unlink()
+    (bundle.checkout / "src/alias.py").symlink_to("/etc/passwd")
+    with pytest.raises(ValueError, match=r"adds or changes the symlink 'src/alias\.py'"):
+        shinka_runner.refuse_new_links(bundle.checkout, links)
