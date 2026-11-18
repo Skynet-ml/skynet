@@ -1604,6 +1604,38 @@ def test_a_box_session_from_a_source_that_does_not_keep_boxes_warm_runs_and_clos
     assert [box.closed for box in runtime.boxes] == [True]
 
 
+@pytest.mark.parametrize(("source_kind", "scans"), [("fresh", 0), ("cold_lease", 0), ("warm_lease", 2)])
+def test_only_a_warm_lease_scans_the_processes_of_a_step(
+    trees: TreeStore, step_log: StepLogStore, source_kind: str, scans: int
+) -> None:
+    """A source that closes each box at release sends no process scan; a warm lease scans before and after the step.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        source_kind: A source that opens a new box for each acquire, a lease with keep_warm=False, or a warm lease.
+        scans: The number of process scans that the candidate box must get.
+    """
+    runtime = _Runtime()
+    candidates: RuntimeBoxSource | RuntimeBoxLease = (
+        RuntimeBoxSource(runtime, _SPEC)  # type: ignore[arg-type]
+        if source_kind == "fresh"
+        else RuntimeBoxLease(_on_both(runtime), _SPEC, keep_warm=source_kind == "warm_lease", **_LIMITS)
+    )
+    metrics = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, keep_warm=False, **_LIMITS)
+    sandbox = TreeSandbox(trees, step_log, candidates, metrics)
+    try:
+        result, _ = sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "cat a.txt", [])
+    finally:
+        if isinstance(candidates, RuntimeBoxLease):
+            candidates.close()
+        metrics.close()
+
+    assert result.stdout == "one\n"
+    assert len(runtime.boxes) == 1
+    assert len(runtime.boxes[0].scan_sudo) == scans
+
+
 def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLogStore) -> None:
     """The step records the grant list that the layer resolves, so the lease must resolve the same way.
 
