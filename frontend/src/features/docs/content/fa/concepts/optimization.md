@@ -2,26 +2,29 @@ Skynet همان Optimize Anything است: هر اجرا یک مخزن را به�
 
 ## قرارداد مشترک
 
-هر اجرا یک مخزن و یک امتیازدهنده دارد. امتیازدهنده یک تابع Python است که مسیر یک نسخه از مخزن و یک مورد را می‌گیرد.
+هر اجرا یک مخزن، یک فایل `optimize.toml` با یک `entry` در `[run]`، و یک امتیازدهنده دارد. `entry` بخش `[run]` یک نسخه از مخزن را روی یک مورد اجرا می‌کند. امتیازدهنده یک تابع Python است که خروجی `entry` و مورد را می‌گیرد.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` پوشهٔ یک نسخه از مخزن است، پس از اجرای دستور راه‌اندازی.
+- `output` همان چیزی است که `entry` بخش `[run]` برای این مورد برگرداند.
 - `case` یک dict است. `case["input"]` فیلدهای ورودی یک مورد را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا وقتی مورد مقداری ندارد `None` است.
+- `repo_path` پوشه‌ای است که فقط فایل‌های معیار شما را نگه می‌دارد.
 - `score` یک جفت برمی‌گرداند: یک عدد، و یک dict با یک رشتهٔ `"feedback"`.
 
-مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. امتیازدهنده می‌تواند آن را فراخوانی کند، و Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
+مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. `entry` بخش `[run]` آن را در جعبهٔ ایزولهٔ خودش فراخوانی می‌کند. Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
+
+امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه هیچ فایلی از مخزن و هیچ کدی از نسخه ندارد، پس امتیازدهنده نمی‌تواند `serve.py` را import کند. نسخه را فقط از طریق `output` می‌بیند. بدون یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، Skynet فایل `optimize.toml` را رد می‌کند.
 
 > [!NOTE]
 > عامل کدنویسی که نسخه‌ها را می‌نویسد نمی‌تواند کد منبع امتیازدهنده، مقدارهای مورد انتظار یا رازهای اجرا را ببیند.

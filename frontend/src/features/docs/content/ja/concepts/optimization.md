@@ -2,26 +2,29 @@ Skynet は Optimize Anything です。すべての実行はリポジトリを最
 
 ## 共通のコントラクト
 
-すべての実行には、リポジトリとスコアラーがあります。スコアラーは Python の関数です。リポジトリの 1 つのバージョンのパスと、1 つのケースを受け取ります。
+すべての実行には、リポジトリ、`[run]` エントリーを持つ `optimize.toml` ファイル、スコアラーがあります。`[run]` エントリーは、リポジトリの 1 つのバージョンを 1 つのケースで実行します。スコアラーは Python の関数です。エントリーの出力とケースを受け取ります。
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` は、セットアップコマンドの実行後の、リポジトリの 1 つのバージョンのフォルダーです。
+- `output` は、`[run]` エントリーがそのケースに対して返した値です。
 - `case` は dict です。`case["input"]` は 1 つのケースの入力フィールドを保持します。`case["expected"]` は期待値を保持します。期待値がないケースでは `None` です。
+- `repo_path` は、メトリクスファイルだけを保持するフォルダーです。
 - `score` はペアを返します。数値と、`"feedback"` 文字列を含む dict です。
 
-リポジトリのルートには、`def serve(input)` を持つ `serve.py` ファイルがあります。スコアラーはこの関数を呼び出せます。Skynet は実行の後、この関数を使って最も良いバージョンを提供します。
+リポジトリのルートには、`def serve(input)` を持つ `serve.py` ファイルがあります。`[run]` エントリーは、専用のサンドボックスでこの関数を呼び出します。Skynet は実行の後、この関数を使って最も良いバージョンを提供します。
+
+スコアラーは別のサンドボックスで実行されます。そのサンドボックスはリポジトリのファイルもバージョンのコードも保持しないため、スコアラーは `serve.py` をインポートできません。スコアラーには `output` を通してだけバージョンが見えます。`[run]` エントリーも `[target.<name>]` ステージもない場合、Skynet は `optimize.toml` ファイルを拒否します。
 
 > [!NOTE]
 > バージョンを書くコーディングエージェントは、スコアラーのソース、期待値、実行シークレットを見ることができません。

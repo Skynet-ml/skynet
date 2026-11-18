@@ -2,26 +2,29 @@ Skynet 就是 Optimize Anything：每次运行都优化一个仓库。引擎提�
 
 ## 共享契约
 
-每次运行都有一个仓库和一个评分器。评分器是一个 Python 函数，它接收仓库某个版本的路径和一个用例。
+每次运行都有一个仓库、一个带有 `[run]` 入口的 `optimize.toml` 文件，以及一个评分器。`[run]` 入口对一个用例运行仓库的一个版本。评分器是一个 Python 函数，它接收入口的输出和该用例。
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` 是仓库某个版本的文件夹，安装命令已经在其中运行过。
+- `output` 是 `[run]` 入口为该用例返回的内容。
 - `case` 是一个 dict。`case["input"]` 包含一个用例的输入字段。`case["expected"]` 包含期望值；如果该用例没有期望值，则为 `None`。
+- `repo_path` 是一个只包含你的指标文件的文件夹。
 - `score` 返回一对值：一个数字，以及一个包含 `"feedback"` 字符串的 dict。
 
-仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。评分器可以调用它，运行结束后 Skynet 也用它来部署最好的版本。
+仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。运行结束后，Skynet 也用它来部署最好的版本。
+
+评分器在另一个独立的沙箱中运行。该沙箱不包含仓库文件和版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output` 看到版本。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `optimize.toml` 文件。
 
 > [!NOTE]
 > 编写版本的编码智能体看不到评分器的源代码、期望值或运行密钥。

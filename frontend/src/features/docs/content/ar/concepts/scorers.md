@@ -3,19 +3,23 @@
 ## العقد
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | الوسيطة     | ما تحتويه                                                                       |
 | ----------- | ------------------------------------------------------------------------------- |
-| `repo_path` | مجلد نسخة واحدة من المستودع، بعد تشغيل أمر الإعداد                               |
+| `repo_path` | مجلد يحتوي ملفات المقياس فقط. لا يحتوي أي ملف آخر من المستودع ولا كود أي نسخة |
 | `case`      | dict. يحتوي `case["input"]` على حقول الإدخال. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` |
+| `output`    | ما أرجعه `entry` في `[run]` للحالة |
 
-إذا كانت دالتك تأخذ وسيطة واحدة فقط، يستدعي Skynet `score(repo_path)`. استخدم هذا الشكل عندما يشغّل المُقيِّم اختباراته الخاصة ولا يحتاج إلى حالات.
+يجب أن يحتوي ملف `optimize.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
 
-يعمل المُقيِّم في البيئة المعزولة، في مجلد النسخة. يمكنه استيراد كود من المستودع، أو تشغيل أمر، أو استدعاء `serve()` من `serve.py`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
+- مدخل من نوع دالة، مثل `entry = "serve.py:serve"`، يتلقى `case["input"]` كوسيطة. و`output` هو قيمة الإرجاع منه.
+- مدخل من نوع أمر، مثل `entry = ["python", "-m", "pytest", "-q"]`، يتلقى الإدخال بصيغة JSON على stdin. و`output` هو `{"exit_code": ..., "stdout": "..."}`.
+
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
 
 ## قيمة الإرجاع
 
@@ -58,54 +62,63 @@ def score(repo_path, case):
 
 ### تطابق تام
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` هو dict مفتاحه اسم عمود المخرج لديك. اقرأ [مجموعات البيانات والتقسيمات](/docs/concepts/datasets).
 
 ### تشغيل اختبارات المستودع
 
+يشغّل `entry` في `[run]` الاختبارات. ويقرأ المُقيِّم رمز الخروج ومخرجات الاختبارات.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### النموذج كحَكَم
 
 يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `skynet`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )

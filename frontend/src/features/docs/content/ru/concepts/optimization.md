@@ -2,26 +2,29 @@ Skynet — это Optimize Anything: каждый запуск оптимизи�
 
 ## Общий контракт
 
-У каждого запуска есть репозиторий и оценщик. Оценщик — это функция Python, которая получает путь к одной версии репозитория и один пример.
+У каждого запуска есть репозиторий, файл `optimize.toml` с точкой входа `[run]` и оценщик. Точка входа `[run]` запускает одну версию репозитория на одном примере. Оценщик — это функция Python, которая получает вывод точки входа и пример.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` — папка одной версии репозитория после выполнения команды настройки.
+- `output` — то, что точка входа `[run]` вернула для примера.
 - `case` — это dict. `case["input"]` содержит входные поля одного примера. `case["expected"]` содержит ожидаемое значение или `None`, если у примера его нет.
+- `repo_path` — папка, в которой есть только ваши файлы метрики.
 - `score` возвращает пару: число и dict со строкой `"feedback"`.
 
-В корне репозитория есть файл `serve.py` с `def serve(input)`. Оценщик может его вызывать, а Skynet после запуска обслуживает через него лучшую версию.
+В корне репозитория есть файл `serve.py` с `def serve(input)`. Точка входа `[run]` вызывает его в своей отдельной песочнице. После запуска Skynet обслуживает через него лучшую версию.
+
+Оценщик работает в отдельной песочнице. В ней нет файлов репозитория и кода версии, поэтому оценщик не может импортировать `serve.py`. Он видит версию только через `output`. Без точки входа `[run]` или этапа `[target.<name>]` Skynet отклоняет файл `optimize.toml`.
 
 > [!NOTE]
 > Агент для кода, который пишет версии, не видит исходный код оценщика, ожидаемые значения и секреты запуска.

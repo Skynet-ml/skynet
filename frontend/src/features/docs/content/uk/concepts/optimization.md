@@ -2,26 +2,29 @@ Skynet — це Optimize Anything: кожен запуск оптимізує р
 
 ## Спільний контракт
 
-Кожен запуск має репозиторій і оцінювач. Оцінювач — це функція Python, яка отримує шлях до однієї версії репозиторію й один кейс.
+Кожен запуск має репозиторій, файл `optimize.toml` з точкою входу `[run]` і оцінювач. Точка входу `[run]` запускає одну версію репозиторію на одному кейсі. Оцінювач — це функція Python, яка отримує вивід точки входу й кейс.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` — це папка однієї версії репозиторію після виконання команди налаштування.
+- `output` — це те, що точка входу `[run]` повернула для кейсу.
 - `case` — це словник. `case["input"]` містить вхідні поля одного кейсу. `case["expected"]` містить очікуване значення або `None`, якщо кейс його не має.
+- `repo_path` — це папка, у якій є лише ваші файли метрики.
 - `score` повертає пару: число й словник із рядком `"feedback"`.
 
-Репозиторій має в корені файл `serve.py` з `def serve(input)`. Оцінювач може його викликати, а Skynet використовує його, щоб обслуговувати найкращу версію після запуску.
+Репозиторій має в корені файл `serve.py` з `def serve(input)`. Точка входу `[run]` викликає його у власній окремій пісочниці. Skynet використовує його, щоб обслуговувати найкращу версію після запуску.
+
+Оцінювач виконується в окремій пісочниці. У ній немає файлів репозиторію й коду версії, тому оцінювач не може імпортувати `serve.py`. Він бачить версію лише через `output`. Без точки входу `[run]` або етапу `[target.<name>]` Skynet відхиляє файл `optimize.toml`.
 
 > [!NOTE]
 > Агент програмування, який пише версії, не бачить вихідного коду оцінювача, очікуваних значень і секретів запуску.

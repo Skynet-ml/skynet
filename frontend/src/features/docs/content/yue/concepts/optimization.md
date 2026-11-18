@@ -2,26 +2,29 @@ Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。引�
 
 ## 共用合約
 
-每次運行都有一個倉庫同一個評分器。評分器係一個 Python 函數，佢會收到倉庫某個版本嘅路徑同一個案例。
+每次運行都有一個倉庫、一個有 `[run]` 入口嘅 `optimize.toml` 檔案，同一個評分器。`[run]` 入口會用一個案例運行倉庫嘅一個版本。評分器係一個 Python 函數，佢會收到入口嘅輸出同個案例。
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` 係倉庫某個版本嘅資料夾，安裝指令已經喺入面運行過。
+- `output` 係 `[run]` 入口為呢個案例回傳嘅嘢。
 - `case` 係一個 dict。`case["input"]` 裝住一個案例嘅輸入欄位。`case["expected"]` 裝住預期值；如果案例冇預期值，就係 `None`。
+- `repo_path` 係一個只裝住你啲指標檔案嘅資料夾。
 - `score` 回傳一對值：一個數字，同一個包含 `"feedback"` 字串嘅 dict。
 
-倉庫嘅根目錄有一個 `serve.py` 檔案，入面有 `def serve(input)`。評分器可以呼叫佢，運行完之後 Skynet 亦會用佢嚟提供最好嗰個版本。
+倉庫嘅根目錄有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會喺自己嘅沙盒入面呼叫佢。運行完之後，Skynet 會用佢嚟提供最好嗰個版本。
+
+評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒冇倉庫檔案，亦冇版本程式碼，所以評分器唔可以匯入 `serve.py`。佢只可以透過 `output` 睇到個版本。如果冇 `[run]` 入口，又冇 `[target.<name>]` 階段，Skynet 會拒絕個 `optimize.toml` 檔案。
 
 > [!NOTE]
 > 寫版本嘅編程 agent 睇唔到評分器原始碼、預期值，亦都睇唔到運行密鑰。

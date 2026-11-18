@@ -3,19 +3,23 @@ L'évaluateur indique à Skynet la qualité d'une version de votre dépôt. C'es
 ## Le contrat
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | Argument    | Ce qu'il contient                                                                |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | Le dossier d'une version du dépôt, après l'exécution de la commande d'installation |
+| `repo_path` | Un dossier qui contient seulement vos fichiers de métrique. Il ne contient aucun autre fichier du dépôt ni aucun code de la version |
 | `case`      | Un dict. `case["input"]` contient les champs d'entrée. `case["expected"]` contient la valeur attendue, ou `None` |
+| `output`    | Ce que l'entrée `[run]` a renvoyé pour le cas |
 
-Si votre fonction ne prend qu'un argument, Skynet appelle `score(repo_path)`. Utilisez cette forme quand l'évaluateur lance ses propres tests et n'a pas besoin de cas.
+Le fichier `optimize.toml` du dépôt doit avoir une section `[run]` ou une étape `[target.<name>]`. L'`entry` de `[run]` exécute une version sur un cas, dans sa propre boîte de sandbox. Skynet refuse un fichier qui n'a ni l'une ni l'autre, car chaque version recevrait le même score.
 
-L'évaluateur s'exécute dans la sandbox, dans le dossier de la version. Il peut importer du code du dépôt, lancer une commande ou appeler `serve()` depuis `serve.py`. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
+- Une entrée de fonction, par exemple `entry = "serve.py:serve"`, reçoit `case["input"]` comme argument. `output` est sa valeur de retour.
+- Une entrée de commande, par exemple `entry = ["python", "-m", "pytest", "-q"]`, reçoit l'entrée en JSON sur stdin. `output` est `{"exit_code": ..., "stdout": "..."}`.
+
+L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique. L'évaluateur ne peut ni importer ni exécuter le code de la version. Il voit la version seulement à travers `output`. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
 
 ## La valeur de retour
 
@@ -58,54 +62,63 @@ GEPA et Auto lisent le texte de retour pour écrire la version suivante. Dites c
 
 ### Correspondance exacte
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` est un dict dont la clé est le nom de votre colonne de sortie. Lisez [Jeux de données et répartitions](/docs/concepts/datasets).
 
 ### Lancer les tests du dépôt
 
+L'entrée `[run]` lance les tests. L'évaluateur lit le code de sortie et la sortie des tests.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### Un modèle comme juge
 
 L'évaluateur peut appeler un modèle. Importez `llm` depuis le module d'aide `skynet`. L'appel passe par la passerelle de modèles de Skynet vers le modèle de l'évaluateur de l'exécution.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )

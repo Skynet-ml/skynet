@@ -55,26 +55,27 @@
 
 ## 5. المقياس والتشغيل
 
-الخطوة الأخيرة هي **المقياس والتشغيل**. يكتب المساعد المُقيِّم نيابةً عنك. ويمكنك تعديله. يتلقى المُقيِّم مسار نسخة واحدة من المستودع وحالة واحدة:
+الخطوة الأخيرة هي **المقياس والتشغيل**. يكتب المساعد المُقيِّم وملف `optimize.toml` نيابةً عنك. ويمكنك تعديلهما. يشغّل `entry` في `[run]` نسخة واحدة من المستودع على حالة واحدة. يتلقى المُقيِّم مخرجات `entry` والحالة:
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return 1.0, {"feedback": "Correct label."}
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-يحتوي `case["input"]` على أعمدة الإدخال لحالة واحدة. ويحتوي `case["expected"]` على عمود الإخراج، ومفتاحه اسم العمود. في المستودع ملف `serve.py` فيه `def serve(input)`. يستخدم Skynet الدالة نفسها لتقديم أفضل نسخة بعد التشغيل.
+يحتوي `case["input"]` على أعمدة الإدخال لحالة واحدة. ويحتوي `case["expected"]` على عمود الإخراج، ومفتاحه اسم العمود. في المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]`، و`output` هو قيمة الإرجاع منه. يعمل المُقيِّم في صندوق معزول منفصل بلا ملفات من المستودع، لذلك لا يستطيع استيراد `serve.py`. يستخدم Skynet الدالة نفسها لتقديم أفضل نسخة بعد التشغيل.
 
-ثم شغّل الفحص. يشغّل الفحص الإعداد والمُقيِّم على نسخة البداية في البيئة المعزولة. لا يمكنك بدء التشغيل إلا بعد نجاح الفحص.
+ثم شغّل الفحص. يشغّل الفحص الإعداد و`entry` في `[run]` والمُقيِّم على نسخة البداية في البيئة المعزولة. لا يمكنك بدء التشغيل إلا بعد نجاح الفحص.
 
 ## 6. البدء والمتابعة
 

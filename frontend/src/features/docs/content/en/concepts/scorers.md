@@ -3,19 +3,23 @@ The scorer tells Skynet how good one version of your repository is. It is a Pyth
 ## The contract
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | Argument    | What it holds                                                                    |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | The folder of one version of the repository, after the setup command ran         |
+| `repo_path` | A folder that holds only your metric files. It holds no other repository file and no version code |
 | `case`      | A dict. `case["input"]` holds the input fields. `case["expected"]` holds the expected value, or `None` |
+| `output`    | What the `[run]` entry returned for the case                                     |
 
-If your function takes only one argument, Skynet calls `score(repo_path)`. Use this form when the scorer runs its own tests and needs no cases.
+The `optimize.toml` file of the repository must have a `[run]` section or a `[target.<name>]` stage. The `[run]` `entry` runs one version on one case, in its own sandbox box. Skynet refuses a file with neither, because every version would get the same score.
 
-The scorer runs in the sandbox, in the folder of the version. It can import code from the repository, run a command, or call `serve()` from `serve.py`. Read [How optimization works](/docs/concepts/optimization).
+- A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
+- A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
+
+The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`. Read [How optimization works](/docs/concepts/optimization).
 
 ## The return value
 
@@ -58,54 +62,63 @@ GEPA and Auto read the feedback text to write the next version. Say what is wron
 
 ### Exact match
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` is a dict keyed by the name of your Output column. Read [Datasets and splits](/docs/concepts/datasets).
 
 ### Run the tests of the repository
 
+The `[run]` entry runs the tests. The scorer reads the exit code and the test output.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### Model as judge
 
 The scorer can call a model. Import `llm` from the `skynet` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )

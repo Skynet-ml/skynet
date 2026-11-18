@@ -3,19 +3,23 @@
 ## החוזה
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | ארגומנט     | מה הוא מכיל                                                                         |
 | ----------- | ----------------------------------------------------------------------------------- |
-| `repo_path` | התיקייה של גרסה אחת של המאגר, אחרי שפקודת ההתקנה רצה                                |
+| `repo_path` | תיקייה שמכילה רק את קובצי המדד שלך. אין בה קובץ אחר של המאגר ואין בה קוד של גרסה |
 | `case`      | dict.‏ `case["input"]` מכיל את שדות הקלט.‏ `case["expected"]` מכיל את הערך הצפוי, או `None` |
+| `output`    | מה שה-`entry` של `[run]` החזיר עבור המקרה |
 
-אם הפונקציה שלך מקבלת רק ארגומנט אחד, Skynet קורא ל-`score(repo_path)`. השתמש/י בצורה הזו כשפונקציית הניקוד מריצה בדיקות משלה ולא צריכה מקרים.
+בקובץ `optimize.toml` של המאגר חייב להיות קטע `[run]` או שלב `[target.<name>]`. ה-`entry` של `[run]` מריץ גרסה אחת על מקרה אחד, בתיבת sandbox משלו. ‏Skynet דוחה קובץ בלי אף אחד מהם, כי כל גרסה הייתה מקבלת את אותו ציון.
 
-פונקציית הניקוד רצה ב-sandbox, בתיקייה של הגרסה. היא יכולה לייבא קוד מהמאגר, להריץ פקודה או לקרוא ל-`serve()` מ-`serve.py`. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization).
+- ‏`entry` של פונקציה, למשל `entry = "serve.py:serve"`, מקבל את `case["input"]` כארגומנט.‏ `output` הוא ערך ההחזרה שלו.
+- ‏`entry` של פקודה, למשל `entry = ["python", "-m", "pytest", "-q"]`, מקבל את הקלט כ-JSON ב-stdin.‏ `output` הוא `{"exit_code": ..., "stdout": "..."}`.
+
+פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך. פונקציית הניקוד לא יכולה לייבא או להריץ את הקוד של הגרסה. היא רואה את הגרסה רק דרך `output`. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization).
 
 ## ערך ההחזרה
 
@@ -58,54 +62,63 @@ GEPA ו-Auto קוראים את טקסט המשוב כדי לכתוב את הגר
 
 ### התאמה מדויקת
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` הוא dict שהמפתח שלו הוא שם עמודת הפלט שלך. קרא/י את [דאטאסטים וחלוקה](/docs/concepts/datasets).
 
 ### הרצת הבדיקות של המאגר
 
+ה-`entry` של `[run]` מריץ את הבדיקות. פונקציית הניקוד קוראת את קוד היציאה ואת הפלט של הבדיקות.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### מודל כשופט
 
 פונקציית הניקוד יכולה לקרוא למודל. ייבא/י את `llm` ממודול העזר `skynet`. הקריאה עוברת דרך שער המודלים של Skynet אל מודל הניקוד של הריצה.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )

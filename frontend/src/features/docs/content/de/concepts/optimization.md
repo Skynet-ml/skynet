@@ -2,26 +2,29 @@ Skynet ist Optimize Anything: Jeder Durchlauf optimiert ein Repository. Eine Eng
 
 ## Der gemeinsame Vertrag
 
-Jeder Durchlauf hat ein Repository und einen Scorer. Der Scorer ist eine Python-Funktion, die den Pfad einer Version des Repositorys und einen Fall erhält.
+Jeder Durchlauf hat ein Repository, eine Datei `optimize.toml` mit einem `[run]`-Eintrag und einen Scorer. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer ist eine Python-Funktion, die die Ausgabe des Eintrags und den Fall erhält.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` ist der Ordner einer Version des Repositorys, nachdem der Setup-Befehl gelaufen ist.
+- `output` ist, was der `[run]`-Eintrag für den Fall zurückgegeben hat.
 - `case` ist ein Dict. `case["input"]` enthält die Eingabefelder eines Falls. `case["expected"]` enthält den erwarteten Wert oder `None`, wenn der Fall keinen hat.
+- `repo_path` ist ein Ordner, der nur Ihre Metrikdateien enthält.
 - `score` gibt ein Paar zurück: eine Zahl und ein Dict mit einem `"feedback"`-String.
 
-Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der Scorer kann sie aufrufen, und Skynet stellt damit nach dem Durchlauf die beste Version bereit.
+Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie in einer eigenen Sandbox-Box auf. Skynet stellt damit nach dem Durchlauf die beste Version bereit.
+
+Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält keine Dateien des Repositorys und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `optimize.toml` ab.
 
 > [!NOTE]
 > Der Coding-Agent, der die Versionen schreibt, sieht weder den Quelltext des Scorers noch die erwarteten Werte oder die Secrets des Durchlaufs.

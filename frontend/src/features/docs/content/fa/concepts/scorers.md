@@ -3,19 +3,23 @@
 ## قرارداد
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | آرگومان     | محتوای آن                                                                        |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | پوشهٔ یک نسخه از مخزن، پس از اجرای دستور راه‌اندازی                                |
+| `repo_path` | پوشه‌ای که فقط فایل‌های معیار شما را نگه می‌دارد. هیچ فایل دیگری از مخزن و هیچ کدی از نسخه در آن نیست |
 | `case`      | یک dict. `case["input"]` فیلدهای ورودی را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا `None` است |
+| `output`    | آنچه `entry` بخش `[run]` برای این مورد برگرداند |
 
-اگر تابع شما فقط یک آرگومان بگیرد، Skynet آن را به شکل `score(repo_path)` فراخوانی می‌کند. وقتی امتیازدهنده آزمون‌های خودش را اجرا می‌کند و به مورد نیاز ندارد، از این شکل استفاده کنید.
+فایل `optimize.toml` مخزن باید یک بخش `[run]` یا یک مرحلهٔ `[target.<name>]` داشته باشد. `entry` بخش `[run]` یک نسخه را روی یک مورد، در جعبهٔ ایزولهٔ خودش اجرا می‌کند. Skynet فایلی را که هیچ‌کدام را ندارد رد می‌کند، چون هر نسخه همان امتیاز را می‌گرفت.
 
-امتیازدهنده در محیط اجرای ایزوله و در پوشهٔ همان نسخه اجرا می‌شود. می‌تواند کد را از مخزن import کند، یک دستور اجرا کند یا `serve()` را از `serve.py` فراخوانی کند. صفحهٔ [بهینه‌سازی چگونه کار می‌کند](/docs/concepts/optimization) را بخوانید.
+- یک entry تابعی، مثلاً `entry = "serve.py:serve"`، مقدار `case["input"]` را به‌عنوان آرگومان می‌گیرد. `output` مقدار بازگشتی آن است.
+- یک entry دستوری، مثلاً `entry = ["python", "-m", "pytest", "-q"]`، ورودی را به‌صورت JSON روی stdin می‌گیرد. `output` برابر `{"exit_code": ..., "stdout": "..."}` است.
+
+امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را نگه می‌دارد. امتیازدهنده نمی‌تواند کد نسخه را import یا اجرا کند. نسخه را فقط از طریق `output` می‌بیند. صفحهٔ [بهینه‌سازی چگونه کار می‌کند](/docs/concepts/optimization) را بخوانید.
 
 ## مقدار بازگشتی
 
@@ -58,54 +62,63 @@ GEPA و Auto متن بازخورد را می‌خوانند تا نسخهٔ بع
 
 ### تطابق دقیق
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` یک dict است که کلیدهای آن نام ستون «خروجی» شما هستند. صفحهٔ [مجموعه‌داده‌ها و تقسیم](/docs/concepts/datasets) را بخوانید.
 
 ### اجرای آزمون‌های مخزن
 
+`entry` بخش `[run]` آزمون‌ها را اجرا می‌کند. امتیازدهنده کد خروج و خروجی آزمون‌ها را می‌خواند.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### مدل به‌عنوان داور
 
 امتیازدهنده می‌تواند یک مدل را فراخوانی کند. `llm` را از ماژول کمکی `skynet` وارد کنید. فراخوانی از طریق دروازهٔ مدل Skynet به مدل امتیازدهندهٔ اجرا می‌رود.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )

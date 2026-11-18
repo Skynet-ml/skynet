@@ -3,19 +3,23 @@
 ## 契约
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | 参数        | 包含的内容                                                                       |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | 仓库某个版本的文件夹，安装命令已经在其中运行过                                   |
+| `repo_path` | 只包含你的指标文件的文件夹。它不包含其他仓库文件，也不包含版本代码 |
 | `case`      | 一个 dict。`case["input"]` 包含输入字段。`case["expected"]` 包含期望值，或为 `None` |
+| `output`    | `[run]` 入口为该用例返回的内容 |
 
-如果你的函数只接受一个参数，Skynet 会调用 `score(repo_path)`。当评分器运行自己的测试、不需要用例时，请使用这种形式。
+仓库的 `optimize.toml` 文件必须有一个 `[run]` 部分或一个 `[target.<name>]` 阶段。`[run]` 的 `entry` 在自己的沙箱中，对一个用例运行一个版本。如果两者都没有，Skynet 会拒绝该文件，因为每个版本都会得到相同的分数。
 
-评分器在沙箱中、在该版本的文件夹里运行。它可以从仓库导入代码、运行命令，或者调用 `serve.py` 中的 `serve()`。请阅读[优化的工作原理](/docs/concepts/optimization)。
+- 函数入口，例如 `entry = "serve.py:serve"`，以 `case["input"]` 作为参数。`output` 是它的返回值。
+- 命令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，从 stdin 以 JSON 形式接收输入。`output` 是 `{"exit_code": ..., "stdout": "..."}`。
+
+评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件。评分器不能导入或运行版本的代码。它只能通过 `output` 看到版本。请阅读[优化的工作原理](/docs/concepts/optimization)。
 
 ## 返回值
 
@@ -58,54 +62,63 @@ GEPA 和 Auto 会读取反馈文本来编写下一个版本。请说明哪里错
 
 ### 精确匹配
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` 是一个以输出列名称为键的 dict。请阅读[数据集与划分](/docs/concepts/datasets)。
 
 ### 运行仓库的测试
 
+`[run]` 入口运行测试。评分器读取退出码和测试输出。
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
+```
+
 ```python tab="scorer.py"
-import subprocess
-
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
+def score(repo_path, case, output=None):
+    if output is None:
+        return 0.0, {"feedback": "The tests did not run."}
+    if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
 
 ### 用模型作为评判
 
 评分器可以调用模型。从 `skynet` 辅助模块导入 `llm`。调用会通过 Skynet 的模型网关，发送到本次运行的评分器模型。
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
