@@ -22,9 +22,11 @@ import pytest
 from gepa.oa.config import OptimizeAnythingConfig
 from sqlalchemy.engine import Engine
 
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.usage_tags import current_tags
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MINIBATCH
 from core.exceptions import ServiceError
+from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxProposer
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
 from core.service_gateway.optimization.blackbox import native_engines
@@ -236,6 +238,33 @@ def _run(
     return MetaHarnessEngine().run(Task("seed", cases=list(_CASES)), loop.server(scorer, max_evals=20), ctx)
 
 
+def _options(
+    *,
+    max_token_cost: float | None = None,
+    reasoning_effort: str | None = None,
+    budget_route: Any = None,
+    **proposer: Any,
+) -> SimpleNamespace:
+    """Build the native options that the worker path reads.
+
+    Args:
+        max_token_cost: The proposer cost cap, in dollars.
+        reasoning_effort: The model's effort level.
+        budget_route: The run's budget route.
+        **proposer: The ``[proposer]`` settings.
+
+    Returns:
+        The options.
+    """
+    return SimpleNamespace(
+        model="m",
+        max_token_cost=max_token_cost,
+        reasoning_effort=reasoning_effort,
+        budget_route=budget_route,
+        proposer=BlackboxProposer(**proposer),
+    )
+
+
 def test_the_loop_path_never_starts_the_native_runtime(
     owner: tuple[User, int],
     engine: Engine,
@@ -401,9 +430,7 @@ def test_the_proposer_cost_cap_stops_the_session(
     """With a cap of one cent, the session runs its first reply's command and then asks the model no more."""
     model = _Proposer(cost="1")
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
-    options = SimpleNamespace(model="m", max_token_cost=0.01, proposer=SimpleNamespace(max_candidates_per_iter=None))
-
-    result = _run(loop, native_options=options)
+    result = _run(loop, native_options=_options(max_token_cost=0.01))
 
     assert result.best_candidate == "seedx"
     assert boxes.opened == 1
@@ -422,6 +449,63 @@ def test_a_repository_run_is_refused(
     with pytest.raises(ServiceError, match="repository"):
         _run(loop, repo_seed=seed)
     assert model.calls == []
+
+
+@pytest.mark.parametrize(
+    ("options", "field"),
+    [
+        (_options(run_command="my-agent"), "run_command"),
+        (_options(install_command="pip install my-agent"), "install_command"),
+        (_options(harness=BLACKBOX_HARNESS_PI), "harness"),
+        (_options(harness=BLACKBOX_HARNESS_CUSTOM, run_command="my-agent"), "harness"),
+        (_options(host_cli="codex"), "host_cli"),
+        (_options(budget_route={MCP_RELAY_ROUTE_KEY: {"servers": [{"name": "docs"}]}}), "mcp"),
+        (_options(reasoning_effort="high"), "reasoning_effort"),
+    ],
+)
+def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
+    options: SimpleNamespace,
+    field: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Until SKY-816, the tool loop is the only proposer: a setting that it would drop fails the run before any call."""
+    model = _Proposer()
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(ServiceError, match=rf"cannot apply these settings: .*\b{field}\b"):
+        _run(loop, native_options=options)
+    assert model.calls == []
+    assert boxes.opened == 0
+
+
+def test_the_default_proposer_settings_are_not_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The default ``[proposer]`` table, and a budget route with no MCP servers, run the tool loop."""
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+
+    result = _run(loop, native_options=_options(budget_route={MCP_RELAY_ROUTE_KEY: {"servers": []}}))
+
+    assert result.best_candidate == "seedxx"
+
+
+def test_a_task_that_holds_the_metric_source_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """As in the native runtime, a task document that holds the metric source never reaches the workspace."""
+    model = _Proposer()
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    metric = "def score(candidate):\n    return len(candidate)"
+    task = Task("seed", objective=f"Maximize this:\n{metric}", cases=list(_CASES), context={"metric_code": metric})
+
+    with pytest.raises(ServiceError, match="metric source"):
+        MetaHarnessEngine().run(task, loop.server(_score, max_evals=20), loop.context(max_iterations=2))
+    assert model.calls == []
+    assert boxes.opened == 0
 
 
 def test_a_bash_call_cannot_read_a_hidden_path(
@@ -542,7 +626,8 @@ def test_a_pending_entry_outside_agents_is_not_copied_or_deleted(
     outside = worker.work_dir.parent / "outside.txt"
     outside.write_text("keep")
     (worker.work_dir / "task.md").write_text("keep")
-    tree = loop.put_files({"logs/run/pending_eval.json": _pending("../outside.txt", "task.md"), "task.md": b"changed"})
+    pending = _pending("../outside.txt", "agents/../../outside.txt", "task.md")
+    tree = loop.put_files({"logs/run/pending_eval.json": pending, "task.md": b"changed"})
 
     worker._pull(tree)
 
@@ -712,7 +797,7 @@ def test_no_wait_follows_the_last_failed_attempt(
 
 
 @pytest.mark.parametrize(
-    ("cap", "value", "output_chars"), [("MAX_SESSION_TURNS", 1, 0), ("MAX_PROMPT_CHARS", 20_000, 25_000)]
+    ("cap", "value", "output_chars"), [("max_tool_calls", 1, 0), ("MAX_PROMPT_CHARS", 20_000, 25_000)]
 )
 def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     cap: str,
@@ -725,12 +810,16 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At the turn cap or the prompt cap, the session asks the model no more; its pending candidate still runs."""
-    monkeypatch.setattr(meta_mod, cap, value)
+    """At the proposer's tool-call cap or the prompt cap, the session asks the model no more; its candidate still runs."""
+    options = _options()
+    if cap == "max_tool_calls":
+        options = _options(max_tool_calls=value)
+    else:
+        monkeypatch.setattr(meta_mod, cap, value)
     model = _Proposer(output_chars=output_chars)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
-    result = _run(loop)
+    result = _run(loop, native_options=options)
 
     assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
     assert len(model.calls) == 2
@@ -812,3 +901,89 @@ def test_a_full_sweep_logs_its_start_as_the_native_runner_does(
         if record.name == native_engines.run_log.name and record.run_log["event"] == "candidate.eval.start"
     ]
     assert starts == [("Evaluating candidate 0 on 2 cases", "0", {"cases": 2})]
+
+
+def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A reply with more tool calls than the cap allows runs the first ones, then ends the session out of budget."""
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path, loop.context())
+    worker._max_tool_calls = 2
+    call = {"id": "c", "name": "bash", "arguments": {"command": "true"}}
+    replies = iter([ModelReply("", Decimal(1), [call, call, call])])
+    worker._call_model = lambda messages: next(replies)
+
+    outcome = worker._propose(1, None)
+
+    assert outcome.budget_exhausted
+    assert boxes.opened == 2
+
+
+def test_the_transcript_holds_tool_calls_in_the_openai_form(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The next prompt holds each tool call as an OpenAI function call, with its arguments as sorted JSON text."""
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    assistant = model.calls[1][-2]
+    command = assistant["tool_calls"][0]["function"]["arguments"]
+    assert assistant["role"] == "assistant"
+    assert assistant["tool_calls"] == [
+        {"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": command}}
+    ]
+    assert json.loads(command)["command"].startswith("printf %s seedx > agents/c1.txt")
+    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"b": 1, "a": 2}}) == {
+        "id": "i",
+        "type": "function",
+        "function": {"name": "bash", "arguments": '{"a": 2, "b": 1}'},
+    }
+    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": "not json"})["function"]["arguments"] == (
+        "not json"
+    )
+
+
+def test_a_best_version_with_no_finite_mean_has_no_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed scores NaN on every case and no rival comes: the result keeps the seed with no score, not -inf."""
+    model = _Proposer(call={"id": "x", "name": "edit", "arguments": "{}"})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, scorer=lambda _loop, _candidate, _case: (math.nan, {}))
+
+    assert result.best_candidate == "seed"
+    assert result.best_score is None
+
+
+def test_a_best_version_with_a_crashed_case_has_no_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed crashes on one case and no rival comes: its filled mean is no score, as the server says."""
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash on the first case, and score the second by length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score and the side information.
+        """
+        del loop
+        if case == _CASES[0]:
+            return None, {"error": "ValueError: bad case"}
+        return float(len(str(candidate))), {}
+
+    model = _Proposer(call={"id": "x", "name": "edit", "arguments": "{}"})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, scorer=score)
+
+    assert result.best_candidate == "seed"
+    assert result.best_score is None

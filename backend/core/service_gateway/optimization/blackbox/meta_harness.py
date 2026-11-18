@@ -27,7 +27,7 @@ import logging
 import math
 import posixpath
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -36,12 +36,20 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
 from .... import run_log
+from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
+from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BlackboxProposer
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from . import native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
-from .native_runtime import native_task_payload, run_native_engine, sanitize_side_info
+from .native_runtime import (
+    NativeOptions,
+    assert_metric_absent,
+    native_task_payload,
+    run_native_engine,
+    sanitize_side_info,
+)
 from .protocol import (
     BudgetExhaustedError,
     Candidate,
@@ -53,6 +61,7 @@ from .protocol import (
     candidate_key,
     fill_unscored,
 )
+from .runner import side_info_json_default
 
 BASH_TOOL = {
     "name": "bash",
@@ -81,16 +90,38 @@ OUTPUT_CHARS = 30_000
 MODEL_ATTEMPTS = 3
 # A rate limit (429) often clears in seconds, so a wait between attempts keeps a short burst from failing all of them.
 MODEL_RETRY_WAIT_SECONDS = 10.0
-# Every turn sends the whole transcript again, and each command can add up to two clipped outputs. These caps keep
-# the prompt inside the model's context: a session at a cap ends as out of budget, so its iteration still reads
-# ``pending_eval.json``, and the run does not stop.
-MAX_SESSION_TURNS = 100
+# Every turn sends the whole transcript again, and each command can add up to two clipped outputs. This cap, and
+# the proposer's ``max_tool_calls``, keep the prompt inside the model's context: a session at a cap ends as out of
+# budget, so its iteration still reads ``pending_eval.json``, and the run does not stop.
 MAX_PROMPT_CHARS = 400_000
 
 # Tests replace this, so a retry test does not wait.
 _sleep = time.sleep
 
 logger = logging.getLogger(__name__)
+
+
+def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    """Give one flat tool call of the engine loop in the OpenAI form that the next prompt's history holds.
+
+    The AutoSaddler port (SKY-723) sends the same form, so both ports send one transcript shape.
+
+    Args:
+        call: The flat ``{"id", "name", "arguments"}`` call.
+
+    Returns:
+        ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
+    """
+    arguments = call.get("arguments")
+    # Sorted keys give the same text for a live reply and for its replay from the step log.
+    return {
+        "id": call.get("id"),
+        "type": "function",
+        "function": {
+            "name": call.get("name"),
+            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True),
+        },
+    }
 
 
 def _clip(text: str) -> str:
@@ -310,16 +341,18 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
 
     record_timing = False
 
-    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext) -> None:
+    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext, max_tool_calls: int | None = None) -> None:
         """Build the native engine and bind the context.
 
         Args:
             config: The native engine's config.
             ctx: The engine loop's context, with its model, command and tree calls.
+            max_tool_calls: The most tool calls in one session; ``None`` takes the proposer default.
         """
         super().__init__(config)
         self._ctx = ctx
         self._tree: str | None = None
+        self._max_tool_calls = BlackboxProposer().max_tool_calls if max_tool_calls is None else max_tool_calls
 
     def skill(self) -> str:
         """Return the native skill, with scratch files in the workspace: ``/tmp`` does not persist between commands.
@@ -333,8 +366,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         """Run one proposer session as a tool loop: one step per model reply and per command.
 
         The proposer cap counts only committed costs, so a resume makes the same choices. The session also ends
-        as out of budget at ``MAX_SESSION_TURNS`` replies or at a prompt over ``MAX_PROMPT_CHARS``; both depend
-        only on the committed replies and results, so a resume ends it at the same place.
+        as out of budget after the proposer's ``max_tool_calls`` commands or at a prompt over ``MAX_PROMPT_CHARS``;
+        both depend only on the committed replies and results, so a resume ends it at the same place.
 
         Args:
             iteration: One-based iteration number.
@@ -363,32 +396,39 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         text = ""
         exhausted = False
         failed = False
-        turns = 0
-        while True:
+        commands = 0
+        while not exhausted:
             if remaining_cost is not None and float(spent) / 100 >= remaining_cost:
                 exhausted = True
                 break
-            if turns >= MAX_SESSION_TURNS or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
+            # A reply with tool calls runs at least one command, so the command cap also bounds the turns.
+            if commands >= self._max_tool_calls or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
                 exhausted = True
                 break
             reply = self._call_model(messages)
             if isinstance(reply, ModelCallFailedError):
+                # A failed call that the provider billed settles its cost on the run's ledger, but the replayed
+                # error does not carry that cost, so ``spent`` cannot count it the same way live and on a resume.
+                # The run budget still bounds the total spend (gap filed against SKY-719).
                 failed = True
                 text = str(reply)
                 break
-            turns += 1
             spent += reply.cost_cents
             text = reply.text
             messages.append(
                 {
                     "role": "assistant",
                     "content": reply.text,
-                    **({"tool_calls": reply.tool_calls} if reply.tool_calls else {}),
+                    **({"tool_calls": [_openai_call(call) for call in reply.tool_calls]} if reply.tool_calls else {}),
                 }
             )
             if not reply.tool_calls:
                 break
             for call in reply.tool_calls:
+                if commands >= self._max_tool_calls:
+                    exhausted = True
+                    break
+                commands += 1
                 output, tree = self._exec(tree, call)
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
         self._tree = tree
@@ -513,7 +553,8 @@ class MetaHarnessEngine:
             The frontier's best candidate and the loop's evidence.
 
         Raises:
-            ServiceError: When a worker-loop run is on a repository, or the candidate is not one text.
+            ServiceError: When a worker-loop run is on a repository, has a proposer setting that the tool loop does
+                not run, would expose the metric source, or the candidate is not one text.
             BudgetExhaustedError: When no scorer call is left.
         """
         if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file):
@@ -521,11 +562,16 @@ class MetaHarnessEngine:
             return run_native_engine(self.name, task, server, ctx)
         if ctx.repo_seed is not None:
             raise ServiceError("Meta-Harness cannot run on a repository in the worker engine loop yet.")
+        options = ctx.native_options
+        if options is not None:
+            # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
+            _refuse_unsupported_proposer(options)
         if not task.str_mode:
             raise ServiceError("Native agent engines require a single text candidate.")
+        # The native runtime checks the same document before it writes it into the box.
+        assert_metric_absent(json.dumps(native_task_payload(self.name, task), default=side_info_json_default), task)
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
-        options = ctx.native_options
         engine_config: dict[str, Any] = {"model": options.model if options else ""}
         if ctx.max_iterations is not None:
             engine_config["max_iterations"] = ctx.max_iterations
@@ -541,12 +587,50 @@ class MetaHarnessEngine:
             sandbox=False,
             engine_config=engine_config,
         )
-        upstream = _WorkerMetaHarness(config, ctx).run(
+        worker = _WorkerMetaHarness(config, ctx, options.proposer.max_tool_calls if options else None)
+        upstream = worker.run(
             UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, list(task.cases), ctx)
         )
+        # A best version with no finite mean, or with a crashed case, has no score (SKY-350, SKY-367).
+        scored = math.isfinite(upstream.best_score) and server.metric_error(upstream.best_candidate) is None
         return Result(
             best_candidate=upstream.best_candidate,
-            best_score=upstream.best_score,
+            best_score=upstream.best_score if scored else None,
             total_evals=server.used,
             metadata={**upstream.metadata, "upstream_revision": native_engines.META_HARNESS_REVISION},
+        )
+
+
+def _refuse_unsupported_proposer(options: NativeOptions) -> None:
+    """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
+
+    The tool loop is the only proposer here: a file proposer command, a host CLI, ``[proposer] mcp`` servers and a
+    reasoning effort would be silently dropped. SKY-816 brings the file proposer command back.
+
+    Args:
+        options: The run's native options.
+
+    Raises:
+        ServiceError: When the options name a proposer setting that the tool loop does not run.
+    """
+    proposer = options.proposer
+    refused = [
+        name
+        for name, value in (
+            ("run_command", proposer.run_command),
+            ("install_command", proposer.install_command),
+            ("host_cli", proposer.host_cli),
+        )
+        if value
+    ]
+    if proposer.harness != BLACKBOX_HARNESS_CODEX:
+        refused.append("harness")
+    if ((options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}).get("servers"):
+        refused.append("mcp")
+    if options.reasoning_effort:
+        refused.append("reasoning_effort")
+    if refused:
+        raise ServiceError(
+            "Meta-Harness in the worker engine loop runs only its built-in proposer, so it cannot apply these "
+            f"settings: {', '.join(refused)}. Remove them, or choose another engine."
         )
