@@ -131,9 +131,17 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         if _too_deep(arguments):
             arguments = _REFUSED_ARGUMENTS
         else:
-            arguments = json.dumps(arguments, sort_keys=True)
-            if len(arguments) > MAX_ARGUMENT_CHARS:
-                arguments = _REFUSED_ARGUMENTS
+            # ``_exec`` measures the arguments with no escapes, so Hebrew text does not count six characters a letter.
+            text = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+            if len(text) > MAX_ARGUMENT_CHARS:
+                text = _REFUSED_ARGUMENTS
+            else:
+                try:
+                    text.encode("utf-8")
+                # A lone surrogate from a JSON escape cannot encode as UTF-8 in the model request, so it stays escaped.
+                except UnicodeEncodeError:
+                    text = json.dumps(arguments, sort_keys=True)
+            arguments = text
     return {
         "id": call.get("id"),
         "type": "function",
@@ -569,7 +577,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         if _too_deep(arguments):
             return self._refuse_arguments(tree)
         # The protocol gives valid JSON object arguments as a mapping, so the text bound above never sees them.
-        if isinstance(arguments, dict) and len(json.dumps(arguments)) > MAX_ARGUMENT_CHARS:
+        if isinstance(arguments, dict) and len(json.dumps(arguments, ensure_ascii=False)) > MAX_ARGUMENT_CHARS:
             return self._refuse_arguments(tree)
         command = arguments.get("command") if isinstance(arguments, dict) else None
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):

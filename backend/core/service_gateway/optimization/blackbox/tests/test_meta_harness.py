@@ -1194,6 +1194,12 @@ def test_the_transcript_holds_tool_calls_in_the_openai_form(
     assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": "not json"})["function"]["arguments"] == (
         "not json"
     )
+    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"a": "א"}})["function"]["arguments"] == (
+        '{"a": "א"}'
+    )
+    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"a": "\ud800"}})["function"][
+        "arguments"
+    ] == ('{"a": "\\ud800"}')
 
 
 def test_a_best_version_with_no_finite_mean_has_no_score(
@@ -1585,13 +1591,15 @@ def _nested(depth: int) -> dict[str, Any]:
     [
         ("[" * 990, "command string"),
         (json.dumps({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}), "nested at most"),
+        # Long JSON text whose parsed object is small: only the text bound refuses it.
+        ('{"command": "true"}' + " " * meta_mod.MAX_ARGUMENT_CHARS, "nested at most"),
         ({"command": "x" * (meta_mod.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
         ({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}, "nested at most"),
         # Close to the depth past which the engine loop cannot commit the reply. How deep ``json.dumps`` can go
         # depends on the stack at the call, so the transcript must not depend on it.
         (_nested(900), "nested at most"),
     ],
-    ids=["deep-text", "long-text", "long-command", "long-object", "deep-object"],
+    ids=["deep-text", "long-text", "padded-text", "long-command", "long-object", "deep-object"],
 )
 def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
     arguments: Any,
@@ -1975,8 +1983,10 @@ def test_a_billed_failure_at_the_proposer_cap_is_not_tried_again(
         # One two-byte character: the command is at the bound in characters, and one byte over it as UTF-8.
         (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 4) + "é", True),
         (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 3) + "é", False),
+        # Hebrew letters are two bytes each, and JSON escapes them as six characters each, past MAX_ARGUMENT_CHARS.
+        (": " + "א" * ((meta_mod.MAX_COMMAND_BYTES - 2) // 2), True),
     ],
-    ids=["ascii-at-bound", "ascii-over", "utf8-at-bound", "utf8-over"],
+    ids=["ascii-at-bound", "ascii-over", "utf8-at-bound", "utf8-over", "hebrew-at-bound"],
 )
 def test_a_command_over_its_byte_bound_gets_an_error_result(
     command: str,
@@ -1987,7 +1997,8 @@ def test_a_command_over_its_byte_bound_gets_an_error_result(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A command up to ``MAX_COMMAND_BYTES`` UTF-8 bytes runs; a longer one gets an error result and opens no box.
+    """A command up to ``MAX_COMMAND_BYTES`` UTF-8 bytes runs and the transcript keeps it; a longer one gets an
+    error result and opens no box.
 
     Args:
         command: The bash command.
@@ -2006,6 +2017,8 @@ def test_a_command_over_its_byte_bound_gets_an_error_result(
 
     if runs:
         assert json.loads(output)["exit_code"] == 0
+        sent = meta_mod._openai_call({"id": "c", "name": "bash", "arguments": {"command": command}})
+        assert json.loads(sent["function"]["arguments"]) == {"command": command}
     else:
         assert f"at most {meta_mod.MAX_COMMAND_BYTES} bytes" in json.loads(output)["error"]
         assert after == tree
