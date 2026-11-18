@@ -33,6 +33,7 @@ from core.service_gateway.optimization.blackbox.native_engines import ProposerFa
 from core.service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     RepoSeed,
     Result,
@@ -1241,6 +1242,61 @@ def test_a_file_past_the_candidate_cap_gets_an_error_result_and_spends_no_budget
     assert "larger than 5 bytes" in _tool_result(model, 3)["error"]
     assert _tool_result(model, 4)["budget"] == {"used": 2, "remaining": 0}
     assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
+
+
+def test_an_over_cap_lab_file_never_loads_for_evaluate_or_the_carried_lab(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``evaluate`` and the carried lab read an over-cap file with the candidate cap, so its bytes never load.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 5)
+    reads: list[tuple[str, int | None, bytes | None | FileTooLargeError]] = []
+    read_file = EngineLoop.read_file
+
+    def recorded(loop: EngineLoop, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
+        """Record each read's path, its cap and what it gave.
+
+        Args:
+            loop: The engine loop.
+            tree_id: The tree.
+            path: The file path.
+            max_bytes: The read's cap.
+
+        Returns:
+            The file bytes, or ``None``.
+        """
+        try:
+            data = read_file(loop, tree_id, path, max_bytes)
+        except FileTooLargeError as error:
+            reads.append((path, max_bytes, error))
+            raise
+        reads.append((path, max_bytes, data))
+        return data
+
+    monkeypatch.setattr(EngineLoop, "read_file", recorded)
+    big: Turn = lambda n: {"id": "big", "name": "evaluate", "arguments": {"file": "work/big.txt"}}  # noqa: E731
+    model = _Researcher([_WRITE, _bash("printf %s seedxx > work/big.txt"), big, _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop, max_evals=2, stop_at_score=None)
+
+    big_reads = [(cap, type(outcome)) for path, cap, outcome in reads if path == "work/big.txt"]
+    # One read for ``evaluate`` and one for the carried lab after the round.
+    assert big_reads == [(5, FileTooLargeError)] * 2
+    assert not (_lab(tmp_path) / "work" / "big.txt").exists()
 
 
 @pytest.mark.parametrize(

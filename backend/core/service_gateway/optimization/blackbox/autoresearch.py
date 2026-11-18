@@ -42,7 +42,15 @@ from . import loop_tools, native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
 from .loop_tools import MAX_PROMPT_CHARS
 from .native_runtime import assert_metric_absent, native_task_payload, run_native_engine, sanitize_side_info
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, candidate_key
+from .protocol import (
+    BudgetExhaustedError,
+    EngineContext,
+    EvalServer,
+    FileTooLargeError,
+    Result,
+    Task,
+    candidate_key,
+)
 from .runner import side_info_json_default
 
 BASH_TOOL = {
@@ -507,14 +515,16 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             isinstance(example_ids, list) and all(isinstance(eid, str) for eid in example_ids)
         ):
             return json.dumps({"error": "Give `example_ids` as a list of example id strings."})
-        data = self._ctx.read_file(tree, path)
-        if data is None:
-            return json.dumps({"error": f"No file {path} in the lab."})
-        if len(data) > native_engines.MAX_CANDIDATE_BYTES:
-            # The candidate is copied into the observations, the archive and the frontier, so its size is bounded.
+        # The candidate is copied into the observations, the archive and the frontier, so its size is bounded. A lab
+        # file may hold up to ``MAX_TREE_BYTES``, so the cap refuses a larger file before it loads.
+        try:
+            data = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+        except FileTooLargeError:
             return json.dumps(
                 {"error": f"{path} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."}
             )
+        if data is None:
+            return json.dumps({"error": f"No file {path} in the lab."})
         try:
             candidate = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -566,13 +576,12 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         work.mkdir()
         total = 0
         for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
-            content = self._ctx.read_file(tree, path)
+            try:
+                content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+            except FileTooLargeError:
+                content = None
             local = self.work_dir / path
-            if (
-                content is None
-                or len(content) > native_engines.MAX_CANDIDATE_BYTES
-                or total + len(content) > _MAX_CARRY_BYTES
-            ):
+            if content is None or total + len(content) > _MAX_CARRY_BYTES:
                 # A deleted or skipped notebook must not come back from an earlier round.
                 local.unlink(missing_ok=True)
                 continue
