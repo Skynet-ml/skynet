@@ -222,7 +222,11 @@ def _run_scripted(
 
 
 def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
-    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts."""
+    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts.
+
+    Args:
+        tmp_path: Folder for the runner files and the run store.
+    """
     python = _upstream_python()
     if python is None:
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
@@ -601,19 +605,27 @@ def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> N
     evaluator = SimpleNamespace(
         best_development=None,
         no_score_candidates=set(),
+        run_failed_candidates=set(),
         stop_at_score=0.5,
         versions={"c1": 1, "c2": 2},
         case_ids={"a": "0", "b": "1"},
         mailbox=SimpleNamespace(total_evals=2, emit=lambda *args: emitted.append(args)),
     )
     floor = autosaddler_runner._NO_SCORE_FLOOR
-    crashed = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=floor)]
+    crashed = [
+        SimpleNamespace(case_id="a", score=0.9, metadata={}),
+        SimpleNamespace(case_id="b", score=floor, metadata={"scorer_feedback": {"status": "run_failed"}}),
+    ]
 
     autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", (0.9 + floor) / 2, crashed)
 
     assert evaluator.best_development is None
     assert emitted == []
-    assert evaluator.no_score_candidates == {"c1"}
+    assert evaluator.no_score_candidates == evaluator.run_failed_candidates == {"c1"}
+    metric_error = [SimpleNamespace(**{**vars(item), "metadata": {}}) for item in crashed]
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c3", "text three", None, metric_error)
+    assert evaluator.no_score_candidates == {"c1", "c3"}
+    assert evaluator.run_failed_candidates == {"c1"}
     scored = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=0.7)]
     with pytest.raises(autosaddler_runner.TargetReached):
         autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
@@ -910,8 +922,8 @@ def test_ranking_never_selects_a_version_with_a_failed_run_case() -> None:
     assert ranking.select([("crashed", _three(0.9, True)), ("low", _three(0.1, True))])[0] == "crashed"
 
 
-def test_ranking_returns_the_seed_when_no_version_scored_every_case() -> None:
-    """With no fully scored version, ranking returns the seed, which the app reports with no score (SKY-751)."""
+def test_ranking_returns_the_seed_when_no_version_has_a_score() -> None:
+    """With no version free of a failed ``[run]`` case, ranking returns the seed, reported with no score (SKY-751)."""
     ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
     nothing = _evaluation({"a": None}, frozenset({"a"}), "development")
     partial = _evaluation({"a": 0.4, "b": None}, frozenset({"b"}), "development")
@@ -920,7 +932,18 @@ def test_ranking_returns_the_seed_when_no_version_scored_every_case() -> None:
     assert ranking.select([("seed", nothing), ("child", partial)])[0] == "seed"
     assert ranking.select([("seed", nothing), ("child", nothing)])[0] == "seed"
     assert ranking.select([("seed", metric_error), ("child", partial)])[0] == "seed"
-    assert ranking.select([("seed", _three(0.1, False, "development")), ("child", metric_error)])[0] == "seed"
+    assert ranking.select([("child", partial), ("other", nothing)])[0] == "child"
+
+
+def test_ranking_still_ranks_versions_with_a_metric_error_by_score() -> None:
+    """A metric error on one case for every version keeps the fill, so the best mean still wins (SKY-751, SKY-367)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+    seed = _evaluation({"a": 0.2, "b": None}, split="development")
+    better = _evaluation({"a": 0.9, "b": None}, split="development")
+    worse = _evaluation({"a": 0.1, "b": None}, split="development")
+
+    assert ranking.select([("seed", seed), ("better", better), ("worse", worse)])[0] == "better"
+    assert ranking.select([("seed", seed), ("worse", worse)])[0] == "seed"
 
 
 def test_training_evidence_never_shows_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1019,14 +1042,14 @@ _HISTORY = ".autosaddler/history"
 
 
 def _prompt_pack(
-    monkeypatch: pytest.MonkeyPatch, history: dict[str, str], no_score: set[str]
+    monkeypatch: pytest.MonkeyPatch, history: dict[str, str], run_failed: set[str]
 ) -> autosaddler_runner.AppPromptPack:
     """Build the app prompt pack with upstream's domain, history and assets stood in.
 
     Args:
         monkeypatch: Stands in for the upstream modules, which need Python 3.12.
         history: The workspace files upstream's history bundle returns.
-        no_score: Versions with a development case that has no score.
+        run_failed: Versions with a failed ``[run]`` case in development.
 
     Returns:
         The prompt pack the runner uses.
@@ -1050,7 +1073,7 @@ def _prompt_pack(
         lambda kind, skills, prefix: SimpleNamespace(system_context="", task_prompt="", skills=(), provenance=()),
     )
     return autosaddler_runner.AppPromptPack(
-        store=None, component_names=["prompt"], objective=None, background=None, no_score_candidates=no_score
+        store=None, component_names=["prompt"], objective=None, background=None, run_failed_candidates=run_failed
     )
 
 
@@ -1089,8 +1112,8 @@ def test_session_context_and_history_never_show_the_floor(monkeypatch: pytest.Mo
     }
 
 
-def test_a_version_with_no_development_score_is_never_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Upstream accepts on the training batch only; the evolve session never offers a no-score version (SKY-751).
+def test_a_version_with_a_failed_run_case_is_never_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstream accepts on the training batch only; the evolve session never offers a failed-run version (SKY-751).
 
     Args:
         monkeypatch: Stands in for the upstream modules.
@@ -1108,6 +1131,28 @@ def test_a_version_with_no_development_score_is_never_offered_as_a_parent(monkey
     assert rendered["component_source_options"] == {"y": ["seed"]}
     every = _prompt_pack(monkeypatch, history, {"seed", "c1"}).session("evolve", context)
     assert every.output_schema["properties"]["parent_ids"]["items"]["enum"] == ["seed", "c1"]
+
+
+def test_a_version_with_a_metric_error_is_still_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A metric error fails for every version, so its version stays a parent the agent can pick (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    evaluator = SimpleNamespace(no_score_candidates=set(), run_failed_candidates=set())
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    observations = [
+        SimpleNamespace(case_id="a", score=0.9, metadata={}),
+        SimpleNamespace(case_id="b", score=floor, metadata={}),
+    ]
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text", None, observations)
+    history = {f"{_HISTORY}/manifest.json": json.dumps({"files": {}}) + "\n"}
+    context = {"candidate_ids": ["seed", "c1"], "component_source_options": {"x": ["seed", "c1"]}}
+
+    spec = _prompt_pack(monkeypatch, history, evaluator.run_failed_candidates).session("evolve", context)
+
+    assert evaluator.no_score_candidates == {"c1"}
+    assert spec.output_schema["properties"]["parent_ids"]["items"]["enum"] == ["seed", "c1"]
 
 
 def test_mailbox_reads_a_null_parent_score_as_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1133,13 +1178,13 @@ import autosaddler_runner as runner
 from autosaddler.v2.core import domain as d, policies as p
 
 
-def evaluation(name, scores, split):
+def evaluation(name, scores, split, status="run_failed"):
     observations = tuple(
         d.Observation.create(
             candidate_id=d.sha256_digest(name), case_id=case, split=split, repetition=0,
             disposition="task_failure", score=runner._NO_SCORE_FLOOR if score is None else score,
             evaluator_fingerprint="f", cost=d.Cost(rollouts=1),
-            metadata={"scorer_feedback": {"status": "run_failed"} if score is None else {}},
+            metadata={"scorer_feedback": {"status": status} if score is None else {}},
         )
         for case, score in scores
     )
@@ -1170,6 +1215,11 @@ print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", None)], "
 print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", 0.4), ("b", None)], "development"))])[0])
 scored_seed = evaluation("s", [("a", 0.2), ("b", 0.2)], "development")
 print(ranking.select([("seed", scored_seed), ("child", evaluation("c", [("a", 0.9), ("b", None)], "development"))])[0])
+metric = [
+    (name, evaluation(name, [("a", score), ("b", None)], "development", "metric_error"))
+    for name, score in (("seed", 0.2), ("best", 0.9), ("worse", 0.1))
+]
+print(ranking.select(metric)[0])
 """
 
 
@@ -1196,4 +1246,5 @@ def test_upstream_policies_handle_the_no_score_floor(tmp_path: Path) -> None:
         "seed",
         "seed",
         "seed",
+        "best",
     ]

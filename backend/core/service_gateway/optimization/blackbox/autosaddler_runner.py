@@ -517,6 +517,9 @@ class AppEvaluator:
         # Development candidates with a case that has no score. Their
         # upstream aggregate holds the floor, so the app reports no score.
         self.no_score_candidates: set[str] = set()
+        # The subset with a failed [run] case. A metric error fails for every
+        # version, so only these never become a parent (SKY-751).
+        self.run_failed_candidates: set[str] = set()
         # The run view orders versions numerically, so each candidate that
         # reaches development gets the next version number in arrival order.
         self.versions: dict[str, int] = {}
@@ -688,6 +691,8 @@ class AppEvaluator:
         # show a score or stop the run.
         if score is None or not math.isfinite(score) or any(_no_score(item) for item in observations):
             self.no_score_candidates.add(candidate_id)
+            if any(_failed_run_case(item) for item in observations):
+                self.run_failed_candidates.add(candidate_id)
             return
         if self.best_development is None or score > self.best_development["best_score"]:
             self.best_development = {"best_candidate": value, "best_score": score, "candidate_id": candidate_id}
@@ -795,6 +800,21 @@ def _scored_view(evaluation: Any) -> Any:
     return dataclasses.replace(evaluation, observations=observations)
 
 
+def _failed_run_case(observation: Any) -> bool:
+    """Tell whether an upstream observation is a case whose ``[run]`` entry failed.
+
+    Args:
+        observation: Upstream observation that carries the scorer feedback.
+
+    Returns:
+        Whether it has no score and the run-failed status. A scorer may
+        report that status with a real score, which it keeps, as in
+        ``protocol.py``.
+    """
+    feedback = observation.metadata.get("scorer_feedback")
+    return isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS and _no_score(observation)
+
+
 def _run_failed(evaluation: Any) -> bool:
     """Tell whether any case of an upstream evaluation had a failed ``[run]`` entry.
 
@@ -802,17 +822,9 @@ def _run_failed(evaluation: Any) -> bool:
         evaluation: Upstream evaluation whose observations carry the scorer feedback.
 
     Returns:
-        Whether any observation has no score and the run-failed status. A
-        scorer may report that status with a real score, which it keeps, as
-        in ``protocol.py``.
+        Whether any observation is a failed ``[run]`` case.
     """
-    for observation in evaluation.observations:
-        feedback = observation.metadata.get("scorer_feedback")
-        if not (isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS):
-            continue
-        if _no_score(observation):
-            return True
-    return False
+    return any(_failed_run_case(observation) for observation in evaluation.observations)
 
 
 def _compared_keys(parent: Any, child: Any) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
@@ -849,8 +861,8 @@ class NoScoreRejectedAcceptance:
     crashed on one case and scored high on the rest would replace a fully
     scored parent. A child with a failed entry is rejected; a child that
     fixes its parent's failed entry is accepted. Acceptance sees only the
-    training batch; ``AppPromptPack`` keeps a version that has no score on a
-    development case from becoming a parent.
+    training batch; ``AppPromptPack`` keeps a version with a failed ``[run]``
+    case in development from becoming a parent.
     """
 
     def __init__(self, inner: Any) -> None:
@@ -896,22 +908,24 @@ class NoScoreRejectedAcceptance:
 
 
 class NoScoreLastRanking:
-    """Ranking that never selects a version with a case that has no score (SKY-751).
+    """Ranking that never selects a version with a failed ``[run]`` case (SKY-751).
 
     Such a case holds the floor in upstream's mean. The app reports no score
-    for that version, so it must not win the final selection.
+    for that version, so it must not win the final selection. A metric error
+    fails for every version, so that version ranks by its mean over its
+    scored cases, as the SKY-367 fill ranks it in the other engines.
     """
 
     def __init__(self, inner: Any) -> None:
         """Wrap upstream's ranking policy.
 
         Args:
-            inner: Upstream ranking, used on the versions that scored every case.
+            inner: Upstream ranking, used on the versions with no failed ``[run]`` case.
         """
         self.inner = inner
 
     def select(self, candidates: Sequence[tuple[Any, Any]]) -> tuple[Any, Any]:
-        """Select the best fully scored version, or the seed when no version scored every case.
+        """Select the best version with a score, or the seed when no version has one.
 
         Args:
             candidates: ``(candidate, development evaluation)`` pairs, the seed first.
@@ -919,10 +933,18 @@ class NoScoreLastRanking:
         Returns:
             The selected pair.
         """
-        scored = [item for item in candidates if not any(_no_score(case) for case in item[1].observations)]
-        # The app reports no score for the seed then, which finishes the run
-        # with no score; any other unscored version would fail the run.
-        return self.inner.select(scored) if scored else candidates[0]
+        views = {id(item[1]): _scored_view(item[1]) for item in candidates}
+        scored = [
+            (candidate, views[id(evaluation)])
+            for candidate, evaluation in candidates
+            if not _run_failed(evaluation) and views[id(evaluation)].aggregate_score is not None
+        ]
+        if not scored:
+            # The app reports no score for the seed then, which finishes the
+            # run with no score; any other unscored version would fail the run.
+            return candidates[0]
+        selected, _ = self.inner.select(scored)
+        return next(item for item in candidates if item[0] is selected)
 
 
 class AppEvidenceBuilder:
@@ -1263,7 +1285,7 @@ class AppPromptPack:
         objective: str | None,
         background: str | None,
         readonly_paths: Sequence[str] | None = None,
-        no_score_candidates: set[str] | None = None,
+        run_failed_candidates: set[str] | None = None,
     ) -> None:
         """Bind the prompt pack to the run store and task framing.
 
@@ -1273,11 +1295,11 @@ class AppPromptPack:
             objective: User objective text.
             background: User background notes.
             readonly_paths: Paths that stay as fetched; set only for a repository run.
-            no_score_candidates: The evaluator's live set of versions with a
-                development case that has no score.
+            run_failed_candidates: The evaluator's live set of versions with a
+                failed ``[run]`` case in development.
         """
         self.store = store
-        self.no_score_candidates = set() if no_score_candidates is None else no_score_candidates
+        self.run_failed_candidates = set() if run_failed_candidates is None else run_failed_candidates
         self.component_names = tuple(component_names)
         self.objective = objective
         self.background = background
@@ -1316,11 +1338,12 @@ class AppPromptPack:
         elif kind == "evolve":
             candidate_ids = _strings(context.get("candidate_ids"), "candidate_ids")
             options = _source_options(context.get("component_source_options"), candidate_ids)
-            # Upstream accepts on the training batch only, so a version with no
-            # score on a development case stays in its accepted list. Only the
-            # parents the agent may name exclude it (SKY-751). When no accepted
-            # version has a score, the search keeps them all.
-            parents = [item for item in candidate_ids if item not in self.no_score_candidates] or list(candidate_ids)
+            # Upstream accepts on the training batch only, so a version with a
+            # failed [run] case in development stays in its accepted list. Only
+            # the parents the agent may name exclude it (SKY-751); a metric
+            # error keeps its version. When every accepted version failed a
+            # [run] case, the search keeps them all.
+            parents = [item for item in candidate_ids if item not in self.run_failed_candidates] or list(candidate_ids)
             options = {
                 name: kept
                 for name, sources in options.items()
@@ -1704,7 +1727,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             objective=task.get("objective"),
             background=task.get("background"),
             readonly_paths=readonly_paths,
-            no_score_candidates=evaluator.no_score_candidates,
+            run_failed_candidates=evaluator.run_failed_candidates,
         ),
         train_cases=train_cases,
         development_cases=development_cases,
