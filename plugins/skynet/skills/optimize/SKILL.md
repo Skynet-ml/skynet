@@ -61,8 +61,8 @@ change their plan. Then call `next_tool`.
    of the repository's `optimize.toml` returned for the case. With
    `[target.<name>]` stages, the scorer calls each stage with
    `call("<name>", input)`, imported by `from skynet import call, StageError`.
-   The scorer runs in its own box with no repository files, so it never
-   imports the repository's code. With no cases, the entry runs once with no
+   The scorer runs in its own box that holds only the metric files and no
+   version code, so it never imports the repository's code. With no cases, the entry runs once with no
    input. Return `(score, "<short feedback>")` or
    `{"score": <number>, "feedback": "<short text>"}`. Higher is better.
    Skynet refuses a bare number, because the engines learn from the
