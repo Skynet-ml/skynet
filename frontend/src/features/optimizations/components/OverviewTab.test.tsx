@@ -78,10 +78,7 @@ void describe("finished-run Overview fixtures", () => {
     };
     const html = render({ ...fixture, job });
     assert.ok(html.includes(BASELINE_CARD), "score cards");
-    assert.ok(
-      html.includes("optimization.overview.no_score") || html.includes(">No score<"),
-      "no score",
-    );
+    assert.ok(html.includes("optimization.overview.no_score"), "no score");
     assert.ok(html.includes(">0.78<"), "the scored version");
   });
 

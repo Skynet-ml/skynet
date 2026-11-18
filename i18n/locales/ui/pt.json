@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "Concluída com {score}",
   "notifications.item.finished_delta": "Concluída com {score}, {delta} face à base",
   "notifications.item.finished_plain": "Concluída",
+  "notifications.item.finished_no_score": "Concluída sem pontuação",
   "notifications.item.new_best": "Nova melhor pontuação: {score}",
   "notifications.item.new_best_delta": "Nova melhor pontuação: {score}, {delta} face à base",
   "notifications.item.new_best_plain": "Nova melhor pontuação",

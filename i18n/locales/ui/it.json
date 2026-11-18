@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "Conclusa a {score}",
   "notifications.item.finished_delta": "Conclusa a {score}, {delta} rispetto alla base",
   "notifications.item.finished_plain": "Conclusa",
+  "notifications.item.finished_no_score": "Conclusa senza punteggio",
   "notifications.item.new_best": "Nuovo punteggio migliore: {score}",
   "notifications.item.new_best_delta": "Nuovo punteggio migliore: {score}, {delta} rispetto alla base",
   "notifications.item.new_best_plain": "Nuovo punteggio migliore",

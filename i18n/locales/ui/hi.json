@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "{score} पर पूरा हुआ",
   "notifications.item.finished_delta": "{score} पर पूरा हुआ, बेसलाइन से {delta}",
   "notifications.item.finished_plain": "पूरा हुआ",
+  "notifications.item.finished_no_score": "बिना स्कोर के पूरा हुआ",
   "notifications.item.new_best": "नया सर्वश्रेष्ठ: {score}",
   "notifications.item.new_best_delta": "नया सर्वश्रेष्ठ: {score}, बेसलाइन से {delta}",
   "notifications.item.new_best_plain": "नया सर्वश्रेष्ठ स्कोर",

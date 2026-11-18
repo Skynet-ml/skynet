@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "Завершено з {score}",
   "notifications.item.finished_delta": "Завершено з {score}, {delta} до базового",
   "notifications.item.finished_plain": "Завершено",
+  "notifications.item.finished_no_score": "Завершено без оцінки",
   "notifications.item.new_best": "Новий найкращий результат: {score}",
   "notifications.item.new_best_delta": "Новий найкращий результат: {score}, {delta} до базового",
   "notifications.item.new_best_plain": "Новий найкращий результат",

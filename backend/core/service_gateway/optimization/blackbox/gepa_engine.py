@@ -28,6 +28,7 @@ from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
 from .native_engines import ScoredThresholdStopper
 from .native_runtime import run_native_engine
 from .protocol import (
+    UNSCORED,
     BudgetExhaustedError,
     Candidate,
     EngineContext,
@@ -196,9 +197,15 @@ class GepaEngine:
                 example: The case, or ``None`` in single-task mode.
 
             Returns:
-                The score, :data:`UNSCORED` after a metric error, and side information.
+                The score, :data:`UNSCORED` after a metric error, and side
+                information. A version with a failed ``[run]`` entry on any
+                case scored so far gets :data:`UNSCORED`, as a batch gives it.
             """
             score, side_info = score_one(candidate, example)
+            # A single call has no batch to fill, so the server's record carries
+            # the version's earlier failed [run] entry to this case (SKY-751).
+            if server.run_failed(candidate):
+                return UNSCORED, side_info
             return engine_score(score), side_info
 
         def batch_evaluator(pairs: list[tuple[Candidate, Any]]) -> list[tuple[float, dict[str, Any]]]:

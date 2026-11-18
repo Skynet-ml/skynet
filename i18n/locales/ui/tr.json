@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "{score} ile bitti",
   "notifications.item.finished_delta": "{score} ile bitti, temele göre {delta}",
   "notifications.item.finished_plain": "Bitti",
+  "notifications.item.finished_no_score": "Puansız bitti",
   "notifications.item.new_best": "Yeni en iyi: {score}",
   "notifications.item.new_best_delta": "Yeni en iyi: {score}, temele göre {delta}",
   "notifications.item.new_best_plain": "Yeni en iyi skor",

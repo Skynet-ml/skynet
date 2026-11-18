@@ -2166,6 +2166,23 @@ def test_a_version_whose_run_failed_is_never_published() -> None:
     assert repo_staging.improved_patch(result) is None
 
 
+_METRIC_ERROR_START = {"candidate": "", "score": None, "side_info": {"error": "KeyError", "status": METRIC_ERROR}}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, 0.4, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, None, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, 0.4, versions=[{"candidate": _EDIT, "score": 0.4}]),
+    ],
+    ids=["final-run", "stopped", "starting-code-not-recorded"],
+)
+def test_a_scored_version_never_beats_a_starting_code_the_metric_crashed_on(result: dict[str, Any]) -> None:
+    """Only a failed ``[run]`` of the starting code lets a scored version open a PR; a metric error does not (SKY-751)."""
+    assert repo_staging.improved_patch(result) is None
+
+
 def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
     """Candidate branches leave out a crashed version and count it as skipped."""
     other = _EDIT.replace("+x = 2", "+x = 3")

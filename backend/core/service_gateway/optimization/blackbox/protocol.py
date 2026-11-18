@@ -246,6 +246,9 @@ class CandidateRecord:
     # Set once the metric or scorer crashed on any case: the version then has
     # no score at all, so it can never be the best or be published.
     metric_error: str | None = None
+    # SKY-751: whether the failure in ``metric_error`` (the first one) is a
+    # failed [run] entry, not a metric crash. ``metric_error`` holds its text.
+    run_failed: bool = False
 
     @property
     def mean_score(self) -> float | None:
@@ -495,18 +498,24 @@ class EvalServer:
         record = self._records.get(key)
         failed = score is None or is_metric_error(side_info)
         failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
-        error = str(side_info.get("error") or (RUN_FAILED_STATUS if failed_run else METRIC_ERROR)) if failed else None
+        # A failed [run] entry carries its failure text as feedback, not as an error.
+        fallback = (side_info.get("feedback") or RUN_FAILED_STATUS) if failed_run else METRIC_ERROR
+        error = str(side_info.get("error") or fallback) if failed else None
         crashed = failed or "error" in side_info
         # A failed case adds nothing to the total: the version's mean is None.
         value = 0.0 if failed or score is None else float(score)
         if record is None:
-            self._records[key] = CandidateRecord(candidate, value, 1, self._root.used, side_info, crashed, error)
+            self._records[key] = CandidateRecord(
+                candidate, value, 1, self._root.used, side_info, crashed, error, failed_run
+            )
             return
         record.total += value
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
-        record.metric_error = record.metric_error or error
+        if record.metric_error is None:
+            record.metric_error = error
+            record.run_failed = failed_run
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -538,6 +547,19 @@ class EvalServer:
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.metric_error
+
+    def run_failed(self, candidate: Candidate) -> bool:
+        """Return whether ``candidate``'s first failed case is a failed ``[run]`` entry (SKY-751).
+
+        Args:
+            candidate: The version to look up.
+
+        Returns:
+            ``True`` when a ``[run]`` entry of the version failed before any
+            metric crash, else ``False`` (also when it was not scored).
+        """
+        record = self._records.get(candidate_key(candidate))
+        return record is not None and record.run_failed
 
     @property
     def best_candidate(self) -> Candidate | None:

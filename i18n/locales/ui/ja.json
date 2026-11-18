@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "{score} で完了",
   "notifications.item.finished_delta": "{score} で完了、ベースライン比 {delta}",
   "notifications.item.finished_plain": "完了",
+  "notifications.item.finished_no_score": "スコアなしで完了",
   "notifications.item.new_best": "最高スコア更新: {score}",
   "notifications.item.new_best_delta": "最高スコア更新: {score}、ベースライン比 {delta}",
   "notifications.item.new_best_plain": "最高スコア更新",

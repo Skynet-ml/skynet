@@ -1101,6 +1101,7 @@
   "notifications.item.finished": "הסתיימה עם {score}",
   "notifications.item.finished_delta": "הסתיימה עם {score}, {delta} לעומת הבסיס",
   "notifications.item.finished_plain": "הסתיימה",
+  "notifications.item.finished_no_score": "הסתיימה ללא ציון",
   "notifications.item.new_best": "שיא חדש: {score}",
   "notifications.item.new_best_delta": "שיא חדש: {score}, {delta} לעומת הבסיס",
   "notifications.item.new_best_plain": "ציון שיא חדש",

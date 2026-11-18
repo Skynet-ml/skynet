@@ -699,28 +699,60 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
             os.kill(setup_pid, signal.SIGKILL)
 
 
-def _evaluation(aggregate: float, crashed: bool) -> SimpleNamespace:
-    """Build an upstream-shaped evaluation over cases ``a``, ``b`` and ``c``.
+def _evaluation(
+    scores: dict[str, float | None], failed: frozenset[str] = frozenset(), split: str = "train"
+) -> SimpleNamespace:
+    """Build an upstream-shaped evaluation with one observation per case.
 
     Args:
-        aggregate: Upstream's mean over the valid cases.
-        crashed: Whether case ``c`` had a failed [run] entry.
+        scores: Each case's score; ``None`` is an invalid observation, as upstream records a non-finite score.
+        failed: Cases whose scorer feedback has the run-failed status.
+        split: Upstream split of the evaluation.
 
     Returns:
-        An evaluation with one observation per case.
+        An evaluation with upstream's fields and aggregate over the valid cases.
     """
-    feedback = [{"feedback": "ok"}, {"feedback": "ok"}, {"feedback": "ok"}]
-    if crashed:
-        feedback[2] = {"feedback": "Run failed: boom", "status": "run_failed"}
+    observations = [
+        SimpleNamespace(
+            case_id=case_id,
+            repetition=0,
+            score=score,
+            is_valid=score is not None,
+            metadata={
+                "scorer_feedback": {"feedback": "Run failed: boom", "status": "run_failed"}
+                if case_id in failed
+                else {"feedback": "ok"}
+            },
+        )
+        for case_id, score in scores.items()
+    ]
+    valid = [score for score in scores.values() if score is not None]
     return SimpleNamespace(
-        aggregate_score=aggregate,
-        requested_case_ids=("a", "b", "c"),
-        observations=[SimpleNamespace(metadata={"scorer_feedback": item}) for item in feedback],
+        aggregate_score=sum(valid) / len(valid) if valid else None,
+        requested_case_ids=tuple(scores),
+        observations=observations,
+        split=split,
     )
 
 
+def _three(aggregate: float, crashed: bool, split: str = "train") -> SimpleNamespace:
+    """Build an evaluation over cases ``a``, ``b`` and ``c``, where ``c`` may have a failed [run] entry.
+
+    Args:
+        aggregate: Score of every valid case, so also upstream's mean.
+        crashed: Whether case ``c`` had a failed [run] entry.
+        split: Upstream split of the evaluation.
+
+    Returns:
+        The evaluation.
+    """
+    if crashed:
+        return _evaluation({"a": aggregate, "b": aggregate, "c": None}, frozenset({"c"}), split)
+    return _evaluation({"a": aggregate, "b": aggregate, "c": aggregate}, split=split)
+
+
 class _MeanRanking:
-    """Rank like upstream: the highest mean over the valid cases wins."""
+    """Rank like upstream: the highest mean over the valid cases wins, and no mean is an error."""
 
     def select(self, candidates: list[tuple[Any, Any]]) -> tuple[Any, Any]:
         """Select the pair with the highest aggregate.
@@ -730,15 +762,20 @@ class _MeanRanking:
 
         Returns:
             The selected pair.
+
+        Raises:
+            ValueError: A pair has no aggregate, as upstream raises.
         """
+        if any(evaluation.aggregate_score is None for _, evaluation in candidates):
+            raise ValueError("Ranking requires valid development aggregates")
         return max(candidates, key=lambda item: item[1].aggregate_score)
 
 
 class _StrictImprovement:
-    """Accept like upstream: a higher mean over the valid cases wins."""
+    """Accept like upstream: a higher mean over the matched valid cases wins, and no matched case is an error."""
 
     def compare(self, parent: Any, child: Any) -> SimpleNamespace:
-        """Accept the child when its aggregate is higher.
+        """Accept the child when its mean over the matched valid cases is higher.
 
         Args:
             parent: Parent evaluation.
@@ -746,31 +783,194 @@ class _StrictImprovement:
 
         Returns:
             A verdict with ``accepted``.
+
+        Raises:
+            ValueError: No case is valid on both sides, as upstream raises.
         """
-        return SimpleNamespace(accepted=child.aggregate_score > parent.aggregate_score)
+        pairs = [
+            (before.score, after.score)
+            for before, after in zip(parent.observations, child.observations, strict=True)
+            if before.is_valid and after.is_valid
+        ]
+        if not pairs:
+            raise ValueError("Acceptance has no matched valid observations")
+        return SimpleNamespace(accepted=sum(after for _, after in pairs) > sum(before for before, _ in pairs))
+
+
+def _acceptance(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Build the wrapped acceptance with upstream's verdict type stood in.
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module, which needs Python 3.12.
+
+    Returns:
+        The acceptance policy the runner uses.
+    """
+    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(PatchVerdict=SimpleNamespace))
+    return autosaddler_runner.NoScoreRejectedAcceptance(_StrictImprovement())
 
 
 def test_ranking_never_selects_a_version_with_a_failed_run_case() -> None:
     """A version that crashed on one case and scored high elsewhere loses to a lower, fully scored one (SKY-751)."""
     ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
 
-    assert ranking.select([("crashed", _evaluation(0.9, True)), ("scored", _evaluation(0.3, False))])[0] == "scored"
-    assert ranking.select([("crashed", _evaluation(0.9, True)), ("low", _evaluation(0.1, True))])[0] == "crashed"
+    assert ranking.select([("crashed", _three(0.9, True)), ("scored", _three(0.3, False))])[0] == "scored"
+    assert ranking.select([("crashed", _three(0.9, True)), ("low", _three(0.1, True))])[0] == "crashed"
+
+
+def test_ranking_finishes_when_every_version_failed() -> None:
+    """With every version failed, ranking skips a version with no valid mean, or returns the seed (SKY-751)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+    nothing = _evaluation({"a": None}, frozenset({"a"}), "development")
+    partial = _evaluation({"a": 0.4, "b": None}, frozenset({"b"}), "development")
+
+    assert ranking.select([("seed", nothing), ("child", partial)])[0] == "child"
+    assert ranking.select([("seed", nothing), ("child", nothing)])[0] == "seed"
+
+
+def test_a_scorer_run_failed_status_with_a_score_is_not_a_failed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scorer may report the run-failed status with a real score, which counts as a score (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    scored = _evaluation({"a": 0.9, "b": 0.9}, frozenset({"b"}))
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+
+    assert not autosaddler_runner._run_failed(scored)
+    assert ranking.select([("scored", scored), ("low", _evaluation({"a": 0.1, "b": 0.1}))])[0] == "scored"
+    assert _acceptance(monkeypatch).compare(_evaluation({"a": 0.1, "b": 0.1}), scored).accepted
 
 
 def test_acceptance_rejects_a_child_with_a_failed_run_case(monkeypatch: pytest.MonkeyPatch) -> None:
     """A crashed child never replaces a fully scored parent; a child that fixes the crash does (SKY-751).
 
     Args:
-        monkeypatch: Stands in for upstream's domain module, which needs Python 3.12.
+        monkeypatch: Stands in for upstream's domain module.
     """
-    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(PatchVerdict=SimpleNamespace))
-    acceptance = autosaddler_runner.NoScoreRejectedAcceptance(_StrictImprovement())
+    acceptance = _acceptance(monkeypatch)
 
-    rejected = acceptance.compare(_evaluation(0.3, False), _evaluation(0.9, True))
-    fixed = acceptance.compare(_evaluation(0.9, True), _evaluation(0.3, False))
+    rejected = acceptance.compare(_three(0.3, False), _three(0.9, True))
+    fixed = acceptance.compare(_three(0.9, True), _three(0.3, False))
 
     assert not rejected.accepted
     assert (rejected.before_score, rejected.after_score) == (0.3, 0.9)
+    assert rejected.compared_case_ids == ("a", "b", "c")
     assert fixed.accepted
-    assert acceptance.compare(_evaluation(0.3, False), _evaluation(0.5, False)).accepted
+    assert acceptance.compare(_three(0.3, False), _three(0.5, False)).accepted
+
+
+@pytest.mark.parametrize(
+    ("parent", "child"),
+    [
+        (_evaluation({"a": None}, frozenset({"a"})), _evaluation({"a": None}, frozenset({"a"}))),
+        (
+            _evaluation({"a": None, "b": 0.5}, frozenset({"a"})),
+            _evaluation({"a": 0.5, "b": None}, frozenset({"b"})),
+        ),
+    ],
+    ids=["one-case-both-crash", "each-crashes-on-another-case"],
+)
+def test_acceptance_rejects_when_no_case_is_valid_on_both_versions(
+    monkeypatch: pytest.MonkeyPatch, parent: SimpleNamespace, child: SimpleNamespace
+) -> None:
+    """Both versions failed and no case is valid on both, so the child is rejected, not an upstream error (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+        parent: Parent's training evaluation.
+        child: Child's training evaluation.
+    """
+    verdict = _acceptance(monkeypatch).compare(parent, child)
+
+    assert not verdict.accepted
+    assert verdict.reason == "no case has a valid score on both versions"
+    assert verdict.compared_case_ids == parent.requested_case_ids
+
+
+def test_acceptance_checks_the_split_and_cases_as_upstream_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wrapper refuses evaluations upstream acceptance refuses, before it records a verdict (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    acceptance = _acceptance(monkeypatch)
+
+    with pytest.raises(ValueError, match="training evaluations only"):
+        acceptance.compare(_three(0.3, False, "development"), _three(0.9, True, "development"))
+    with pytest.raises(ValueError, match="identical ordered case set"):
+        acceptance.compare(_three(0.3, False), _evaluation({"a": 0.9}, frozenset({"a"})))
+
+
+def test_mailbox_reads_a_null_parent_score_as_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent sends null for a case with no score; the mailbox reads it as negative infinity, not an error (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the response file.
+        monkeypatch: Working folder and a fixed request id.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(autosaddler_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r1"))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps({"score": None, "info": {"status": "run_failed"}}))
+
+    score, info = autosaddler_runner.EvaluatorMailbox("testnonce", 1.0).evaluate("x", {"id": "a"})
+
+    assert score == float("-inf")
+    assert info == {"status": "run_failed"}
+
+
+_UPSTREAM_POLICIES = """
+import autosaddler_runner as runner
+from autosaddler.v2.core import domain as d, policies as p
+
+
+def evaluation(name, scores, split):
+    observations = tuple(
+        d.Observation.create(
+            candidate_id=d.sha256_digest(name), case_id=case, split=split, repetition=0,
+            disposition="execution_error" if score is None else "task_failure", score=score,
+            evaluator_fingerprint="f", cost=d.Cost(rollouts=1),
+            metadata={"scorer_feedback": {"status": "run_failed"} if score is None else {}},
+        )
+        for case, score in scores
+    )
+    return d.Evaluation(
+        evaluation_id=d.sha256_digest(name + split), candidate_id=d.sha256_digest(name), split=split,
+        purpose="development" if split == "development" else "train_before", iteration=0,
+        requested_case_ids=tuple(case for case, _ in scores), observations=observations,
+        artifact_dir=d.ArtifactRef(uri="x", kind="k"),
+    )
+
+
+acceptance = runner.NoScoreRejectedAcceptance(p.MatchedValidStrictImprovement())
+one = acceptance.compare(evaluation("s", [("a", None)], "train"), evaluation("c", [("a", None)], "train"))
+two = acceptance.compare(
+    evaluation("s", [("a", None), ("b", 0.5)], "train"), evaluation("c", [("a", 0.5), ("b", None)], "train")
+)
+ranking = runner.NoScoreLastRanking(p.MeanDevelopmentRanking())
+seed = evaluation("s", [("a", None)], "development")
+print(one.accepted, one.compared_case_ids, two.accepted, two.compared_case_ids)
+print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", None)], "development"))])[0])
+print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", 0.4), ("b", None)], "development"))])[0])
+"""
+
+
+def test_upstream_policies_finish_when_every_case_failed(tmp_path: Path) -> None:
+    """With upstream's own policies, an all-failed comparison is a reject and an all-failed ranking picks a version (SKY-751).
+
+    Args:
+        tmp_path: Folder with the runner files and the probe script.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    for name, text in native_runtime._runner_files("autosaddler").items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    (tmp_path / "probe.py").write_text(_UPSTREAM_POLICIES)
+
+    run = subprocess.run([python, "probe.py"], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines() == ["False ('a',) False ('a', 'b')", "seed", "child"]

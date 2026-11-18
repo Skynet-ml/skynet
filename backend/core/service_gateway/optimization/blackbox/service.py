@@ -882,7 +882,7 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
                     else {
                         **record.side_info,
                         "error": record.metric_error,
-                        "status": RUN_FAILED_STATUS if record.metric_error == RUN_FAILED_STATUS else METRIC_ERROR,
+                        "status": RUN_FAILED_STATUS if record.run_failed else METRIC_ERROR,
                     },
                     default=side_info_json_default,
                 )

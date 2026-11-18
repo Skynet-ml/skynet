@@ -1920,6 +1920,7 @@
   "notifications.item.finished": "以 {score} 完成",
   "notifications.item.finished_delta": "以 {score} 完成，比基線 {delta}",
   "notifications.item.finished_plain": "已完成",
+  "notifications.item.finished_no_score": "已完成，冇分數",
   "notifications.item.new_best": "新最佳分數：{score}",
   "notifications.item.new_best_delta": "新最佳分數：{score}，比基線 {delta}",
   "notifications.item.new_best_plain": "新最佳分數",

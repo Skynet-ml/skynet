@@ -168,7 +168,11 @@ class EvaluatorMailbox:
                     raise self.error
                 with self._write_lock:
                     self.total_evals += 1
-                return float(response["score"]), dict(response.get("info") or {})
+                # The parent sends null for a case with no score (a metric
+                # error or a failed [run] entry); the evaluator keeps any
+                # non-finite score out of upstream's averages (SKY-751).
+                score = response.get("score")
+                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply
@@ -703,13 +707,44 @@ def _run_failed(evaluation: Any) -> bool:
         evaluation: Upstream evaluation whose observations carry the scorer feedback.
 
     Returns:
-        Whether any observation's scorer feedback has the run-failed status.
+        Whether any observation has no score and the run-failed status. A
+        scorer may report that status with a real score, which it keeps, as
+        in ``protocol.py``.
     """
     for observation in evaluation.observations:
         feedback = observation.metadata.get("scorer_feedback")
-        if isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS:
+        if not (isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS):
+            continue
+        if observation.score is None or not math.isfinite(observation.score):
             return True
     return False
+
+
+def _compared_keys(parent: Any, child: Any) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Check two training evaluations as upstream acceptance does and list their cases.
+
+    Args:
+        parent: Parent's training evaluation.
+        child: Child's training evaluation.
+
+    Returns:
+        The sorted ``(case, repetition)`` keys both sides observed, and the
+        subset where both sides have a valid observation.
+
+    Raises:
+        ValueError: The evaluations are not training evaluations of the same
+            cases, as upstream ``MatchedValidStrictImprovement`` requires.
+    """
+    if parent.split != "train" or child.split != "train":
+        raise ValueError("Acceptance may compare training evaluations only")
+    if parent.requested_case_ids != child.requested_case_ids:
+        raise ValueError("Parent and child must be evaluated on the identical ordered case set")
+    parent_by_key = {(item.case_id, item.repetition): item for item in parent.observations}
+    child_by_key = {(item.case_id, item.repetition): item for item in child.observations}
+    if parent_by_key.keys() != child_by_key.keys():
+        raise ValueError("Parent and child observations must have identical case/repetition keys")
+    keys = sorted(parent_by_key)
+    return keys, [key for key in keys if parent_by_key[key].is_valid and child_by_key[key].is_valid]
 
 
 class NoScoreRejectedAcceptance:
@@ -739,17 +774,26 @@ class NoScoreRejectedAcceptance:
         Returns:
             Upstream's patch verdict.
         """
+        keys, matched = _compared_keys(parent, child)
         parent_failed, child_failed = _run_failed(parent), _run_failed(child)
-        if parent_failed == child_failed:
+        if parent_failed == child_failed and matched:
             return self.inner.compare(parent, child)
+        # Upstream raises when no case is valid on both sides, which would end
+        # the run; with nothing to compare, the child cannot be better.
+        if parent_failed == child_failed:
+            accepted, reason = False, "no case has a valid score on both versions"
+        elif parent_failed:
+            accepted, reason = True, "the child fixes a failed [run] entry"
+        else:
+            accepted, reason = False, "the child has a failed [run] entry"
         # The verdict's scores are only a record. Upstream records reject
         # non-finite numbers, so a side with no valid case records 0.0.
         return as_domain.PatchVerdict(
             before_score=parent.aggregate_score if parent.aggregate_score is not None else 0.0,
             after_score=child.aggregate_score if child.aggregate_score is not None else 0.0,
-            compared_case_ids=tuple(parent.requested_case_ids),
-            accepted=parent_failed,
-            reason="the child fixes a failed [run] entry" if parent_failed else "the child has a failed [run] entry",
+            compared_case_ids=tuple(dict.fromkeys(case_id for case_id, _ in keys)),
+            accepted=accepted,
+            reason=reason,
         )
 
 
@@ -769,16 +813,20 @@ class NoScoreLastRanking:
         self.inner = inner
 
     def select(self, candidates: Sequence[tuple[Any, Any]]) -> tuple[Any, Any]:
-        """Select the best fully scored version, or rank all when every version failed.
+        """Select the best fully scored version, or the best version with a valid mean when every version failed.
 
         Args:
-            candidates: ``(candidate, development evaluation)`` pairs.
+            candidates: ``(candidate, development evaluation)`` pairs, the seed first.
 
         Returns:
-            The selected pair.
+            The selected pair. When no version has a valid mean, the seed.
         """
         scored = [item for item in candidates if not _run_failed(item[1])]
-        return self.inner.select(scored or candidates)
+        if scored:
+            return self.inner.select(scored)
+        # Upstream raises on a version with no valid mean, which would end the run.
+        valid = [item for item in candidates if item[1].aggregate_score is not None]
+        return self.inner.select(valid) if valid else candidates[0]
 
 
 class AppEvidenceBuilder:

@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "Fertig mit {score}",
   "notifications.item.finished_delta": "Fertig mit {score}, {delta} gegenüber Ausgangswert",
   "notifications.item.finished_plain": "Fertig",
+  "notifications.item.finished_no_score": "Fertig, ohne Bewertung",
   "notifications.item.new_best": "Neuer Bestwert: {score}",
   "notifications.item.new_best_delta": "Neuer Bestwert: {score}, {delta} gegenüber Ausgangswert",
   "notifications.item.new_best_plain": "Neuer Bestwert",

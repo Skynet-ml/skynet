@@ -1221,6 +1221,26 @@ def _version_has_no_score(result: dict[str, Any], candidate: str) -> bool:
     )
 
 
+def _seed_run_failed(result: dict[str, Any]) -> bool:
+    """Return whether the starting code has no score because its own ``[run]`` entry failed.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the run's version list marks the starting code with the
+        ``run_failed`` status; ``False`` after a metric error or when the run
+        never recorded the starting code.
+    """
+    seed = result.get("seed_candidate") or ""
+    return any(
+        isinstance(version, dict)
+        and version.get("candidate") == seed
+        and (version.get("side_info") or {}).get(STATUS_KEY) == RUN_FAILED_STATUS
+        for version in result.get("versions") or []
+    )
+
+
 def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
     """Drop the hidden-path edits from one recorded candidate.
 
@@ -1265,7 +1285,8 @@ def improved_patch(result: dict[str, Any]) -> str | None:
 
     The final run's fresh scores decide; a run stopped before its final run
     compares the versions' own scores instead. A scored version beats a
-    starting version with no score (SKY-751).
+    starting version with no score only when the starting code's own
+    ``[run]`` entry failed (SKY-751).
 
     Args:
         result: Finished black-box result.
@@ -1284,7 +1305,11 @@ def improved_patch(result: dict[str, Any]) -> str | None:
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, best)
     if optimized is None:
         return None
-    return best if baseline is None or optimized > baseline else None
+    if baseline is None:
+        # A metric error on the starting code is the metric's fault, not the
+        # code's, so a scored version proves no improvement over it.
+        return best if _seed_run_failed(result) else None
+    return best if optimized > baseline else None
 
 
 # The record hashes stream each member in parts of this size, so a large

@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "انتهى بنتيجة {score}",
   "notifications.item.finished_delta": "انتهى بنتيجة {score}، {delta} مقارنة بالأساس",
   "notifications.item.finished_plain": "انتهى",
+  "notifications.item.finished_no_score": "انتهى بلا نتيجة",
   "notifications.item.new_best": "أفضل نتيجة جديدة: {score}",
   "notifications.item.new_best_delta": "أفضل نتيجة جديدة: {score}، {delta} مقارنة بالأساس",
   "notifications.item.new_best_plain": "أفضل نتيجة جديدة",

@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "{score}(으)로 완료",
   "notifications.item.finished_delta": "{score}(으)로 완료, 기준 대비 {delta}",
   "notifications.item.finished_plain": "완료",
+  "notifications.item.finished_no_score": "점수 없이 완료",
   "notifications.item.new_best": "새 최고 점수: {score}",
   "notifications.item.new_best_delta": "새 최고 점수: {score}, 기준 대비 {delta}",
   "notifications.item.new_best_plain": "새 최고 점수",

@@ -1161,6 +1161,7 @@
   "notifications.item.finished": "با {score} تمام شد",
   "notifications.item.finished_delta": "با {score} تمام شد، {delta} نسبت به پایه",
   "notifications.item.finished_plain": "تمام شد",
+  "notifications.item.finished_no_score": "بدون امتیاز تمام شد",
   "notifications.item.new_best": "بهترین امتیاز تازه: {score}",
   "notifications.item.new_best_delta": "بهترین امتیاز تازه: {score}، {delta} نسبت به پایه",
   "notifications.item.new_best_plain": "بهترین امتیاز تازه",

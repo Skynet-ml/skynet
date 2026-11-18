@@ -1251,6 +1251,7 @@
   "notifications.item.finished": "Finished at {score}",
   "notifications.item.finished_delta": "Finished at {score}, {delta} vs baseline",
   "notifications.item.finished_plain": "Finished",
+  "notifications.item.finished_no_score": "Finished with no score",
   "notifications.item.new_best": "New best: {score}",
   "notifications.item.new_best_delta": "New best: {score}, {delta} vs baseline",
   "notifications.item.new_best_plain": "New best score",

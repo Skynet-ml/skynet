@@ -68,6 +68,13 @@ def test_success_emits_finished_with_score_delta_and_duration(sent: _Recorder) -
     assert call["dedupe_key"] == "finished:run1"
 
 
+def test_success_with_no_final_score_marks_no_score(sent: _Recorder) -> None:
+    """A run whose final version has no score says so, so the inbox never shows 0 (SKY-751)."""
+    notify_job_completed("run1", "alice", "success", baseline_score=None, optimized_score=None)
+
+    assert sent.calls[0]["facts"] == {"score": None, "no_score": True, "duration": 125}
+
+
 def test_failed_emits_failed_with_a_truncated_error(sent: _Recorder) -> None:
     """A failed run emits ``failed`` carrying the error as its detail."""
     notify_job_completed("run1", "alice", "failed", message="x" * 400)

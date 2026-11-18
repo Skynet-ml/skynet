@@ -55,6 +55,7 @@ from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
 from ..protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     UNSCORED,
     Candidate,
     EngineContext,
@@ -1398,6 +1399,39 @@ def test_version_history_shows_the_validation_score_and_keeps_the_running_mean()
         ("aaa", 0.75, server.mean_score("aaa"), 2),
         ("bcd", server.mean_score("bcd"), server.mean_score("bcd"), 1),
     ]
+
+
+def test_version_history_shows_the_run_failure_text_and_its_status() -> None:
+    """A version whose [run] entry failed shows that failure as its error, apart from a metric crash (SKY-751)."""
+    failure = "Run failed: ConnectionError: egress blocked"
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Fail the run of ``broken``, crash the metric on ``crash`` and score the rest.
+
+        Args:
+            candidate: The version.
+            case: The case (unused).
+
+        Returns:
+            No score with the failure's status, or a score of 0.5.
+        """
+        if candidate == "broken":
+            return None, {"feedback": failure, "status": RUN_FAILED_STATUS}
+        if candidate == "crash":
+            raise ValueError("cannot score this")
+        return 0.5, {"feedback": "ok"}
+
+    server = EvalServer(scorer, max_evals=5)
+    for candidate in ("broken", "crash", "fine"):
+        server.evaluate(candidate)
+
+    versions = {version.candidate: version for version in service_mod._version_history(server)}
+
+    assert (versions["broken"].score, versions["broken"].side_info["status"]) == (None, RUN_FAILED_STATUS)
+    assert versions["broken"].side_info["error"] == failure
+    assert (versions["crash"].score, versions["crash"].side_info["status"]) == (None, METRIC_ERROR)
+    assert "cannot score this" in versions["crash"].side_info["error"]
+    assert versions["fine"].score == 0.5
 
 
 def test_validation_scores_come_from_every_lane_with_the_later_lane_winning() -> None:
