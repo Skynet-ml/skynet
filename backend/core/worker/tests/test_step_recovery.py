@@ -1204,6 +1204,114 @@ def test_a_resume_without_a_fence_before_the_cancel_write_keeps_the_user_cancell
     assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("closed", "user_cancelled", 0)
 
 
+def test_a_resume_after_the_cancel_write_keeps_its_reopened_budget(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual resume right after the cancel's write owns the run; the cancel does not close its budget (SKY-800)."""
+    _funded_run(store)
+    _save_checkpoint(store, monkeypatch)
+    _claim(store, "pod-a")
+    _set_job(store, status="paused", recovery=None)
+    write = store.update_job_if_status
+
+    def resume_after(*args: Any, **kwargs: Any) -> bool:
+        """Do the cancel's write, then let the user resume the cancelled run.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        applied = write(*args, **kwargs)
+        if applied and kwargs.get("status") == "cancelled":
+            assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) == 1
+        return applied
+
+    monkeypatch.setattr(store, "update_job_if_status", resume_after)
+
+    assert _cancel(store).status == "cancelled"
+
+    job = store.get_job(RUN)
+    assert (job["status"], job["execution_budget_generation"]) == ("pending", 1)
+    budget = _budget(store)
+    assert (budget.state, budget.blocked_reason) == ("attached", None)
+
+
+def test_a_resume_after_the_cancel_reread_keeps_its_reopened_budget(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume between the cancel's reread and its budget close fails the check under the job row lock (SKY-800)."""
+    _funded_run(store)
+    _save_checkpoint(store, monkeypatch)
+    _claim(store, "pod-a")
+    _set_job(store, status="paused", recovery=None)
+    write = store.update_job_if_status
+    read = store.get_job
+    written = []
+
+    def mark_write(*args: Any, **kwargs: Any) -> bool:
+        """Do the cancel's write and note that it applied.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        applied = write(*args, **kwargs)
+        written.append(applied)
+        return applied
+
+    def resume_after_read(optimization_id: str) -> dict[str, Any]:
+        """Read the row; after the cancel's write, let the user resume the run before the cancel uses the read.
+
+        Args:
+            optimization_id: The run.
+
+        Returns:
+            The row as read before the resume.
+        """
+        row = read(optimization_id)
+        if written == [True]:
+            written.append("resumed")
+            assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) == 1
+        return row
+
+    monkeypatch.setattr(store, "update_job_if_status", mark_write)
+    monkeypatch.setattr(store, "get_job", resume_after_read)
+
+    assert _cancel(store).status == "cancelled"
+
+    assert written == [True, "resumed"]
+    job = read(RUN)
+    assert (job["status"], job["execution_budget_generation"]) == ("pending", 1)
+    budget = _budget(store)
+    assert (budget.state, budget.blocked_reason) == ("attached", None)
+
+
+def test_the_cancel_close_skips_a_cancelled_row_that_a_resume_fenced(store: StepJobStore) -> None:
+    """A resume commits its new generation before it writes pending; the close of the older generation does nothing."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    service = BudgetService(engine=store.engine)
+    service.fence_generation(budget_id, "owner", expected_generation=0)
+    _hold(store, "resumed", generation=1)
+    # The resume's first commit: the row is still cancelled, at the new generation.
+    _set_job(store, status="cancelled", execution_budget_generation=1)
+
+    assert not service.close_for_cancelled_job(budget_id, "owner", job_id=RUN, expected_generation=0)
+
+    budget = _budget(store)
+    assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("attached", None, 5)
+    assert service.close_for_cancelled_job(budget_id, "owner", job_id=RUN, expected_generation=1)
+    budget = _budget(store)
+    assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("closed", "user_cancelled", 0)
+
+
 def test_a_cancel_that_loses_the_race_to_the_wake_cancels_the_woken_run(
     store: StepJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,6 +29,7 @@ from ..storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     ExecutionUsageEvidenceModel,
+    JobModel,
     WalletLedgerModel,
 )
 from .budget_amounts import (
@@ -1693,7 +1694,9 @@ class BudgetService:
             budget.updated_at = now
         return released
 
-    def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def close_for_failed_job(
+        self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
+    ) -> BudgetSnapshot:
         """Close a failed job's envelope and return the holds of work that never started.
 
         Settled usage stays billed. Dispatched and pending work keeps its
@@ -1704,12 +1707,13 @@ class BudgetService:
             budget_id: Envelope of the job that reached a terminal failure.
             username: Authenticated owner.
             expected_generation: Epoch of the worker that saw the failure.
+            session: Optional caller transaction that already holds the job row.
 
         Returns:
             Closed budget with only the coverage of started work still held,
             or the unchanged budget when a resume already fenced that epoch.
         """
-        with self._transaction() as session:
+        with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             # A manual resume can fence a new epoch between the failed status
             # write and this close. The new epoch's holds and admission are
@@ -1723,6 +1727,40 @@ class BudgetService:
                 budget.blocked_reason = "job_failed"
             budget.updated_at = now
             return self._snapshot(session, budget, wallet)
+
+    def close_for_cancelled_job(self, budget_id: str, username: str, *, job_id: str, expected_generation: int) -> bool:
+        """Close a cancelled run's admission and free its unstarted holds while the run is still cancelled.
+
+        A resume can follow the cancel's status write and reopen the budget. The
+        close must then leave that budget alone (SKY-800). The job row lock comes
+        before the budget lock, in the order that ``requeue_for_resume`` takes
+        them, so a resume cannot change the row between the check and the close.
+
+        Args:
+            budget_id: Envelope of the cancelled run.
+            username: Authenticated owner.
+            job_id: The cancelled run.
+            expected_generation: Budget generation on the row that the cancel read after its write.
+
+        Returns:
+            ``True`` when the budget closed; ``False`` when the run is no longer
+            cancelled at that generation, because a newer action owns it.
+        """
+        with self._transaction() as session:
+            still_cancelled = session.scalar(
+                select(JobModel.optimization_id)
+                .where(
+                    JobModel.optimization_id == job_id,
+                    JobModel.status == "cancelled",
+                    func.coalesce(JobModel.execution_budget_generation, 0) == expected_generation,
+                )
+                .with_for_update()
+            )
+            if still_cancelled is None:
+                return False
+            self.stop_admission(budget_id, username, reason="user_cancelled", session=session)
+            self.close_for_failed_job(budget_id, username, expected_generation=expected_generation, session=session)
+            return True
 
     def resume_admission(
         self, budget_id: str, username: str, *, expected_generation: int, automatic: bool = False
