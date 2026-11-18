@@ -36,6 +36,8 @@ from core.billing.budgets import BudgetService
 from core.constants import OPTIMIZATION_TYPE_TAGGING, WORKER_RESTART_CAUSE
 from core.storage.base import JobStore
 from core.storage.models import (
+    MAX_PROGRESS_EVENT_KEY_LENGTH,
+    PROGRESS_EVENT_KEY,
     Base,
     BillingCustomerModel,
     ExecutionBudgetModel,
@@ -43,6 +45,7 @@ from core.storage.models import (
     GepaCheckpointModel,
     JobModel,
     OptimizationShareGrantModel,
+    ProgressEventModel,
     WalletLedgerModel,
 )
 from core.storage.remote import RemoteDBJobStore
@@ -550,6 +553,75 @@ def test_get_progress_count_matches(store: SQLiteJobStore) -> None:
     store.record_progress("p6", "a", {})
     store.record_progress("p6", "b", {})
     assert store.get_progress_count("p6") == 2
+
+
+def test_record_progress_replayed_keyed_event_adds_no_row(store: SQLiteJobStore) -> None:
+    """A replayed event with the same key adds no row (SKY-808)."""
+    store.create_job("p-key")
+    key = PROGRESS_EVENT_KEY
+    store.record_progress("p-key", "candidate", {key: "candidate:0", "score": 0.5})
+    store.record_progress("p-key", "candidate", {key: "candidate:0", "score": 0.5})
+    assert store.get_progress_count("p-key") == 1
+
+
+def test_record_progress_keys_are_scoped_per_job(store: SQLiteJobStore) -> None:
+    """The same key on another job still adds that job's row."""
+    store.create_job("p-key-a")
+    store.create_job("p-key-b")
+    key = PROGRESS_EVENT_KEY
+    store.record_progress("p-key-a", "candidate", {key: "candidate:0"})
+    store.record_progress("p-key-b", "candidate", {key: "candidate:0"})
+    store.record_progress("p-key-b", "candidate", {key: "candidate:0"})
+    assert store.get_progress_count("p-key-a") == 1
+    assert store.get_progress_count("p-key-b") == 1
+
+
+def test_record_progress_replay_keeps_distinct_and_unkeyed_events_in_order(store: SQLiteJobStore) -> None:
+    """A replay drops only repeated keys; new keys and unkeyed events keep their order."""
+    store.create_job("p-replay")
+    key = PROGRESS_EVENT_KEY
+    store.record_progress("p-replay", "candidate", {key: "candidate:0"})
+    store.record_progress("p-replay", "tick", {})
+    store.record_progress("p-replay", "candidate", {key: "candidate:1"})
+    store.record_progress("p-replay", "candidate", {key: "candidate:0"})
+    store.record_progress("p-replay", "candidate", {key: "candidate:1"})
+    store.record_progress("p-replay", "tick", {})
+    store.record_progress("p-replay", "candidate", {key: "candidate:2"})
+    events = store.get_progress_events("p-replay")
+    assert [(e["event"], e["metrics"].get(key)) for e in events] == [
+        ("candidate", "candidate:0"),
+        ("tick", None),
+        ("candidate", "candidate:1"),
+        ("tick", None),
+        ("candidate", "candidate:2"),
+    ]
+
+
+def test_record_progress_for_generation_replayed_keyed_event_adds_no_row(store: SQLiteJobStore) -> None:
+    """The generation-fenced write also adds one row per key and still refreshes the metrics."""
+    store.create_job("p-gen")
+    store.update_job("p-gen", status="running", execution_generation=1)
+    key = PROGRESS_EVENT_KEY
+    for score in (0.5, 0.7):
+        assert store.record_progress_for_generation(
+            "p-gen", "step", {key: "step:3", "score": score}, source_optimization_id="p-gen", generation=1
+        )
+    assert store.get_progress_count("p-gen") == 1
+    assert store.get_job("p-gen")["latest_metrics"]["score"] == 0.7
+
+
+def test_progress_event_key_index_rejects_a_second_row_with_the_key(store: SQLiteJobStore) -> None:
+    """The database itself refuses a second row with the same job and string key."""
+    key = PROGRESS_EVENT_KEY
+    with Session(store.engine) as session:
+        session.add(ProgressEventModel(optimization_id="p-idx", event="a", metrics={key: "k"}))
+        session.add(ProgressEventModel(optimization_id="p-idx", event="b", metrics={key: 7}))
+        session.add(ProgressEventModel(optimization_id="p-idx", event="c", metrics={key: 7}))
+        session.add(ProgressEventModel(optimization_id="p-other", event="d", metrics={key: "k"}))
+        session.commit()
+        session.add(ProgressEventModel(optimization_id="p-idx", event="e", metrics={key: "k"}))
+        with pytest.raises(IntegrityError):
+            session.commit()
 
 
 def test_get_progress_events_empty_for_unknown_job(store: SQLiteJobStore) -> None:
@@ -1905,6 +1977,49 @@ def test_progress_eviction_oldest_entry_removed_when_cap_reached(
     event_names = [e["event"] for e in events]
     assert "step-0" not in event_names
     assert "step-3" in event_names
+
+
+def test_progress_trim_keeps_keyed_events(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trim deletes only unkeyed rows, so a later replay of an old key adds no row (SKY-808)."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    key = PROGRESS_EVENT_KEY
+    store.create_job("evict-keyed")
+    store.record_progress("evict-keyed", "keyed-step", {key: "step:0"})
+    for i in range(3):
+        store.record_progress("evict-keyed", f"step-{i}", {"i": i})
+    store.record_progress("evict-keyed", "keyed-step", {key: "step:0"})
+
+    events = store.get_progress_events("evict-keyed")
+    assert [e["event"] for e in events] == ["keyed-step", "step-2"]
+
+
+def test_progress_trim_hard_cap_deletes_oldest_keyed_events(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the hard cap the trim deletes the oldest rows, keyed or not, so keys cannot grow a job without limit."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    key = PROGRESS_EVENT_KEY
+    hard_cap = 2 * remote_mod.PROGRESS_EVENTS_HARD_CAP_FACTOR
+    store.create_job("evict-hard")
+    for i in range(hard_cap + 3):
+        store.record_progress("evict-hard", "keyed-step", {key: f"step:{i}"})
+
+    events = store.get_progress_events("evict-hard")
+    assert [e["metrics"][key] for e in events] == [f"step:{i}" for i in range(3, hard_cap + 3)]
+
+
+def test_record_progress_treats_an_empty_or_over_long_key_as_no_key(store: SQLiteJobStore) -> None:
+    """A key that is empty or longer than the limit adds a row each time, like an unkeyed event."""
+    key = PROGRESS_EVENT_KEY
+    store.create_job("p-long-key")
+    for value in ("", "k" * (MAX_PROGRESS_EVENT_KEY_LENGTH + 1)):
+        store.record_progress("p-long-key", "step", {key: value})
+        store.record_progress("p-long-key", "step", {key: value})
+    store.record_progress("p-long-key", "step", {key: "k" * MAX_PROGRESS_EVENT_KEY_LENGTH})
+    store.record_progress("p-long-key", "step", {key: "k" * MAX_PROGRESS_EVENT_KEY_LENGTH})
+    assert store.get_progress_count("p-long-key") == 5
 
 
 def test_progress_eviction_count_stays_at_cap(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
