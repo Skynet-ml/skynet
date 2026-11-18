@@ -141,8 +141,10 @@ def _leave_sweep_recovery(
 ) -> None:
     """Replace the ``recovering`` marker of a run that a requeue gave up, and commit.
 
-    A user's cancel or pause does not change ``recovery``, and the UI hides the
-    status of a run whose marker says ``recovering`` (SKY-814).
+    On SQLite, a status write can land between the requeue's reads and its
+    claim. A write that does not pass ``ends_recovery``, such as a worker's,
+    leaves the sweep's ``recovering`` marker, and the UI hides the status of a
+    run whose marker says ``recovering`` (SKY-814).
 
     Args:
         session: The requeue's session.
@@ -1335,8 +1337,9 @@ class RemoteDBJobStore:
                 apply.
             expected_generation: Execution fence required for worker-owned writes.
             ends_recovery: Whether a user's stop writes the status. Then a
-                ``recovering`` marker becomes ``interrupted`` in the same
-                transaction, and any other marker stays.
+                ``recovering`` marker becomes ``interrupted``, or ``None`` when
+                no interrupted generation is known, in the same transaction.
+                Any other marker stays.
             **kwargs: Column values to overwrite.
 
         Returns:
