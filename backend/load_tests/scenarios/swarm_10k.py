@@ -68,7 +68,10 @@ agent count; it does not measure the models or the boxes.
 
 The database is one SQLite file per shard, unless ``LOAD_TEST_SWARM_DB_URL``
 names a throwaway Postgres on ``localhost``, ``127.0.0.1`` or ``::1``; there
-all shards share the database. The
+all shards share the database. Its name must start with
+``THROWAWAY_DB_PREFIX`` (``loadtest``), and its ``jobs`` table must hold no
+row of another run. The swarm deletes its own rows at the end of each pass.
+The
 objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
 bucket on a local S3 server such as MinIO; then ``LOAD_TEST_SWARM_S3_ENDPOINT``
 must name that server on ``localhost``, ``127.0.0.1`` or ``::1``, and the
@@ -102,11 +105,12 @@ import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import create_engine, delete, make_url, select, text
+from sqlalchemy import create_engine, delete, inspect, make_url, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -146,6 +150,9 @@ REFERENCE_BOX_STEPS_PER_STEP = 6 / 8
 LOCAL_S3_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # The only libpq query keys the swarm database URL may carry: none of them can change the host.
 DB_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "application_name"})
+# A loopback server can be a port-forward to a remote database, or the local dev database. The swarm creates
+# tables, deletes rows and puts running jobs in, so it asks for a database name that says it is a throwaway.
+THROWAWAY_DB_PREFIX = "loadtest"
 # Vercel's sandbox caps for one team: vCPU box starts per minute and concurrent vCPUs.
 VERCEL_VCPU_STARTS_PER_MINUTE = 5_000
 VERCEL_CONCURRENT_VCPUS = 10_000
@@ -333,6 +340,46 @@ def _check_server_addr(engine: Engine) -> None:
         raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL reached server address {address}, which is not loopback")
 
 
+def _check_throwaway(engine: Engine) -> None:
+    """Refuse a Postgres database whose name does not mark it as a throwaway, or that holds another run's job.
+
+    This is a third guard after ``_check_server_addr``: a loopback address does not prove a throwaway.
+
+    Args:
+        engine: The Postgres database.
+
+    Raises:
+        RuntimeError: When the database name does not start with ``THROWAWAY_DB_PREFIX``, or a job is not a swarm
+            run.
+    """
+    with engine.connect() as connection:
+        name = connection.execute(text("SELECT current_database()")).scalar()
+    if not str(name).startswith(THROWAWAY_DB_PREFIX):
+        raise RuntimeError(
+            f"LOAD_TEST_SWARM_DB_URL names database {name!r}; its name must start with {THROWAWAY_DB_PREFIX!r}"
+        )
+    _check_only_swarm_jobs(engine)
+
+
+def _check_only_swarm_jobs(engine: Engine) -> None:
+    """Refuse a database whose ``jobs`` table holds a row that is not a swarm run.
+
+    Args:
+        engine: The database.
+
+    Raises:
+        RuntimeError: When a job's ``optimization_id`` does not start with ``RUN_PREFIX``.
+    """
+    if not inspect(engine).has_table(JobModel.__tablename__):
+        return
+    with engine.connect() as connection:
+        other = connection.execute(
+            select(JobModel.optimization_id).where(~JobModel.optimization_id.startswith(RUN_PREFIX)).limit(1)
+        ).scalar()
+    if other is not None:
+        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL holds job {other!r}, which is not a swarm run: use a new database")
+
+
 def _delete_packs(shard: Shard) -> None:
     """Delete the shard's packs from a local S3 bucket; a local folder goes with its temporary folder.
 
@@ -368,23 +415,38 @@ def _swarm_tables() -> list[Any]:
     return [table for table in Base.metadata.sorted_tables if table.name in needed]
 
 
+def _delete_swarm_rows(session: Session) -> None:
+    """Delete the rows of the swarm's own runs and workers, so a shared database keeps its other rows.
+
+    Args:
+        session: The open session; the caller commits.
+    """
+    session.execute(delete(AgentStepModel).where(AgentStepModel.run_id.startswith(RUN_PREFIX)))
+    session.execute(delete(TreeObjectModel).where(TreeObjectModel.username.startswith(RUN_PREFIX)))
+    session.execute(delete(StoragePackModel).where(StoragePackModel.worker_id.startswith(RUN_PREFIX)))
+    session.execute(delete(JobModel).where(JobModel.optimization_id.startswith(RUN_PREFIX)))
+
+
 def _reset(engine: Engine, runs: list[str]) -> None:
     """Create the missing swarm tables and put one fresh running job row in for each run.
-
-    Only rows of the swarm's own runs and workers go, so a shared database keeps its other rows.
 
     Args:
         engine: The database.
         runs: The job ids.
     """
     Base.metadata.create_all(engine, tables=_swarm_tables())
+    # A local worker's orphan sweep takes a running job with no lease or a lapsed one; the lease outlasts the pass.
+    lease = datetime.now(UTC) + timedelta(seconds=2 * PASS_TIMEOUT_SECONDS)
     with Session(engine) as session:
-        session.execute(delete(AgentStepModel).where(AgentStepModel.run_id.startswith(RUN_PREFIX)))
-        session.execute(delete(TreeObjectModel).where(TreeObjectModel.username.startswith(RUN_PREFIX)))
-        session.execute(delete(StoragePackModel).where(StoragePackModel.worker_id.startswith(RUN_PREFIX)))
-        session.execute(delete(JobModel).where(JobModel.optimization_id.startswith(RUN_PREFIX)))
+        _delete_swarm_rows(session)
         session.add_all(
-            JobModel(optimization_id=run_id, username=run_id, status="running", execution_generation=1)
+            JobModel(
+                optimization_id=run_id,
+                username=run_id,
+                status="running",
+                execution_generation=1,
+                lease_expires_at=lease,
+            )
             for run_id in runs
         )
         session.commit()
@@ -828,6 +890,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             engine = create_engine(url, connect_args={"timeout": 60} if url.startswith("sqlite") else {})
             if config.db_url is not None:
                 _check_server_addr(engine)
+                _check_throwaway(engine)
             if config.db_url is None or index == 0:
                 _reset(engine, runs)
             shard_runs = [run for position, run in enumerate(runs) if position % shard_count == index]
@@ -876,6 +939,15 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
                 process.join()
         # Each shard gets its cleanup, also after another shard's cleanup fails; the first error wins.
         cleanup_error: Exception | None = None
+        # A shard joins ``shards`` only after its database passed every check. The pass's rows point at packs
+        # that the cleanup deletes, and a later worker's orphan sweep must not take its running jobs.
+        if config.db_url is not None and shards:
+            try:
+                with Session(shards[0].engine) as session:
+                    _delete_swarm_rows(session)
+                    session.commit()
+            except Exception as error:
+                cleanup_error = error
         for shard in shards:
             try:
                 _delete_packs(shard)

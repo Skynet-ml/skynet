@@ -7,14 +7,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from core.service_gateway.optimization.blackbox.sandbox_runtime import LocalSubprocessRuntime
+from core.storage.models import JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.worker.engine_loop import EngineLoop
@@ -1263,3 +1267,133 @@ def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(
     figures = swarm_10k.run_pass(_small_pass_config(), 1, tmp_path)
     assert figures["commits_per_second"] == 0.0
     assert figures["commits_per_second_with_drain"] == 0.0
+
+
+def _named_sqlite(path: Path, name: str) -> Engine:
+    """Return a SQLite engine that answers ``current_database()`` with a name, as Postgres does.
+
+    Args:
+        path: The database file.
+        name: The database name.
+
+    Returns:
+        The engine.
+    """
+    engine = create_engine(f"sqlite:///{path}")
+    event.listen(
+        engine, "connect", lambda connection, record: connection.create_function("current_database", 0, lambda: name)
+    )
+    return engine
+
+
+def _postgres_pass(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> None:
+    """Send a swarm pass with a Postgres URL to a SQLite engine, with no shard process.
+
+    Args:
+        monkeypatch: Replaces the engine, the server address check and the shard processes.
+        engine: The engine that the pass gets for the Postgres URL.
+    """
+    for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    monkeypatch.setattr(swarm_10k, "create_engine", lambda url, connect_args: engine)
+    # SQLite has no inet_server_addr(); the address check has its own tests.
+    monkeypatch.setattr(swarm_10k, "_check_server_addr", lambda engine: None)
+    context = SimpleNamespace(Barrier=lambda count: None, Queue=lambda: None, Process=_NoProcess)
+    monkeypatch.setattr(swarm_10k, "multiprocessing", SimpleNamespace(get_context=lambda method: context))
+    report = {
+        "worker_id": "swarm-w",
+        "started": 0.5,
+        "waits": [0.1],
+        "lates": [0.0],
+        "times": [1.0],
+        "first_round_durable": 1.0,
+        "first_agent_done": 1.0,
+        "boxes_opened": 0,
+        "boxes_open_max": 0,
+    }
+    monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
+
+
+@pytest.mark.parametrize("name", ["skynet", "postgres", "swarm", "my_loadtest"])
+def test_swarm_refuses_a_database_without_the_throwaway_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """Check that the swarm refuses a local database whose name does not mark it as a throwaway, before any reset.
+
+    Args:
+        monkeypatch: Replaces the engine and makes a reset fail the test.
+        tmp_path: The pass folder.
+        name: The database name.
+    """
+    _postgres_pass(monkeypatch, _named_sqlite(tmp_path / "db.sqlite", name))
+    monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    with pytest.raises(RuntimeError, match="must start with 'loadtest'"):
+        swarm_10k.run_pass(_swarm_config(db_url="postgresql://user@localhost/skynet"), 2, tmp_path / "pass")
+
+
+def test_swarm_refuses_a_database_with_another_job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that the swarm refuses a throwaway-named database that holds a job of another run, before any reset.
+
+    Args:
+        monkeypatch: Replaces the engine and makes a reset fail the test.
+        tmp_path: The pass folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    swarm_10k._reset(engine, ["swarm-old"])
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id="opt-real", username="someone", status="running"))
+        session.commit()
+    _postgres_pass(monkeypatch, engine)
+    monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    with pytest.raises(RuntimeError, match="'opt-real', which is not a swarm run"):
+        swarm_10k.run_pass(_swarm_config(db_url="postgresql://user@localhost/loadtest_swarm"), 2, tmp_path / "pass")
+
+
+def test_swarm_takes_a_throwaway_database(tmp_path: Path) -> None:
+    """Check that a throwaway-named database with no jobs table, or with only swarm jobs, passes the check.
+
+    Args:
+        tmp_path: The folder for the database.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    swarm_10k._check_throwaway(engine)
+    swarm_10k._reset(engine, ["swarm-old"])
+    swarm_10k._check_throwaway(engine)
+
+
+def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that a shared-database pass keeps a live lease on its jobs and leaves no swarm row when it ends.
+
+    A local worker's orphan sweep takes a running job with no lease, or a lapsed one.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes and the step log read.
+        tmp_path: The pass folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    _postgres_pass(monkeypatch, engine)
+    leases: list[datetime | None] = []
+
+    def digest(shards: list[swarm_10k.Shard]) -> tuple[str, int]:
+        """Record the job leases during the pass.
+
+        Args:
+            shards: The shards.
+
+        Returns:
+            A made-up digest and step count.
+        """
+        with Session(engine) as session:
+            leases.extend(session.execute(select(JobModel.lease_expires_at)).scalars())
+        return "digest", 1
+
+    monkeypatch.setattr(swarm_10k, "_digest", digest)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    swarm_10k.run_pass(config, 1, tmp_path / "pass")
+    assert leases
+    assert all(lease is not None and lease.replace(tzinfo=UTC) > datetime.now(UTC) for lease in leases)
+    with Session(engine) as session:
+        assert session.execute(select(JobModel.optimization_id)).scalars().all() == []

@@ -103,7 +103,12 @@ _SCENARIO_KNOBS = (
         "step-log shards of the swarm's second pass, one OS process each"
         f" (default: one for each {swarm_10k.AGENTS_PER_SHARD} agents, 2 to {swarm_10k.MAX_SHARDS})",
     ),
-    ("--swarm-db-url", "LOAD_TEST_SWARM_DB_URL", "throwaway Postgres URL for the swarm (default: SQLite files)"),
+    (
+        "--swarm-db-url",
+        "LOAD_TEST_SWARM_DB_URL",
+        "throwaway Postgres URL on localhost for the swarm; the database name must start with"
+        f" {swarm_10k.THROWAWAY_DB_PREFIX!r} and its jobs table must hold only swarm runs (default: SQLite files)",
+    ),
 )
 
 
