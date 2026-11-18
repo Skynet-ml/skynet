@@ -746,7 +746,10 @@ export function OptimizationDetailView({
     !isBudgetPause(job);
   const showResume = canRestart && !!job.resumable;
   const showRetry = canRestart && !job.resumable && canClone;
-  const canCancel = canEditRun && isActive;
+  // A paused run has no worker, but the cancel route still cancels it (SKY-800),
+  // so Cancel stays for a manual pause and a budget pause alike.
+  const canCancel = canEditRun && (isActive || job.status === "paused");
+  const canPause = canEditRun && isActive && !!job.pausable;
   // /storage lists the local account's storage, which has no hosted view.
   const showStorageLink = source === "local" && (job.stored_bytes ?? 0) > 0;
   const headerActionCounts = isShare
@@ -756,7 +759,7 @@ export function OptimizationDetailView({
           Number(canManageShare) +
           Number(canClone) +
           Number(showResume || showRetry) +
-          Number(canCancel && !!job.pausable) +
+          Number(canPause) +
           Number(canCancel) +
           Number(canDeleteRun && isTerminal),
         phone: Number(canManageShare) + Number(canCancel),
@@ -916,7 +919,7 @@ export function OptimizationDetailView({
                     </Button>
                   </TooltipButton>
                 )}
-                {!isPhone && canEditRun && isActive && job.pausable && (
+                {!isPhone && canPause && (
                   <TooltipButton tooltip={msg("optimization.pause_tooltip")}>
                     <Button
                       variant="ghost"
@@ -929,7 +932,7 @@ export function OptimizationDetailView({
                     </Button>
                   </TooltipButton>
                 )}
-                {canEditRun && isActive && (
+                {canCancel && (
                   <TooltipButton tooltip={msg("auto.app.optimizations.id.page.5")}>
                     <Button
                       variant="ghost"
