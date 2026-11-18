@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import resource
 import signal
 import stat
 import sys
@@ -1062,3 +1063,264 @@ def test_a_budget_stop_reports_the_best_version_the_child_reports_only_after_the
 
     assert stopped.value.result is not None
     assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
+
+
+def _wait_until_dead(pid: int) -> bool:
+    """Wait up to ten seconds for a process to end.
+
+    Args:
+        pid: The process id.
+
+    Returns:
+        Whether the process ended in time.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_the_child_gets_the_memory_and_cpu_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set the address-space and CPU limits, since the child parses untrusted model replies.
+
+    Args:
+        monkeypatch: Turns the memory limit on and records the limits.
+    """
+    limits: list[tuple[int, tuple[int, int]]] = []
+    monkeypatch.setattr(shinka_evolve, "_MEMORY_LIMITED", True)
+    monkeypatch.setattr(shinka_evolve.resource, "setrlimit", lambda kind, values: limits.append((kind, values)))
+
+    shinka_evolve._limit_resources()
+
+    memory, cpu = shinka_evolve._CHILD_MEMORY_BYTES, shinka_evolve._CHILD_CPU_SECONDS
+    assert limits == [(resource.RLIMIT_AS, (memory, memory)), (resource.RLIMIT_CPU, (cpu, cpu))]
+
+
+def test_a_child_past_its_cpu_limit_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill a child that spins past its CPU limit, so a reply that makes a parser loop cannot hold the host.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a one-second CPU limit.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            pass
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve, "_CHILD_CPU_SECONDS", 1)
+    started = time.monotonic()
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine(python).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+        )
+
+    assert time.monotonic() - started < 30
+
+
+def test_a_child_that_writes_nothing_after_a_reply_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill the child's group and fail the run when the child goes quiet after a reply.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a short idle limit.
+    """
+    child_pid = tmp_path / "child.pid"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        import os
+
+        open({str(child_pid)!r}, "w").write(str(os.getpid()))
+        emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0", "candidate": "x"}})
+        sys.stdin.readline()
+        time.sleep(600)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 0.5)
+    started = time.monotonic()
+
+    with pytest.raises(ServiceError, match="wrote nothing"):
+        ShinkaEvolveEngine(python).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+        )
+
+    assert time.monotonic() - started < 30
+    assert _wait_until_dead(int(child_pid.read_text()))
+
+
+def test_the_idle_limit_does_not_run_while_the_worker_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start the idle limit only once the reply is sent, so a slow scorer or model never kills the child.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a short idle limit.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0", "candidate": "x"})
+        sys.stdin.readline()
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 0, "candidate": "x", "score": 1.0})
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 0.3)
+
+    def slow(candidate: object, case: object) -> tuple[float, dict[str, object]]:
+        """Score after a delay longer than the idle limit.
+
+        Args:
+            candidate: The version, ignored.
+            case: The case, ignored.
+
+        Returns:
+            A score of one and no side information.
+        """
+        time.sleep(1.0)
+        return 1.0, {}
+
+    result = ShinkaEvolveEngine(python).run(Task("seed"), EvalServer(slow, max_evals=5), _context(tmp_path))
+
+    assert (result.best_candidate, result.best_score) == ("x", 1.0)
+
+
+def test_a_stopped_child_whose_group_holds_the_pipe_is_killed_after_the_drain_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill the group when a member keeps the output open past the drain limit after a budget stop.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request and sets a short drain limit.
+    """
+    holder_pid = tmp_path / "holder.pid"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        # It keeps the child's output open and ignores the closed reply stream.
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
+        open({str(holder_pid)!r}, "w").write(str(holder.pid))
+        emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0"}})
+        sys.stdin.read()
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+    monkeypatch.setattr(shinka_evolve, "_DRAIN_SECONDS", 0.5)
+    started = time.monotonic()
+    pid = 0
+    try:
+        with pytest.raises(BudgetReached):
+            ShinkaEvolveEngine(python).run(
+                Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+            )
+        pid = int(holder_pid.read_text())
+        assert time.monotonic() - started < 30
+        assert _wait_until_dead(pid)
+    finally:
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+class _FakeChild:
+    """Stand in for the child process and record the calls that end it."""
+
+    def __init__(self, calls: list[str], output: str, **popen: object) -> None:
+        """Keep the call record and the output the child writes.
+
+        Args:
+            calls: The shared record of ``wait`` and ``killpg`` calls.
+            output: The child's whole output.
+            **popen: ``Popen``'s keyword arguments.
+        """
+        self.calls = calls
+        self.popen = popen
+        self.pid = 4242
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO(output)
+
+    def wait(self) -> int:
+        """Reap the child.
+
+        Returns:
+            Exit code zero.
+        """
+        self.calls.append("wait")
+        return 0
+
+
+def _fake_popen(monkeypatch: pytest.MonkeyPatch, output: str) -> tuple[list[str], list[_FakeChild]]:
+    """Replace the child process and the group kill with recorders.
+
+    Args:
+        monkeypatch: Replaces ``subprocess.Popen`` and ``os.killpg``.
+        output: The child's whole output.
+
+    Returns:
+        The record of ``wait`` and ``killpg`` calls, and the children started.
+    """
+    calls: list[str] = []
+    children: list[_FakeChild] = []
+
+    def popen(command: list[str], **kwargs: object) -> _FakeChild:
+        """Start a fake child.
+
+        Args:
+            command: The child's command, ignored.
+            **kwargs: ``Popen``'s keyword arguments.
+
+        Returns:
+            The fake child.
+        """
+        children.append(_FakeChild(calls, output, **kwargs))
+        return children[-1]
+
+    monkeypatch.setattr(shinka_evolve.subprocess, "Popen", popen)
+    monkeypatch.setattr(shinka_evolve.os, "killpg", lambda pid, sig: calls.append("killpg"))
+    return calls, children
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["finished", "budget-stop"])
+def test_the_group_is_killed_before_the_leader_is_reaped(
+    stopped: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill the group while the leader is unreaped, so its id cannot belong to an unrelated process.
+
+    Args:
+        stopped: Whether a budget stop ends the run, so the child drains first.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the child process and stops the run at its first request.
+    """
+    calls, _ = _fake_popen(monkeypatch, 'APP_NATIVE_RPC n {"kind": "evaluate", "id": "0"}\n' if stopped else "")
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+    requests = _requests(tmp_path, lambda candidate, case: (1.0, {}))
+
+    with pytest.raises(BudgetReached) if stopped else contextlib.nullcontext():
+        ShinkaEvolveEngine("python")._drive(requests, tmp_path)
+
+    assert calls == ["killpg", "wait"]
+
+
+def test_the_child_hashes_strings_with_a_fixed_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fix the child's string hashing, so set order, and the run's steps, repeat on a resume.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the child process.
+    """
+    _, children = _fake_popen(monkeypatch, "")
+
+    ShinkaEvolveEngine("python")._drive(_requests(tmp_path, lambda candidate, case: (1.0, {})), tmp_path)
+
+    env = children[0].popen["env"]
+    assert isinstance(env, dict)
+    assert env["PYTHONHASHSEED"] == "0"

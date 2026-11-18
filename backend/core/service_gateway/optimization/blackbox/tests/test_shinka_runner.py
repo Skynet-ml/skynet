@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import random
@@ -1684,3 +1685,88 @@ def test_a_symlink_the_tree_ships_unchanged_is_kept(tmp_path: Path) -> None:
     (bundle.checkout / "src/alias.py").symlink_to("/etc/passwd")
     with pytest.raises(ValueError, match=r"adds or changes the symlink 'src/alias\.py'"):
         shinka_runner.refuse_new_links(bundle.checkout, links)
+
+
+class _IdleRunner:
+    """Stand in for upstream's runner: it scores nothing."""
+
+    def __init__(self, **fields: Any) -> None:
+        """Start with no jobs.
+
+        Args:
+            **fields: Upstream's runner arguments, ignored.
+        """
+        self.running_jobs: list[Any] = []
+        self.failed_jobs_for_retry: dict[str, Any] = {}
+
+    async def _generate_proposal_async(self, generation: int, task_id: str) -> None:
+        """Make no proposal.
+
+        Args:
+            generation: Upstream's generation number.
+            task_id: Upstream's proposal task id.
+        """
+
+    def run(self) -> None:
+        """End at once."""
+
+
+def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Score one case at a time and gate each proposal on the engine loop, whatever concurrency the payload asks.
+
+    A resume replays its steps in order, so neither may depend on thread timing.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream and the reply stream.
+    """
+    scorers: list[shinka_runner.ProgramScorer] = []
+    runners: list[_IdleRunner] = []
+
+    class RecordingScorer(shinka_runner.ProgramScorer):
+        """Record each scorer that ``execute`` builds."""
+
+        def __init__(self, **fields: Any) -> None:
+            """Build the scorer and record it.
+
+            Args:
+                **fields: The scorer's arguments.
+            """
+            super().__init__(**fields)
+            scorers.append(self)
+
+    def runner(**fields: Any) -> _IdleRunner:
+        """Build an idle runner and record it.
+
+        Args:
+            **fields: Upstream's runner arguments.
+
+        Returns:
+            The runner.
+        """
+        runners.append(_IdleRunner(**fields))
+        return runners[-1]
+
+    monkeypatch.chdir(tmp_path)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    monkeypatch.setattr(shinka_runner, "ProgramScorer", RecordingScorer)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "seed_randomness", lambda seed: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    shinka_runner.execute(
+        _payload(
+            nonce="testnonce",
+            timeout_seconds=5.0,
+            transport="stdio",
+            max_concurrency=4,
+            task={"seed_candidate": "seed", "train_set": []},
+        )
+    )
+
+    assert scorers[0]._cases._max_workers == 1
+    assert runners[0]._generate_proposal_async.__qualname__ == "install_sequential_gate.<locals>.gated"

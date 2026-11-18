@@ -22,9 +22,12 @@ import contextlib
 import json
 import logging
 import os
+import resource
 import shutil
 import signal
 import subprocess
+import sys
+import threading
 import uuid
 from dataclasses import replace
 from decimal import Decimal
@@ -67,6 +70,20 @@ _ROUTE_URL = "http://engine-loop.invalid/v1"
 _ROUTE_LABEL = "engine-loop"
 # The budget and the evaluation limit end a run; this only bounds a lost reply.
 _TIMEOUT_SECONDS = 7 * 24 * 3600.0
+# The child parses untrusted model replies, so a reply that makes a parser loop
+# or grow must not take the worker host with it. Its own work is prompt building
+# and parsing: a few hundred MiB and well under a second a generation, while it
+# waits on the worker for nearly all of a run. The address-space limit leaves
+# room for the thread stacks and malloc arenas that inflate the virtual size.
+_CHILD_MEMORY_BYTES = 8 * 1024**3
+_CHILD_CPU_SECONDS = 6 * 3600
+# macOS refuses to lower the address-space limit; the workers run Linux.
+_MEMORY_LIMITED = sys.platform == "linux"
+# Between a reply and its next line the child only builds prompts and parses the
+# reply; the worker scores versions and calls the model with no timer running.
+_IDLE_SECONDS = 30 * 60.0
+# A stopped child only reports its scored versions and writes its result.
+_DRAIN_SECONDS = 60.0
 
 
 class ShinkaEvolveEngine:
@@ -223,6 +240,8 @@ class ShinkaEvolveEngine:
             "SHINKA_PRICING_MODE": "offline",
         }
         with (workdir / "stderr.log").open("w", encoding="utf-8") as stderr:
+            # ``preexec_fn`` is unsafe in a threaded parent only when it takes a
+            # lock; ``_limit_resources`` makes only system calls.
             child = subprocess.Popen(
                 [self.python, _RUNNER_FILE, _INPUT_FILE],
                 cwd=workdir,
@@ -237,14 +256,21 @@ class ShinkaEvolveEngine:
                 # ``evaluate.py`` jobs, which would otherwise poll for days and
                 # write into the folder a resume starts again.
                 start_new_session=True,
+                preexec_fn=_limit_resources,  # noqa: PLW1509
             )
             assert child.stdin is not None
             assert child.stdout is not None
+            killer = _GroupKiller(child.pid)
             try:
                 try:
                     for line in child.stdout:
-                        requests.line(line.rstrip("\n"), child.stdin)
+                        killer.cancel()
+                        if requests.line(line.rstrip("\n"), child.stdin):
+                            killer.arm(_IDLE_SECONDS)
                 except (BudgetReached, BudgetExhaustedError):
+                    # A group member that holds the pipe and ignores the stop
+                    # would block the worker, so the drain has a time limit.
+                    killer.arm(_DRAIN_SECONDS)
                     # A closed reply stream stops the child, which then reports
                     # every scored version, so the stop's best version never
                     # depends on how far its progress lines got.
@@ -252,16 +278,25 @@ class ShinkaEvolveEngine:
                         child.stdin.close()
                     for line in child.stdout:
                         requests.line(line.rstrip("\n"), None)
-                    child.wait()
                     raise
-                return child.wait()
             finally:
-                with contextlib.suppress(ProcessLookupError):
+                killer.cancel()
+                # Kill the group before the leader is reaped: until then its id
+                # cannot go to an unrelated process. At the end of its output the
+                # leader is already exiting, and a kernel ignores a signal to an
+                # exiting process, so the kill keeps its exit code. macOS refuses
+                # to signal a group whose only member is the unreaped leader.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+                returncode = child.wait()
                 with contextlib.suppress(OSError):
                     child.stdin.close()
                 child.stdout.close()
+        if killer.fired:
+            raise ServiceError(
+                f"ShinkaEvolve wrote nothing for {_IDLE_SECONDS:g} seconds after a reply, so the worker stopped it."
+            )
+        return returncode
 
     @staticmethod
     def _result(workdir: Path, returncode: int, requests: _Requests) -> Result:
@@ -316,6 +351,55 @@ class ShinkaEvolveEngine:
         )
 
 
+def _limit_resources() -> None:
+    """Bound the child's memory and CPU time; it runs in the forked child before ``exec``.
+
+    It makes only system calls, so it takes no lock that another worker thread
+    could hold at the fork.
+    """
+    if _MEMORY_LIMITED:
+        resource.setrlimit(resource.RLIMIT_AS, (_CHILD_MEMORY_BYTES, _CHILD_MEMORY_BYTES))
+    resource.setrlimit(resource.RLIMIT_CPU, (_CHILD_CPU_SECONDS, _CHILD_CPU_SECONDS))
+
+
+class _GroupKiller:
+    """Kill a child's process group when a deadline passes, unless the deadline is cancelled first."""
+
+    def __init__(self, pid: int) -> None:
+        """Bind the killer to the child.
+
+        Args:
+            pid: The child's process id, which is also its group id.
+        """
+        self.pid = pid
+        self.fired = False
+        self._timer: threading.Timer | None = None
+
+    def arm(self, seconds: float) -> None:
+        """Start a new deadline in place of the current one.
+
+        Args:
+            seconds: The time from now to the kill.
+        """
+        self.cancel()
+        self._timer = threading.Timer(seconds, self._kill)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def cancel(self) -> None:
+        """Cancel the deadline, and wait for a kill in progress, so the leader is reaped only after it."""
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer.join()
+            self._timer = None
+
+    def _kill(self) -> None:
+        """Kill the group."""
+        self.fired = True
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(self.pid, signal.SIGKILL)
+
+
 class _Requests:
     """Answer the child's framed lines: evaluations and model calls, progress and logs."""
 
@@ -356,13 +440,16 @@ class _Requests:
             metadata={"native_artifacts_dir": str(workdir), "model_cost_cents": str(self.cost_cents)},
         )
 
-    def line(self, line: str, replies: IO[str] | None) -> None:
+    def line(self, line: str, replies: IO[str] | None) -> bool:
         """Handle one line the child wrote.
 
         Args:
             line: The line, without its newline.
             replies: The child's stdin, where each reply goes as one line, or
                 ``None`` after a stop, when only progress and logs are read.
+
+        Returns:
+            Whether a reply went to the child.
         """
         for prefix, handle in (
             (_RPC_PREFIX, self._request),
@@ -374,7 +461,7 @@ class _Requests:
                 body = line[len(framed) :]
                 if prefix == _RPC_PREFIX:
                     if replies is None:
-                        return
+                        return False
                     reply = self._request(json.loads(body))
                 else:
                     # A broken log or progress line must not stop the run the
@@ -385,17 +472,21 @@ class _Requests:
                         data = None
                     if not isinstance(data, dict):
                         sandbox_log.stream_line(body, owner=None, scrub=self.scrub, label="stdout")
-                        return
+                        return False
                     reply = handle(data)
                 if reply is not None and replies is not None:
                     text = json.dumps(reply, default=side_info_json_default, allow_nan=False)
                     # A child that already exited reports its own failure in its result.
-                    with contextlib.suppress(BrokenPipeError):
+                    try:
                         replies.write(text + "\n")
                         replies.flush()
-                return
+                    except BrokenPipeError:
+                        return False
+                    return True
+                return False
         if line.strip():
             logger.debug("ShinkaEvolve output: %s", line)
+        return False
 
     def _request(self, request: dict[str, Any]) -> dict[str, Any]:
         """Answer one evaluation or model request.
