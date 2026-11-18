@@ -44,7 +44,7 @@ from urllib.parse import urlsplit
 
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
-from ....sandbox.grants import Grant
+from ....sandbox.grants import Grant, GrantError
 from ....sandbox.trees import TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
@@ -194,13 +194,15 @@ class ShinkaEvolveEngine:
                     "ShinkaEvolve cannot give the [proposer] services to the [proposer] entry command yet. "
                     "Choose another engine, or remove [proposer] services from optimize.toml."
                 )
-            if options.budget_route is not None:
+            if options.budget_route is not None or options.max_token_cost is not None:
                 # The proposer box reaches the model with a raw credential grant, and the loop does not meter
-                # those calls, so a budgeted run could spend past its budget (SKY-815).
+                # those calls. A budgeted or managed run would spend Skynet's key past its budget, so only a run
+                # on the user's own key (BYOK) runs the command: service.py leaves ``max_token_cost`` unset only
+                # for a BYOK model (SKY-815).
                 raise ServiceError(
-                    "ShinkaEvolve cannot meter the [proposer] entry command's model calls, so it does not run "
-                    "the command on a budgeted run. Choose another engine, or remove [proposer] entry from "
-                    "optimize.toml."
+                    "ShinkaEvolve cannot meter the [proposer] entry command's model calls, so it runs the command "
+                    "only with your own model key, on a run without a budget route. Choose another engine, or "
+                    "remove [proposer] entry from optimize.toml."
                 )
             proposer = _Proposer(ctx, options)
         if repo is None and task.seed_candidate is None:
@@ -596,6 +598,7 @@ class _Proposer:
 
         Raises:
             ServiceError: When the ``[proposer] setup`` command fails.
+            GrantError: When the registry holds no credential for a granted host.
         """
         assert self.ctx.run_command is not None
         assert self.ctx.put_files is not None
@@ -616,6 +619,9 @@ class _Proposer:
                 ),
                 self.grants,
             )
+        except GrantError:
+            # A grant the registry cannot resolve fails every mutation the same way, so it stops the run.
+            raise
         except (ValueError, TreeRejectedError) as exc:
             # The version would hold a path that a box may not write; upstream counts a failed mutation.
             return {"error": f"The [proposer] entry command left no usable version: {exc}"}

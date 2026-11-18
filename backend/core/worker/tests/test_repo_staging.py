@@ -435,8 +435,8 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     assert proposer.install_command is None
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
-        "Auto leaves out the AutoResearch and Meta-Harness lanes, because they cannot use the proposer"
-        " command in the contract file.",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
     ]
     # The launch as native_runtime builds it for a protected run.
     launch = build_launch(
@@ -536,6 +536,8 @@ _ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agen
     [
         (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
         (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
+        # No production run builds the engine loop that runs the command yet (SKY-728, SKY-815).
+        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve cannot use the [proposer] entry command yet."),
     ],
 )
 def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(
@@ -555,25 +557,6 @@ def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_se
     assert (caught.value.section, caught.value.key) == ("proposer", "entry")
 
 
-def test_a_single_shinka_evolve_run_with_a_files_proposer_passes_the_setup_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A single ShinkaEvolve run uses the file's command for each mutation, so the check keeps it (SKY-815).
-
-    Args:
-        monkeypatch: Pytest fixture for the fake fetch.
-    """
-    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}}
-
-    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
-    staged.cleanup()
-
-    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
-    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
-        "The run uses the proposer command in the contract file: node agent.js",
-    ]
-
-
 def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -590,8 +573,8 @@ def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run uses the proposer command in the contract file: node agent.js",
-        "Auto leaves out the AutoResearch and Meta-Harness lanes, because they cannot use the proposer"
-        " command in the contract file.",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
     ]
 
 

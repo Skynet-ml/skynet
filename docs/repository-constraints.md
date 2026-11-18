@@ -133,7 +133,15 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
-- In ShinkaEvolve, ShinkaEvolve keeps its search, and the command replaces
+- ShinkaEvolve cannot use the command yet. Its command support runs only on
+  the worker's engine loop, which runs no run yet. So a single ShinkaEvolve
+  run with `entry` fails the setup check, and Auto leaves out its lane. The
+  rest of this item says how the command will run when the refusal ends.
+  ShinkaEvolve then refuses a budgeted or managed run, because it cannot
+  meter the command's model calls: only a run on your own model key runs the
+  command. It also refuses `entry` together with `[proposer] services` or
+  `[proposer] mcp`.
+  ShinkaEvolve keeps its search, and the command replaces
   its model. For each mutation, the run runs the command once in the
   proposer's box, on the tree of the parent version. `ASCENT_TASK` holds the
   text that ShinkaEvolve would send its model. The tree that the command
@@ -152,9 +160,10 @@ U+2066 to U+2069), because they can hide what a command does.
   proposer.
 - AutoResearch and Meta-Harness cannot use the command. They call the
   proposer from their own lab folder, so the files the command changes are
-  not their versions. A single run of one of these engines with `entry`
-  fails the setup check, and the message names `[proposer] entry` and the
-  engine. Auto leaves out their lanes, and the run record says so in a note.
+  not their versions. A single run of AutoResearch, Meta-Harness or
+  ShinkaEvolve with `entry` fails the setup check, and the message names
+  `[proposer] entry` and the engine. Auto leaves out the lanes of these three
+  engines, and the run record says so in a note.
 - Every repository file or folder that `entry` or `setup` names by its
   exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
   `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
@@ -559,7 +568,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. AutoResearch and Meta-Harness refuse it. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. AutoResearch, Meta-Harness and ShinkaEvolve refuse it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
@@ -578,8 +587,8 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 - A `[proposer] entry` or `setup` that is not a list of non-empty strings,
   or a part with a control character, or that contains `__APP_API_KEY__` or
   `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
-  `[proposer] mcp`. An `entry` in a single AutoResearch or Meta-Harness
-  run.
+  `[proposer] mcp`. An `entry` in a single AutoResearch, Meta-Harness or
+  ShinkaEvolve run.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
