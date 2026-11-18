@@ -3574,6 +3574,33 @@ def test_a_later_undo_leaves_a_checkout_that_the_engine_moved_to_another_version
     assert (state / "done.json").exists()
 
 
+def test_a_later_undo_leaves_a_checkout_whose_head_moved_with_the_same_index(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A move of HEAD alone, with no index write, also means another version, so the undo keeps the files (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        capfd: Reads the bridge's note.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && echo o > out.txt"])
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    started = json.loads((state / "started.json").read_text())
+    other = _git(checkout, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "other")
+    _git(checkout, "update-ref", "--no-deref", "HEAD", other)
+    # The test is only about the HEAD half of the check when the index file is still the one from before the setup.
+    assert harness_bridge._index_stamp(checkout) == started["index_stamp"]
+
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    assert "holds another version than before the stopped setup" in capfd.readouterr().err
+    assert (checkout / "a.txt").read_text() == "setup\n"
+    assert (checkout / "out.txt").read_text() == "o\n"
+    assert not (state / "started.json").exists()
+    assert (state / "done.json").exists()
+
+
 @pytest.mark.parametrize("lock_before", [False, True], ids=["left-by-setup", "there-before"])
 def test_a_later_undo_removes_only_an_index_lock_that_the_stopped_setup_left(tmp_path: Path, lock_before: bool) -> None:
     """A setup killed inside a git command leaves index.lock, which would make every later undo fail (SKY-753).
