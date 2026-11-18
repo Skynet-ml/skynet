@@ -612,6 +612,23 @@ def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: p
     assert staged_payload["proposer"] == {"host_cli": "codex"}
 
 
+def test_the_files_proposer_clears_an_empty_install_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty install command keeps the file's proposer, and staging clears it to ``None`` (SKY-753).
+
+    The guest runs ``[proposer] setup`` in its checkout, so the bootstrap must not get an install step.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "proposer": {"install_command": ""}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["install_command"] is None
+
+
 def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:
     """A custom command cannot load the relay's MCP servers yet, so the setup check names the cause.
 
