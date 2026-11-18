@@ -13,10 +13,13 @@ Without that env var the module is skipped.
 
 from __future__ import annotations
 
+import fcntl
 import os
+import tempfile
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, delete, make_url, select
@@ -31,6 +34,8 @@ from core.storage.models import NotificationModel
 from core.storage.tests.test_remote_jobstore_postgres import _reset_legacy_schema, _upgrade_to_head
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
+# Shared by both notification Postgres modules, so their xdist workers migrate one at a time.
+_MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-notification-postgres-tests.lock"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -49,8 +54,13 @@ def _migrated_engine(db_url: str) -> Engine:
     Returns:
         The engine. The caller disposes it.
     """
-    _reset_legacy_schema(db_url)
-    _upgrade_to_head(db_url)
+    # Each xdist worker migrates the same empty database from its own module fixture, and concurrent
+    # CREATE TABLE races in pg_type. A Postgres advisory lock would deadlock with CREATE INDEX CONCURRENTLY,
+    # which waits for the lock holder's open transaction, so a file lock lets one worker migrate at a time.
+    with _MIGRATE_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _reset_legacy_schema(db_url)
+        _upgrade_to_head(db_url)
     return create_engine(db_url)
 
 
@@ -68,8 +78,18 @@ def engine() -> Iterator[Engine]:
         engine.dispose()
 
 
-def test_engine_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Migrate the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database."""
+def test_engine_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Migrate the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database.
+
+    The ``engine`` fixture migrates the database first, so the upgrade here has no migration to run.
+    An upgrade that went to the other database still raises, because it cannot connect.
+
+    Args:
+        engine: The live engine. Only its migration is used.
+        monkeypatch: pytest's ``MonkeyPatch`` fixture.
+    """
     other_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_{uuid.uuid4().hex[:8]}")
     other = other_url.render_as_string(hide_password=False)
     monkeypatch.setenv("REMOTE_DB_URL", other)
