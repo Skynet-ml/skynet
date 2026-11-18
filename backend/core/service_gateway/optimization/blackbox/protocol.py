@@ -326,8 +326,9 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
     already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
     list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
-    Text that nests too deep to read stays raw text, and a value too deep to write becomes
-    :data:`TOO_DEEP_ARGUMENTS`, so the engine refuses only that call.
+    Text too deep to read and a value too deep to write both become :data:`TOO_DEEP_ARGUMENTS`, so the engine
+    refuses only that call. Deep raw text must not reach the transcript: a later call would read it again, raise
+    :class:`RecursionError` and fail every later model call in the session.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -352,9 +353,12 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         else:
             try:
                 parsed = json.loads(raw)
-            except (TypeError, ValueError, RecursionError):
-                parsed = None
-            arguments = parsed if isinstance(parsed, dict) else raw
+            except RecursionError:
+                arguments = TOO_DEEP_ARGUMENTS
+            except (TypeError, ValueError):
+                arguments = raw
+            else:
+                arguments = parsed if isinstance(parsed, dict) else raw
         calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
     return calls
 

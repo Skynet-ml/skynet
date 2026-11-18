@@ -614,8 +614,9 @@ class EngineLoop:
 
         Both shapes are flat and provider-neutral. A tool definition is ``{"name", "description",
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
-        (:class:`ToolCall`), with ``arguments`` as a dict, or as raw text when it is not a JSON object. The
-        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`.
+        (:class:`ToolCall`), with ``arguments`` as a dict, as raw text when it is not a JSON object, or as
+        ``TOO_DEEP_ARGUMENTS`` when it nests too deep. The model client converts with :func:`openai_tools` and
+        :func:`tool_calls_from_openai`.
 
         Args:
             prompt: The prompt text or messages.

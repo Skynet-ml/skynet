@@ -571,15 +571,17 @@ def _deep_list(levels: int) -> list[Any]:
 
 @pytest.mark.parametrize(
     ("arguments", "kept"),
-    [("[" * 5000 + "]" * 5000, "[" * 5000 + "]" * 5000), (_deep_list(5000), TOO_DEEP_ARGUMENTS)],
+    [("[" * 5000 + "]" * 5000, TOO_DEEP_ARGUMENTS), (_deep_list(5000), TOO_DEEP_ARGUMENTS)],
     ids=["text", "value"],
 )
-def test_tool_calls_from_openai_keeps_arguments_that_nest_too_deep_as_text(arguments: Any, kept: str) -> None:
-    """Arguments past Python's recursion limit give text that the engine refuses, not a raise that loses the reply.
+def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any, kept: str) -> None:
+    """Arguments past Python's recursion limit give ``TOO_DEEP_ARGUMENTS``, not a raise that loses the reply.
+
+    Deep raw text must not reach the transcript, because a later call would read it again and raise.
 
     Args:
         arguments: The deep arguments, as JSON text to read or as a value to write as JSON text.
-        kept: The text that the call keeps: the raw text, or ``TOO_DEEP_ARGUMENTS`` for a value.
+        kept: The text that the call keeps: ``TOO_DEEP_ARGUMENTS`` for both shapes.
     """
     message = {
         "tool_calls": [
