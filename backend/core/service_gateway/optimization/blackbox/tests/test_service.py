@@ -2216,7 +2216,7 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
     monkeypatch: pytest.MonkeyPatch,
     fake_native_proposers: list[tuple[str, EngineContext]],
 ) -> None:
-    """The snapshot's ``file_proposer`` and ``proposer_setup`` reach ``NativeOptions.repo`` (SKY-753).
+    """The snapshot's proposer fields reach ``NativeOptions.repo`` (SKY-753, SKY-830).
 
     Args:
         fake_lm: Fake reflection model for the run.
@@ -2246,6 +2246,7 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
         target=BlackboxTarget(kind="repo", repo=BlackboxRepoSource(repository="o/r", editable_paths=["src"])),
     )
     setup = ["npm", "ci"]
+    servers = [{"name": "web", "url": "https://web.example.com/mcp"}]
 
     with pytest.raises(_NativeOptionsBuiltError):
         service_mod.run_job(
@@ -2256,11 +2257,12 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
             started=time.perf_counter(),
             progress_callback=None,
             gepa_log_dir_path=str(tmp_path),
-            repo_snapshot={"chunks": [], "file_proposer": True, "proposer_setup": setup},
+            repo_snapshot={"chunks": [], "file_proposer": True, "proposer_setup": setup, "proposer_mcp": servers},
         )
 
     assert built[0]["repo"]["file_proposer"] is True
     assert built[0]["repo"]["proposer_setup"] == setup
+    assert built[0]["repo"]["proposer_mcp"] == servers
 
 
 def test_a_run_where_every_case_scores_a_valid_zero_succeeds(

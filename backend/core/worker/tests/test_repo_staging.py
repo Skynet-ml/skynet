@@ -1058,6 +1058,21 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
     staged.cleanup()
 
 
+def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The snapshot gives the engine each [proposer] mcp server's name and address, and no header (SKY-830)."""
+    files = {
+        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
+        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+    }
+
+    result, staged = _stage_with(files, monkeypatch)
+
+    assert result[repo_staging.REPO_SNAPSHOT_KEY]["proposer_mcp"] == [
+        {"name": "web", "url": "https://web.example.com/mcp"}
+    ]
+    staged.cleanup()
+
+
 def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
     files = {
