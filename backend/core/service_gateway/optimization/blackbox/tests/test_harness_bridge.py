@@ -2462,6 +2462,44 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("tracked", "error"),
+    [(False, "changed or removed files of the version: link"), (True, "changed tracked files: link")],
+    ids=["untracked", "tracked-changed"],
+)
+def test_a_setup_that_points_a_link_of_the_version_at_a_new_target_stops(
+    tmp_path: Path, tracked: bool, error: str
+) -> None:
+    """A new link target enters every version even when both targets hold the same bytes (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        tracked: Whether git tracks the link, which the parent version then changed.
+        error: The expected error text.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "one.txt").write_text("same")
+    (checkout / "two.txt").write_text("same")
+    if tracked:
+        (checkout / "link").symlink_to("a.txt")
+        for arguments in (["add", "link"], ["commit", "--quiet", "--no-verify", "-m", "link"]):
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+            )
+        (checkout / "link").unlink()
+    (checkout / "link").symlink_to("one.txt")
+    command = [
+        sys.executable,
+        "-c",
+        "import os; os.remove('link'); os.symlink('two.txt', 'link'); open('new.txt', 'w')",
+    ]
+
+    with pytest.raises(RuntimeError, match=rf"(?s)setup command in optimize.toml \(.*\) {error}\."):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+
 def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
     """A setup cannot run past the session's limit, and the harness gets only the time the setup left (SKY-753).
 
