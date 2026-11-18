@@ -15,6 +15,7 @@ import json
 import pickle
 import runpy
 import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -50,12 +51,14 @@ from ...storage.models import (
     DatasetModel,
     ExecutionBudgetModel,
     ExecutionOperationModel,
+    JobEmbeddingModel,
     JobModel,
     LogEntryModel,
     NotificationModel,
     NotificationPreferenceModel,
     ProgressEventModel,
     PushSubscriptionModel,
+    RunCallModel,
     SetupDraftModel,
     SlackConnectionModel,
     StoragePackModel,
@@ -1061,3 +1064,135 @@ def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(full_schema_
         assert session.get(JobModel, run_id) is None
         assert session.scalars(select(LogEntryModel)).all() == []
         assert session.scalars(select(ProgressEventModel)).all() == []
+
+
+@pytest.mark.parametrize(
+    "seeded",
+    [("embedding",), ("run_call",), ("budget",), ("embedding", "run_call", "budget")],
+    ids=["embedding", "run_call", "budget", "all"],
+)
+def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
+    full_schema_engine: Engine, seeded: tuple[str, ...]
+) -> None:
+    """A run with no log rows still lets an account delete and a run delete finish together (SKY-733).
+
+    The run delete deletes its rows and closes its budget, then waits until the
+    account delete waits for a lock. If the account delete locked the job
+    before it reached those rows, each would wait for the other and PostgreSQL
+    would abort one.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        seeded: The run rows that the two deletes contend for.
+    """
+    if full_schema_engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    run_id = "job-race"
+    budget_id = "budget-race"
+    now = datetime.now(UTC)
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="queued"))
+        session.flush()
+        if "embedding" in seeded:
+            session.add(JobEmbeddingModel(optimization_id=run_id, user_id=_EMAIL))
+        if "run_call" in seeded:
+            session.add(
+                RunCallModel(optimization_id=run_id, candidate_id="c", seq=1, kind="model", started_at=now, status="ok")
+            )
+        if "budget" in seeded:
+            session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus-race", balance_cents=500))
+            session.add(
+                ExecutionBudgetModel(
+                    id=budget_id,
+                    username=_EMAIL,
+                    job_id=run_id,
+                    creation_key=budget_id,
+                    creation_fingerprint="f",
+                    total_cents=100,
+                    state="attached",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        session.commit()
+    # The full constructor opens its own engine from a URL; delete_job needs only the session factory and engine.
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = full_schema_engine
+    store._session_factory = sessionmaker(bind=full_schema_engine)
+
+    run_rows_deleted = threading.Event()
+    errors: list[BaseException] = []
+    real_mark = mark_run_packs
+
+    def _account_delete_waits() -> bool:
+        """Report whether another session of this database waits for a row lock.
+
+        Returns:
+            True when a session waits for a lock.
+        """
+        with full_schema_engine.connect() as connection:
+            return bool(
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+            )
+
+    def _mark_after_the_account_delete_waits(session: Session, run_ids: list[str]) -> None:
+        """Hold the run delete before its job lock until the account delete waits for one of its locks.
+
+        Args:
+            session: The run delete's open session.
+            run_ids: The runs being deleted.
+
+        Raises:
+            AssertionError: When the account delete never waits for a lock.
+        """
+        run_rows_deleted.set()
+        deadline = time.monotonic() + 30
+        while not _account_delete_waits():
+            if time.monotonic() > deadline:
+                raise AssertionError("the account delete never waited for a lock of the run delete")
+            time.sleep(0.05)
+        real_mark(session, run_ids)
+
+    def _delete_run() -> None:
+        """Delete the run and keep any error."""
+        try:
+            store.delete_job(run_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def _delete_owner() -> None:
+        """Delete the account and keep any error."""
+        try:
+            _delete(full_schema_engine)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with (
+        patch.object(settings, "embeddings_enabled", True),
+        patch("core.storage.remote.mark_run_packs", _mark_after_the_account_delete_waits),
+    ):
+        run = threading.Thread(target=_delete_run)
+        run.start()
+        assert run_rows_deleted.wait(timeout=30)
+        owner = threading.Thread(target=_delete_owner)
+        owner.start()
+        run.join(timeout=60)
+        owner.join(timeout=60)
+
+    assert not run.is_alive()
+    assert not owner.is_alive()
+    assert errors == []
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+        assert session.get(JobModel, run_id) is None
+        assert session.scalars(select(JobEmbeddingModel)).all() == []
+        assert session.scalars(select(RunCallModel)).all() == []
+        if "budget" in seeded:
+            budget = session.get(ExecutionBudgetModel, budget_id)
+            assert (budget.state, budget.job_id) == ("closed", None)
