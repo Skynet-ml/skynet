@@ -7,7 +7,10 @@ a paid provider or the network.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
+import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -949,7 +952,8 @@ def test_the_control_commands_never_run_a_tool_from_the_box_path(
         tmp_path: Scratch folder; it holds the fake tools and their marker file.
     """
     marker = tmp_path / "ran.txt"
-    names = ("ps", "awk", "sort", "cat", "tr", "find", "stat", "cksum", "tar", "base64", "rm", "mkdir", "split", "wc")
+    names = ("ps", "awk", "sort", "cat", "tr", "find", "stat", "sha256sum", "shasum", "tar", "base64", "rm", "mkdir")
+    names += ("split", "wc")
     _fake_tools(tmp_path / "bin", marker, names)
     runtime = _Runtime()
     spec = replace(_SPEC, env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"})
@@ -1108,8 +1112,8 @@ def test_the_scan_names_each_process_by_its_pid_and_start_ticks(tmp_path: Path) 
     assert result.stdout.splitlines()[1:] == ["1 5", "300 987654"]
 
 
-def test_the_scan_skips_a_process_that_ends_during_the_read(tmp_path: Path) -> None:
-    """A process that ends after the folder list has no stat file any more, which is no scan failure.
+def test_the_scan_fails_when_a_listed_process_has_no_stat_file(tmp_path: Path) -> None:
+    """A process that ends after the folder list could have forked a child the scan never sees, so the scan fails.
 
     Args:
         tmp_path: Scratch folder; it holds the fake /proc tree.
@@ -1120,8 +1124,155 @@ def test_the_scan_skips_a_process_that_ends_during_the_read(tmp_path: Path) -> N
 
     result = _run_scan(proc)
 
-    assert result.returncode == 0
-    assert result.stdout.splitlines()[1:] == ["1 5"]
+    assert result.returncode != 0
+
+
+def _scan_while(proc: Path, change: Callable[[int], None]) -> subprocess.CompletedProcess[str]:
+    """Run the scan and change the fake /proc tree after the scan lists it, before the scan reads pid 1.
+
+    The stat file of pid 1 becomes a named pipe, so the scan's read of it waits until the change is done.
+
+    Args:
+        proc: The fake /proc tree; it must hold pid 1.
+        change: Changes the tree; it gets the pid of the scan's shell.
+
+    Returns:
+        The finished scan.
+    """
+    stat = proc / "1" / "stat"
+    line = stat.read_text()
+    stat.unlink()
+    os.mkfifo(stat)
+    scan = subprocess.Popen(
+        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+        env={"PATH": "/usr/bin:/bin", "SCAN_PROC_ROOT": str(proc)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 30
+    while True:
+        # A non-blocking open fails with ENXIO until the scan opens the pipe, so a scan that ends first cannot hang.
+        try:
+            pipe = os.open(stat, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as error:
+            if error.errno != errno.ENXIO or scan.poll() is not None or time.monotonic() > deadline:
+                scan.kill()
+                scan.communicate()
+                raise AssertionError("The scan did not read the stat file of pid 1.") from error
+            time.sleep(0.01)
+    try:
+        change(scan.pid)
+        os.write(pipe, line.encode())
+    finally:
+        os.close(pipe)
+    out, err = scan.communicate(timeout=30)
+    return subprocess.CompletedProcess(scan.args, scan.returncode, out, err)
+
+
+def _add(proc: Path, pid: int, ppid: int) -> None:
+    """Add a process to the fake /proc tree.
+
+    Args:
+        proc: The fake /proc tree.
+        pid: The pid of the process.
+        ppid: Its parent pid.
+    """
+    (proc / str(pid)).mkdir()
+    (proc / str(pid) / "stat").write_text(_stat_line(pid, ppid, 9))
+
+
+def test_the_scan_fails_when_a_listed_process_ends_during_the_scan(tmp_path: Path) -> None:
+    """A process that ends between the list and its read could hide a child, so the scan fails.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+    """
+    proc = _fake_proc(tmp_path / "proc", ((1, 0, 5), (400, 1, 9)))
+
+    def end(_: int) -> None:
+        """Remove pid 400 after the list.
+
+        Args:
+            _: The scan's pid; not used.
+        """
+        (proc / "400" / "stat").unlink()
+        (proc / "400").rmdir()
+
+    assert _scan_while(proc, lambda _: None).returncode == 0
+    proc = _fake_proc(tmp_path / "again", ((1, 0, 5), (400, 1, 9)))
+    assert _scan_while(proc, end).returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("parent", "kthreadd", "ok"),
+    [("scan", False, True), ("kernel", True, True), ("kernel", False, False), ("other", False, False)],
+    ids=["child-of-the-scan", "kernel-thread", "child-of-a-fake-kthreadd", "other-process"],
+)
+def test_the_scan_fails_when_a_process_starts_after_the_list(
+    tmp_path: Path, parent: str, kthreadd: bool, ok: bool
+) -> None:
+    """A fork-and-exit chain starts each child after the list, so a new pid fails the scan.
+
+    Only the scan's own children (awk and sort can start after the list) and kernel threads are new without a failure.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+        parent: The parent of the new process: the scan's shell, pid 2 or pid 1.
+        kthreadd: Pid 2 is kthreadd with the kernel's flags.
+        ok: The scan passes.
+    """
+    proc = _fake_proc(tmp_path / "proc", ((1, 0, 5), (2, 0, 6)), kthreadd=kthreadd)
+
+    def start(scan: int) -> None:
+        """Add pid 9000 after the list.
+
+        Args:
+            scan: The pid of the scan's shell.
+        """
+        _add(proc, 9000, {"scan": scan, "kernel": 2, "other": 1}[parent])
+
+    result = _scan_while(proc, start)
+
+    assert (result.returncode == 0) is ok
+    if ok:
+        assert "9000" not in {line.split()[0] for line in result.stdout.splitlines()}
+
+
+@pytest.mark.parametrize(
+    "fake",
+    ["exit 1", "echo 1234567 89", "echo nothex"],
+    ids=["fails", "crc-output", "bad-output"],
+)
+def test_the_scan_fails_when_the_hash_tool_fails_or_gives_no_sha256(tmp_path: Path, fake: str) -> None:
+    """A missing or wrong hash tool gives no SHA-256 state line, so the scan fails and the box is not kept.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake hash tools and the fake /proc tree.
+        fake: The body of the fake sha256sum and shasum.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("sha256sum", "shasum"):
+        (tools / name).write_text(f"#!/bin/sh\ncat >/dev/null\n{fake}\n")
+        (tools / name).chmod(0o755)
+    proc = _fake_proc(tmp_path / "proc")
+    real = _run_scan(proc)
+
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+        env={"PATH": f"{tools}:/usr/bin:/bin", "SCAN_PROC_ROOT": str(proc)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert real.returncode == 0
+    assert re.fullmatch(r"state [0-9a-f]{64}", real.stdout.splitlines()[0])
+    assert result.returncode != 0
+    assert result.stdout == ""
 
 
 def _unreadable(proc: Path) -> None:

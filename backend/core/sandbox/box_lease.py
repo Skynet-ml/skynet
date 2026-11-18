@@ -248,8 +248,8 @@ class BoxLease(Generic[BoxT]):
         """Return the key's warm box, or open a new one.
 
         Args:
-            agent_id: The box key. The caller builds it from the run and the
-                agent (``run_id:agent_id``), so two runs never share a box.
+            agent_id: The box key (``run_id:agent_id``). The caller builds it
+                from the run and the agent, so two runs never share a box.
             grants: The box's grants; a warm box with other grants is replaced.
 
         Returns:
@@ -508,7 +508,7 @@ class BoxLease(Generic[BoxT]):
         """Take the key's warm box, or reserve a new box and its provider.
 
         Args:
-            key: The box key, built from the run and the agent (``run_id:agent_id``).
+            key: The box key (``run_id:agent_id``).
             grants: The box's grants.
             wanted: The normalized grants; a warm box with other grants is replaced.
 

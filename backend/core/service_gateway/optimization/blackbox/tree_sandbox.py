@@ -132,12 +132,17 @@ _CLEAN_SHELL = _CLEAN_ENV + _CLEAN_BASH
 # kernel sets. mawk has no bitwise operators, so awk tests the bit with division. A pid with its start time names one
 # process, also when the pid is used again. The scan reads /proc/<pid>/stat itself, because the box image
 # (python:3.12-slim) has no ps. The name in a stat line can hold spaces and parens, so the fields come after the
-# last ")": the parent pid is field 4 and the start time in clock ticks is field 22. A process that ends during
-# the read has no stat file any more and is skipped. Any other read failure, a bad line or no process at all
-# fails the scan. SCAN_PROC_ROOT is for tests only: env -i in PROCESS_SCAN drops it, so the box cannot set it.
-# The hash covers the metadata of each file in the box PATH folders and of the shell profile files. stat -L
-# follows a link to its target. The change time of a file changes on each write, and the box user cannot set it
-# back. stat has GNU flags in a box and BSD flags on a macOS host.
+# last ")": the parent pid is field 4 and the start time in clock ticks is field 22. A process that ends between
+# the list and its read could fork a child and hide it, so a stat file that does not read fails the scan. The
+# scan's own processes live through the read: bash waits for each command substitution before the list. After the
+# reads the scan lists /proc again, so a process that a fork-and-exit chain starts after the first list fails the
+# scan too ("+" marks it for awk), unless its parent is the scan's shell (awk and sort) or a kernel thread
+# parent. Any other read failure, a bad line or no process at all fails the scan. SCAN_PROC_ROOT is for tests
+# only: env -i in PROCESS_SCAN drops it, so the box cannot set it.
+# The SHA-256 hash covers the metadata of each file in the box PATH folders and of the shell profile files. A
+# CRC can be forged, so it is not used. stat -L follows a link to its target. The change time of a file changes
+# on each write, and the box user cannot set it back. stat has GNU flags in a box and BSD flags on a macOS host.
+# A box has sha256sum and a macOS host has shasum; with neither, the hash line is bad and the scan fails.
 # A root scan under sudo gets root's HOME and PATH, so it checks the home of the user that sudo names and the
 # image's box PATH. A provider that already runs as root sets no SUDO_UID and keeps the box values.
 SCAN_SCRIPT = (
@@ -146,16 +151,23 @@ SCAN_SCRIPT = (
     ' HOME=$(getent passwd "$SUDO_UID" | cut -d: -f6) && [ -n "$HOME" ] || exit 1; BOX_PATH=$ENTRY_PATH; fi;'
     " if stat -c %i / >/dev/null 2>&1; then fmt=(-L -c '%n %i %s %Y %Z');"
     " else fmt=(-L -f '%N %i %z %m %c'); fi;"
+    " if command -v sha256sum >/dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi;"
     ' state=$({ printf "%s\\n" "$BOX_PATH" | tr : "\\n" | while IFS= read -r d; do'
     ' find -H "$d" -maxdepth 1 -exec stat "${fmt[@]}" {} +; done;'
-    ' for f in .bash_profile .bash_login .profile .bashrc; do stat "${fmt[@]}" "$HOME/$f"; done; } 2>&1 | cksum);'
-    ' echo "state $state"; proc=${SCAN_PROC_ROOT:-/proc}; k=0;'
+    ' for f in .bash_profile .bash_login .profile .bashrc; do stat "${fmt[@]}" "$HOME/$f"; done; } 2>&1 | "${sum[@]}");'
+    " [[ $state =~ ^[0-9a-f]{64}[[:space:]] ]] || exit 1;"
+    ' echo "state ${state%% *}"; proc=${SCAN_PROC_ROOT:-/proc}; k=0;'
     ' if [ "$(cat "$proc/2/comm" 2>/dev/null)" = kthreadd ]; then k=2; fi; shopt -s nullglob;'
-    ' for f in "$proc"/[0-9]*/stat; do if ! { IFS= read -r l < "$f"; } 2>/dev/null; then'
-    ' [ -e "$f" ] && exit 1; continue; fi; [[ $l == *")"* ]] || exit 1;'
-    ' printf "%s%s\\n" "${l%% *}" "${l##*)}"; done | awk -v me=$$ -v k=$k \''
-    "$1 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $21 !~ /^[0-9]+$/ {bad = 1} {parent[$1] = $3; start[$1] = $21}"
+    ' { for f in "$proc"/[0-9]*/stat; do p=${f%/stat}; p=${p##*/}; [[ $p =~ ^[1-9][0-9]*$ ]] || exit 1; seen[p]=1;'
+    ' { IFS= read -r l < "$f"; } 2>/dev/null || exit 1; [[ $l == *")"* ]] || exit 1;'
+    ' printf "%s%s\\n" "${l%% *}" "${l##*)}"; done;'
+    ' for d in "$proc"/[0-9]*; do p=${d##*/}; [[ $p =~ ^[1-9][0-9]*$ ]] || exit 1; [ -n "${seen[p]}" ] && continue;'
+    ' { IFS= read -r l < "$d/stat"; } 2>/dev/null || exit 1; [[ $l == *")"* ]] || exit 1;'
+    ' printf "+%s%s\\n" "${l%% *}" "${l##*)}"; done; } | awk -v me=$$ -v k=$k \''
+    '{n = sub(/^[+]/, "", $1)} $1 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $21 !~ /^[0-9]+$/ {bad = 1}'
+    " n {late[$1] = $3; next} {parent[$1] = $3; start[$1] = $21}"
     " $1 == 2 {flags = $8} END {if (bad || !NR) exit 1; if (int(flags / 2097152) % 2 != 1) k = 0;"
+    " for (pid in late) if (late[pid] != me && !(k && late[pid] == k)) exit 1;"
     " p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
     " for (pid in start) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
     " print pid, start[pid]}"
@@ -266,7 +278,7 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         """Return the agent's warm box, or open a new one; refuse a GPU box or a denied grant first.
 
         Args:
-            agent_id: The agent.
+            agent_id: The box key (``run_id:agent_id``).
             grants: The box's grants.
 
         Returns:
