@@ -632,6 +632,128 @@ def _tracked_changes(checkout: Path) -> dict[str, str]:
     return {path: _tracked_state(checkout, path) for path in paths if path}
 
 
+def _setup_changes(checkout: Path, tracked: dict[str, str]) -> list[str]:
+    """List the tracked paths whose content differs from their content before the setup.
+
+    Args:
+        checkout: The checkout or worktree, after the setup.
+        tracked: :func:`_tracked_changes` before the setup.
+
+    Returns:
+        The changed paths, sorted.
+    """
+    return sorted(
+        path
+        for path in tracked.keys() | _tracked_changes(checkout).keys()
+        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
+    )
+
+
+def _index_path(checkout: Path) -> Path:
+    """Find the git index file of a checkout or worktree.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of its index file.
+    """
+    index = Path(_checkout_git(["rev-parse", "--git-path", "index"], checkout).strip())
+    return index if index.is_absolute() else checkout / index
+
+
+def _save_checkout(checkout: Path, paths: Iterable[str], saved: Path) -> None:
+    """Copy the index and the version's changed files before a setup, so a failed setup can be undone.
+
+    Args:
+        checkout: The checkout or worktree.
+        paths: The tracked paths the version changed and its untracked files.
+        saved: An empty folder for the copy.
+    """
+    index = _index_path(checkout)
+    if index.exists():
+        shutil.copy2(index, saved / "index")
+    for path in paths:
+        if os.path.lexists(checkout / path):
+            _copy_path(checkout / path, saved / "files" / path, saved / "files")
+
+
+def _undo_setup(
+    checkout: Path,
+    head: str,
+    tracked: dict[str, str],
+    version_files: dict[str, str],
+    ignored_before: set[str],
+    saved: Path,
+) -> None:
+    """Put a checkout back to its state before a failed setup.
+
+    Args:
+        checkout: The checkout or worktree.
+        head: The commit of ``HEAD`` before the setup.
+        tracked: :func:`_tracked_changes` before the setup.
+        version_files: Each untracked file of the version before the setup, with its :func:`_tracked_state`.
+        ignored_before: Every ignored file before the setup.
+        saved: The :func:`_save_checkout` copy from before the setup.
+    """
+    if _checkout_git(["rev-parse", "HEAD"], checkout).strip() != head:
+        # Soft, so the working tree keeps the version's own changes; the loop below undoes the setup's.
+        _checkout_git(["reset", "--soft", head], checkout)
+    if (saved / "index").exists():
+        shutil.copy2(saved / "index", _index_path(checkout))
+    # Listed after the index is back, so a file the setup untracked in its commit counts as tracked again.
+    # Removed first, so a link the setup put in place of a folder is gone before the files below are restored.
+    before = set(version_files)
+    for path in _setup_output(checkout, before) | _setup_output(checkout, ignored_before, ignored=True):
+        _remove_path(checkout / path.rstrip("/"))
+    changed = _setup_changes(checkout, tracked)
+    specs = [f":(literal){path}" for path in changed]
+    in_head = (
+        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head, "--", *specs], checkout).split("\0"))
+        if specs
+        else set()
+    )
+    for path in changed:
+        _check_parents(checkout / path, checkout)
+        if path in tracked:
+            # The version had changed this file before the setup, so the commit's content is not its content.
+            _remove_path(checkout / path)
+            if os.path.lexists(saved / "files" / path):
+                _copy_path(saved / "files" / path, checkout / path, checkout)
+        elif path in in_head:
+            _checkout_git(["checkout", head, "--", f":(literal){path}"], checkout)
+        else:
+            _remove_path(checkout / path)
+    for path, content in version_files.items():
+        if _tracked_state(checkout, path) != content:
+            _check_parents(checkout / path, checkout)
+            _remove_path(checkout / path)
+            _copy_path(saved / "files" / path, checkout / path, checkout)
+
+
+def _check_parents(target: Path, root: Path) -> None:
+    """Refuse a path whose parent folders do not stay plain folders inside a root.
+
+    Args:
+        target: The path to write or remove.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
+    """
+    # A version can replace a parent folder with a link; the copy would then write outside the checkout.
+    folder = root
+    for part in target.relative_to(root).parts[:-1]:
+        folder = folder / part
+        if os.path.lexists(folder) and (
+            folder.is_symlink() or not folder.is_dir() or not folder.resolve().is_relative_to(root.resolve())
+        ):
+            raise RuntimeError(
+                f"The [proposer] setup output {target} cannot be restored: its parent folder {folder} is a link,"
+                f" is not a folder or is outside {root}. Make the version keep that folder a plain folder."
+            )
+
+
 def _copy_path(source: Path, target: Path, root: Path) -> None:
     """Copy one file, link or folder of a setup's output, with its links kept as links.
 
@@ -641,17 +763,9 @@ def _copy_path(source: Path, target: Path, root: Path) -> None:
         root: The folder that must hold ``target``.
 
     Raises:
-        RuntimeError: When a parent folder of ``target`` is a link or resolves outside ``root``.
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
     """
-    # A version can replace a parent folder with a link; the copy would then write outside the checkout.
-    folder = root
-    for part in target.relative_to(root).parts[:-1]:
-        folder = folder / part
-        if folder.is_symlink() or (os.path.lexists(folder) and not folder.resolve().is_relative_to(root.resolve())):
-            raise RuntimeError(
-                f"The [proposer] setup output {target} cannot be restored: its parent folder {folder} is a link"
-                f" or is outside {root}. Make the version keep that folder a plain folder."
-            )
+    _check_parents(target, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     if source.is_dir() and not source.is_symlink():
         shutil.copytree(source, target, symlinks=True)
@@ -722,7 +836,9 @@ def ensure_setup(
     included, is copied into :data:`SETUP_STATE` in the git dir, and a
     session after a reset or in a new worktree gets that copy back, without
     a second setup. What the setup adds, ignored files included, is excluded
-    from every version, like the harness files (SKY-753).
+    from every version, like the harness files (SKY-753). Any failure after
+    the setup starts puts the checkout back as it was: ``HEAD``, the index,
+    the files of the version, and no setup output.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
@@ -789,62 +905,67 @@ def ensure_setup(
                 f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
                 f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
             )
-        try:
-            run_setup(command, checkout, remaining, env)
-        except RuntimeError:
-            # A failed setup's partial output must not enter the version, and the next session starts clean.
-            for path in _setup_output(checkout, before) | _setup_output(checkout, ignored_before, ignored=True):
-                _remove_path(checkout / path.rstrip("/"))
-            raise
-        moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
-        if moved != head:
-            # A commit would hide its changes from the diff below, and enter every version.
-            raise RuntimeError(
-                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from {head}"
-                f" to {moved}. Those changes would enter every version. Make the setup leave the git history alone."
-            )
-        changed = sorted(
-            path
-            for path in tracked.keys() | _tracked_changes(checkout).keys()
-            if path not in tracked or tracked[path] != _tracked_state(checkout, path)
-        )
-        if changed:
-            raise RuntimeError(
-                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
-                f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
-                " files that git does not track."
-            )
-        # GEPA and Best-of-N check out a parent version with its new files untracked;
-        # a change to one of them would enter every version as well.
-        rewritten = sorted(path for path, content in version_files.items() if _tracked_state(checkout, path) != content)
-        if rewritten:
-            raise RuntimeError(
-                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed files"
-                f" of the version: {', '.join(rewritten)}. Those changes would enter every version. Make the setup"
-                " write only new files that git does not track."
-            )
-        added = sorted(_setup_output(checkout, before))
-        ignored = _setup_output(checkout, ignored_before, ignored=True)
-        # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
-        # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
-        lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
-        kept = sorted(set(added) | ignored)
-        output = state / "output"
-        shutil.rmtree(output, ignore_errors=True)
-        for path in kept:
-            name = path.rstrip("/")
-            # An ignored path inside a new folder is already in that folder's copy.
-            if not os.path.lexists(output / name):
-                _copy_path(checkout / name, output / name, output)
-        exclude = common / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
-        with exclude.open("a", encoding="utf-8") as stream:
-            stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-        # A stop between truncate and write would leave an empty record, so the record is replaced whole.
-        partial = state / "done.json.tmp"
-        partial.write_text(json.dumps({"output": kept}), encoding="utf-8")
-        partial.replace(record)
+        with tempfile.TemporaryDirectory(dir=state) as saved_name:
+            saved = Path(saved_name)
+            # The version's own edits are only hashed above, so a failed setup could not put them back.
+            _save_checkout(checkout, tracked.keys() | before, saved)
+            try:
+                run_setup(command, checkout, remaining, env)
+                moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+                if moved != head:
+                    # A commit would hide its changes from the diff below, and enter every version.
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
+                        f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
+                        " history alone."
+                    )
+                changed = _setup_changes(checkout, tracked)
+                if changed:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                        f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+                        " files that git does not track."
+                    )
+                # GEPA and Best-of-N check out a parent version with its new files untracked;
+                # a change to one of them would enter every version as well.
+                rewritten = sorted(
+                    path for path, content in version_files.items() if _tracked_state(checkout, path) != content
+                )
+                if rewritten:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
+                        f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
+                        " Make the setup write only new files that git does not track."
+                    )
+                added = sorted(_setup_output(checkout, before))
+                ignored = _setup_output(checkout, ignored_before, ignored=True)
+                # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
+                # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
+                lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
+                kept = sorted(set(added) | ignored)
+                output = state / "output"
+                shutil.rmtree(output, ignore_errors=True)
+                for path in kept:
+                    name = path.rstrip("/")
+                    # An ignored path inside a new folder is already in that folder's copy.
+                    if not os.path.lexists(output / name):
+                        _copy_path(checkout / name, output / name, output)
+                exclude = common / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+                with exclude.open("a", encoding="utf-8") as stream:
+                    stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+                # A stop between truncate and write would leave an empty record, so the record is replaced whole.
+                partial = state / "done.json.tmp"
+                partial.write_text(json.dumps({"output": kept}), encoding="utf-8")
+                partial.replace(record)
+            except BaseException as error:
+                # Any failure after the setup starts leaves the checkout as it was, so no edit becomes the baseline.
+                try:
+                    _undo_setup(checkout, head, tracked, version_files, ignored_before, saved)
+                except Exception as undo_error:
+                    error.add_note(f"The checkout could not be restored after the setup: {undo_error!r}")
+                raise
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:

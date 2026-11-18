@@ -23,7 +23,7 @@ const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseTe
   "./repo-run.ts"
 );
 const { prepareModelConfig } = await import("./model-config.ts");
-const { harnessPickerValue, proposerHeader } = await import("./engine-contract.ts");
+const { HARNESS_DEFAULT_PICK, harnessPickerValue, pickHarness, proposerHeader } = await import("./engine-contract.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
 
@@ -114,6 +114,20 @@ test("the harness picker starts empty, so picking Codex sends Codex (SKY-753)", 
   state.optimizer.proposer = { ...state.optimizer.proposer, harness: "codex" };
   assert.equal(harnessPickerValue(state.optimizer.proposer), "codex");
   assert.equal(repoRunRequest(state, options)?.proposer?.harness, "codex");
+});
+
+test("the default harness item drops the picked harness and host CLI again (SKY-753)", () => {
+  const state = repoState();
+  state.optimizer.proposer = pickHarness({ ...state.optimizer.proposer, host_cli: "claude" }, "pi");
+  assert.equal(state.optimizer.proposer.harness, "pi");
+
+  state.optimizer.proposer = pickHarness(state.optimizer.proposer, HARNESS_DEFAULT_PICK);
+  assert.equal("harness" in state.optimizer.proposer, false);
+  assert.equal("host_cli" in state.optimizer.proposer, false);
+  assert.equal(state.optimizer.proposer.max_tool_calls, 100);
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+  // With no harness, the repository's [proposer] entry runs again.
+  assert.equal("harness" in repoRunRequest(state, options)!.proposer!, false);
 });
 
 test("the closed proposer header shows the server default until the user picks a harness (SKY-753)", () => {

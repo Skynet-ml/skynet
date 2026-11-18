@@ -2588,6 +2588,9 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+    assert (checkout / "kept.txt").read_text() == "from the parent version"
+    assert (checkout / "gone.txt").read_text() == "from the parent version"
+    assert not (checkout / "new.txt").exists()
 
 
 @pytest.mark.parametrize(
@@ -3079,6 +3082,111 @@ def test_a_setup_that_makes_a_commit_stops_with_its_command(tmp_path: Path) -> N
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+
+def test_a_setup_that_makes_a_commit_is_reset_to_the_old_head(tmp_path: Path) -> None:
+    """A failed setup's commit is undone, with its tracked edit and its committed new file (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("the parent version's edit")
+    (checkout / "parent.txt").write_text("from the parent version")
+
+    def git(*arguments: str) -> str:
+        """Run one git command in the checkout.
+
+        Args:
+            *arguments: Arguments after ``git``.
+
+        Returns:
+            Its standard output.
+        """
+        return subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, text=True, check=True).stdout
+
+    head = git("rev-parse", "HEAD")
+    command = [
+        "sh",
+        "-c",
+        "echo evil >> a.txt && echo c > committed.txt && echo n > new.txt && git add a.txt committed.txt"
+        " && git -c user.name=t -c user.email=t@example.com commit --quiet --no-verify -m s",
+    ]
+
+    with pytest.raises(RuntimeError, match="moved HEAD"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert git("rev-parse", "HEAD") == head
+    assert git("status", "--porcelain", "--untracked-files=all") == " M a.txt\n?? parent.txt\n"
+    assert (checkout / "a.txt").read_text() == "the parent version's edit"
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+
+@pytest.mark.parametrize("parent_edit", [False, True], ids=["clean", "parent-edit"])
+def test_a_setup_that_edits_a_tracked_file_is_undone_and_fails_again(tmp_path: Path, parent_edit: bool) -> None:
+    """The refused edit never becomes the next setup's baseline, so a second session refuses it too (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        parent_edit: Whether the parent version changed the tracked file before the setup.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    if parent_edit:
+        (checkout / "a.txt").write_text("the parent version's edit")
+    content = (checkout / "a.txt").read_text()
+    command = [sys.executable, "-c", "open('a.txt', 'a').write('!'); open('new.txt', 'w')"]
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match=r"changed tracked files: a\.txt\."):
+            harness_bridge.ensure_setup(command, checkout)
+
+        assert (checkout / "a.txt").read_text() == content
+        assert not (checkout / "new.txt").exists()
+        assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+
+def test_an_undo_after_a_setup_links_a_tracked_folder_outside_deletes_nothing_there(tmp_path: Path) -> None:
+    """The undo removes the setup's link before it restores the folder's files, so no outside file goes (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the outside folder.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "pkg").mkdir()
+    (checkout / "pkg" / "x").write_text("tracked")
+    for arguments in (["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "pkg"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x").write_text("outside")
+    command = [sys.executable, "-c", f"import os, shutil; shutil.rmtree('pkg'); os.symlink({str(outside)!r}, 'pkg')"]
+
+    with pytest.raises(RuntimeError, match="changed tracked files"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert (outside / "x").read_text() == "outside"
+    assert not (checkout / "pkg").is_symlink()
+    assert (checkout / "pkg" / "x").read_text() == "tracked"
+
+
+def test_a_restore_into_a_parent_path_that_is_a_file_stops(tmp_path: Path) -> None:
+    """A version that puts a file where the output's folder was gets a clear error, not a raw OSError (SKY-753).
+
+    Args:
+        tmp_path: The source and the root.
+    """
+    source = tmp_path / "out.txt"
+    source.write_text("o")
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "pkg").write_text("a file of the version")
+
+    with pytest.raises(RuntimeError, match=r"pkg/gen/out\.txt cannot be restored: its parent folder .*pkg is a link"):
+        harness_bridge._copy_path(source, root / "pkg" / "gen" / "out.txt", root)
+
+    assert (root / "pkg").read_text() == "a file of the version"
 
 
 def test_a_setup_file_name_that_is_not_utf8_stops_the_run() -> None:

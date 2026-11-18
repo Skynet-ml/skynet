@@ -40,6 +40,22 @@ export function harnessPickerValue(proposer: BlackboxProposer): BlackboxHarness 
   return proposer.harness ?? "";
 }
 
+/** The harness picker's first item: no harness, so the repository proposer or the server default runs. */
+export const HARNESS_DEFAULT_PICK = "default";
+
+/**
+ * The proposer after a harness pick. The default item drops `harness` and
+ * `host_cli`, so the repository's `[proposer] entry` applies again (SKY-753).
+ */
+export function pickHarness(
+  proposer: BlackboxProposer,
+  value: BlackboxHarness | typeof HARNESS_DEFAULT_PICK,
+): BlackboxProposer {
+  if (value !== HARNESS_DEFAULT_PICK) return { ...proposer, harness: value };
+  const { harness: _harness, host_cli: _hostCli, ...rest } = proposer;
+  return rest;
+}
+
 /**
  * What the closed proposer header shows: the picked harness with its logo,
  * or the default text, because an unset harness is not sent: the repository's

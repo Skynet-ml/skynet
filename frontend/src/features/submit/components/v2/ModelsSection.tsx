@@ -49,7 +49,9 @@ import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
 import {
   DEFAULT_PROPOSER,
+  HARNESS_DEFAULT_PICK,
   harnessPickerValue,
+  pickHarness,
   proposerHeader,
   proposerKnobs,
   usesNativeProposer,
@@ -312,13 +314,21 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
               <Select
                 value={harnessPickerValue(proposer)}
                 onValueChange={(value) => {
-                  patchOptimizer({ proposer: { ...proposer, harness: value as BlackboxHarness } });
+                  patchOptimizer({
+                    proposer: pickHarness(
+                      proposer,
+                      value as BlackboxHarness | typeof HARNESS_DEFAULT_PICK,
+                    ),
+                  });
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
                   <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")} />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={HARNESS_DEFAULT_PICK}>
+                    {t("submit.v2.optimizer.proposer.harness_default")}
+                  </SelectItem>
                   {BLACKBOX_HARNESSES.map((h) => (
                     <SelectItem key={h} value={h}>
                       <span className="flex items-center gap-2">
