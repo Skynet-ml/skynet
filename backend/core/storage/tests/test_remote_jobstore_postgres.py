@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import pickle
 import random
 import threading
@@ -33,7 +34,7 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, make_url, text
 from sqlalchemy.orm import Session
 
 import core.storage.remote as remote_mod
@@ -95,6 +96,25 @@ def _reset_legacy_schema(db_url: str) -> None:
         engine.dispose()
 
 
+def _upgrade_to_head(db_url: str) -> None:
+    """Upgrade ``db_url`` to Alembic head, and never touch the ``REMOTE_DB_URL`` database.
+
+    ``alembic/env.py`` replaces ``sqlalchemy.url`` with ``REMOTE_DB_URL`` when
+    that variable is set, and ``tests/conftest.py`` loads a developer's
+    ``backend/.env`` (which points it at the dev database). So the variable
+    is set to the test URL for the length of the upgrade only (SKY-803).
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+    """
+    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("REMOTE_DB_URL", db_url)
+        command.upgrade(alembic_cfg, "head")
+
+
 @pytest.fixture(scope="module")
 def store() -> Iterator[RemoteDBJobStore]:
     """Yield a single store backed by the real Postgres for the whole module.
@@ -104,17 +124,36 @@ def store() -> Iterator[RemoteDBJobStore]:
     The store is reused across tests to avoid repeating that setup work.
     """
     _reset_legacy_schema(TEST_DB_URL or "")
-
-    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
-    alembic_cfg.set_main_option("sqlalchemy.url", TEST_DB_URL or "")
-    command.upgrade(alembic_cfg, "head")
+    _upgrade_to_head(TEST_DB_URL or "")
 
     s = RemoteDBJobStore(TEST_DB_URL)
     try:
         yield s
     finally:
         s.engine.dispose()
+
+
+def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database.
+
+    The ``store`` fixture runs first, so a legacy test database gets its reset before this upgrade.
+    """
+    other_url = make_url(TEST_DB_URL or "").set(database=f"sky803_missing_{uuid.uuid4().hex[:8]}")
+    other = other_url.render_as_string(hide_password=False)
+    monkeypatch.setenv("REMOTE_DB_URL", other)
+
+    # The other database does not exist, so an upgrade that went to it would raise.
+    _upgrade_to_head(TEST_DB_URL or "")
+
+    engine = create_engine(TEST_DB_URL or "")
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    finally:
+        engine.dispose()
+    assert os.environ["REMOTE_DB_URL"] == other
 
 
 @pytest.fixture

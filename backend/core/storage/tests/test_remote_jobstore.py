@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -44,6 +44,7 @@ from core.storage.base import JobStore
 from core.storage.models import (
     MAX_PROGRESS_EVENT_KEY_LENGTH,
     PROGRESS_EVENT_KEY,
+    AgentStepModel,
     Base,
     BillingCustomerModel,
     ExecutionBudgetModel,
@@ -52,6 +53,7 @@ from core.storage.models import (
     JobModel,
     OptimizationShareGrantModel,
     ProgressEventModel,
+    StoragePackModel,
     WalletLedgerModel,
 )
 from core.storage.remote import RemoteDBJobStore
@@ -138,7 +140,14 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
 
 
 def _parse_iso_datetime(value: str) -> datetime:
-    """Parse an ISO timestamp that may use a trailing ``Z`` UTC marker."""
+    """Parse an ISO timestamp that may use a trailing ``Z`` UTC marker.
+
+    Args:
+        value: The ISO timestamp.
+
+    Returns:
+        The parsed datetime.
+    """
     return datetime.fromisoformat(value)
 
 
@@ -153,26 +162,42 @@ def store() -> Iterator[SQLiteJobStore]:
 
 
 def test_create_job_returns_pending_status(store: SQLiteJobStore) -> None:
-    """Create job returns pending status."""
+    """Create job returns pending status.
+
+    Args:
+        store: Disposable job store.
+    """
     result = store.create_job("job-create-1")
     assert result["status"] == "pending"
     assert result["optimization_id"] == "job-create-1"
 
 
 def test_create_job_with_estimate_stored(store: SQLiteJobStore) -> None:
-    """Create job with estimate stored."""
+    """Create job with estimate stored.
+
+    Args:
+        store: Disposable job store.
+    """
     result = store.create_job("job-create-2", estimated_remaining_seconds=60.0)
     assert result["estimated_remaining_seconds"] == 60.0
 
 
 def test_create_job_is_retrievable(store: SQLiteJobStore) -> None:
-    """Create job is retrievable."""
+    """Create job is retrievable.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-create-3")
     assert store.job_exists("job-create-3")
 
 
 def test_create_job_created_at_is_iso_parseable(store: SQLiteJobStore) -> None:
-    """Create job created at is iso parseable."""
+    """Create job created at is iso parseable.
+
+    Args:
+        store: Disposable job store.
+    """
     result = store.create_job("job-create-4")
     # Real Postgres TIMESTAMPTZ preserves the +00:00 offset; SQLite's DateTime
     # column stores naive datetimes, so we only assert the value round-trips.
@@ -181,7 +206,11 @@ def test_create_job_created_at_is_iso_parseable(store: SQLiteJobStore) -> None:
 
 
 def test_create_job_default_fields_are_empty(store: SQLiteJobStore) -> None:
-    """Create job default fields are empty."""
+    """Create job default fields are empty.
+
+    Args:
+        store: Disposable job store.
+    """
     result = store.create_job("job-create-5")
     assert result["latest_metrics"] == {}
     assert result["payload_overview"] == {}
@@ -195,7 +224,11 @@ def test_create_job_default_fields_are_empty(store: SQLiteJobStore) -> None:
 def test_monthly_active_admission_allows_existing_identity_at_limit(
     store: SQLiteJobStore,
 ) -> None:
-    """A full month blocks a new identity but never ejects an admitted one."""
+    """A full month blocks a new identity but never ejects an admitted one.
+
+    Args:
+        store: Disposable job store.
+    """
     month_start = date(2026, 8, 1)
 
     assert store.admit_monthly_active_user("alice@example.com", month_start, 1) is True
@@ -205,13 +238,21 @@ def test_monthly_active_admission_allows_existing_identity_at_limit(
 
 
 def test_get_job_raises_key_error_for_unknown(store: SQLiteJobStore) -> None:
-    """Get job raises key error for unknown."""
+    """Get job raises key error for unknown.
+
+    Args:
+        store: Disposable job store.
+    """
     with pytest.raises(KeyError, match="no-such-job"):
         store.get_job("no-such-job")
 
 
 def test_get_job_returns_correct_record(store: SQLiteJobStore) -> None:
-    """Get job returns correct record."""
+    """Get job returns correct record.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-get-1")
     store.update_job("job-get-1", status="running")
     job = store.get_job("job-get-1")
@@ -220,32 +261,52 @@ def test_get_job_returns_correct_record(store: SQLiteJobStore) -> None:
 
 
 def test_job_exists_true_after_create(store: SQLiteJobStore) -> None:
-    """Job exists true after create."""
+    """Job exists true after create.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-exists-1")
     assert store.job_exists("job-exists-1") is True
 
 
 def test_job_exists_false_for_missing(store: SQLiteJobStore) -> None:
-    """Job exists false for missing."""
+    """Job exists false for missing.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.job_exists("missing-id") is False
 
 
 def test_update_job_status_field(store: SQLiteJobStore) -> None:
-    """Update job status field."""
+    """Update job status field.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-1")
     store.update_job("job-upd-1", status="running")
     assert store.get_job("job-upd-1")["status"] == "running"
 
 
 def test_update_job_message_field(store: SQLiteJobStore) -> None:
-    """Update job message field."""
+    """Update job message field.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-2")
     store.update_job("job-upd-2", message="all good")
     assert store.get_job("job-upd-2")["message"] == "all good"
 
 
 def test_update_job_multiple_fields_at_once(store: SQLiteJobStore) -> None:
-    """Update job multiple fields at once."""
+    """Update job multiple fields at once.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-3")
     store.update_job("job-upd-3", status="success", message="done", estimated_remaining_seconds=0.0)
     job = store.get_job("job-upd-3")
@@ -255,7 +316,11 @@ def test_update_job_multiple_fields_at_once(store: SQLiteJobStore) -> None:
 
 
 def test_update_job_datetime_string_parsed_and_stored(store: SQLiteJobStore) -> None:
-    """Update job datetime string parsed and stored."""
+    """Update job datetime string parsed and stored.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-4")
     ts_str = "2026-04-14T10:00:00+00:00"
     store.update_job("job-upd-4", started_at=ts_str)
@@ -270,7 +335,11 @@ def test_update_job_datetime_string_parsed_and_stored(store: SQLiteJobStore) -> 
 
 
 def test_update_job_latest_metrics_merges(store: SQLiteJobStore) -> None:
-    """Update job latest metrics merges."""
+    """Update job latest metrics merges.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-5")
     store.update_job("job-upd-5", latest_metrics={"acc": 0.8})
     store.update_job("job-upd-5", latest_metrics={"loss": 0.2})
@@ -281,7 +350,11 @@ def test_update_job_latest_metrics_merges(store: SQLiteJobStore) -> None:
 
 
 def test_update_job_json_result_roundtrips(store: SQLiteJobStore) -> None:
-    """Update job json result roundtrips."""
+    """Update job json result roundtrips.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-upd-6")
     payload: dict[str, Any] = {"weights": [1, 2, 3], "config": {"k": "v"}}
     store.update_job("job-upd-6", result=payload)
@@ -289,14 +362,22 @@ def test_update_job_json_result_roundtrips(store: SQLiteJobStore) -> None:
 
 
 def test_delete_job_removes_the_job(store: SQLiteJobStore) -> None:
-    """Delete job removes the job."""
+    """Delete job removes the job.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-del-1")
     store.delete_job("job-del-1")
     assert not store.job_exists("job-del-1")
 
 
 def test_delete_job_cascades_logs(store: SQLiteJobStore) -> None:
-    """Delete job cascades logs."""
+    """Delete job cascades logs.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-del-2")
     store.append_log("job-del-2", level="INFO", logger_name="t", message="hi")
     store.delete_job("job-del-2")
@@ -304,7 +385,11 @@ def test_delete_job_cascades_logs(store: SQLiteJobStore) -> None:
 
 
 def test_delete_job_cascades_progress_events(store: SQLiteJobStore) -> None:
-    """Delete job cascades progress events."""
+    """Delete job cascades progress events.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-del-3")
     store.record_progress("job-del-3", "step", {"x": 1})
     store.delete_job("job-del-3")
@@ -312,7 +397,11 @@ def test_delete_job_cascades_progress_events(store: SQLiteJobStore) -> None:
 
 
 def test_delete_job_cascades_agent_runs(store: SQLiteJobStore) -> None:
-    """Delete job removes the job's sandboxed agent runs."""
+    """Delete job removes the job's sandboxed agent runs.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("job-del-runs")
     store.save_agent_run("job-del-runs", {"run_id": 1, "phase": "version", "status": "running"})
     store.append_agent_run_transcript("job-del-runs", 1, "hi\n")
@@ -326,12 +415,20 @@ def test_delete_job_cascades_agent_runs(store: SQLiteJobStore) -> None:
 
 
 def test_delete_job_tolerates_nonexistent_id(store: SQLiteJobStore) -> None:
-    """Delete job tolerates nonexistent id."""
+    """Delete job tolerates nonexistent id.
+
+    Args:
+        store: Disposable job store.
+    """
     store.delete_job("ghost-id")  # must not raise
 
 
 def test_requeue_for_rerun_resets_row_and_clears_children(store: SQLiteJobStore) -> None:
-    """A from-scratch rerun flips the row to pending and wipes the prior attempt in place."""
+    """A from-scratch rerun flips the row to pending and wipes the prior attempt in place.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("rr1")
     store.update_job("rr1", status="failed", result={"score": 0.9}, attempts=3)
     store.append_log("rr1", level="INFO", logger_name="t", message="boom")
@@ -351,12 +448,20 @@ def test_requeue_for_rerun_resets_row_and_clears_children(store: SQLiteJobStore)
 
 
 def test_requeue_for_rerun_missing_id_returns_false(store: SQLiteJobStore) -> None:
-    """Re-running an unknown id is a no-op that reports the miss."""
+    """Re-running an unknown id is a no-op that reports the miss.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.requeue_for_rerun("ghost") is False
 
 
 def test_get_jobs_status_by_ids_returns_map(store: SQLiteJobStore) -> None:
-    """Get jobs status by ids returns map."""
+    """Get jobs status by ids returns map.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("s1")
     store.create_job("s2")
     store.update_job("s2", status="running")
@@ -365,7 +470,11 @@ def test_get_jobs_status_by_ids_returns_map(store: SQLiteJobStore) -> None:
 
 
 def test_get_jobs_status_by_ids_omits_missing(store: SQLiteJobStore) -> None:
-    """Get jobs status by ids omits missing."""
+    """Get jobs status by ids omits missing.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("s3")
     result = store.get_jobs_status_by_ids(["s3", "missing-xyz"])
     assert "missing-xyz" not in result
@@ -373,19 +482,31 @@ def test_get_jobs_status_by_ids_omits_missing(store: SQLiteJobStore) -> None:
 
 
 def test_get_jobs_status_by_ids_empty_input(store: SQLiteJobStore) -> None:
-    """Get jobs status by ids empty input."""
+    """Get jobs status by ids empty input.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.get_jobs_status_by_ids([]) == {}
 
 
 def test_delete_jobs_returns_count_of_deleted(store: SQLiteJobStore) -> None:
-    """Delete jobs returns count of deleted."""
+    """Delete jobs returns count of deleted.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("b1")
     store.create_job("b2")
     assert store.delete_jobs(["b1", "b2"]) == 2
 
 
 def test_delete_jobs_actually_removes_jobs(store: SQLiteJobStore) -> None:
-    """Delete jobs actually removes jobs."""
+    """Delete jobs actually removes jobs.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("b3")
     store.create_job("b4")
     store.delete_jobs(["b3", "b4"])
@@ -394,7 +515,11 @@ def test_delete_jobs_actually_removes_jobs(store: SQLiteJobStore) -> None:
 
 
 def test_delete_jobs_removes_associated_logs_and_progress(store: SQLiteJobStore) -> None:
-    """Delete jobs removes associated logs and progress."""
+    """Delete jobs removes associated logs and progress.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("b5")
     store.append_log("b5", level="INFO", logger_name="t", message="log entry")
     store.record_progress("b5", "step", {"m": 1})
@@ -472,20 +597,76 @@ def test_delete_job_closes_budget_and_keeps_ledger(store: SQLiteJobStore, bulk: 
     assert snapshot.job_id is None
 
 
+@pytest.mark.parametrize("bulk", [False, True])
+def test_delete_job_marks_the_packs_of_its_steps_for_rewrite(store: SQLiteJobStore, bulk: bool) -> None:
+    """Deleting a run marks each pack that holds its steps, so the compactor rewrites its bytes away (SKY-733).
+
+    Args:
+        store: Private fixture database.
+        bulk: Whether the job goes through ``delete_jobs`` instead of ``delete_job``.
+    """
+    store.create_job("gone-run")
+    store.create_job("kept-run")
+    with Session(store.engine) as session:
+        for key in ("packs/w1/shared", "packs/w1/kept"):
+            session.add(StoragePackModel(pack_key=key, worker_id="w1", byte_size=10))
+        for step_id, run_id, key in (
+            ("gone-run:a:0", "gone-run", "packs/w1/shared"),
+            ("kept-run:a:0", "kept-run", "packs/w1/shared"),
+            ("kept-run:a:1", "kept-run", "packs/w1/kept"),
+        ):
+            session.add(
+                AgentStepModel(
+                    step_id=step_id,
+                    run_id=run_id,
+                    agent_id="a",
+                    seq=int(step_id[-1]),
+                    kind="model",
+                    execution_generation=1,
+                    grant_list_id="grants-1",
+                    pack_key=key,
+                    pack_offset=0,
+                    pack_length=5,
+                )
+            )
+        session.commit()
+
+    if bulk:
+        store.delete_jobs(["gone-run"])
+    else:
+        store.delete_job("gone-run")
+
+    with Session(store.engine) as session:
+        marked = {key for key, flag in session.query(StoragePackModel.pack_key, StoragePackModel.needs_rewrite) if flag}
+    assert marked == {"packs/w1/shared"}
+
+
 def test_delete_jobs_tolerates_missing_ids(store: SQLiteJobStore) -> None:
-    """Delete jobs tolerates missing ids."""
+    """Delete jobs tolerates missing ids.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("b6")
     removed = store.delete_jobs(["b6", "no-such-id"])
     assert removed == 1
 
 
 def test_delete_jobs_tolerates_empty_list(store: SQLiteJobStore) -> None:
-    """Delete jobs tolerates empty list."""
+    """Delete jobs tolerates empty list.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.delete_jobs([]) == 0
 
 
 def test_record_progress_creates_event(store: SQLiteJobStore) -> None:
-    """Record progress creates event."""
+    """Record progress creates event.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p1")
     store.record_progress("p1", "started", {"loss": 0.5})
     events = store.get_progress_events("p1")
@@ -495,14 +676,22 @@ def test_record_progress_creates_event(store: SQLiteJobStore) -> None:
 
 
 def test_record_progress_none_message_allowed(store: SQLiteJobStore) -> None:
-    """Record progress none message allowed."""
+    """Record progress none message allowed.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p2")
     store.record_progress("p2", None, {})
     assert store.get_progress_count("p2") == 1
 
 
 def test_record_progress_replaces_latest_metrics_snapshot(store: SQLiteJobStore) -> None:
-    """Record progress replaces latest metrics snapshot."""
+    """Record progress replaces latest metrics snapshot.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p3")
     store.record_progress("p3", "step", {"acc": 0.9})
     store.record_progress("p3", "next", {"loss": 0.2})
@@ -511,7 +700,11 @@ def test_record_progress_replaces_latest_metrics_snapshot(store: SQLiteJobStore)
 
 
 def test_record_progress_carries_tqdm_progress_across_non_tqdm_events(store: SQLiteJobStore) -> None:
-    """Optimizer tqdm progress persists in latest_metrics across interleaved non-tqdm events."""
+    """Optimizer tqdm progress persists in latest_metrics across interleaved non-tqdm events.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p3-tqdm")
     store.record_progress("p3-tqdm", "optimizer_progress", {"tqdm_percent": 30.0, "tqdm_n": 3, "tqdm_total": 10})
     store.record_progress("p3-tqdm", "minibatch_feedback", {"score": 1.0, "iteration": 2})
@@ -524,7 +717,11 @@ def test_record_progress_carries_tqdm_progress_across_non_tqdm_events(store: SQL
 
 
 def test_record_progress_refreshes_sticky_tqdm_on_new_optimizer_tick(store: SQLiteJobStore) -> None:
-    """A newer optimizer_progress event replaces the carried tqdm snapshot without accumulating fields."""
+    """A newer optimizer_progress event replaces the carried tqdm snapshot without accumulating fields.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p3-tqdm2")
     store.record_progress("p3-tqdm2", "optimizer_progress", {"tqdm_percent": 30.0})
     store.record_progress("p3-tqdm2", "minibatch_feedback", {"score": 0.5})
@@ -535,7 +732,11 @@ def test_record_progress_refreshes_sticky_tqdm_on_new_optimizer_tick(store: SQLi
 
 
 def test_record_progress_json_metrics_roundtrip(store: SQLiteJobStore) -> None:
-    """Record progress json metrics roundtrip."""
+    """Record progress json metrics roundtrip.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p4")
     metrics: dict[str, Any] = {"nested": {"a": 1}, "values": [1, 2, 3]}
     store.record_progress("p4", "step", metrics)
@@ -543,8 +744,51 @@ def test_record_progress_json_metrics_roundtrip(store: SQLiteJobStore) -> None:
     assert events[0]["metrics"] == metrics
 
 
+def test_record_progress_for_generation_selects_its_jobs_in_key_order(store: SQLiteJobStore) -> None:
+    """The fenced progress publish reads its two jobs ordered by key, so its row locks match a delete's (SKY-733).
+
+    SQLite renders no ``FOR UPDATE``, so the test checks the ``ORDER BY`` that sets the lock order on PostgreSQL.
+
+    Args:
+        store: Disposable job store.
+    """
+    for run_id in ("job-b", "job-a"):
+        store.create_job(run_id)
+        store.update_job(run_id, status="running", execution_generation=1)
+    selects: list[str] = []
+
+    def capture_job_select(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Record each ``SELECT`` on the ``jobs`` table.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        if statement.startswith("SELECT") and "FROM jobs" in statement:
+            selects.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", capture_job_select)
+    try:
+        assert store.record_progress_for_generation(
+            "job-a", "candidate", {"score": 1}, source_optimization_id="job-b", generation=1
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture_job_select)
+
+    assert len(selects) == 1
+    assert selects[0].rstrip().endswith("ORDER BY jobs.optimization_id")
+
+
 def test_get_progress_events_chronological_order(store: SQLiteJobStore) -> None:
-    """Get progress events chronological order."""
+    """Get progress events chronological order.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p5")
     for i in range(3):
         store.record_progress("p5", f"step-{i}", {"i": i})
@@ -554,7 +798,11 @@ def test_get_progress_events_chronological_order(store: SQLiteJobStore) -> None:
 
 
 def test_get_progress_count_matches(store: SQLiteJobStore) -> None:
-    """Get progress count matches."""
+    """Get progress count matches.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p6")
     store.record_progress("p6", "a", {})
     store.record_progress("p6", "b", {})
@@ -631,12 +879,20 @@ def test_progress_event_key_index_rejects_a_second_row_with_the_key(store: SQLit
 
 
 def test_get_progress_events_empty_for_unknown_job(store: SQLiteJobStore) -> None:
-    """Get progress events empty for unknown job."""
+    """Get progress events empty for unknown job.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.get_progress_events("unknown-job") == []
 
 
 def test_progress_silently_ignored_for_deleted_job(store: SQLiteJobStore) -> None:
-    """Progress silently ignored for deleted job."""
+    """Progress silently ignored for deleted job.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("p-del")
     store.delete_job("p-del")
     # Logging / progress for a deleted job must not raise
@@ -644,7 +900,11 @@ def test_progress_silently_ignored_for_deleted_job(store: SQLiteJobStore) -> Non
 
 
 def test_append_log_makes_entry_retrievable(store: SQLiteJobStore) -> None:
-    """Append log makes entry retrievable."""
+    """Append log makes entry retrievable.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l1")
     store.append_log("l1", level="INFO", logger_name="mylogger", message="hello")
     logs = store.get_logs("l1")
@@ -655,7 +915,12 @@ def test_append_log_makes_entry_retrievable(store: SQLiteJobStore) -> None:
 
 
 def test_append_log_warns_for_deleted_job(store: SQLiteJobStore, caplog: pytest.LogCaptureFixture) -> None:
-    """Append log warns and skips the entry for deleted jobs."""
+    """Append log warns and skips the entry for deleted jobs.
+
+    Args:
+        store: Disposable job store.
+        caplog: Pytest's log capture fixture.
+    """
     store.create_job("l-del")
     store.delete_job("l-del")
     store.append_log("l-del", level="INFO", logger_name="lg", message="after delete")
@@ -664,7 +929,11 @@ def test_append_log_warns_for_deleted_job(store: SQLiteJobStore, caplog: pytest.
 
 
 def test_get_logs_level_filter(store: SQLiteJobStore) -> None:
-    """Get logs level filter."""
+    """Get logs level filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l4")
     store.append_log("l4", level="INFO", logger_name="lg", message="info msg")
     store.append_log("l4", level="ERROR", logger_name="lg", message="err msg")
@@ -674,7 +943,11 @@ def test_get_logs_level_filter(store: SQLiteJobStore) -> None:
 
 
 def test_get_logs_offset_pagination(store: SQLiteJobStore) -> None:
-    """Get logs offset pagination."""
+    """Get logs offset pagination.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l5")
     for i in range(5):
         store.append_log("l5", level="INFO", logger_name="lg", message=f"msg {i}")
@@ -684,7 +957,11 @@ def test_get_logs_offset_pagination(store: SQLiteJobStore) -> None:
 
 
 def test_get_logs_limit_pagination(store: SQLiteJobStore) -> None:
-    """Get logs limit pagination."""
+    """Get logs limit pagination.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l6")
     for i in range(5):
         store.append_log("l6", level="INFO", logger_name="lg", message=f"msg {i}")
@@ -693,7 +970,11 @@ def test_get_logs_limit_pagination(store: SQLiteJobStore) -> None:
 
 
 def test_get_logs_limit_and_offset_combined(store: SQLiteJobStore) -> None:
-    """Get logs limit and offset combined."""
+    """Get logs limit and offset combined.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l7")
     for i in range(10):
         store.append_log("l7", level="INFO", logger_name="lg", message=f"msg {i}")
@@ -703,7 +984,11 @@ def test_get_logs_limit_and_offset_combined(store: SQLiteJobStore) -> None:
 
 
 def test_get_log_count_no_filter(store: SQLiteJobStore) -> None:
-    """Get log count no filter."""
+    """Get log count no filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l8")
     store.append_log("l8", level="INFO", logger_name="lg", message="a")
     store.append_log("l8", level="WARN", logger_name="lg", message="b")
@@ -711,7 +996,11 @@ def test_get_log_count_no_filter(store: SQLiteJobStore) -> None:
 
 
 def test_get_log_count_with_level_filter(store: SQLiteJobStore) -> None:
-    """Get log count with level filter."""
+    """Get log count with level filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("l9")
     store.append_log("l9", level="INFO", logger_name="lg", message="i")
     store.append_log("l9", level="ERROR", logger_name="lg", message="e1")
@@ -720,12 +1009,20 @@ def test_get_log_count_with_level_filter(store: SQLiteJobStore) -> None:
 
 
 def test_get_logs_returns_empty_for_unknown_job(store: SQLiteJobStore) -> None:
-    """Get logs returns empty for unknown job."""
+    """Get logs returns empty for unknown job.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.get_logs("unknown-job") == []
 
 
 def test_set_payload_overview_stores_and_retrieves_data(store: SQLiteJobStore) -> None:
-    """Set payload overview stores and retrieves data."""
+    """Set payload overview stores and retrieves data.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("o1")
     overview: dict[str, Any] = {"username": "alice", "optimization_type": "gepa", "extra": [1, 2]}
     store.set_payload_overview("o1", overview)
@@ -735,7 +1032,11 @@ def test_set_payload_overview_stores_and_retrieves_data(store: SQLiteJobStore) -
 
 
 def test_set_payload_overview_overwrites_previous(store: SQLiteJobStore) -> None:
-    """Set payload overview overwrites previous."""
+    """Set payload overview overwrites previous.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("o2")
     store.set_payload_overview("o2", {"username": "old"})
     store.set_payload_overview("o2", {"username": "new"})
@@ -743,7 +1044,11 @@ def test_set_payload_overview_overwrites_previous(store: SQLiteJobStore) -> None
 
 
 def test_set_payload_overview_sets_username_column(store: SQLiteJobStore) -> None:
-    """Set payload overview sets username column."""
+    """Set payload overview sets username column.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("o3")
     store.set_payload_overview("o3", {"username": "carol"})
     # The store writes to the job.username column as well; verify via list_jobs filter
@@ -752,7 +1057,11 @@ def test_set_payload_overview_sets_username_column(store: SQLiteJobStore) -> Non
 
 
 def test_set_payload_overview_without_username_preserves_column(store: SQLiteJobStore) -> None:
-    """Payload overview updates without username keep the indexed owner."""
+    """Payload overview updates without username keep the indexed owner.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("o4")
     store.set_payload_overview("o4", {"username": "dana", "optimization_type": "gepa"})
     store.set_payload_overview("o4", {"optimization_type": "bootstrap"})
@@ -761,7 +1070,11 @@ def test_set_payload_overview_without_username_preserves_column(store: SQLiteJob
 
 
 def test_set_payload_overview_hoists_composition_column(store: SQLiteJobStore) -> None:
-    """The ``composition`` overview key is hoisted to the indexed job column."""
+    """The ``composition`` overview key is hoisted to the indexed job column.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("o5")
     store.set_payload_overview("o5", {"composition": "single"})
     session = store._get_session()
@@ -773,14 +1086,22 @@ def test_set_payload_overview_hoists_composition_column(store: SQLiteJobStore) -
 
 
 def test_list_jobs_no_filter_returns_all(store: SQLiteJobStore) -> None:
-    """List jobs no filter returns all."""
+    """List jobs no filter returns all.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lj1")
     store.create_job("lj2")
     assert len(store.list_jobs()) == 2
 
 
 def test_list_jobs_status_filter(store: SQLiteJobStore) -> None:
-    """List jobs status filter."""
+    """List jobs status filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lj-pend")
     store.create_job("lj-run")
     store.update_job("lj-run", status="running")
@@ -790,7 +1111,11 @@ def test_list_jobs_status_filter(store: SQLiteJobStore) -> None:
 
 
 def test_list_jobs_username_filter(store: SQLiteJobStore) -> None:
-    """List jobs username filter."""
+    """List jobs username filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lj-alice")
     store.set_payload_overview("lj-alice", {"username": "alice"})
     store.create_job("lj-bob")
@@ -800,7 +1125,11 @@ def test_list_jobs_username_filter(store: SQLiteJobStore) -> None:
 
 
 def test_list_jobs_optimization_type_filter(store: SQLiteJobStore) -> None:
-    """List jobs optimization type filter."""
+    """List jobs optimization type filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lj-opt-a")
     store.set_payload_overview("lj-opt-a", {"optimization_type": "opt_a"})
     store.create_job("lj-bs")
@@ -811,7 +1140,11 @@ def test_list_jobs_optimization_type_filter(store: SQLiteJobStore) -> None:
 
 
 def test_internal_tagging_jobs_hidden_from_listing_surfaces(store: SQLiteJobStore) -> None:
-    """Tagger bulk jobs stay out of every listing/count unless filtered for by type."""
+    """Tagger bulk jobs stay out of every listing/count unless filtered for by type.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("run-1")
     store.set_payload_overview("run-1", {"username": "alice", "optimization_type": "run"})
     store.create_job("tag-1")
@@ -830,21 +1163,33 @@ def test_internal_tagging_jobs_hidden_from_listing_surfaces(store: SQLiteJobStor
 
 
 def test_legacy_null_type_jobs_survive_internal_exclusion(store: SQLiteJobStore) -> None:
-    """Rows with a NULL optimization_type (legacy) are still listed and counted."""
+    """Rows with a NULL optimization_type (legacy) are still listed and counted.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("legacy-1")
     assert {j["optimization_id"] for j in store.list_jobs()} == {"legacy-1"}
     assert store.count_jobs() == 1
 
 
 def test_list_jobs_limit(store: SQLiteJobStore) -> None:
-    """List jobs limit."""
+    """List jobs limit.
+
+    Args:
+        store: Disposable job store.
+    """
     for i in range(5):
         store.create_job(f"lim-{i}")
     assert len(store.list_jobs(limit=3)) == 3
 
 
 def test_list_jobs_offset(store: SQLiteJobStore) -> None:
-    """List jobs offset."""
+    """List jobs offset.
+
+    Args:
+        store: Disposable job store.
+    """
     for i in range(5):
         store.create_job(f"off-{i}")
     all_jobs = store.list_jobs()
@@ -853,7 +1198,11 @@ def test_list_jobs_offset(store: SQLiteJobStore) -> None:
 
 
 def test_list_jobs_includes_progress_and_log_counts(store: SQLiteJobStore) -> None:
-    """List jobs includes progress and log counts."""
+    """List jobs includes progress and log counts.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lj-counts")
     store.append_log("lj-counts", level="INFO", logger_name="t", message="m")
     store.record_progress("lj-counts", "step", {})
@@ -864,7 +1213,11 @@ def test_list_jobs_includes_progress_and_log_counts(store: SQLiteJobStore) -> No
 
 
 def test_list_jobs_prunes_result_to_summary_scalars(store: SQLiteJobStore) -> None:
-    """List rows carry only the result scalars the cards read; get_job keeps the blob."""
+    """List rows carry only the result scalars the cards read; get_job keeps the blob.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lr-run", username="alice")
     store.create_job("lr-pending", username="alice")
     full_result = {
@@ -888,7 +1241,11 @@ def test_list_jobs_prunes_result_to_summary_scalars(store: SQLiteJobStore) -> No
 
 
 def test_shared_list_surfaces_prune_result_the_same_way(store: SQLiteJobStore) -> None:
-    """The visible-to and shared-with pages carry the same pruned result as list_jobs."""
+    """The visible-to and shared-with pages carry the same pruned result as list_jobs.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("lr-shared", username="alice")
     store.set_payload_overview("lr-shared", {"username": "alice", "optimization_type": "run"})
     store.update_job(
@@ -921,14 +1278,22 @@ def test_shared_list_surfaces_prune_result_the_same_way(store: SQLiteJobStore) -
 
 
 def test_count_jobs_total(store: SQLiteJobStore) -> None:
-    """Count jobs total."""
+    """Count jobs total.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("cj1")
     store.create_job("cj2")
     assert store.count_jobs() == 2
 
 
 def test_count_jobs_status_filter(store: SQLiteJobStore) -> None:
-    """Count jobs status filter."""
+    """Count jobs status filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("cj-pend")
     store.create_job("cj-done")
     store.update_job("cj-done", status="success")
@@ -937,7 +1302,11 @@ def test_count_jobs_status_filter(store: SQLiteJobStore) -> None:
 
 
 def test_count_jobs_username_filter(store: SQLiteJobStore) -> None:
-    """Count jobs username filter."""
+    """Count jobs username filter.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("cj-alice")
     store.set_payload_overview("cj-alice", {"username": "alice"})
     store.create_job("cj-bob")
@@ -946,7 +1315,11 @@ def test_count_jobs_username_filter(store: SQLiteJobStore) -> None:
 
 
 def test_count_jobs_zero_when_empty(store: SQLiteJobStore) -> None:
-    """Count jobs zero when empty."""
+    """Count jobs zero when empty.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.count_jobs() == 0
 
 
@@ -1708,7 +2081,11 @@ def test_requeue_for_resume_without_checkpoint_fails(store: SQLiteJobStore) -> N
 
 
 def test_recover_orphaned_jobs_fails_validating_job(store: SQLiteJobStore) -> None:
-    """Recover orphaned jobs fails a validating job."""
+    """Recover orphaned jobs fails a validating job.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("r2")
     store.update_job("r2", status="validating")
     store.recover_orphaned_jobs()
@@ -1716,7 +2093,11 @@ def test_recover_orphaned_jobs_fails_validating_job(store: SQLiteJobStore) -> No
 
 
 def test_recover_orphaned_jobs_leaves_terminal_jobs_intact(store: SQLiteJobStore) -> None:
-    """Recover orphaned jobs leaves terminal jobs intact."""
+    """Recover orphaned jobs leaves terminal jobs intact.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("r3")
     store.update_job("r3", status="success")
     store.create_job("r4")
@@ -1727,7 +2108,11 @@ def test_recover_orphaned_jobs_leaves_terminal_jobs_intact(store: SQLiteJobStore
 
 
 def test_recover_orphaned_jobs_returns_count(store: SQLiteJobStore) -> None:
-    """Recover orphaned jobs returns count."""
+    """Recover orphaned jobs returns count.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("r5")
     store.update_job("r5", status="running")
     store.create_job("r6")
@@ -1738,14 +2123,22 @@ def test_recover_orphaned_jobs_returns_count(store: SQLiteJobStore) -> None:
 
 
 def test_recover_orphaned_jobs_returns_zero_when_none_present(store: SQLiteJobStore) -> None:
-    """Recover orphaned jobs returns zero when none present."""
+    """Recover orphaned jobs returns zero when none present.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("r9")
     store.update_job("r9", status="success")
     assert store.recover_orphaned_jobs() == 0
 
 
 def test_recover_pending_jobs_returns_only_pending(store: SQLiteJobStore) -> None:
-    """Recover pending jobs returns only pending."""
+    """Recover pending jobs returns only pending.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("rp1")
     store.create_job("rp2")
     store.update_job("rp2", status="success")
@@ -1757,7 +2150,12 @@ def test_recover_pending_jobs_returns_only_pending(store: SQLiteJobStore) -> Non
 def test_recover_pending_jobs_skips_incompatible_code_version(
     store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pending local restart hints exclude jobs for a different code version."""
+    """Pending local restart hints exclude jobs for a different code version.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod.settings, "code_version", "v2", raising=False)
     store.create_job("rp-versioned")
     store.update_job("rp-versioned", code_version="v1")
@@ -1766,7 +2164,11 @@ def test_recover_pending_jobs_skips_incompatible_code_version(
 
 
 def test_recover_pending_jobs_returns_list_of_strings(store: SQLiteJobStore) -> None:
-    """Recover pending jobs returns list of strings."""
+    """Recover pending jobs returns list of strings.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("rp3")
     result = store.recover_pending_jobs()
     assert isinstance(result, list)
@@ -1774,14 +2176,22 @@ def test_recover_pending_jobs_returns_list_of_strings(store: SQLiteJobStore) -> 
 
 
 def test_recover_pending_jobs_empty_when_none_pending(store: SQLiteJobStore) -> None:
-    """Recover pending jobs empty when none pending."""
+    """Recover pending jobs empty when none pending.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("rp4")
     store.update_job("rp4", status="success")
     assert store.recover_pending_jobs() == []
 
 
 def test_duplicate_optimization_id_raises_on_insert(store: SQLiteJobStore) -> None:
-    """Duplicate optimization id raises on insert."""
+    """Duplicate optimization id raises on insert.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("dup-1")
     with pytest.raises(IntegrityError):
         # Bypass create_job's session so we insert a raw duplicate row
@@ -1808,7 +2218,12 @@ def test_remote_db_job_store_satisfies_job_store_protocol() -> None:
 
 
 def test_claim_next_job_skips_incompatible_code_version(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A v2 worker cannot claim a job submitted by v1."""
+    """A v2 worker cannot claim a job submitted by v1.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod.settings, "code_version", "v2", raising=False)
     store.create_job("claim-v1")
     store.update_job("claim-v1", code_version="v1", payload={"ok": True})
@@ -1817,7 +2232,12 @@ def test_claim_next_job_skips_incompatible_code_version(store: SQLiteJobStore, m
 
 
 def test_claim_next_job_accepts_null_code_version(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Jobs without a code version remain claimable by any worker."""
+    """Jobs without a code version remain claimable by any worker.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod.settings, "code_version", "v2", raising=False)
     store.create_job("claim-null")
     store.update_job("claim-null", code_version=None, payload={"ok": True})
@@ -1835,6 +2255,9 @@ def test_claim_next_job_skips_pending_row_without_payload(store: SQLiteJobStore)
     *before* the worker writes the payload (``submit_job``). A poll tick landing
     in that window must not claim the payload-less row and fail it with "has no
     payload" — it waits, then becomes claimable once the payload lands.
+
+    Args:
+        store: Disposable job store.
     """
     store.create_job("claim-nopayload")
 
@@ -1853,6 +2276,9 @@ def test_claim_next_job_prefers_user_with_fewer_jobs_in_flight(store: SQLiteJobS
     Alice submits first and already has one job claimed; Bob's younger job
     must be claimed next because Alice has more work in flight — plain FIFO
     would hand Alice the slot and starve Bob behind her whole burst.
+
+    Args:
+        store: Disposable job store.
     """
     store.create_job("fair-alice-1", username="alice")
     store.update_job("fair-alice-1", payload={"ok": True})
@@ -1875,7 +2301,11 @@ def test_claim_next_job_prefers_user_with_fewer_jobs_in_flight(store: SQLiteJobS
 
 
 def test_claim_next_job_stays_fifo_within_one_user(store: SQLiteJobStore) -> None:
-    """With a single user queued, claims stay strictly oldest-first."""
+    """With a single user queued, claims stay strictly oldest-first.
+
+    Args:
+        store: Disposable job store.
+    """
     for i in range(3):
         store.create_job(f"fifo-{i}", username="alice")
         store.update_job(f"fifo-{i}", payload={"ok": True})
@@ -1886,21 +2316,33 @@ def test_claim_next_job_stays_fifo_within_one_user(store: SQLiteJobStore) -> Non
 
 
 def test_update_job_unknown_field_raises_value_error(store: SQLiteJobStore) -> None:
-    """Update job unknown field raises value error."""
+    """Update job unknown field raises value error.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("uf-1")
     with pytest.raises(ValueError, match="Unknown field"):
         store.update_job("uf-1", bogus_field="x")
 
 
 def test_update_job_unknown_field_message_contains_field_name(store: SQLiteJobStore) -> None:
-    """Update job unknown field message contains field name."""
+    """Update job unknown field message contains field name.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("uf-2")
     with pytest.raises(ValueError, match="totally_bogus"):
         store.update_job("uf-2", totally_bogus="value")
 
 
 def test_update_job_unknown_field_does_not_corrupt_existing_data(store: SQLiteJobStore) -> None:
-    """Update job unknown field does not corrupt existing data."""
+    """Update job unknown field does not corrupt existing data.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("uf-3")
     store.update_job("uf-3", status="running")
     with pytest.raises(ValueError):
@@ -1910,7 +2352,11 @@ def test_update_job_unknown_field_does_not_corrupt_existing_data(store: SQLiteJo
 
 
 def test_run_log_is_never_trimmed(store: SQLiteJobStore) -> None:
-    """A run's log keeps every line; its size counts against storage instead."""
+    """A run's log keeps every line; its size counts against storage instead.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("no-trim")
     store.append_logs("no-trim", [{"level": "INFO", "logger": "lg", "message": f"msg-{i}"} for i in range(6000)])
 
@@ -1919,7 +2365,11 @@ def test_run_log_is_never_trimmed(store: SQLiteJobStore) -> None:
 
 
 def test_run_log_fields_round_trip(store: SQLiteJobStore) -> None:
-    """Source, event, fields, candidate and case survive the store."""
+    """Source, event, fields, candidate and case survive the store.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("fields")
     store.append_log(
         "fields",
@@ -1944,7 +2394,11 @@ def test_run_log_fields_round_trip(store: SQLiteJobStore) -> None:
 
 
 def test_run_log_cuts_text_to_its_column(store: SQLiteJobStore) -> None:
-    """A value longer than its column is cut to fit and ends with an ellipsis."""
+    """A value longer than its column is cut to fit and ends with an ellipsis.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("long")
     store.append_log("long", level="INFO", logger_name="lg", message="m" * 50_000, event="e" * 400)
 
@@ -1955,7 +2409,11 @@ def test_run_log_cuts_text_to_its_column(store: SQLiteJobStore) -> None:
 
 
 def test_get_logs_resumes_after_an_id(store: SQLiteJobStore) -> None:
-    """A live reader gets only the lines written after the last one it saw."""
+    """A live reader gets only the lines written after the last one it saw.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("resume")
     store.append_logs("resume", [{"level": "INFO", "logger": "lg", "message": f"msg-{i}"} for i in range(5)])
     seen = store.get_logs("resume", limit=2)
@@ -1968,7 +2426,12 @@ def test_get_logs_resumes_after_an_id(store: SQLiteJobStore) -> None:
 def test_progress_eviction_oldest_entry_removed_when_cap_reached(
     store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Progress eviction oldest entry removed when cap reached."""
+    """Progress eviction oldest entry removed when cap reached.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 3)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
@@ -2153,7 +2616,12 @@ def test_record_progress_treats_an_empty_or_over_long_key_as_no_key(store: SQLit
 
 
 def test_progress_eviction_count_stays_at_cap(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Progress eviction count stays at cap."""
+    """Progress eviction count stays at cap.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 3)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
@@ -2165,7 +2633,12 @@ def test_progress_eviction_count_stays_at_cap(store: SQLiteJobStore, monkeypatch
 
 
 def test_progress_eviction_preserves_structural_events(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Structural phase markers survive eviction while high-volume rows get dropped."""
+    """Structural phase markers survive eviction while high-volume rows get dropped.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 3)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
@@ -2190,7 +2663,12 @@ def test_progress_eviction_preserves_structural_events(store: SQLiteJobStore, mo
 def test_progress_eviction_structural_dropped_only_as_last_resort(
     store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When every existing row is structural, the oldest structural row is evicted."""
+    """When every existing row is structural, the oldest structural row is evicted.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
@@ -2229,7 +2707,12 @@ def test_auto_run_progress_is_never_trimmed(store: SQLiteJobStore, monkeypatch: 
 
 
 def test_single_engine_run_progress_keeps_the_cap(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A single-engine run's lane marker does not lift the retention cap."""
+    """A single-engine run's lane marker does not lift the retention cap.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 3)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
@@ -2262,7 +2745,12 @@ def test_update_job_does_not_lock_parent_job_row() -> None:
 
 
 def test_progress_trim_is_sampled_and_batched(store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sampled trimming allows a small overshoot but keeps rows near the cap."""
+    """Sampled trimming allows a small overshoot but keeps rows near the cap.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 5000)
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 100)
 
@@ -2274,7 +2762,11 @@ def test_progress_trim_is_sampled_and_batched(store: SQLiteJobStore, monkeypatch
 
 
 def test_engine_kwargs_use_configured_pool_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Engine kwargs read DB pool settings from configuration."""
+    """Engine kwargs read DB pool settings from configuration.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod.settings, "db_pool_size", 12)
     monkeypatch.setattr(remote_mod.settings, "db_pool_max_overflow", 7)
     monkeypatch.setattr(remote_mod.settings, "db_pool_recycle_seconds", 600)
@@ -2289,7 +2781,11 @@ def test_engine_kwargs_use_configured_pool_settings(monkeypatch: pytest.MonkeyPa
 def test_pgbouncer_transaction_mode_disables_psycopg_prepared_statements(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Psycopg3 URLs disable server-side prepared statements for PgBouncer."""
+    """Psycopg3 URLs disable server-side prepared statements for PgBouncer.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(remote_mod.settings, "db_pgbouncer_transaction_mode", True)
 
     connect_args = remote_mod._build_connect_args("postgresql+psycopg://user:pass@localhost/skynet")
@@ -2298,7 +2794,11 @@ def test_pgbouncer_transaction_mode_disables_psycopg_prepared_statements(
 
 
 def test_create_job_persists_username_and_idempotency_key(store: SQLiteJobStore) -> None:
-    """``create_job`` records the submitter and dedup key when supplied."""
+    """``create_job`` records the submitter and dedup key when supplied.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("idem-create-1", username="alice", idempotency_key="abc-123")
 
     row = store.get_job("idem-create-1")
@@ -2306,7 +2806,11 @@ def test_create_job_persists_username_and_idempotency_key(store: SQLiteJobStore)
 
 
 def test_find_job_by_idempotency_key_returns_prior_submission(store: SQLiteJobStore) -> None:
-    """Looking up a prior ``(username, idempotency_key)`` pair returns its job id."""
+    """Looking up a prior ``(username, idempotency_key)`` pair returns its job id.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("idem-find-1", username="bob", idempotency_key="key-xyz")
 
     found = store.find_job_by_idempotency_key("bob", "key-xyz")
@@ -2315,7 +2819,11 @@ def test_find_job_by_idempotency_key_returns_prior_submission(store: SQLiteJobSt
 
 
 def test_find_job_by_idempotency_key_scopes_by_username(store: SQLiteJobStore) -> None:
-    """Two users sharing the same key resolve to distinct jobs."""
+    """Two users sharing the same key resolve to distinct jobs.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("idem-scope-a", username="alice", idempotency_key="shared")
     store.create_job("idem-scope-b", username="bob", idempotency_key="shared")
 
@@ -2324,12 +2832,20 @@ def test_find_job_by_idempotency_key_scopes_by_username(store: SQLiteJobStore) -
 
 
 def test_find_job_by_idempotency_key_returns_none_for_unknown(store: SQLiteJobStore) -> None:
-    """Unknown key returns ``None`` rather than raising."""
+    """Unknown key returns ``None`` rather than raising.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.find_job_by_idempotency_key("alice", "never-seen") is None
 
 
 def test_find_job_by_idempotency_key_rejects_empty_inputs(store: SQLiteJobStore) -> None:
-    """Empty username or key short-circuits to ``None`` (no wildcard match)."""
+    """Empty username or key short-circuits to ``None`` (no wildcard match).
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("idem-empty-1", username="alice", idempotency_key="real-key")
 
     assert store.find_job_by_idempotency_key("", "real-key") is None
@@ -2337,14 +2853,22 @@ def test_find_job_by_idempotency_key_rejects_empty_inputs(store: SQLiteJobStore)
 
 
 def test_claim_completion_notification_first_caller_wins(store: SQLiteJobStore) -> None:
-    """The first caller to claim a job's notification wins."""
+    """The first caller to claim a job's notification wins.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("notify-claim-1")
 
     assert store.claim_completion_notification("notify-claim-1") is True
 
 
 def test_claim_completion_notification_second_caller_loses(store: SQLiteJobStore) -> None:
-    """The second caller for the same job loses the CAS race."""
+    """The second caller for the same job loses the CAS race.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("notify-claim-2")
 
     store.claim_completion_notification("notify-claim-2")
@@ -2353,12 +2877,20 @@ def test_claim_completion_notification_second_caller_loses(store: SQLiteJobStore
 
 
 def test_claim_completion_notification_missing_job_returns_false(store: SQLiteJobStore) -> None:
-    """A missing job id reports ``False`` rather than raising."""
+    """A missing job id reports ``False`` rather than raising.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.claim_completion_notification("no-such-job") is False
 
 
 def test_claim_job_notification_is_once_per_kind(store: SQLiteJobStore) -> None:
-    """Each in-run email kind is claimable once; distinct kinds are independent."""
+    """Each in-run email kind is claimable once; distinct kinds are independent.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("run-claim-1")
 
     assert store.claim_job_notification("run-claim-1", "new_best") is True
@@ -2367,7 +2899,11 @@ def test_claim_job_notification_is_once_per_kind(store: SQLiteJobStore) -> None:
 
 
 def test_claim_job_notification_honours_prefix_cap(store: SQLiteJobStore) -> None:
-    """Claims sharing a prefix stop at the cap while other kinds still succeed."""
+    """Claims sharing a prefix stop at the cap while other kinds still succeed.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("run-claim-2")
 
     assert store.claim_job_notification("run-claim-2", "stage:a", cap_prefix="stage:", cap=2) is True
@@ -2377,12 +2913,20 @@ def test_claim_job_notification_honours_prefix_cap(store: SQLiteJobStore) -> Non
 
 
 def test_claim_job_notification_missing_job_returns_false(store: SQLiteJobStore) -> None:
-    """A missing job id reports ``False`` rather than raising."""
+    """A missing job id reports ``False`` rather than raising.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.claim_job_notification("no-such-run", "new_best") is False
 
 
 def test_requeue_for_rerun_clears_notification_claims(store: SQLiteJobStore) -> None:
-    """A from-scratch rerun may send its in-run emails again."""
+    """A from-scratch rerun may send its in-run emails again.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("run-claim-3")
     store.claim_job_notification("run-claim-3", "new_best")
     store.update_job("run-claim-3", status="failed")
@@ -2399,7 +2943,11 @@ def test_immutable_columns_include_notification_and_idempotency_fields() -> None
 
 
 def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> None:
-    """A checkpoint saves, reads back with its iteration/size, replaces, and deletes."""
+    """A checkpoint saves, reads back with its iteration/size, replaces, and deletes.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("ck1")
     assert store.has_gepa_checkpoint("ck1") is False
     assert store.get_gepa_checkpoint("ck1") is None
@@ -2423,7 +2971,11 @@ def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> Non
 
 
 def test_delete_job_removes_its_checkpoint(store: SQLiteJobStore) -> None:
-    """Deleting a job drops its checkpoint row too (no orphaned bytes)."""
+    """Deleting a job drops its checkpoint row too (no orphaned bytes).
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("ck2")
     store.save_gepa_checkpoint("ck2", b"STATE", iteration=1)
     store.delete_job("ck2")
@@ -2454,7 +3006,11 @@ def test_requeue_for_resume_flips_to_pending_and_bumps_attempts(
 
 
 def test_requeue_for_resume_missing_job_returns_none(store: SQLiteJobStore) -> None:
-    """Re-queuing an unknown id reports ``None`` rather than raising."""
+    """Re-queuing an unknown id reports ``None`` rather than raising.
+
+    Args:
+        store: Disposable job store.
+    """
     assert store.requeue_for_resume("no-such-job") is None
 
 
@@ -2493,7 +3049,11 @@ def test_requeue_for_resume_banks_finished_leg_runtime(store: SQLiteJobStore, mo
 
 
 def test_gepa_checkpoints_are_isolated_per_key(store: SQLiteJobStore) -> None:
-    """A job keeps an independent checkpoint per ``pair_index`` key."""
+    """A job keeps an independent checkpoint per ``pair_index`` key.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("g1")
     store.save_gepa_checkpoint("g1", b"P0", iteration=1, pair_index=0)
     store.save_gepa_checkpoint("g1", b"P1", iteration=2, pair_index=1)
@@ -2509,7 +3069,11 @@ def test_gepa_checkpoints_are_isolated_per_key(store: SQLiteJobStore) -> None:
 
 
 def test_delete_job_removes_checkpoints(store: SQLiteJobStore) -> None:
-    """Deleting a job drops its checkpoints."""
+    """Deleting a job drops its checkpoints.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("g3")
     store.save_gepa_checkpoint("g3", b"P0", iteration=1)
     store.delete_job("g3")
@@ -2517,7 +3081,11 @@ def test_delete_job_removes_checkpoints(store: SQLiteJobStore) -> None:
 
 
 def test_scan_jobs_for_analytics_trims_run_result(store: SQLiteJobStore) -> None:
-    """A run row keeps only the scalar metrics; per-example blobs never surface."""
+    """A run row keeps only the scalar metrics; per-example blobs never surface.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("an-run", username="alice")
     store.set_payload_overview(
         "an-run",
@@ -2558,7 +3126,11 @@ def test_scan_jobs_for_analytics_trims_run_result(store: SQLiteJobStore) -> None
 
 
 def test_scan_jobs_for_analytics_null_result_and_filters(store: SQLiteJobStore) -> None:
-    """Result-less rows read as None, and status/username/limit narrow the scan."""
+    """Result-less rows read as None, and status/username/limit narrow the scan.
+
+    Args:
+        store: Disposable job store.
+    """
     store.create_job("an-pending", username="alice")
     store.set_payload_overview("an-pending", {"optimizer_name": "gepa"})
     store.create_job("an-other", username="bob")

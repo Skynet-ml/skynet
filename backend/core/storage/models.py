@@ -1612,6 +1612,9 @@ class StoragePackModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+    # An entry in this pack has no row (account deletion, stale step, duplicate, gone job); the compactor
+    # rewrites the pack without its bytes (SKY-733).
+    needs_rewrite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
 
 
 class AgentStepModel(Base):
@@ -1621,8 +1624,8 @@ class AgentStepModel(Base):
     the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
     ``run_id`` is the job id and the shard key. On the main database, rows go
     with their job via the cascading foreign key. Another shard has no
-    ``jobs`` table, so its rows stay after a job delete until SKY-733 (tree
-    retention and purge) removes them.
+    ``jobs`` table, so a job delete (``purge_run_shards``) and an account
+    purge (``purge_user_shards``) in ``tree_purge`` delete its rows (SKY-733).
     """
 
     __tablename__ = "agent_steps"
@@ -1656,9 +1659,9 @@ class TreeObjectModel(Base):
 
     ``object_id`` is the SHA-256 of the stored bytes, so the same content has
     one row for each account. ``byte_size`` counts toward the owner's storage
-    footprint. No job foreign key: a tree outlives its run. Nothing deletes
-    tree objects yet; the tree retention issue (SKY-733) adds deletion,
-    also on account deletion.
+    footprint. No job foreign key: a tree outlives its run. The account
+    deletion purge deletes an account's rows (see
+    :mod:`core.storage.tree_purge`).
     """
 
     __tablename__ = "tree_objects"

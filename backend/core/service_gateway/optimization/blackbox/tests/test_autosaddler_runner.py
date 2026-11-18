@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import io
 import json
 import os
+import shlex
+import signal
 import subprocess
 import sys
+import tarfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from .. import autosaddler_runner, native_runtime, repo_tree
+from .. import autosaddler_runner, harness_bridge, native_runtime, repo_tree
 
 # The runner needs the pinned upstream package on Python 3.12, which the
 # backend venv does not carry; point this at an interpreter that has it.
@@ -34,8 +42,8 @@ spec.loader.exec_module(runner)
 class ScriptedProvider:
     """Answer every upstream session with a schema-valid, vowel-adding patch."""
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, model):
+        self.model = model
         Path("sessions.log").touch()
 
     async def run(self, request):
@@ -62,7 +70,7 @@ class ScriptedProvider:
             output = {"schema_version": "app-autosaddler-reflection/v1", "lessons": []}
         with Path("sessions.log").open("a") as log:
             log.write(kind + "\\n")
-        usage = Usage(input_tokens=5, output_tokens=3, model=self.config.model)
+        usage = Usage(input_tokens=5, output_tokens=3, model=self.model)
         return SessionResult(
             status="completed",
             structured_output=output,
@@ -73,7 +81,7 @@ class ScriptedProvider:
         )
 
 
-runner.ClaudeAgentProvider = ScriptedProvider
+runner.harness_provider = lambda proposer, model, on_refusal=None: ScriptedProvider(model)
 original_execute = runner.execute
 
 
@@ -141,6 +149,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         "max_iterations": 2,
         "timeout_seconds": 60,
         "source": native_runtime.AUTOSADDLER_REVISION,
+        "proposer": {"harness": "custom", "model": "claude-test", "price": {"input": 0.0, "output": 0.0}},
         "task": {
             "name": "test",
             "seed_candidate": "bcd",
@@ -189,7 +198,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
     assert result["best_candidate"] == "bcdaaaaaa"
     assert result["best_score"] == pytest.approx(_vowel_fraction("bcdaaaaaa"))
     assert result["total_evals"] == len(scored)
-    assert {example for _, example in scored} == {"a", "b", "c"}
+    assert {example for _, example in scored} == {"a", "b"}
     assert result["metadata"]["iterations"] == 2
     sessions = (tmp_path / "sessions.log").read_text().split()
     assert sessions.count("diagnose_patch") == 2
@@ -549,6 +558,148 @@ def test_harness_sessions_send_each_refusal_to_the_run_log(
     record = json.loads(lines[0].split(" ", 2)[2])
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
+
+
+# The setup marks its own output; the fake proposer logs whether that output
+# is in the folder it runs in, and prints a reply.
+_SESSION_SETUP = """
+import os, pathlib, sys
+pathlib.Path("setup-out").mkdir()
+pathlib.Path("setup-out/ready").write_text("ok")
+with open(sys.argv[1], "a") as log:
+    log.write(f"setup {os.getcwd()}\\n")
+"""
+_SESSION_AGENT = """
+import os, pathlib, sys
+with open(sys.argv[1], "a") as log:
+    log.write(f"agent {os.getcwd()} {pathlib.Path('setup-out/ready').exists()}\\n")
+print("done")
+"""
+
+
+def test_each_autosaddler_session_worktree_gets_the_files_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upstream gives each session a new worktree; the setup runs once, and each worktree gets its output (SKY-753).
+
+    Args:
+        tmp_path: Guest folder.
+        monkeypatch: Working folder, home folder and the upstream classes the guest builds.
+    """
+    tree = io.BytesIO()
+    with tarfile.open(fileobj=tree, mode="w:gz") as packed:
+        info = tarfile.TarInfo("src.txt")
+        info.size = 1
+        packed.addfile(info, io.BytesIO(b"v"))
+    chunk = tmp_path / "chunk-0"
+    chunk.write_text(base64.b64encode(tree.getvalue()).decode("ascii"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    monkeypatch.setattr(autosaddler_runner, "GitHarnessSpace", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "SessionUsage", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "TransportOutcome", SimpleNamespace)
+    log = tmp_path / "proposer.log"
+    proposer = {
+        "run_command": shlex.join([sys.executable, "-c", _SESSION_AGENT, str(log)]),
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "file_command": True,
+        "setup": [sys.executable, "-c", _SESSION_SETUP, str(log)],
+    }
+    repo = {"chunks": [str(chunk)], "editable_paths": ["."], "readonly_paths": []}
+    mailbox = autosaddler_runner.EvaluatorMailbox("testnonce", 1.0)
+
+    space, _base = autosaddler_runner.repo_space(repo, "", tmp_path / "run", proposer, mailbox)
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    worktrees = [tmp_path / "run" / "worktrees" / name for name in ("w1", "w2")]
+    for index, worktree in enumerate(worktrees):
+        subprocess.run(
+            ["git", "worktree", "add", "--quiet", "--detach", str(worktree), space.base_revision],
+            cwd=space.source_repo,
+            check=True,
+        )
+        session = SimpleNamespace(workspace=worktree, task_prompt="Improve it.", session_id=f"s{index}")
+        asyncio.run(transport.run(session, 30.0))
+
+    assert log.read_text().splitlines() == [
+        f"setup {worktrees[0]}",
+        f"agent {worktrees[0]} True",
+        f"agent {worktrees[1]} True",
+    ]
+    assert not (space.source_repo / "setup-out").exists()
+    for worktree in worktrees:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status == ""
+
+
+def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AutoSaddler runs sessions in its own process, without the bridge's SIGTERM handler; its stop ends the setup.
+
+    Args:
+        tmp_path: The checkout and the setup's pid file.
+        monkeypatch: Home folder and the proposer key.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "a.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    pid_file = tmp_path / "setup.pid"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    proposer = {
+        "run_command": "echo done",
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "setup": [
+            sys.executable,
+            "-c",
+            f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)",
+        ],
+    }
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    session = SimpleNamespace(workspace=checkout, task_prompt="x", session_id="s0")
+    errors: list[BaseException] = []
+
+    def drive() -> None:
+        """Run the session and keep the error it ends with."""
+        try:
+            asyncio.run(transport.run(session, 120.0))
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 20
+    while not pid_file.exists() or not pid_file.read_text():
+        assert time.monotonic() < deadline, "the setup did not start"
+        time.sleep(0.05)
+    setup_pid = int(pid_file.read_text())
+    try:
+        autosaddler_runner._stop_children()
+        worker.join(timeout=20)
+
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert "[proposer] setup command in optimize.toml" in str(errors[0])
+        with pytest.raises(ProcessLookupError):
+            os.kill(setup_pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(setup_pid, signal.SIGKILL)
 
 
 def test_runner_git_refuses_a_bare_repository_layout(

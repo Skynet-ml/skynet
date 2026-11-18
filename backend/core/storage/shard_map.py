@@ -14,8 +14,8 @@ the main database, or a ``main`` record, keeps ``main``.
 
 A shard holds only ``agent_steps``, ``tree_objects`` and ``storage_packs``.
 Jobs, users, wallets and budgets stay on the main database. The cascade from
-``jobs`` stops at the main database: a job or account delete leaves its rows
-on the other shards until SKY-733 (tree retention and purge) adds the purge.
+``jobs`` stops at the main database, so a job delete and an account purge
+delete the rows on every other shard themselves (``tree_purge``, SKY-733).
 
 Give every pod the same ``STEP_LOG_SHARDS`` map before any run records a
 shard. The check is for each run: a pod refuses to read or write a run that

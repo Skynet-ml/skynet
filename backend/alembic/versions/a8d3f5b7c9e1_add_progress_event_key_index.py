@@ -1,7 +1,7 @@
 """Add a unique index on the progress event key of each job (SKY-808).
 
 Revision ID: a8d3f5b7c9e1
-Revises: a7c3e5f9b1d4
+Revises: e3b7d1f5a9c2
 
 An engine that replays its committed steps on a resume sends their progress
 events again. The keyed insert uses ``ON CONFLICT DO NOTHING`` on this partial
@@ -25,7 +25,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a8d3f5b7c9e1"
-down_revision: str | Sequence[str] | None = "a7c3e5f9b1d4"
+down_revision: str | Sequence[str] | None = "e3b7d1f5a9c2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
