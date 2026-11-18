@@ -16,7 +16,7 @@ from ..billing.runtime import UsagePendingError
 from ..billing.signals import BudgetReached
 from ..brand import APP_NAME
 from ..exceptions import InfrastructureInterruptionError, ServiceError
-from ..models.blackbox import BLACKBOX_HARNESS_CODEX
+from ..models.blackbox import BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_HARNESS_CODEX, BlackboxProposer
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, archive_chunks
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSpec
@@ -70,13 +70,25 @@ def _starts_codex(payload: dict[str, Any]) -> bool:
         payload: The black-box run payload.
 
     Returns:
-        True for a sandbox proposer on the Codex harness, outside a setup check.
+        True for a sandbox proposer on the Codex harness, or for a run of the
+        file's ``[proposer] entry`` whose AutoSaddler sessions outside a
+        checkout fall back to a default Codex agent, outside a setup check.
     """
     if "_preflight" in payload:
         return False
     proposer = payload.get("proposer")
     if not isinstance(proposer, dict) or proposer.get("host_cli") is not None:
         return False
+    staged = payload.get(REPO_SNAPSHOT_KEY)
+    strategy = payload.get("strategy") or {}
+    # native_runtime gives such a run the default agent as its fallback (SKY-753).
+    if (
+        isinstance(staged, dict)
+        and staged.get("file_proposer")
+        and (strategy.get("mode", "auto") == "auto" or strategy.get("engine") == BLACKBOX_ENGINE_AUTOSADDLER)
+        and BlackboxProposer().harness == BLACKBOX_HARNESS_CODEX
+    ):
+        return True
     return proposer.get("harness", BLACKBOX_HARNESS_CODEX) == BLACKBOX_HARNESS_CODEX
 
 
