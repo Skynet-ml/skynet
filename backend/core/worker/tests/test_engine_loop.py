@@ -51,7 +51,7 @@ from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import SEQ_MAX, StepLogStore, step_id_for
-from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore, object_id_of
 from core.storage.workspace_store import WorkspaceStore
 from core.worker import engine_loop
 from core.worker.actors import LeaseExhaustedError, User
@@ -2770,7 +2770,9 @@ def test_finish_does_not_count_a_harness_capture_of_the_run(
     assert model.prompts == []
 
 
-@pytest.mark.parametrize("path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/"])
+@pytest.mark.parametrize(
+    "path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/", ".git/config", "a/.GIT/x", "a/.Git"]
+)
 def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     path: str,
     owner: tuple[User, int],
@@ -2783,7 +2785,7 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     """The tree store refuses a bad name only at its folder, so put_files checks each part before the first blob.
 
     Args:
-        path: A path with an empty, ``.`` or ``..`` part, or a NUL byte.
+        path: A path with an empty, ``.`` or ``..`` part, a ``.git`` part in any letter case, or a NUL byte.
     """
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     writes: list[Any] = []
@@ -2792,3 +2794,41 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     with pytest.raises(ValueError, match="bad tree entry name"):
         loop.put_files({"ok.txt": b"1", path: b"2"})
     assert writes == []
+
+
+def _put_raw_tree(trees: TreeStore, rows: list[list[str]]) -> str:
+    """Store a tree object without :func:`encode_tree`, as a tree stored before SKY-810 can be.
+
+    Args:
+        trees: The tree store.
+        rows: The ``[name, mode, object_id]`` entries, unchecked.
+
+    Returns:
+        The tree's object id.
+    """
+    stored = b"tree\0" + json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    object_id = object_id_of(stored)
+    trees._step_log.put_object(RUN_ID, object_id, stored)
+    return object_id
+
+
+def test_a_tree_stored_before_sky_810_loses_its_git_entries_on_a_rewrite(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The context and put_files write back a legacy tree without its ``.git`` entries, as other writers do."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    secret = trees.put_blob(RUN_ID, b"secret")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    raw = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["metric.py", "file", secret], ["sub", "tree", sub]]
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(raw, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    written = loop.put_files({"sub/b.py": b"b"}, raw)
+    assert written == _store(trees, {"README": b"seed", "metric.py": b"secret", "sub/a.py": b"seed", "sub/b.py": b"b"})

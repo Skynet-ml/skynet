@@ -151,7 +151,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
 )
 from ..storage.models import AgentStepModel
 from ..storage.step_log_store import StepFenceError, step_id_for
-from ..storage.tree_store import TreeEntry, TreeStore
+from ..storage.tree_store import TreeEntry, TreeStore, is_git_part
 from .actors import Agent, LeaseExhaustedError, Run, StepResult
 from .step_recovery import last_committed_step, still_owns_run
 
@@ -598,9 +598,10 @@ class EngineLoop:
             The new tree id.
 
         Raises:
-            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part or a NUL byte, or is both a file
-                and a folder; or when a write would change a hidden path. A bad part is refused before any write. The
-                message names only the written path, so it does not name another hidden path.
+            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part, ``.git`` in any letter case or a
+                NUL byte, or is both a file and a folder; or when a write would change a hidden path. A bad part is
+                refused before any write. The message names only the written path, so it does not name another hidden
+                path.
             LookupError: When the run cannot see the base tree or one of its folders.
             LoopStoppedError: When the loop stopped; it writes nothing.
         """
@@ -610,7 +611,7 @@ class EngineLoop:
                     raise ValueError(f"path {path} may not be changed")
                 # The tree store refuses a bad name only when it writes the folder, after the blobs below it, so
                 # every part is checked before the first write.
-                if any(part in {"", ".", ".."} or "\0" in part for part in path.split("/")):
+                if any(part in {"", ".", ".."} or "\0" in part or is_git_part(part) for part in path.split("/")):
                     raise ValueError(f"bad tree entry name in path {path!r}")
             tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
             if base_tree_id in self._run_outputs:
@@ -912,7 +913,9 @@ class EngineLoop:
         """Return a folder without its hidden paths, or ``None`` when it holds only hidden paths.
 
         A folder that the filter leaves empty is dropped, not kept empty: an empty ``eval/`` would show the
-        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays.
+        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays. A ``.git``
+        entry in any letter case is left out too: a tree stored before SKY-810 can hold one, and the tree store
+        refuses to write it back.
 
         Args:
             tree_id: The folder.
@@ -929,7 +932,7 @@ class EngineLoop:
         kept = []
         for name, entry in entries.items():
             path = f"{prefix}{name}"
-            if hashed_kind(self._hidden, path) is not None:
+            if is_git_part(name) or hashed_kind(self._hidden, path) is not None:
                 continue
             if entry.mode == "tree":
                 visible = self._visible(entry.object_id, f"{path}/")
@@ -1219,7 +1222,8 @@ class EngineLoop:
                 replace a folder that holds a hidden path.
             LookupError: When the run cannot see the tree.
         """
-        entries = {} if tree_id is None else self._entries(tree_id)
+        # A tree stored before SKY-810 can hold a .git entry, which the tree store refuses to write back.
+        entries = {} if tree_id is None else {n: e for n, e in self._entries(tree_id).items() if not is_git_part(n)}
         folders: dict[str, dict[tuple[str, ...], bytes]] = {}
         written: set[str] = set()
         for (name, *rest), data in files.items():
