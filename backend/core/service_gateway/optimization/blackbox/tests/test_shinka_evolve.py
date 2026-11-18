@@ -13,6 +13,7 @@ import io
 import stat
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,6 +92,7 @@ _FAKE_UPSTREAM = {
         import asyncio
         import json
         import os
+        import random
         import sqlite3
         import subprocess
         import uuid
@@ -101,6 +103,8 @@ _FAKE_UPSTREAM = {
 
         START = "<!-- EVOLVE-BLOCK-START -->\\n"
         END = "\\n<!-- EVOLVE-BLOCK-END -->"
+        # The generation at which upstream fails, or None for a run that ends normally.
+        FAIL_AFTER = None
 
 
         class EvolutionConfig:
@@ -127,6 +131,7 @@ _FAKE_UPSTREAM = {
                 self.evaluate_str = evaluate_str
                 self.results_dir = Path(evo_config.results_dir)
                 self.running_jobs = []
+                self.failed_jobs_for_retry = {}
 
             def _get_completed_job_work_count(self):
                 return 0
@@ -136,10 +141,12 @@ _FAKE_UPSTREAM = {
 
             async def _generate_proposal_async(self, generation, task_id):
                 text = self.best[1].split(START)[1].split(END)[0]
+                # Upstream's prompts carry random draws and program ids, so a
+                # replay matches its log only when the runner seeds them.
                 result = await shinka_llm.query_async(
                     model_name=self.evo.llm_models[0],
                     msg=f"improve {text}",
-                    system_msg=self.evo.task_sys_msg,
+                    system_msg=f"{self.evo.task_sys_msg} {random.random()} {uuid.uuid4()}",
                     msg_history=[],
                 )
                 # The fake model echoes the end of the printed message list; keep only the word.
@@ -156,6 +163,8 @@ _FAKE_UPSTREAM = {
                 self.seed_text = self.init_program.split(START)[1].split(END)[0]
                 self.best = (None, self.init_program, float("-inf"))
                 for generation in range(self.evo.num_generations):
+                    if generation == FAIL_AFTER:
+                        raise RuntimeError("upstream broke")
                     program = self.init_program
                     if generation:
                         program = await self._generate_proposal_async(generation, f"task-{generation}")
@@ -181,11 +190,12 @@ _FAKE_UPSTREAM = {
 }
 
 
-def _fake_python(tmp_path: Path) -> str:
+def _fake_python(tmp_path: Path, fail_after: int | None = None) -> str:
     """Write the fake upstream package and an interpreter wrapper that imports it.
 
     Args:
         tmp_path: Pytest's temporary folder.
+        fail_after: The generation at which the fake upstream fails, or None for no failure.
 
     Returns:
         The wrapper's path: the engine's ``shinka-evolve`` interpreter.
@@ -194,7 +204,8 @@ def _fake_python(tmp_path: Path) -> str:
     for name, text in _FAKE_UPSTREAM.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+        text = textwrap.dedent(text).lstrip().replace("FAIL_AFTER = None", f"FAIL_AFTER = {fail_after}")
+        path.write_text(text, encoding="utf-8")
     python = tmp_path / "shinka-python"
     python.write_text(f'#!/bin/sh\nPYTHONPATH={root} exec {sys.executable} "$@"\n', encoding="utf-8")
     python.chmod(python.stat().st_mode | stat.S_IXUSR)
@@ -221,7 +232,16 @@ def test_each_upstream_model_reply_and_scorer_command_is_one_loop_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run upstream in the child: the loop's model answers each call, and the loop's boxes score each version."""
+    """Run upstream in the child: the loop's model answers each call, and the loop's boxes score each version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces ``run_native_engine``.
+    """
     monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
@@ -239,14 +259,22 @@ def test_each_upstream_model_reply_and_scorer_command_is_one_loop_step(
     ]
     assert all("'role': 'system'" in prompt for prompt in model.prompts)
     assert boxes.opened == 6
-    assert not +boxes.open
+    assert not any(boxes.open.values())
     assert [kind for _, kind, _ in _steps(engine)] == _KINDS
 
 
 def test_a_run_killed_in_a_model_call_resumes_from_its_last_committed_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Kill the worker in the second model call, then resume: upstream replays, and only new steps run."""
+    """Kill the worker in the second model call, then resume: upstream replays, and only new steps run.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     seed_tree, metric_tree = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
     python = _fake_python(tmp_path)
     first, first_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, die_at=1)
@@ -338,7 +366,12 @@ def test_the_repository_options_must_hide_the_same_paths_as_the_runs_repository_
 def test_with_no_engine_loop_context_the_engine_runs_in_the_sandbox_as_before(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hand a run with no loop context to ``run_native_engine`` unchanged, until the cutover (SKY-728)."""
+    """Hand a run with no loop context to ``run_native_engine`` unchanged, until the cutover (SKY-728).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces ``run_native_engine``.
+    """
     calls: list[tuple[object, ...]] = []
     expected = Result(best_candidate="sandbox", best_score=1.0, total_evals=1)
 
@@ -367,7 +400,15 @@ def test_with_no_engine_loop_context_the_engine_runs_in_the_sandbox_as_before(
 def test_a_budget_stop_carries_the_best_version_scored_so_far(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Stop the run in the last version's evaluation, and keep an earlier scored version as the stop's result."""
+    """Stop the run in the last version's evaluation, and keep an earlier scored version as the stop's result.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     checks: list[None] = []
 
@@ -396,6 +437,140 @@ def test_a_budget_stop_carries_the_best_version_scored_so_far(
         "final_evaluation_completed": False,
         "final_evaluation_reason": "budget_reached",
     }
+
+
+def _five_checks_then(error: Exception) -> Callable[[], None]:
+    """Return a budget check that raises at its fifth call: the first check of the third version's evaluation.
+
+    Args:
+        error: The error the check raises.
+
+    Returns:
+        The budget check.
+    """
+    checks: list[None] = []
+
+    def check_budget() -> None:
+        """Count the check, and raise at the fifth.
+
+        Raises:
+            Exception: ``error``, at the fifth check.
+        """
+        checks.append(None)
+        if len(checks) == 5:
+            raise error
+
+    return check_budget
+
+
+def test_a_budget_stop_reports_the_runs_evaluations_not_those_when_the_best_was_found(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Report two evaluations when the stop comes after the second version, though the first version is the best.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    by_length = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    def shortest(step_loop: object, candidate: object, case: object) -> tuple[float | None, dict[str, object]]:
+        """Score a shorter version higher, so the seed stays the best version.
+
+        Args:
+            step_loop: The engine loop.
+            candidate: The version.
+            case: Not used.
+
+        Returns:
+            The negative length and no side information.
+        """
+        score, info = by_length(step_loop, candidate, case)
+        return -score, info
+
+    with pytest.raises(BudgetReached) as stopped:
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"),
+            loop.server(shortest, max_evals=10),
+            loop.context(max_iterations=2, check_budget=_five_checks_then(BudgetReached())),
+        )
+
+    result = stopped.value.result
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seed", -4.0, 2)
+
+
+def test_the_scorer_cap_mid_run_returns_the_best_version_scored_so_far(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """End the run with the best scored version when the parent's scorer cap stops the third evaluation.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+        Task("seed"),
+        loop.server(_scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")), max_evals=10),
+        loop.context(max_iterations=2, check_budget=_five_checks_then(BudgetExhaustedError("cap"))),
+    )
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
+    assert result.metadata["model_cost_cents"] == "2"
+
+
+def test_a_child_that_fails_after_a_scored_version_returns_that_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Return the version scored before upstream failed, as the sandbox path does, from a child that exits non-zero.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path, fail_after=1)).run(
+        Task("seed"),
+        loop.server(_scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")), max_evals=10),
+        loop.context(max_iterations=2),
+    )
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seed", 4.0, 1)
+    assert "upstream broke" in (tmp_path / "loop-1" / "shinka_evolve" / "native_result.json").read_text()
+
+
+def test_a_child_that_fails_before_any_scored_version_fails_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Fail the run when upstream fails before it scores a version: a version with no score is never the best.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    with pytest.raises(ServiceError, match="upstream broke"):
+        ShinkaEvolveEngine(_fake_python(tmp_path, fail_after=0)).run(
+            Task("seed"),
+            loop.server(_scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")), max_evals=10),
+            loop.context(max_iterations=2),
+        )
 
 
 def test_a_worker_without_the_shinka_interpreter_runs_the_engine_in_the_sandbox(

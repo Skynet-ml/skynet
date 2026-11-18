@@ -99,11 +99,13 @@ class ShinkaEvolveEngine:
             ctx: Run context: the loop's model, run folder, seed and native options.
 
         Returns:
-            The best version upstream found.
+            The best version upstream found, or the best version scored before
+            upstream failed or the scorer cap stopped it.
 
         Raises:
-            ServiceError: When the settings need a feature the worker does not run yet, or upstream fails.
-            BudgetExhaustedError: When no scorer call remains.
+            ServiceError: When the settings need a feature the worker does not run yet, or upstream fails
+                before it scores a version.
+            BudgetExhaustedError: When no scorer call remains, or the cap stops the run before a version is scored.
             BudgetReached: When the budget stops the run; it carries the best version scored so far.
         """
         # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter; a
@@ -186,19 +188,19 @@ class ShinkaEvolveEngine:
         except BudgetReached as stop:
             # The killed child writes no result, so the best version comes from its progress.
             if requests.best is not None:
-                stop.result = Result(
-                    best_candidate=requests.best["candidate"],
-                    best_score=requests.best["score"],
-                    total_evals=requests.best["total_evals"],
-                    metadata={"native_artifacts_dir": str(workdir), "model_cost_cents": str(requests.cost_cents)},
-                )
+                stop.result = requests.best_so_far(workdir)
                 stop.evidence.update(
                     selection_scope="validation",
                     final_evaluation_completed=False,
                     final_evaluation_reason="budget_reached",
                 )
             raise
-        result = self._result(workdir, returncode)
+        except BudgetExhaustedError:
+            # As in GEPA, the scorer cap ends the run with the best version scored so far.
+            if requests.best is None:
+                raise
+            return requests.best_so_far(workdir)
+        result = self._result(workdir, returncode, server)
         result.metadata["model_cost_cents"] = str(requests.cost_cents)
         return result
 
@@ -240,7 +242,7 @@ class ShinkaEvolveEngine:
                 try:
                     for line in child.stdout:
                         requests.line(line.rstrip("\n"), child.stdin)
-                except BudgetReached:
+                except (BudgetReached, BudgetExhaustedError):
                     # A closed reply stream stops the child, which then reports
                     # every scored version, so the stop's best version never
                     # depends on how far its progress lines got.
@@ -260,21 +262,38 @@ class ShinkaEvolveEngine:
                 child.stdout.close()
 
     @staticmethod
-    def _result(workdir: Path, returncode: int) -> Result:
+    def _result(workdir: Path, returncode: int, server: EvalServer) -> Result:
         """Read the child's result document.
 
         Args:
             workdir: The child's folder.
             returncode: The child's exit code.
+            server: The eval server, which knows the versions that hit a metric error.
 
         Returns:
-            The best version and its score.
+            The best version and its score. When upstream failed after it scored
+            a version, the best version scored before the failure.
 
         Raises:
-            ServiceError: When the child failed or wrote no result.
+            ServiceError: When the child failed before it scored a version, or wrote no result.
         """
         path = workdir / _RESULT_FILE
         document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        incumbent = document.get("interrupted_incumbent")
+        # A failure keeps the last good version, as the sandbox path does; a
+        # version with no score, or with a crashed case (SKY-350), is never one.
+        if (
+            isinstance(incumbent, dict)
+            and incumbent.get("best_score") is not None
+            and server.metric_error(incumbent.get("best_candidate")) is None
+        ):
+            logger.warning("ShinkaEvolve stopped early and keeps its best version: %s", document.get("error"))
+            return Result(
+                best_candidate=incumbent["best_candidate"],
+                best_score=incumbent["best_score"],
+                total_evals=incumbent.get("total_evals", 0),
+                metadata={**document.get("metadata", {}), "native_artifacts_dir": str(workdir)},
+            )
         if returncode != 0 or not document or document.get("error") or document.get("best_score") is None:
             stderr = (workdir / "stderr.log").read_text(encoding="utf-8", errors="replace")
             detail = str(document.get("error") or stderr[-2000:] or "No result was produced.")
@@ -306,6 +325,26 @@ class _Requests:
         self.scrub = sandbox_log.Scrubber(())
         self.cost_cents = Decimal(0)
         self.best: dict[str, Any] | None = None
+        # Every evaluation the child asked for, so a stop reports the run's
+        # total, not the total when the best version was found.
+        self.evals = 0
+
+    def best_so_far(self, workdir: Path) -> Result:
+        """Return the best version the child reported, for a run that stopped before its result.
+
+        Args:
+            workdir: The child's folder.
+
+        Returns:
+            The best version, its score and the run's evaluations so far.
+        """
+        assert self.best is not None
+        return Result(
+            best_candidate=self.best["candidate"],
+            best_score=self.best["score"],
+            total_evals=self.evals,
+            metadata={"native_artifacts_dir": str(workdir), "model_cost_cents": str(self.cost_cents)},
+        )
 
     def line(self, line: str, replies: IO[str] | None) -> None:
         """Handle one line the child wrote.
@@ -429,6 +468,7 @@ class _Requests:
             case=None if example is None else str(example["id"]),
         ):
             score, info = self.server.evaluate(candidate, case)
+        self.evals += 1
         if self.ctx.check_budget is not None:
             self.ctx.check_budget()
         if score is not None and isinstance(info, dict) and type(candidate_id) is int:
@@ -467,11 +507,7 @@ class _Requests:
         # A version with a crashed case has no score (SKY-350).
         shown = None if self.server.metric_error(event.get("candidate")) is not None else float(score)
         if shown is not None and (self.best is None or shown > self.best["score"]):
-            self.best = {
-                "candidate": event.get("candidate"),
-                "score": shown,
-                "total_evals": int(event.get("total_evals") or 0),
-            }
+            self.best = {"candidate": event.get("candidate"), "score": shown}
         emit_candidate(
             self.ctx.progress_callback,
             candidate_id=str(candidate_id),
