@@ -617,6 +617,33 @@ def test_the_scorer_cap_mid_run_returns_the_best_version_scored_so_far(
     assert result.metadata["model_cost_cents"] == "2"
 
 
+def test_a_run_starts_in_an_empty_child_folder(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Delete the files a previous try left in the child's folder, so upstream starts from scratch.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    stale = tmp_path / "loop-1" / shinka_evolve._WORKDIR / "stale.txt"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("from the last try")
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+        Task("seed"),
+        loop.server(_scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")), max_evals=10),
+        loop.context(max_iterations=2),
+    )
+
+    assert result.best_candidate == "seedxx"
+    assert not stale.exists()
+
+
 def test_a_child_that_fails_after_a_scored_version_returns_that_version(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -2104,6 +2131,23 @@ def test_a_version_scored_on_only_some_cases_is_never_the_best(tmp_path: Path) -
 
     assert requests.best == {"candidate": "y", "score": 0.5}
     assert requests.recorded_score("x") is None
+
+
+def test_of_two_versions_with_the_same_full_score_the_first_stays_the_best(tmp_path: Path) -> None:
+    """Keep the first version scored on every case when a later one only ties its score.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _two_case_requests(tmp_path, {"x": 0.5, "y": 0.5})
+    for candidate in ("x", "y"):
+        for index in (0, 1):
+            requests.line(_evaluate_line(candidate, {"id": index}), io.StringIO())
+
+    _report(requests, "x", 0.5, 1)
+    _report(requests, "y", 0.5, 2)
+
+    assert requests.best == {"candidate": "x", "score": 0.5}
 
 
 def test_an_evaluation_with_no_case_in_a_task_with_cases_is_refused_to_the_child(tmp_path: Path) -> None:

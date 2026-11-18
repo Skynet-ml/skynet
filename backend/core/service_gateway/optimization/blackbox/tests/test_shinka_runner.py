@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import random
 import re
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
@@ -18,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from core.models.blackbox import BlackboxShinkaSettings
@@ -329,6 +332,76 @@ def test_lineage_reporter_names_each_versions_parent_and_depth(tmp_path: Path) -
     reporter.poll(final=True)
     assert mailbox.lines[-1]["candidate_id"] == 3
     assert mailbox.lines[-1]["parent_id"] is None
+
+
+def test_lineage_reporter_reads_only_the_programs_filed_since_its_last_poll(tmp_path: Path) -> None:
+    """Read only new program rows on each poll, and still link a new version to a parent read before.
+
+    Each upstream row holds the program's code, so a poll that read every row
+    would cost CPU that grows with the square of the run length.
+
+    Args:
+        tmp_path: Directory for a stand-in program database.
+    """
+    db_path = tmp_path / "programs.sqlite"
+    with shinka_runner.contextlib.closing(shinka_runner.sqlite3.connect(db_path)) as db:
+        # Upstream's own column order: the code comes before the lineage columns.
+        db.execute(
+            "CREATE TABLE programs (id TEXT PRIMARY KEY, code TEXT NOT NULL, parent_id TEXT, generation INTEGER)"
+        )
+        db.executemany("INSERT INTO programs VALUES (?, ?, ?, ?)", [("p0", "x" * 9000, None, 0), ("p1", "y", "p0", 1)])
+        db.commit()
+    scorer = shinka_runner.ProgramScorer.__new__(shinka_runner.ProgramScorer)
+    scorer._lock = shinka_runner.threading.Lock()
+    scorer.scored = {generation: {"candidate": "x", "score": 0.1, "per_example": []} for generation in (0, 1)}
+    mailbox = _Mailbox()
+    reporter = shinka_runner.LineageReporter(mailbox, scorer, db_path)
+    reporter.poll()
+    assert [(line["candidate_id"], line["parent_id"]) for line in mailbox.lines] == [(0, None), (1, 0)]
+    # A poll that read the old rows again would take this changed generation.
+    with shinka_runner.contextlib.closing(shinka_runner.sqlite3.connect(db_path)) as db:
+        db.execute("UPDATE programs SET generation = 99 WHERE id = 'p1'")
+        db.commit()
+
+    reporter.poll()
+    assert len(mailbox.lines) == 2
+    with shinka_runner.contextlib.closing(shinka_runner.sqlite3.connect(db_path)) as db:
+        db.execute("INSERT INTO programs VALUES ('p2', 'z', 'p1', 2)")
+        db.commit()
+    scorer.scored[2] = {"candidate": "z", "score": 0.2, "per_example": []}
+    reporter.poll()
+
+    assert reporter.generation_by_id == {"p0": 0, "p1": 1, "p2": 2}
+    assert [(line["candidate_id"], line["parent_id"], line["generation"]) for line in mailbox.lines[2:]] == [(2, 1, 2)]
+
+
+def test_the_scorer_takes_each_request_out_of_the_queue_once_it_handles_it(tmp_path: Path) -> None:
+    """Remove a handled request file, so each poll lists only new requests and its cost does not grow with the run.
+
+    Args:
+        tmp_path: Scratch folder for the queue.
+    """
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[None],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    answer_fields = {"correct": True, "error": None, "metrics": {}}
+    scorer.score_program = lambda program_path: answer_fields  # type: ignore[method-assign]
+    (tmp_path / "queue/requests/a.json").write_text(json.dumps({"program_path": "gen_1/main.md"}))
+
+    scorer.poll()
+    answer = tmp_path / "queue/responses/a.json"
+    deadline = time.monotonic() + 5
+    while not answer.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    scorer.stop()
+
+    assert json.loads(answer.read_text())["correct"] is True
+    assert list((tmp_path / "queue/requests").iterdir()) == []
 
 
 def test_lineage_reporter_adds_the_agents_tool_calls_to_each_version(tmp_path: Path) -> None:
@@ -1196,10 +1269,22 @@ def test_a_closed_reply_stream_stops_the_run() -> None:
     mailbox = shinka_runner.EvaluatorMailbox("testnonce", 60.0)
     mailbox.emit = lambda prefix, payload: None  # type: ignore[method-assign]
     mailbox.listen(iter(())).join(5.0)
+    started = time.monotonic()
 
     with pytest.raises(shinka_runner.EvaluationStopped, match="closed its reply stream"):
         mailbox.evaluate("text")
     assert mailbox.stopped.is_set()
+    # The reply timeout is 60 seconds; a closed stream must not wait it out.
+    assert time.monotonic() - started < 5.0
+
+
+def test_a_reply_whose_id_is_not_a_string_is_not_filed() -> None:
+    """Drop a reply with a number id: request ids are strings, so it can answer no request."""
+    mailbox = shinka_runner.EvaluatorMailbox("testnonce", 60.0)
+
+    mailbox.listen(iter(['{"id": 0, "score": 1.0}\n', '{"id": null, "score": 1.0}\n'])).join(5.0)
+
+    assert mailbox._replies == {}
 
 
 def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_filed() -> None:
@@ -1247,6 +1332,55 @@ def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_file
     assert order == ["job done", "filing done", "side effects done", "propose 1"]
 
 
+@pytest.mark.parametrize("busy", ["running_jobs", "retries", "completed_work", "side_effects"])
+def test_each_gate_condition_alone_holds_a_proposal(busy: str) -> None:
+    """Hold the next proposal while any one of the gate's conditions is still true.
+
+    Args:
+        busy: The one condition that is true when the proposal starts.
+    """
+    order: list[str] = []
+    state: dict[str, Any] = {"running_jobs": [], "retries": {}, "completed_work": 0, "side_effects": False}
+    busy_values = {"running_jobs": ["job"], "retries": {"job-1": object()}, "completed_work": 1, "side_effects": True}
+    state[busy] = busy_values[busy]
+    runner = SimpleNamespace(running_jobs=state["running_jobs"], failed_jobs_for_retry=state["retries"])
+
+    async def propose(generation: int, task_id: str) -> str:
+        """Record the proposal.
+
+        Args:
+            generation: Upstream's generation number.
+            task_id: Upstream's task id.
+
+        Returns:
+            The task id.
+        """
+        order.append(f"propose {generation}")
+        return task_id
+
+    runner._generate_proposal_async = propose
+    runner._get_completed_job_work_count = lambda: state["completed_work"]
+    runner._has_background_side_effect_work = lambda: state["side_effects"]
+    shinka_runner.install_sequential_gate(runner)
+
+    async def scenario() -> str:
+        """Clear the one condition while the proposal waits.
+
+        Returns:
+            The proposal's result.
+        """
+        proposal = asyncio.create_task(runner._generate_proposal_async(3, "task-3"))
+        await asyncio.sleep(0.12)
+        order.append("cleared")
+        runner.running_jobs = []
+        runner.failed_jobs_for_retry = {}
+        state.update(completed_work=0, side_effects=False)
+        return await proposal
+
+    assert asyncio.run(scenario()) == "task-3"
+    assert order == ["cleared", "propose 3"]
+
+
 def test_the_gate_holds_a_proposal_while_a_database_retry_is_queued() -> None:
     """Start upstream's next proposal only once its retry queue of failed database writes is empty."""
     order: list[str] = []
@@ -1292,24 +1426,25 @@ def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest
     The test restores the ``random`` and NumPy random states that the seeding changes.
 
     Args:
-        monkeypatch: Restores ``uuid.uuid4``.
+        monkeypatch: Restores ``uuid.uuid4`` and gives the runner NumPy.
     """
     monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    # The test environment has no upstream, so the runner may have no NumPy of its own.
+    monkeypatch.setattr(shinka_runner, "np", np)
     state = random.getstate()
-    np_state = shinka_runner.np.random.get_state() if shinka_runner.np is not None else None
+    np_state = np.random.get_state()
     try:
         shinka_runner.seed_randomness(5)
-        first = (random.random(), _draw_a(), _draw_a())
+        first = (random.random(), np.random.random(), _draw_a(), _draw_a())
         shinka_runner.seed_randomness(5)
-        second = (random.random(), _draw_a(), _draw_a())
+        second = (random.random(), np.random.random(), _draw_a(), _draw_a())
     finally:
         random.setstate(state)
-        if np_state is not None:
-            shinka_runner.np.random.set_state(np_state)
+        np.random.set_state(np_state)
 
     assert first == second
-    assert uuid.UUID(first[1]).version == 4
-    assert first[1] != first[2]
+    assert uuid.UUID(first[2]).version == 4
+    assert first[2] != first[3]
 
 
 def _draw_a() -> str:
@@ -1708,6 +1843,95 @@ def test_a_symlink_the_tree_ships_unchanged_is_kept(tmp_path: Path) -> None:
     (bundle.checkout / "src/alias.py").symlink_to("/etc/passwd")
     with pytest.raises(ValueError, match=r"adds or changes the symlink 'src/alias\.py'"):
         shinka_runner.refuse_new_links(bundle.checkout, links)
+
+
+def _tree_chunk(tmp_path: Path, member: tarfile.TarInfo) -> list[str]:
+    """Pack one tar entry as the run's tree chunk.
+
+    Args:
+        tmp_path: Scratch folder.
+        member: The entry.
+
+    Returns:
+        The chunk file.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tree:
+        tree.addfile(member)
+    chunk = tmp_path / "tree.0.b64"
+    chunk.write_text(base64.b64encode(buffer.getvalue()).decode("ascii"))
+    return [str(chunk)]
+
+
+@pytest.mark.parametrize("kind", [tarfile.LNKTYPE, tarfile.FIFOTYPE], ids=["hard-link", "fifo"])
+def test_a_tree_with_a_hard_link_or_a_special_file_is_refused(tmp_path: Path, kind: bytes) -> None:
+    """Refuse a shipped tree entry that is not a file, a folder or a symlink.
+
+    Args:
+        tmp_path: Scratch folder.
+        kind: The tar entry type.
+    """
+    member = tarfile.TarInfo("src/odd")
+    member.type = kind
+    member.linkname = "src/app.py" if kind == tarfile.LNKTYPE else ""
+
+    with pytest.raises(ValueError, match="unsafe entry: src/odd"):
+        shinka_runner.refuse_unsafe_tree(_tree_chunk(tmp_path, member))
+
+
+def _git_checkout(tmp_path: Path) -> Path:
+    """Make an empty git checkout.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The checkout.
+    """
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    return checkout
+
+
+def test_a_checkout_with_a_special_file_is_refused(tmp_path: Path) -> None:
+    """Refuse a checkout in which the seed made a named pipe.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    checkout = _git_checkout(tmp_path)
+    os.mkfifo(checkout / "pipe")
+
+    with pytest.raises(ValueError, match="adds the special file 'pipe'"):
+        shinka_runner.refuse_new_links(checkout, {})
+
+
+def test_a_checkout_with_a_staged_gitlink_is_refused(tmp_path: Path) -> None:
+    """Refuse a checkout whose index holds a gitlink, which no folder walk can see.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    checkout = _git_checkout(tmp_path)
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib"], cwd=checkout, check=True
+    )
+
+    with pytest.raises(ValueError, match="adds the gitlink 'vendor/lib'"):
+        shinka_runner.refuse_new_links(checkout, {})
+
+
+def test_a_path_that_names_a_folder_is_refused(tmp_path: Path) -> None:
+    """Refuse a write to a path that is a folder in the checkout.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="'src' is not a regular file"):
+        shinka_runner.checked_target(checkout, "src")
 
 
 class _IdleRunner:
