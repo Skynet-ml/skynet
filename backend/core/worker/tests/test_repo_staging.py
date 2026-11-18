@@ -744,6 +744,18 @@ def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
 
 
+def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+    no_run = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        _stage_with(no_run, monkeypatch, resumed)
+
+
 _RULED = {
     **_FILES,
     "optimize.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',

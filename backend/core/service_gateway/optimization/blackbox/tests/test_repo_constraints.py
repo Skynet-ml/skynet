@@ -965,6 +965,12 @@ def test_a_contract_with_no_metric_no_run_and_no_target_fails_the_setup_check() 
     assert parse_constraints(b'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/app.py:run"\n').run_entry
 
 
+def test_a_started_run_with_no_run_and_no_target_fails_the_setup_check() -> None:
+    """A started run is lenient only on ``version``: resumed runs get no exemption from the [run] rule (SKY-761)."""
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        parse_constraints(b'[paths]\neditable = ["src"]\n', require_version=False)
+
+
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
     assert parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nservices = []\n').targets == {}

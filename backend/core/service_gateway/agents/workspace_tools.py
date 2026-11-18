@@ -66,7 +66,7 @@ illegal = "docs/rules.md"
 network = ["pypi.org"]
 
 [run]
-entry = ["pytest", "-q", "--junitxml=out.xml"]
+entry = ["pytest", "-q"]
 timeout = 300
 
 [metric]
@@ -107,14 +107,16 @@ How to write the run's files:
   is what the entry returned for the case, and ``None`` when nothing ran, so always give it the ``None``
   default. That metric reads ``output`` and never imports or calls the candidate's code. When the repository
   is scored by its own tests, put the test command in ``[run] entry``, for example
-  ``entry = ["pytest", "-q", "--junitxml=out.xml"]``, and write a metric that only reads the saved report; the
-  metric never runs the tests itself. For a command entry, a nonzero exit code is normal output, not a
-  failure: the metric gets ``exit_code`` and decides what it means. For example, pytest exits 1 when some
-  tests fail, so the metric reads the report and gives partial credit. Write each API that a role calls as
-  ``[services.<name>]`` with a ``url`` and ``headers`` that hold each secret as ``${{NAME}}``, for example
-  ``url = "https://api.example.com/v1"`` and ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List
-  in each role's ``services`` every service the role calls, for example ``services = ["judge"]`` in
-  ``[metric]``. When the candidate calls MCP servers, describe them in a standard ``.mcp.json`` file and set
+  ``entry = ["pytest", "-q"]``, and write a metric that only reads ``output["stdout"]`` and
+  ``output["exit_code"]``; the metric never runs the tests itself. The metric box holds no candidate files, so
+  the metric cannot read a report file that the tests write. For a command entry, a nonzero exit code is normal
+  output, not a failure: the metric gets ``exit_code`` and decides what it means. For example, pytest exits 1
+  when some tests fail, so the metric counts the passed and failed tests in ``stdout`` and gives partial credit.
+  Write each API that a role calls as ``[services.<name>]`` with a ``url`` and ``headers`` that hold each
+  secret as ``${{NAME}}``, for example ``url = "https://api.example.com/v1"`` and
+  ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List in each role's ``services`` every service
+  the role calls, for example ``services = ["judge"]`` in ``[metric]``.
+  When the candidate calls MCP servers, describe them in a standard ``.mcp.json`` file and set
   ``mcp = "<path>"`` in ``[run]``, for example ``mcp = ".mcp.json"``; show the user the file's contents. Only
   http servers with a ``url`` are supported now, for example
   ``"maps": {{"url": "https://mapstools.googleapis.com/mcp"}}``. Put placeholders such as ``${{MAPS_KEY}}``

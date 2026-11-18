@@ -783,11 +783,13 @@ def test_guide_has_the_run_entry_write_the_metric_reads_output() -> None:
 
 
 def test_guide_puts_the_test_command_in_the_run_entry() -> None:
-    """A repository scored by its own tests runs them from [run] entry; the metric only reads the report (E40)."""
+    """A repository scored by its own tests runs them from [run] entry; the metric only reads its output (E40)."""
     prompt = _guide()
 
-    assert 'entry = ["pytest", "-q", "--junitxml=out.xml"]' in prompt
-    assert "only reads the saved report" in prompt
+    assert 'entry = ["pytest", "-q"]' in prompt
+    assert 'only reads ``output["stdout"]`` and ``output["exit_code"]``' in prompt
+    assert "cannot read a report file that the tests write" in prompt
+    assert "junitxml" not in prompt
     assert "the metric never runs the tests itself" in prompt
 
 
@@ -887,7 +889,7 @@ def test_guide_example_is_a_valid_optimize_toml() -> None:
     constraints = repo_constraints.parse_constraints(OPTIMIZE_TOML_EXAMPLE.encode())
 
     assert OPTIMIZE_TOML_EXAMPLE in METRIC_GUIDE
-    assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
+    assert constraints.run_entry == ("pytest", "-q")
     assert constraints.editable_paths == ("src",)
     assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
 
