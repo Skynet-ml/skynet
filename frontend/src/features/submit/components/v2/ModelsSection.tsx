@@ -47,7 +47,15 @@ import { msg } from "@/shared/lib/messages";
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
-import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
+import {
+  DEFAULT_PROPOSER,
+  HARNESS_DEFAULT_PICK,
+  harnessPickerValue,
+  pickHarness,
+  proposerHeader,
+  proposerKnobs,
+  usesNativeProposer,
+} from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
 import {
   DEFAULT_SHINKA_SETTINGS,
@@ -106,8 +114,13 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   const reflectionLabel = t("submit.v2.optimizer.models.reflection.label");
   const updateProposer = (patch: Partial<typeof proposer>) =>
     patchOptimizer({ proposer: { ...proposer, ...patch } });
-  // The proposer harness runs the reflection model, so it limits the effort.
-  const limitingHarness = effortHarness(proposer, nativeProposer);
+  // Until the user picks a harness, the request sends none and the server
+  // chooses (SKY-753); the effort limit still assumes the default harness.
+  const limitingHarness = effortHarness(
+    { ...proposer, harness: proposer.harness ?? DEFAULT_PROPOSER.harness },
+    nativeProposer,
+  );
+  const header = proposerHeader(proposer);
   const fitHarness = (config: ModelConfig) =>
     limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
   // A harness, host CLI or engine change can leave a stored effort the new
@@ -280,8 +293,14 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           onOpenChange={setProposerOpen}
           trailing={
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <HarnessLogo harness={proposer.harness} size={14} />
-              {harnessLabel(proposer.harness)}
+              {"harness" in header ? (
+                <>
+                  <HarnessLogo harness={header.harness} size={14} />
+                  {harnessLabel(header.harness)}
+                </>
+              ) : (
+                t(header.labelKey)
+              )}
             </span>
           }
           alwaysShowTrailing
@@ -293,16 +312,23 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
               tip="submit.blackbox.proposer"
             >
               <Select
-                value={proposer.harness}
+                value={harnessPickerValue(proposer)}
                 onValueChange={(value) => {
-                  const harness = value as BlackboxHarness;
-                  patchOptimizer({ proposer: { ...proposer, harness } });
+                  patchOptimizer({
+                    proposer: pickHarness(
+                      proposer,
+                      value as BlackboxHarness | typeof HARNESS_DEFAULT_PICK,
+                    ),
+                  });
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
-                  <SelectValue />
+                  <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")} />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={HARNESS_DEFAULT_PICK}>
+                    {t("submit.v2.optimizer.proposer.harness_default")}
+                  </SelectItem>
                   {BLACKBOX_HARNESSES.map((h) => (
                     <SelectItem key={h} value={h}>
                       <span className="flex items-center gap-2">

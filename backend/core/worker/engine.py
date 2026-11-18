@@ -78,7 +78,7 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
-from ..models.blackbox import STORED_PAYLOAD_CONTEXT
+from ..models.blackbox import HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -992,9 +992,16 @@ class BackgroundWorker:
                 if payload_dict.get("max_cost_cents") is None:
                     payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
                 host = host_proposer(payload_dict)
+                # A host CLI that local mode filled in gives way to the file's
+                # [proposer] entry at staging (SKY-753), so only staging can say
+                # whether this run uses it.
+                proposer_settings = payload_dict.get("proposer")
+                staging_decides_host = is_repo_payload(payload_dict) and bool(
+                    isinstance(proposer_settings, dict) and proposer_settings.get(HOST_CLI_AUTO_KEY)
+                )
                 # The bind waits for the staged hidden paths, but a host proposer
                 # it would refuse must fail before setup and the scorer cost money.
-                if host is not None:
+                if host is not None and not staging_decides_host:
                     check_host_agent(settings, cli=host[0], permission=host[1])
                 if is_repo_payload(payload_dict):
                     with self._renewing_lease(worker_id):
@@ -1008,6 +1015,10 @@ class BackgroundWorker:
                             engine=byok_engine,
                             require_constraints=True,
                         )
+                        if staging_decides_host:
+                            host = host_proposer(payload_dict)
+                            if host is not None:
+                                check_host_agent(settings, cli=host[0], permission=host[1])
                         self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
                         # Before the setup model and the scorer box, so a refused run costs nothing.
                         gate_failures = check_repository(

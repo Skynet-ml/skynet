@@ -560,6 +560,44 @@ def test_explicit_resume_requires_reconciliation_and_is_not_triggered_by_funding
     assert service.resume_admission(budget.id, "alice", expected_generation=0).state == "attached"
 
 
+@pytest.mark.parametrize("reason", ["user_cancelled", "user_paused"])
+def test_a_later_non_user_stop_keeps_the_user_stop_reason(engine: Engine, reason: str) -> None:
+    """Keep a user's stop reason against later stops, so only the user's own resume reopens it (SKY-814).
+
+    Args:
+        engine: Private funded ledger database.
+        reason: The reason the user's cancel or pause closes admission with.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="user-stop")
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    service.stop_admission(budget.id, "alice", reason="budget_reached")
+    assert service.stop_admission(budget.id, "alice", reason=reason).blocked_reason == reason
+
+    for later in ("budget_reached", "job_failed"):
+        kept = service.stop_admission(budget.id, "alice", reason=later)
+        assert (kept.state, kept.blocked_reason) == ("closed", reason)
+    swept = service.resume_admission(budget.id, "alice", expected_generation=0, automatic=True)
+    assert (swept.state, swept.blocked_reason) == ("closed", reason)
+    resumed = service.resume_admission(budget.id, "alice", expected_generation=0)
+    assert (resumed.state, resumed.blocked_reason) == ("attached", None)
+    assert service.stop_admission(budget.id, "alice", reason="budget_reached").blocked_reason == "budget_reached"
+
+
+def test_a_cancel_replaces_a_pause_reason(engine: Engine) -> None:
+    """Let a user's cancel replace the user's earlier pause as the stop reason (SKY-814).
+
+    Args:
+        engine: Private funded ledger database.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="pause-then-cancel")
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    service.stop_admission(budget.id, "alice", reason="user_paused")
+
+    assert service.stop_admission(budget.id, "alice", reason="user_cancelled").blocked_reason == "user_cancelled"
+
+
 def test_overrun_retains_evidence_and_coverage_without_unbounded_debit(engine: Engine) -> None:
     """Quarantine reported usage above a verified bound instead of charging beyond it."""
     service = BudgetService(engine=engine)
@@ -1371,3 +1409,48 @@ def test_restart_waiver_returns_grant_cents_to_the_grant(engine: Engine) -> None
     with Session(engine) as session:
         wallet = session.get(BillingCustomerModel, "alice")
         assert (wallet.grant_remaining, wallet.balance_cents) == (2, 50)
+
+
+def test_a_lease_slice_settles_each_step_once_by_its_step_id(engine: Engine) -> None:
+    """An agent lease settles cumulative spend under each step id; a replayed step adds nothing (SKY-717).
+
+    Args:
+        engine: Private funded ledger database.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="workspace")
+    service.attach_to_job(budget.id, "alice", "run-1", expected_revision=budget.revision)
+    (lease,) = service.reserve_lease(
+        budget.id,
+        "alice",
+        lease_key="run-1:g0:lease-0",
+        slices=1,
+        generation=0,
+        phase="run",
+        cost_kind="agent_lease",
+        request_fingerprint="run-1:g0:lease-0",
+        price_snapshot={"version": "agent-lease-v1"},
+        max_cents=4,
+    )
+    service.mark_dispatched(lease.id, "alice")
+    for step_id, cumulative in (("run-1:a:0", "1.5"), ("run-1:a:1", "2.5"), ("run-1:a:0", "1.5")):
+        service.settle(
+            lease.id, "alice", evidence_key=step_id, actual_cents=cumulative, evidence={"step_id": step_id}, final=False
+        )
+    with pytest.raises(BudgetConflictError):
+        service.settle(
+            lease.id, "alice", evidence_key="run-1:a:1", actual_cents=3, evidence={"step_id": "run-1:a:1"}, final=False
+        )
+    assert service.get(budget.id, "alice").reserved_cents == Decimal("1.5")
+
+    closed = service.settle(lease.id, "alice", evidence_key="close", actual_cents="2.5", evidence={}, final=True)
+
+    assert (closed.state, closed.actual_cents) == ("settled", Decimal("2.5"))
+    assert (closed.budget.run_spent_cents, closed.budget.reserved_cents, closed.budget.billed_cents) == (
+        Decimal("2.5"),
+        Decimal(0),
+        3,
+    )
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(ExecutionUsageEvidenceModel)) == 3
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 47

@@ -17,8 +17,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.api.errors import DomainError
@@ -30,6 +32,7 @@ from core.storage.models import (
     AgentConversationModel,
     AgentMessageModel,
     AgentStagedDatasetModel,
+    AgentStepModel,
     Base,
     BillingCustomerModel,
     ChatMediaModel,
@@ -37,9 +40,12 @@ from core.storage.models import (
     JobEmbeddingModel,
     LogEntryModel,
     RunCallModel,
+    StoragePackModel,
     TaggingSessionModel,
+    TreeObjectModel,
 )
 from core.storage.remote import RemoteDBJobStore
+from core.storage.shard_map import ShardMap
 from core.storage.usage import (
     STORAGE_CATEGORIES,
     UNSENT_MEDIA_RETENTION,
@@ -226,7 +232,15 @@ def test_run_calls_fold_into_optimization_footprint(store: _SQLiteJobStore) -> N
 
 
 def _insert_dataset(store: _SQLiteJobStore, *, dataset_id: str, owner: str, name: str, byte_size: int) -> None:
-    """Insert a minimal dataset row directly for storage-items ranking tests."""
+    """Insert a minimal dataset row directly for storage-items ranking tests.
+
+    Args:
+        store: The job store.
+        dataset_id: The dataset id.
+        owner: The owner username.
+        name: The dataset name.
+        byte_size: The stored size in bytes.
+    """
     with store._session_factory() as session:
         session.add(
             DatasetModel(
@@ -294,7 +308,15 @@ def test_storage_items_honours_limit(store: _SQLiteJobStore) -> None:
 
 
 def _insert_staged(store: _SQLiteJobStore, *, staged_id: str, username: str, filename: str, rows: list) -> None:
-    """Insert a staged (pending) upload row directly for category-listing tests."""
+    """Insert a staged (pending) upload row directly for category-listing tests.
+
+    Args:
+        store: The job store.
+        staged_id: The staged upload id.
+        username: The owner username.
+        filename: The uploaded file name.
+        rows: The staged rows.
+    """
     with store._session_factory() as session:
         session.add(
             AgentStagedDatasetModel(
@@ -393,7 +415,15 @@ def test_category_items_lists_staged_uploads(store: _SQLiteJobStore) -> None:
 
 
 def _insert_tagging_session(store: _SQLiteJobStore, *, session_id: str, username: str, name: str, rows: list) -> None:
-    """Insert a labeling session row directly for storage-accounting tests."""
+    """Insert a labeling session row directly for storage-accounting tests.
+
+    Args:
+        store: The job store.
+        session_id: The labeling session id.
+        username: The owner username.
+        name: The session name.
+        rows: The session rows.
+    """
     with store._session_factory() as session:
         session.add(
             TaggingSessionModel(
@@ -600,6 +630,15 @@ def test_local_postgres_free_bytes_reads_df_and_fails_soft(monkeypatch: pytest.M
     calls: list[list[str]] = []
 
     def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        """Keep the command and answer as ``df`` does with 30 GiB free.
+
+        Args:
+            args: The command.
+            **_: The other ``subprocess.run`` arguments.
+
+        Returns:
+            A completed process with the ``df`` output.
+        """
         calls.append(args)
         return SimpleNamespace(returncode=0, stdout="   Avail\n32212254720\n")
 
@@ -704,3 +743,86 @@ def test_admin_overrides_remain_effective_with_historical_subscription(store: _S
     assert store.get_effective_user_quota("alice") == 12
     store.set_user_quota_override("alice", None)
     assert store.get_effective_user_quota("alice") is None
+
+
+def _add_tree(engine: Engine, username: str, object_id: str, byte_size: int) -> None:
+    """Store one tree object row for an account.
+
+    Args:
+        engine: The database that holds the row.
+        username: The owner.
+        object_id: The object id.
+        byte_size: The object size.
+    """
+    with Session(engine) as session:
+        session.add(
+            TreeObjectModel(
+                username=username,
+                object_id=object_id,
+                byte_size=byte_size,
+                pack_key="packs/w1/p.pack",
+                pack_offset=0,
+                pack_length=byte_size,
+            )
+        )
+        session.commit()
+
+
+def test_tree_objects_on_every_step_log_shard_count_toward_the_owner(store: _SQLiteJobStore, tmp_path: Path) -> None:
+    """The trees on another shard count, so a sharded account cannot store trees for free (SKY-731).
+
+    Args:
+        store: SQLite-backed store.
+        tmp_path: Pytest's temporary folder.
+    """
+    shard = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(
+        shard, tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+    )
+    store._step_log_shards = ShardMap(store.engine, {"s2": shard})
+    _add_tree(store.engine, "alice", "a" * 64, 100)
+    _add_tree(shard, "alice", "b" * 64, 40)
+    _add_tree(shard, "bob", "c" * 64, 7)
+
+    usage = store.compute_user_storage("alice")
+
+    assert usage.total == 140
+    assert usage.breakdown["optimizations"] == 140
+    shard.dispose()
+
+
+def test_storage_with_no_shard_map_refuses_a_shard_config(store: _SQLiteJobStore, monkeypatch) -> None:
+    """With shards configured, a sum of the main database alone fails instead of leaving out their trees.
+
+    Args:
+        store: SQLite-backed store.
+        monkeypatch: Pytest fixture that patches the settings.
+    """
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr("sqlite://")})
+
+    with pytest.raises(ValueError, match="shard map"):
+        compute_user_storage(store.engine, "alice")
+
+
+def test_a_step_log_shard_that_does_not_answer_is_left_out_of_the_storage_count(
+    store: _SQLiteJobStore, tmp_path: Path
+) -> None:
+    """A down shard does not fail the count: the quota is a soft limit, so the other shards still count (SKY-731).
+
+    Args:
+        store: SQLite-backed store.
+        tmp_path: Pytest's temporary folder.
+    """
+    shard = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(shard, tables=[TreeObjectModel.__table__])
+    # SQLite cannot open a file in a folder that does not exist, so each query on this shard fails.
+    down = create_engine(f"sqlite:///{tmp_path / 'missing' / 's3.sqlite'}")
+    store._step_log_shards = ShardMap(store.engine, {"s2": shard, "s3": down})
+    _add_tree(store.engine, "alice", "a" * 64, 100)
+    _add_tree(shard, "alice", "b" * 64, 40)
+
+    usage = store.compute_user_storage("alice")
+
+    assert usage.total == 140
+    shard.dispose()
+    down.dispose()

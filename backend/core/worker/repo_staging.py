@@ -12,13 +12,14 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,10 +61,19 @@ from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
+from ..models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CUSTOM,
+    FILE_PROPOSER_REFUSED_ENGINES,
+    HOST_CLI_AUTO_KEY,
+)
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
@@ -72,6 +82,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
+    RepoEnvironment,
     RoleEnvironment,
     ServiceSpec,
     TargetStage,
@@ -86,6 +97,7 @@ from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_comma
 from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
+    SAFE_GIT,
     drop_paths,
     inside,
     linked_hidden_paths,
@@ -420,7 +432,13 @@ def stage_repository(
             constraints,
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
+            approved_proposer=_names_proposer(result),
         )
+        # A custom command runs without the relay's MCP servers, so it would run without the file's tools.
+        if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
+            raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
+        if environment.proposer_entry is not None:
+            environment = _without_refused_engines(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -496,6 +514,17 @@ def stage_repository(
     repo["editable_paths"] = list(environment.editable_paths)
     repo[ENVIRONMENT_KEY] = record
     result["target"]["setup_command"] = environment.setup_command
+    if environment.proposer_entry is not None:
+        result["proposer"] = {
+            **(result.get("proposer") or {}),
+            "harness": BLACKBOX_HARNESS_CUSTOM,
+            "run_command": shlex.join(environment.proposer_entry),
+            # The guest runs the file's setup in its checkout (``proposer_setup`` below), not in the bootstrap.
+            "install_command": None,
+            # Only a filled-in host CLI reaches here, and it would replace the file's command.
+            "host_cli": None,
+        }
+        result["proposer"].pop(HOST_CLI_AUTO_KEY, None)
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
@@ -513,6 +542,8 @@ def stage_repository(
         # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
         "hidden_hashes": hidden_hashes(hidden),
         "outcome": record["outcome"],
+        "file_proposer": environment.proposer_entry is not None,
+        "proposer_setup": list(environment.proposer_setup or ()),
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -556,6 +587,75 @@ def stage_repository(
         drafts=drafts,
         require_version=require_version,
         record_facts=record_facts,
+    )
+
+
+# The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
+_FILE_PROPOSER_REFUSALS = {
+    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
+}
+
+
+def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
+    """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
+
+    ShinkaEvolve writes versions with its own editor and never runs the file's
+    command. AutoResearch and Meta-Harness call the proposer from their lab
+    folder and read their own protocol files there, so the files the command
+    changes do not become their versions (SKY-753; Gilad, 2026-11-18).
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        strategy: The stored run request's ``strategy``.
+
+    Returns:
+        The environment, with a note for an Auto run.
+
+    Raises:
+        ConstraintsError: When the run is a single run of a refused engine.
+    """
+    if strategy.get("mode", "auto") == "single":
+        engine = strategy.get("engine")
+        if engine in FILE_PROPOSER_REFUSED_ENGINES:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {_FILE_PROPOSER_REFUSALS[engine]} Remove [proposer] entry, or choose another"
+                " engine.",
+                section="proposer",
+                key="entry",
+            )
+        return environment
+    return replace(
+        environment,
+        notes=(
+            *environment.notes,
+            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+            " proposer command in the contract file.",
+        ),
+    )
+
+
+def _names_proposer(payload: Mapping[str, Any]) -> bool:
+    """Tell whether a run request names its own proposer.
+
+    The stored request keeps ``proposer.harness`` only when the client sent
+    it (SKY-753), so a default does not replace ``[proposer] entry``. A host
+    CLI, a run command and an install command are the user's own choice too,
+    but not a host CLI that local mode filled in.
+
+    Args:
+        payload: The stored run request.
+
+    Returns:
+        True when the request sends ``proposer.harness``, a host CLI, a run
+        command or an install command.
+    """
+    proposer = payload.get("proposer")
+    return isinstance(proposer, dict) and (
+        "harness" in proposer
+        or (proposer.get("host_cli") is not None and not proposer.get(HOST_CLI_AUTO_KEY))
+        or bool(proposer.get("run_command") or proposer.get("install_command"))
     )
 
 
@@ -1762,6 +1862,21 @@ def _suite_patch(archive: Path, files: dict[str, str], workdir: Path) -> str:
         shutil.rmtree(root, ignore_errors=True)
 
 
+# The scratch root holds files from the job's suite, so git must read no
+# config, attributes or ignore files under it: a planted ``.gitconfig`` or
+# ``.config/git/`` file would run code on the worker host through an alias,
+# hook or fsmonitor (SKY-812). The calls make no commit, so git needs no
+# identity from a config file.
+_SCRATCH_GIT_ENV = {
+    "HOME": "/nonexistent",
+    "XDG_CONFIG_HOME": "/nonexistent",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+}
+
+
 def _git(cwd: Path, *arguments: str) -> str:
     """Run git in a scratch repository with no user or system config.
 
@@ -1773,12 +1888,12 @@ def _git(cwd: Path, *arguments: str) -> str:
         Standard output.
     """
     return subprocess.run(
-        ["git", "-c", "core.autocrlf=false", *arguments],
+        ["git", "-c", "core.autocrlf=false", *SAFE_GIT, *arguments],
         cwd=cwd,
         check=True,
         capture_output=True,
         text=True,
-        env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cwd)},
+        env={"PATH": os.environ.get("PATH", ""), **_SCRATCH_GIT_ENV},
     ).stdout
 
 
