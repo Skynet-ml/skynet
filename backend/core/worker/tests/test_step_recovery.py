@@ -1312,6 +1312,21 @@ def test_the_cancel_close_skips_a_cancelled_row_that_a_resume_fenced(store: Step
     assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("closed", "user_cancelled", 0)
 
 
+def test_the_cancel_close_skips_a_row_that_a_resume_made_pending_at_the_same_generation(store: StepJobStore) -> None:
+    """A resume of a run with a usage-wait marker skips the fence; the late close at that generation does nothing."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    service = BudgetService(engine=store.engine)
+    _hold(store, "resumed", generation=0)
+    _set_job(store, status="pending", execution_budget_generation=0)
+
+    assert not service.close_for_cancelled_job(budget_id, "owner", job_id=RUN, expected_generation=0)
+
+    budget = _budget(store)
+    assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("attached", None, 5)
+
+
 def test_a_cancel_that_loses_the_race_to_the_wake_cancels_the_woken_run(
     store: StepJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
