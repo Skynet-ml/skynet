@@ -164,7 +164,7 @@ DEFAULT_FLUSH_MAX_BYTES = Settings.model_fields["step_log_flush_max_bytes"].defa
 # A reference shape run (reference_shapes.py, 2 rounds) commits 8 steps and opens 6 boxes: the seed's
 # command and metric, and a command and a metric after each of the 2 model steps.
 REFERENCE_BOX_STEPS_PER_STEP = 6 / 8
-LOCAL_S3_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # The only libpq query keys the swarm database URL may carry: none of them can change the host.
 DB_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "application_name"})
 # A loopback server can be a port-forward to a remote database, or the local dev database. The swarm creates
@@ -317,9 +317,9 @@ def _s3_settings() -> tuple[str, str] | None:
         return None
     # With no endpoint, boto3 goes to real AWS S3; the swarm writes only to a local server.
     endpoint = os.environ.get("LOAD_TEST_SWARM_S3_ENDPOINT", "").strip()
-    if urlsplit(endpoint).hostname not in LOCAL_S3_HOSTS:
+    if urlsplit(endpoint).hostname not in LOOPBACK_HOSTS:
         raise RuntimeError(
-            f"LOAD_TEST_SWARM_S3_BUCKET needs LOAD_TEST_SWARM_S3_ENDPOINT on {sorted(LOCAL_S3_HOSTS)}, got {endpoint!r}"
+            f"LOAD_TEST_SWARM_S3_BUCKET needs LOAD_TEST_SWARM_S3_ENDPOINT on {sorted(LOOPBACK_HOSTS)}, got {endpoint!r}"
         )
     if boto3 is None:
         raise RuntimeError("boto3 is not installed")
@@ -364,13 +364,13 @@ def _check_db_url(url: str | None) -> None:
     # libpq takes the host from query keys (host, hostaddr, service, a nested dsn) before the URL host, so a
     # local URL host proves nothing unless every other query key is refused.
     unknown = {key.lower() for key in parsed.query} - DB_QUERY_KEYS
-    if unknown or parsed.host not in LOCAL_S3_HOSTS:
-        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL must name a database on {sorted(LOCAL_S3_HOSTS)}")
+    if unknown or parsed.host not in LOOPBACK_HOSTS:
+        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL must name a database on {sorted(LOOPBACK_HOSTS)}")
     # PGHOSTADDR overrides the URL host, and a service file can set hostaddr; PGHOST is safe only when local.
     redirects = [
         name
         for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
-        if os.environ.get(name, "").strip() and not (name == "PGHOST" and os.environ[name].strip() in LOCAL_S3_HOSTS)
+        if os.environ.get(name, "").strip() and not (name == "PGHOST" and os.environ[name].strip() in LOOPBACK_HOSTS)
     ]
     if redirects:
         raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL is refused while {redirects} are set: unset them")
@@ -543,8 +543,6 @@ def _reset(engine: Engine, runs: list[str]) -> None:
     # A local worker's orphan sweep takes a running job with no lease or a lapsed one; the lease outlasts the pass.
     lease = datetime.now(UTC) + timedelta(seconds=2 * PASS_TIMEOUT_SECONDS)
     with Session(engine) as session:
-        # The stamp makes the run ids new, so only a run of this invocation's last pass can still have rows.
-        _delete_swarm_rows(session, runs, [])
         session.add_all(
             JobModel(
                 optimization_id=run_id,
