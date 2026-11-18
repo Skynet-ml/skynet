@@ -54,7 +54,7 @@ from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import harness_bridge, runner
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
@@ -2180,6 +2180,123 @@ _CRASHED_EDIT = {
 )
 def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, Any]) -> None:
     """A metric error has no score (SKY-350), so even a stray number never makes it publishable."""
+    assert repo_staging.improved_patch(result) is None
+
+
+_RUN_FAILED_START = {
+    "candidate": "",
+    "score": None,
+    "side_info": {"error": "Run failed: ConnectionError", "status": RUN_FAILED_STATUS},
+}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(
+            None,
+            0.4,
+            versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}],
+            details={"baseline_run_failed": True},
+        ),
+        _result(None, None, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+    ],
+)
+def test_a_scored_version_beats_a_starting_code_with_no_score(result: dict[str, Any]) -> None:
+    """A starting code whose ``[run]`` failed has no score, so a scored version opens a PR (SKY-751).
+
+    Args:
+        result: Finished result whose starting code has no score.
+    """
+    assert repo_staging.improved_patch(result) == _EDIT
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+    assert "The starting code has no score" in body
+    assert "This version scored 0.4." in body
+
+
+def test_a_starting_code_whose_final_run_failed_loses_to_a_scored_version() -> None:
+    """The search scored the starting code, but its final ``[run]`` failed, so the winner opens a PR (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": True})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_the_pr_body_says_the_starting_code_has_no_score_when_its_final_run_failed() -> None:
+    """The final run decides the PR body: the search scores never stand in for a failed starting code (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.6, versions=versions, details={"baseline_run_failed": True})
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "The starting code has no score: it failed on at least one case. This version scored 0.6." in body
+    assert "Score went from" not in body
+
+
+def test_a_metric_error_in_the_final_run_never_lets_a_version_win() -> None:
+    """The final run decides: a metric error there opens no PR, even after a search ``[run]`` failure (SKY-751)."""
+    versions = [_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": False})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+@pytest.mark.parametrize("run_failed", [True, False])
+def test_a_final_run_with_no_score_for_either_version_publishes_nothing(run_failed: bool) -> None:
+    """Both final-run scores are empty, so the search scores never stand in and no PR opens (SKY-751).
+
+    Args:
+        run_failed: The final run's ``baseline_run_failed`` flag.
+    """
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": run_failed})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+def test_a_stopped_run_still_compares_the_search_scores() -> None:
+    """A run stopped before its final run has no run-failed flag, so the version scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_a_budget_stop_in_the_winners_held_out_run_compares_the_search_scores() -> None:
+    """The starting code's held-out run finished, the winner's did not, so the search scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(0.3, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert "Score went from 0.3 to 0.5." in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_a_version_whose_run_failed_is_never_published() -> None:
+    """A best version with a failed ``[run]`` case has no score, so it opens no PR (SKY-751)."""
+    failed = {**_RUN_FAILED_START, "candidate": _EDIT}
+    result = _result(None, None, versions=[{"candidate": "", "score": 0.2}, failed])
+
+    assert repo_staging.improved_patch(result) is None
+
+
+_METRIC_ERROR_START = {"candidate": "", "score": None, "side_info": {"error": "KeyError", "status": METRIC_ERROR}}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, 0.4, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, None, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, 0.4, versions=[{"candidate": _EDIT, "score": 0.4}]),
+    ],
+    ids=["final-run", "stopped", "starting-code-not-recorded"],
+)
+def test_a_scored_version_never_beats_a_starting_code_the_metric_crashed_on(result: dict[str, Any]) -> None:
+    """Only a failed ``[run]`` of the starting code lets a scored version open a PR; a metric error does not (SKY-751).
+
+    Args:
+        result: Finished result whose starting code had a metric error.
+    """
     assert repo_staging.improved_patch(result) is None
 
 

@@ -102,6 +102,7 @@ from .harnesses import REGISTRY
 from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     STATUS_KEY,
     Candidate,
     EngineContext,
@@ -111,9 +112,10 @@ from .protocol import (
     Task,
     candidate_key,
     is_metric_error,
+    is_run_failed,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
-from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, RUN_FAILED_STATUS, SETUP_ALLOWANCE_SECONDS
+from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
@@ -528,25 +530,29 @@ def _agent_scorer(
 class FinalRun:
     """One version's fresh scores from the final run, outside the optimization budget."""
 
-    # ``None`` when the metric crashed on any case (a metric error): a crash is
-    # not a measurement, so the version has no score at all (SKY-350).
+    # ``None`` when the metric crashed on any case (a metric error) or the
+    # version's ``[run]`` entry failed on one: a crash is not a measurement, so
+    # the version has no score at all (SKY-350, SKY-751).
     score: float | None
     feedback: str | None
     named: dict[str, BlackboxNamedScore]
-    # Per case ``(score, feedback)``; empty when the run has no cases. A metric
-    # error case has no score, and its feedback is the error text.
+    # Per case ``(score, feedback)``; empty when the run has no cases. A case
+    # with no score has its error text, or its "Run failed" text, as feedback.
     cases: list[tuple[float | None, str]] = field(default_factory=list)
     runs: int = 0
     # Per case, the trusted observation of the run stage (time, model calls,
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
     # Error text of each run that failed: a metric error, or, on a repository
-    # run, the traceback of the version's own crashed run, which scores 0 (SKY-221).
-    # The traceback is stored without its "Run failed: " prefix.
+    # run, the traceback of the version's own failed run (SKY-221). The
+    # traceback is stored without its "Run failed: " prefix.
     failures: list[str] = field(default_factory=list)
     # How many cases returned each named score. ``named`` holds a name's mean
     # but cannot show that some cases left the name out (SKY-692).
     named_cases: dict[str, int] = field(default_factory=dict)
+    # Whether the version's ``[run]`` entry failed on any case, not only the
+    # metric: only that makes the starting code lose to a scored version (SKY-751).
+    run_failed: bool = False
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
@@ -636,13 +642,13 @@ def _final_run(
         case_offset: Added to each case's index in the run records, so the
             held-out pass does not overwrite the selection pass's records.
         repo_scorer: Whether ``scorer`` is the repository scorer, the only
-            scorer whose ``run_failed`` status counts as a failed case.
+            scorer whose ``run_failed`` feedback holds the failure text.
 
     Returns:
         The mean score, the feedback and named scores, and each case's result.
-        The score is ``None``, and the named scores empty, when the metric
-        crashed on any case. ``failures`` holds the error text of each failed
-        case: metric errors, and on a repository run the crashed runs.
+        The score is ``None``, and the named scores empty, when any case has
+        no score. ``failures`` holds the error text of each such case: metric
+        errors, and on a repository run the failed runs.
 
     Raises:
         ServiceError: When the scorer fails on the candidate, including when
@@ -658,8 +664,8 @@ def _final_run(
             numbered: The case's 1-based position and the case itself.
 
         Returns:
-            The score (``None`` after a metric error), side information and
-            trusted observation for that case.
+            The score (``None`` when the case has no score), side information
+            and trusted observation for that case.
         """
         position, case = numbered
         stage = STAGE_BASELINE if phase == PHASE_BASELINE else STAGE_EVALUATION
@@ -673,7 +679,8 @@ def _final_run(
         # Per-case heartbeats at DEBUG surface only in the Logs tab's verbose view.
         if score is None or is_metric_error(side_info):
             error = side_info.get("error")
-            logger.debug("%s final run %d/%d %s: %s", label, position, len(targets), METRIC_ERROR, error)
+            status = side_info.get(STATUS_KEY) or METRIC_ERROR
+            logger.debug("%s final run %d/%d %s: %s", label, position, len(targets), status, error)
             return None, side_info, observation
         logger.debug("%s final run %d/%d score=%.3f", label, position, len(targets), score)
         return score, side_info, observation
@@ -694,17 +701,23 @@ def _final_run(
     except Exception as exc:
         raise ServiceError(f"scorer failed on the {label}: {type(exc).__name__}: {exc}") from exc
     side_infos = [side_info for _, side_info, _ in scored]
-    errors = [str(side_info.get("error") or METRIC_ERROR) for score, side_info, _ in scored if score is None]
     feedbacks = [
         str(side_info.get(FEEDBACK_KEY) or (side_info.get("error") if score is None else "") or "")
         for score, side_info, _ in scored
     ]
+    errors = [
+        # Pending rule-judge notes can come before the failure text.
+        feedback.rpartition(RUN_FAILED)[2]
+        if repo_scorer and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        else str(side_info.get("error") or METRIC_ERROR)
+        for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
+        if score is None
+    ]
     elapsed = time.perf_counter() - started
     mean: float | None = None
     if errors:
-        logger.warning(
-            "%s has no score: %s on %d of %d run(s): %s", label, METRIC_ERROR, len(errors), len(scored), errors[0]
-        )
+        kind = next(str(side_info.get(STATUS_KEY) or METRIC_ERROR) for score, side_info, _ in scored if score is None)
+        logger.warning("%s has no score: %s on %d of %d run(s): %s", label, kind, len(errors), len(scored), errors[0])
     else:
         mean = sum(score for score, _, _ in scored if score is not None) / len(scored)
         logger.info("%s scored %.3f over %d run(s) in %.0fs", label, mean, len(scored), elapsed)
@@ -716,13 +729,8 @@ def _final_run(
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
-        failures=errors
-        + [
-            # Pending rule-judge notes can come before the failure text.
-            feedback.rpartition(RUN_FAILED)[2]
-            for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
-            if repo_scorer and score is not None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
-        ],
+        failures=errors,
+        run_failed=any(score is None and is_run_failed(side_info) for score, side_info, _ in scored),
     )
 
 
@@ -858,8 +866,9 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
     Returns:
         One entry per distinct version in first-seen order, side info made
         JSON-safe and trimmed to :data:`VERSION_SIDE_INFO_BYTE_CAP` in total.
-        A version that hit a metric error has no score, and its side info
-        carries the error text and ``status: metric_error``.
+        A version with a case that has no score has no score, and its side
+        info carries the error text and ``status: metric_error``, or
+        ``status: run_failed`` when its ``[run]`` entry failed (SKY-751).
     """
     val_scores = val_scores or {}
     versions = [
@@ -875,7 +884,11 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
                 json.dumps(
                     record.side_info
                     if record.metric_error is None
-                    else {**record.side_info, "error": record.metric_error, "status": METRIC_ERROR},
+                    else {
+                        **record.side_info,
+                        "error": record.metric_error,
+                        "status": RUN_FAILED_STATUS if record.run_failed else METRIC_ERROR,
+                    },
                     default=side_info_json_default,
                 )
             ),
@@ -884,7 +897,11 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
     ]
     sizes = [len(json.dumps(version.side_info)) for version in versions]
     total = sum(sizes)
-    weakest_first = sorted(range(len(versions)), key=lambda i: (versions[i].score or 0.0, versions[i].first_run))
+    # An unscored version ranks below every scored one, whatever the sign of the scores.
+    weakest_first = sorted(
+        range(len(versions)),
+        key=lambda i: (float("-inf") if versions[i].score is None else versions[i].score, versions[i].first_run),
+    )
     for i in weakest_first[:-1]:
         if total <= VERSION_SIDE_INFO_BYTE_CAP:
             break
@@ -1459,16 +1476,13 @@ def _run_job(
                 )
             )
             if baseline_val is not None and best_val.score is None:
-                logger.info("the optimized version has no score (%s); keeping the starting point", METRIC_ERROR)
-                best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
-            elif (
-                baseline_val is not None
-                and len(best_val.failures) == best_val.runs
-                and len(baseline_val.failures) < baseline_val.runs
-            ):
-                # SKY-221: every run of the winner crashed, so its 0 scores are
-                # not a measurement; keep the starting point, as for a metric error.
-                logger.info("the optimized version failed on every case; keeping the starting point")
+                if baseline_val.score is None:
+                    logger.warning(
+                        "No version has a score: each one failed on at least one case. "
+                        "The run keeps the starting version."
+                    )
+                else:
+                    logger.info("the optimized version has no score; keeping the starting point")
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
             elif (
                 baseline_val is not None
@@ -1588,6 +1602,11 @@ def _run_job(
             **finite_json(result.metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
+            # SKY-751: whether the starting code's final run had a failed [run]
+            # case; the pull request decision reads it with ``baseline_score``.
+            # It stays None unless both final runs finished, so a budget stop
+            # in the winner's held-out run never passes for a finished final run.
+            "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
             # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
             **({"outcome": verdict} if verdict else {}),
         },
