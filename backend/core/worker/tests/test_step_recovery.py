@@ -985,3 +985,55 @@ def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
     assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
     assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
     assert store.take_ended_orphans() == [(RUN, job["execution_generation"])]
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "job_failed")
+
+
+def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that loses the last automatic resume to another sweep does not fail the run that sweep requeued."""
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the other sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+
+    def other_sweep_requeues(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Let another sweep requeue the run with the last automatic resume after this sweep fenced it.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        result = waive(self, *args, **kwargs)
+        fenced = int(store.get_job(RUN)["execution_generation"])
+        _set_job(
+            store,
+            status="pending",
+            execution_generation=fenced + 1,
+            automatic_resumes=MAX_AUTOMATIC_RESUMES,
+            claimed_by=None,
+            lease_expires_at=None,
+        )
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", other_sweep_requeues)
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "pending"
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert budget.blocked_reason is None

@@ -1920,7 +1920,8 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
-            job.execution_generation = int(job.execution_generation or 0) + 1
+            held_generation = int(job.execution_generation or 0)
+            job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None
             current = int(job.attempts or 0)
@@ -1993,24 +1994,46 @@ class RemoteDBJobStore:
                     )
                 )
                 if not counted:
+                    budget_id, username = job.execution_budget_id, job.username
                     session.rollback()
                     # The fence above already moved the generation, so the sweep's own
                     # failure write would miss the row and leave the run running with
-                    # no kept error. End the run here, as the sweep would.
-                    job.status = "failed"  # type: ignore[assignment]
-                    job.stop_reason = "interrupted"
-                    job.completed_at = datetime.now(UTC)  # type: ignore[assignment]
-                    job.message = (  # type: ignore[assignment]
-                        f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
-                        f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
+                    # no kept error. End the run here, as the sweep would. The guard on
+                    # the generation and the status leaves alone a run that another
+                    # sweep requeued or a worker claimed since.
+                    ended = (
+                        session.query(JobModel)
+                        .filter(
+                            JobModel.optimization_id == optimization_id,
+                            JobModel.execution_generation == held_generation,
+                            JobModel.status.in_(("running", "validating")),
+                        )
+                        .update(
+                            {
+                                JobModel.status: "failed",
+                                JobModel.stop_reason: "interrupted",
+                                JobModel.completed_at: datetime.now(UTC),
+                                JobModel.message: (
+                                    f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
+                                    f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
+                                ),
+                                JobModel.recovery: None,
+                                JobModel.claimed_by: None,
+                                JobModel.claimed_at: None,
+                                JobModel.lease_expires_at: None,
+                            },
+                            synchronize_session=False,
+                        )
                     )
-                    job.recovery = None
-                    job.claimed_by = None  # type: ignore[assignment]
-                    job.claimed_at = None  # type: ignore[assignment]
-                    job.lease_expires_at = None  # type: ignore[assignment]
-                    ended_generation = int(job.execution_generation or 0)
+                    if not ended:
+                        session.rollback()
+                        return None
+                    # The resume above can reopen admission. Close it in the same
+                    # transaction as the failure, so a run that another sweep
+                    # requeued keeps its admission open.
+                    budget_service.stop_admission(budget_id, username, reason="job_failed", session=session)
                     session.commit()
-                    self._note_ended_orphan(optimization_id, ended_generation)
+                    self._note_ended_orphan(optimization_id, held_generation)
                     return None
             session.commit()
             return next_attempt
