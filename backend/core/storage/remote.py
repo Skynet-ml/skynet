@@ -2031,17 +2031,6 @@ class RemoteDBJobStore:
                         expected_generation=job.execution_budget_generation,
                         automatic=automatic,
                     )
-                if automatic and budget.blocked_reason in USER_STOP_REASONS:
-                    # The user cancelled or paused the run while this sweep held it,
-                    # and the user wins: the budget stays closed (SKY-814).
-                    _end_user_stopped_requeue(
-                        session,
-                        optimization_id,
-                        int(job.execution_generation or 0),
-                        _interrupted_recovery(job.recovery, interrupted),
-                        budget.blocked_reason,
-                    )
-                    return None
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
                     if automatic:
                         # A user's stop can close admission after the reads above, and it
