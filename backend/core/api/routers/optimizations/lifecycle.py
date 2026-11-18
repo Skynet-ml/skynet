@@ -124,11 +124,12 @@ def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> 
 def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: str) -> bool:
     """Set a run to ``cancelled`` with a compare-and-set on its current status.
 
-    A ``paused`` run has no worker. Its cancel clears ``recovery``, which
-    holds ``wake_at``, so the wake sweep never claims the run again (SKY-800).
-    The wake sweep also moves only a ``paused`` row, so one of the two writes
-    wins. When the wake wins, the run is active again and gets the active-run
-    cancel. A park can also commit after the read, so when the first write
+    A ``paused`` run has no worker. The wake sweep moves only a ``paused``
+    row, so one of the two writes wins (SKY-800). The write ends a park's
+    marker, which holds ``wake_at``, and keeps an ``interrupted`` marker, so a
+    run that a resume could restart from the beginning stays resumable
+    (SKY-814). When the wake wins, the run is active again and gets the
+    active-run cancel. A park can also commit after the read, so when the first write
     misses, the other write runs. A park and then a wake can make both writes
     miss, so the cancel reads the row again and retries while it is not
     terminal. After ``_CANCEL_TRIES`` misses the cancel gives up and reports
@@ -154,16 +155,10 @@ def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: 
     status = job.get("status")
     cancelled = False
     for _ in range(_CANCEL_TRIES):
-        writes: list[tuple[tuple[str, ...], dict[str, Any]]] = [
-            (_ACTIVE_STATUSES, {}),
-            ((OptimizationStatus.paused.value,), {"recovery": None}),
-        ]
+        writes: list[tuple[str, ...]] = [_ACTIVE_STATUSES, (OptimizationStatus.paused.value,)]
         if status == OptimizationStatus.paused.value:
             writes.reverse()
-        cancelled = any(
-            _set_terminal_if_active(job_store, optimization_id, expected, **extra, **fields)
-            for expected, extra in writes
-        )
+        cancelled = any(_set_terminal_if_active(job_store, optimization_id, expected, **fields) for expected in writes)
         if cancelled:
             break
         status = (job_store.get_job(optimization_id) or {}).get("status")
