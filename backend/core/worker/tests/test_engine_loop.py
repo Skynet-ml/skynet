@@ -12,6 +12,7 @@ import shlex
 import threading
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -548,9 +549,10 @@ def test_a_resumed_loop_continues_from_its_last_step_and_repeats_no_model_call(
     assert [kind for _, kind, _ in steps] == _KINDS
     assert [seq for seq, _, _ in steps] == list(range(len(_KINDS)))
     assert [generation for _, _, generation in steps] == [1] * 5 + [2] * 3
-    # The resume restores the agent's newest committed tree into its local folder (SKY-715).
-    restored = tmp_path / "loop-2" / "agents" / ROOT_AGENT_ID / "workspace" / "answer.txt"
-    assert restored.read_text() == "seedx"
+    # Session state lives only in the committed run trees, so neither the live run nor the resume writes a
+    # local workspace that the two could disagree on.
+    assert not (tmp_path / "loop-1" / "agents").exists()
+    assert not (tmp_path / "loop-2" / "agents").exists()
 
 
 def test_a_replay_that_asks_for_another_step_stops(
@@ -595,16 +597,47 @@ def test_a_fenced_loop_stops_before_any_more_model_or_box_work(
 def test_a_swallowed_divergence_keeps_the_loop_stopped(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """An engine that catches a divergence and makes the committed call next gets no reply from the log."""
+    """An engine that catches a divergence and makes the committed call next gets no reply from the log.
+
+    Each later call raises the kept stop's own type, so the engine still sees a divergence, not a plain stop.
+    """
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     assert first.model("improve seed") == "seedx"
 
     _new_generation(engine)
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
-    with pytest.raises(StepDivergedError):
+    with pytest.raises(StepDivergedError) as diverged:
         loop.model("improve other")
-    with pytest.raises(LoopStoppedError):
+    with pytest.raises(LoopStoppedError) as again:
         loop.model("improve seed")
+    assert type(again.value) is StepDivergedError
+    assert str(again.value) == str(diverged.value)
+    assert again.value.__cause__ is diverged.value
+    for later in (
+        lambda: loop.put_files({"a": b"1"}),
+        lambda: loop.list_files(_tree(trees, "a", "1")),
+        loop.remaining_cost_usd,
+        # A call that was already past the stop check meets the kept stop at the owner check.
+        loop._check_owner,
+    ):
+        with pytest.raises(LoopStoppedError) as again:
+            later()
+        assert type(again.value) is StepDivergedError
+    assert model.prompts == []
+
+
+def test_a_kept_stop_that_is_no_divergence_stays_a_plain_stop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A fenced loop keeps a plain stop, and a later call does not raise it as a divergence."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    _new_generation(engine)
+    with pytest.raises(LoopStoppedError) as first:
+        loop.model("improve seed")
+    with pytest.raises(LoopStoppedError) as again:
+        loop.model("improve seed")
+    assert type(first.value) is LoopStoppedError
+    assert type(again.value) is LoopStoppedError
     assert model.prompts == []
 
 
@@ -852,7 +885,7 @@ def test_a_run_closed_on_the_actor_opens_no_box(
     assert len(_steps(engine)) == 1
 
 
-def test_a_workspace_that_does_not_restore_stops_the_loop(
+def test_an_agent_that_does_not_open_stops_the_loop(
     owner: tuple[User, int],
     engine: Engine,
     step_log: StepLogStore,
@@ -860,32 +893,31 @@ def test_a_workspace_that_does_not_restore_stops_the_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A restore that fails would fail on every call, so the agent cannot open and the loop keeps the stop."""
+    """An open that fails would fail on every call, so the agent cannot open and the loop keeps the stop."""
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     first.run(_tree(trees, "README", "seed"), "printf a > answer.txt")
-    restores: list[Any] = []
+    reads: list[Any] = []
 
-    def missing(*args: Any, **kwargs: Any) -> None:
-        """Fail as a restore with a missing object does.
+    def broken(*args: Any) -> None:
+        """Fail as a step log read with a bad row does.
 
         Args:
-            *args: The restore's arguments.
-            **kwargs: The restore's keyword arguments.
+            *args: The read's arguments.
 
         Raises:
             ValueError: Always.
         """
-        restores.append(args)
-        raise ValueError("an object is missing")
+        reads.append(args)
+        raise ValueError("a row is bad")
 
-    monkeypatch.setattr(engine_loop, "restore_session", missing)
+    monkeypatch.setattr(engine_loop, "last_committed_step", broken)
     _new_generation(engine)
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     with pytest.raises(LoopStoppedError, match="cannot open: ValueError"):
         loop.model("improve seed")
     with pytest.raises(LoopStoppedError):
         loop.model("improve seed")
-    assert len(restores) == 1
+    assert len(reads) == 1
     assert model.prompts == []
 
 
@@ -897,22 +929,26 @@ def test_a_slow_agent_open_does_not_block_a_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent's open holds only its own lock, so the loop closes while the agent still restores."""
+    """An agent's open holds only its own lock, so the loop closes while the agent still reads its log."""
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     first.run(_tree(trees, "README", "seed"), "printf a > answer.txt")
     entered, release = threading.Event(), threading.Event()
+    read = engine_loop.last_committed_step
 
-    def slow(*args: Any, **kwargs: Any) -> None:
-        """Restore slowly: wait until the test lets the restore end.
+    def slow(*args: Any) -> Any:
+        """Read the agent's last step slowly: wait until the test lets the read end.
 
         Args:
-            *args: The restore's arguments.
-            **kwargs: The restore's keyword arguments.
+            *args: The read's arguments.
+
+        Returns:
+            What the real read returns.
         """
         entered.set()
         release.wait(10)
+        return read(*args)
 
-    monkeypatch.setattr(engine_loop, "restore_session", slow)
+    monkeypatch.setattr(engine_loop, "last_committed_step", slow)
     _new_generation(engine)
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     errors: list[BaseException] = []
@@ -964,27 +1000,6 @@ def test_a_failed_model_call_commits_and_its_replay_fails_again_with_no_call(
     assert loop.model("improve other") == "otherx"
     assert loop.model("improve otherx") == "otherxx"
     assert model.prompts == ["improve otherx"]
-
-
-def test_a_resume_restores_the_newest_workspace_tree_and_not_a_score_tree(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
-) -> None:
-    """A score step and a failed run step after the last run step name other trees; the resume skips both."""
-    seed, metric = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
-    outputs = _tree(trees, "answer.txt", "other outputs")
-    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
-    first.run(seed, "printf a > answer.txt")
-    first.score(outputs, metric, _METRIC)
-    with pytest.raises(GrantDeniedError):
-        first.run(outputs, "true", (Grant("api.example.com", credential=True),))
-
-    _new_generation(engine)
-    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
-    loop.run(seed, "printf a > answer.txt")
-
-    restored = tmp_path / "loop-2" / "agents" / ROOT_AGENT_ID / "workspace" / "answer.txt"
-    assert restored.read_text() == "a"
-    assert boxes.opened == 0
 
 
 def test_a_failure_record_names_the_grant_list_that_the_step_resolved(
@@ -1328,20 +1343,24 @@ def test_two_calls_open_one_agent_once(
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     first.run(seed_tree, "printf a > answer.txt")
     entered, release = threading.Event(), threading.Event()
-    restores: list[Any] = []
+    reads: list[Any] = []
+    read = engine_loop.last_committed_step
 
-    def slow(*args: Any, **kwargs: Any) -> None:
-        """Restore slowly: wait until the test lets the restore end.
+    def slow(*args: Any) -> Any:
+        """Read the agent's last step slowly: wait until the test lets the read end.
 
         Args:
-            *args: The restore's arguments.
-            **kwargs: The restore's keyword arguments.
+            *args: The read's arguments.
+
+        Returns:
+            What the real read returns.
         """
-        restores.append(args)
+        reads.append(args)
         entered.set()
         release.wait(10)
+        return read(*args)
 
-    monkeypatch.setattr(engine_loop, "restore_session", slow)
+    monkeypatch.setattr(engine_loop, "last_committed_step", slow)
     _new_generation(engine)
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     results: list[Any] = []
@@ -1362,7 +1381,7 @@ def test_two_calls_open_one_agent_once(
     for caller in callers:
         caller.join(10)
 
-    assert len(restores) == 1
+    assert len(reads) == 1
     assert results == [0, 0]
     assert [seq for seq, _, _ in _steps(engine)] == [0, 1]
 
@@ -1580,11 +1599,44 @@ def test_the_context_carries_the_repo_seed_of_its_caller(
         hidden_hashes=hidden,
     )
     ctx = loop.context(repo_seed=seed)
-    assert ctx.repo_seed is seed
+    assert ctx.repo_seed == replace(seed, tree_id=ctx.repo_seed.tree_id)
     assert ctx.read_file is not None
     assert ctx.read_file(seed.tree_id, "README") == b"seed"
     assert ctx.read_file(seed.tree_id, "metric.py") is None
     assert boxes.opened == 0
+
+
+def test_the_engine_gets_the_visible_seed_tree_id_and_runs_steps_from_it(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The raw seed tree id is a hash of the hidden files too, so the engine gets the id of the visible tree.
+
+    With no hidden path in the seed, the id stays the same. Steps run from the visible id as from the seed.
+    """
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    raw = _store(trees, {"README": b"seed", "metric.py": b"secret"})
+    ctx = loop.context(repo_seed=RepoSeed(raw, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.list_files is not None
+    assert ctx.run_command is not None
+    visible = ctx.repo_seed.tree_id
+
+    assert visible != raw
+    assert visible == _store(trees, {"README": b"seed"})
+    assert ctx.list_files(visible) == ["README"]
+    from_visible, after = ctx.run_command(visible, "cat README; ls", ())
+    from_raw, _ = ctx.run_command(raw, "cat README; ls", ())
+    assert from_visible.stdout == from_raw.stdout
+    assert "seed" in from_visible.stdout
+    assert "metric.py" not in from_visible.stdout
+    assert ctx.list_files(after) == ["README"]
+    assert boxes.opened == 2
+
+    plain = _store(trees, {"README": b"seed"})
+    assert loop.context(repo_seed=RepoSeed(plain, hidden_hashes=hidden)).repo_seed == RepoSeed(
+        plain, hidden_hashes=hidden
+    )
 
 
 @pytest.mark.parametrize("seed_hidden", [{}, hidden_hashes(["other.py"])])
@@ -2096,6 +2148,39 @@ def test_a_run_output_with_more_linked_paths_than_the_limit_does_not_stop_the_lo
     many = _store(trees, {"src/a.py": b"a"}, {f"link{n}": "src" for n in range(5)})
     with pytest.raises(LoopStoppedError, match="reaches more than 3 paths"):
         loop.read_file(many, "src/a.py")
+
+
+@pytest.mark.parametrize(
+    ("hidden", "files", "refused"),
+    [
+        (None, {"src/a.py": b"a"}, False),
+        (["eval"], {"src/a.py": b"a"}, True),
+        (None, {"src/a.py": b"a", ".optimize/exploits/1/patch.diff": b"secret"}, True),
+    ],
+    ids=["no-hidden-path", "strict", "holds-exploits"],
+)
+def test_more_linked_paths_than_the_limit_refuse_a_tree_only_in_strict_mode_or_with_a_hidden_path(
+    hidden: list[str] | None,
+    files: dict[str, bytes],
+    refused: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limit is like a link loop: a run that hides no path of its own refuses only a tree with a hidden path."""
+    monkeypatch.setattr(engine_loop, "_MAX_LINKED_PATHS", 3)
+    loop, _, _ = _loop(
+        owner, engine, step_log, trees, tmp_path, generation=1, hidden=None if hidden is None else hidden_hashes(hidden)
+    )
+    many = _store(trees, files, {f"link{n}": "src" for n in range(5)})
+    if refused:
+        with pytest.raises(LoopStoppedError, match="reaches more than 3 paths"):
+            loop.read_file(many, "src/a.py")
+    else:
+        assert loop.read_file(many, "src/a.py") == b"a"
 
 
 @pytest.mark.parametrize("stop", ["fence", "close"])

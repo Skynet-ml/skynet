@@ -432,10 +432,23 @@ def test_tool_calls_from_openai_keeps_raw_text_that_is_no_json_object(arguments:
 
 @pytest.mark.parametrize(
     ("arguments", "expected"),
-    [({"command": "ls"}, {"command": "ls"}), (["ls"], ["ls"]), (7, 7)],
+    [
+        ({"command": "ls"}, {"command": "ls"}),
+        (["ls"], '["ls"]'),
+        (7, "7"),
+        (0, "0"),
+        (False, "false"),
+        ([], "[]"),
+        ({}, {}),
+        (None, {}),
+        ("", {}),
+    ],
 )
 def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, expected: Any) -> None:
-    """A dict stays as it is, and a value that is no text stays raw instead of raising, so no reply is lost."""
+    """A dict stays as it is, missing arguments are ``{}``, and any other value becomes its JSON text.
+
+    A value that is no text does not raise, so no reply is lost, and a falsy one keeps its value.
+    """
     message = {
         "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
     }

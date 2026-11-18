@@ -274,8 +274,9 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw value instead, so the same reply always gives the same calls. ``arguments`` that are
-    already a dict stay as they are.
+    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
+    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -286,10 +287,14 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     calls: list[ToolCall] = []
     for call in message.get("tool_calls") or []:
         function = call["function"]
-        raw = function.get("arguments") or "{}"
+        raw = function.get("arguments")
+        if raw is None or raw == "":
+            raw = "{}"
         if isinstance(raw, dict):
             # Some clients parse the arguments already.
             arguments: dict[str, Any] | str = raw
+        elif not isinstance(raw, str):
+            arguments = json.dumps(raw, default=str)
         else:
             try:
                 parsed = json.loads(raw)

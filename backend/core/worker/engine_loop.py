@@ -23,7 +23,7 @@ A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
 work, a model call cost more than its bound, the run or the step log is
 closed, a step failed outside its own work, or an agent could not open: its
-committed log has a gap or its workspace does not restore. The error is a
+committed log has a gap or the step log read fails. The error is a
 :class:`ScorerAbortError`, so the eval server and Auto's lanes pass it
 through and stop the run. The loop also keeps the error: an engine that
 catches it and calls again gets it again, before any work.
@@ -74,7 +74,9 @@ commits the budget room that it reads as a step with no cost, as a durable
 workflow step does, and a replay gives the committed room. An engine that
 stops on the room then stops at the same place on a resume.
 :meth:`EngineLoop.context` puts these calls, ``run`` and the caller's
-:class:`RepoSeed` on the :class:`EngineContext`.
+:class:`RepoSeed` on the :class:`EngineContext`. The engine's seed names the
+seed tree without its hidden paths. The raw seed tree id is a hash of the
+hidden content too, so the engine never gets it.
 
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent. Calls outside a
@@ -90,7 +92,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
@@ -114,7 +116,6 @@ from ..sandbox.trees import (
 )
 from ..service_gateway.optimization.blackbox.harness_bridge import hashed_kind
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes as path_hashes
-from ..service_gateway.optimization.blackbox.harness_capture import restore_session
 from ..service_gateway.optimization.blackbox.protocol import (
     Candidate,
     EngineContext,
@@ -167,7 +168,7 @@ class LoopStoppedError(ScorerAbortError):
 
     Its replay diverged, its run lost the fence, no lease is left, the budget refused the work, a model call
     cost more than its bound, the run or the step log is closed, a step failed outside its own work, or an agent
-    could not open because its committed log has a gap or its workspace does not restore.
+    could not open because its committed log has a gap or the step log read fails.
     """
 
 
@@ -314,13 +315,14 @@ class EngineLoop:
         """Return the engine context of the loop: each model call and each command commits a step.
 
         Concurrency is 1: a step's place in the log must not depend on thread timing. ``read_file``,
-        ``list_files`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does.
+        ``list_files`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does. The
+        context's ``repo_seed`` names the seed tree without its hidden paths, and keeps the seed's path rules.
 
         Args:
             **fields: Other :class:`EngineContext` fields, such as the run's ``repo_seed``.
 
         Returns:
-            The context.
+            The context; its ``repo_seed`` names the visible seed tree, the same id when nothing is hidden.
 
         Raises:
             ValueError: When the ``repo_seed`` hides other paths than the loop does.
@@ -334,7 +336,8 @@ class EngineLoop:
         if seed is not None and dict(seed.hidden_hashes) != self._seed_hidden:
             raise ValueError("the repo_seed hides other paths than the engine loop")
         if seed is not None:
-            self._check_links(seed.tree_id)
+            # The raw id is a content hash of the hidden files too, so an engine could test a guess against it.
+            fields["repo_seed"] = replace(seed, tree_id=self._visible_tree(self._check_links(seed.tree_id)))
         return EngineContext(
             reflection_lm=self.model,
             run_dir=str(self.run_dir),
@@ -588,7 +591,7 @@ class EngineLoop:
                     user = run.workspace.user
                     budget = user.budgets.get(run.budget_id, user.username)
                     room = format(budget.available_cents + budget.reserved_cents, "f")
-                    # The step log needs a tree on a command step; the restore reads only a run step's tree.
+                    # The step log needs a tree on a command step.
                     empty_tree = self._trees.put_tree(run.run_id, [])
                     # Agent.step settles each step on the ledger, and a read has nothing to settle.
                     step_id = run.step_log.commit(
@@ -710,11 +713,14 @@ class EngineLoop:
             Nothing.
 
         Raises:
-            LoopStoppedError: The kept stop, or a new one when the run lost the fence or the budget stopped it.
+            LoopStoppedError: The kept stop, with its own type, such as :class:`StepDivergedError`; or a new one
+                when the run lost the fence or the budget stopped it.
         """
         stopped = self._stopped
         if stopped is not None:
-            raise LoopStoppedError(str(stopped)) from stopped
+            # A new error of the kept type: a StepDivergedError stays one on each later call. The kept instance
+            # itself is not raised again, since each raise would add to the traceback that it shares across threads.
+            raise type(stopped)(str(stopped)) from stopped
         try:
             yield
         except LoopStoppedError as error:
@@ -741,13 +747,15 @@ class EngineLoop:
         """Check that the loop did not stop and this worker still owns the run, before a step's paid work.
 
         Raises:
-            LoopStoppedError: The kept stop, which a call that was already past :meth:`_stops` did not see; or
-                a new one when the run is closed, no longer active at the loop's generation, or the owner check
-                fails.
+            LoopStoppedError: The kept stop, with its own type, which a call that was already past :meth:`_stops`
+                did not see; or a new one when the run is closed, no longer active at the loop's generation, or the
+                owner check fails.
         """
         stopped = self._stopped
         if stopped is not None:
-            raise LoopStoppedError(str(stopped)) from stopped
+            # A new error of the kept type: a StepDivergedError stays one on each later call. The kept instance
+            # itself is not raised again, since each raise would add to the traceback that it shares across threads.
+            raise type(stopped)(str(stopped)) from stopped
         run = self._run
         if run.closed:
             raise LoopStoppedError(f"Run {run.run_id} is closed.")
@@ -864,8 +872,8 @@ class EngineLoop:
         ``_MAX_LINKED_PATHS`` paths reached through links, also stops the loop, since the walk cannot check all
         of them. So does a link that names an absolute path, or a path that leaves the tree, also one that comes
         back in: the loop does not know where a box puts the tree, so it cannot tell what such a link reaches.
-        When the run hides no path of its own, a link loop and a link that leaves the tree stop the loop only in
-        a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over one, holds
+        When the run hides no path of its own, a link loop, a link that leaves the tree and the limit stop the
+        loop only in a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over one, holds
         no hidden content, so the loop does not walk it.
 
         Args:
@@ -904,6 +912,17 @@ class EngineLoop:
         """
         folders: dict[tuple[str, ...], dict[str, TreeEntry]] = {}
         self._index_folders(tree_id, (), folders)
+        return self._folders_hold_hidden(folders)
+
+    def _folders_hold_hidden(self, folders: Mapping[tuple[str, ...], Mapping[str, TreeEntry]]) -> bool:
+        """Tell whether a path of the indexed folders is hidden.
+
+        Args:
+            folders: The entries by name of each folder, by path parts from the tree's root.
+
+        Returns:
+            Whether a folder holds a hidden path or ``.optimize/exploits``.
+        """
         return any(
             hashed_kind(self._hidden, "/".join((*path, name))) is not None
             for path, entries in folders.items()
@@ -934,8 +953,9 @@ class EngineLoop:
 
         A link that leaves the tree, or a link loop, hides from the walk what it reaches, and a hidden path can
         lie behind it: ``a -> .`` reaches ``a/secret.txt``. So when the run hides paths of its own, such a link
-        refuses the tree. With the exploit suite alone, it refuses the tree only when the walk reaches a hidden
-        path, since repositories hold such links: ``python -m venv`` writes an absolute link on Linux.
+        refuses the tree, and so does a walk that reaches more than ``_MAX_LINKED_PATHS`` paths through links,
+        which then stops. With the exploit suite alone, these refuse the tree only when it holds a hidden path,
+        since repositories hold such links: ``python -m venv`` writes an absolute link on Linux.
 
         Args:
             folders: The entries by name of each folder, by path parts from the tree's root.
@@ -960,7 +980,9 @@ class EngineLoop:
                 if linked or entry.mode == "symlink":
                     reached += 1
                     if reached > _MAX_LINKED_PATHS:
-                        return f"reaches more than {_MAX_LINKED_PATHS} paths through symlinks"
+                        problem = problem or f"reaches more than {_MAX_LINKED_PATHS} paths through symlinks"
+                        pending.clear()
+                        break
                     if hidden:
                         return "has a symlink at, below or above a hidden path"
                 if entry.mode == "symlink":
@@ -977,7 +999,10 @@ class EngineLoop:
                     pending.append((path, target, True, above | {target}))
                 elif entry.mode == "tree":
                     pending.append((path, (*real, name), linked, above | {(*real, name)}))
-        return problem if holds_hidden or self._strict_links else None
+        if problem is None or holds_hidden or self._strict_links:
+            return problem
+        # A walk that stopped at the limit saw only some paths, so the tree's own paths tell whether it holds one.
+        return problem if self._folders_hold_hidden(folders) else None
 
     def _link_target(
         self, folders: Mapping[tuple[str, ...], Mapping[str, TreeEntry]], link: tuple[str, ...]
@@ -1161,8 +1186,8 @@ class EngineLoop:
             The agent's log.
 
         Raises:
-            LoopStoppedError: When the agent's committed log has a gap, its workspace does not restore, the run
-                is closed, or the step log read fails.
+            LoopStoppedError: When the agent's committed log has a gap, the run is closed, or the step log read
+                fails.
         """
         agent_id = current_tags().get(LANE_KEY) or ROOT_AGENT_ID
         with self._lock:
@@ -1170,7 +1195,7 @@ class EngineLoop:
             if log is not None:
                 return log
             opening = self._opening.setdefault(agent_id, threading.Lock())
-        # An open reads the step log and writes files, so it holds only its agent's lock: other lanes and stops go on.
+        # An open reads the step log, so it holds only its agent's lock: other lanes and stops go on.
         with opening:
             with self._lock:
                 log = self._logs.get(agent_id)
@@ -1185,7 +1210,11 @@ class EngineLoop:
         return log
 
     def _open(self, agent_id: str) -> _AgentLog:
-        """Spawn an agent after its committed steps, and restore its newest workspace tree into its local folder.
+        """Spawn an agent after its committed steps.
+
+        The loop keeps no local copy of a workspace. An agent's session state lives in the tree of its committed
+        run steps: the engine passes that tree to its next ``run``, and the box gets it there, live and on a
+        replay alike.
 
         Args:
             agent_id: The agent.
@@ -1195,7 +1224,6 @@ class EngineLoop:
 
         Raises:
             LookupError: When a step below the agent's newest one is missing.
-            ValueError: When the newest workspace tree does not restore.
             RuntimeError: When the run is closed.
         """
         run_id = self._run.run_id
@@ -1207,20 +1235,6 @@ class EngineLoop:
             if record is None:
                 raise LookupError(f"step {seq} of agent {agent_id} is missing")
             records.append(record)
-        # A score step names its outputs tree and a failed step its input tree; only a run step's tree is the workspace.
-        tree_id = next(
-            (
-                record["tree_id"]
-                for record in reversed(records)
-                if _call(record) == "run" and "error" not in record["body"] and record["tree_id"]
-            ),
-            None,
-        )
-        if tree_id is not None:
-            # SKY-715: the tree holds the harness session folder, so a harness that resumes here finds its state.
-            folder = self.run_dir / "agents" / agent_id
-            # The tree's links are model-written, and this folder is on the worker, not in a box.
-            restore_session(self._trees, run_id, tree_id, folder / "workspace", folder / "home", confine_links=True)
         return _AgentLog(self._run.spawn(agent_id, next_seq=len(records)), deque(records))
 
     def _replayed(

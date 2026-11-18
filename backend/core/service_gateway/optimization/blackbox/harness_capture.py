@@ -775,9 +775,7 @@ def _redact_bytes(data: bytes, route_key: str) -> bytes:
     return data.replace(route_key.encode(), KEY_TOKEN.encode()) if route_key else data
 
 
-def restore_session(
-    trees: TreeStore, run_id: str, tree_id: str, workspace: Path, home: Path, *, confine_links: bool = False
-) -> None:
+def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path, home: Path) -> None:
     """Write a :func:`snapshot_session` tree back: the workspace, and the session folder under ``home``.
 
     The workspace and each restored folder end up holding only what the tree
@@ -796,9 +794,6 @@ def restore_session(
         tree_id: The root tree id of a committed step.
         workspace: The agent's workspace in the new box.
         home: The home folder in the new box; the bridge reads ``home/SESSIONS_DIR``.
-        confine_links: Delete each restored symlink that names an absolute path or resolves outside the
-            workspace or ``home/SESSIONS_DIR``. A restore outside a box sets it: there a model-written link
-            could reach the host's own files.
 
     Raises:
         ValueError: When an object is missing or an entry name is not a plain name.
@@ -821,31 +816,6 @@ def restore_session(
         for session in session_entries:
             if session.mode == "tree":
                 _restore(trees, run_id, session, sessions / session.name, prune)
-        if confine_links:
-            _drop_leaving_links(sessions)
-    if confine_links:
-        _drop_leaving_links(workspace)
-
-
-def _drop_leaving_links(root: Path) -> None:
-    """Delete each symlink below ``root`` that names an absolute path or resolves outside ``root``.
-
-    The check resolves each link through the links that are already on disk: a link that is lexically inside
-    ``root`` can still leave it through another link (``a -> .`` and ``b -> a/..``).
-
-    Args:
-        root: A real folder.
-    """
-    real_root = Path(os.path.realpath(root))
-    for folder, folders, files in os.walk(root):
-        for name in [*folders, *files]:
-            path = Path(folder, name)
-            if not path.is_symlink():
-                continue
-            # Not Path.resolve: it raises on a link loop. A loop reaches no file, so it can stay.
-            real = Path(os.path.realpath(path))
-            if path.readlink().is_absolute() or not real.is_relative_to(real_root):
-                path.unlink()
 
 
 def _prune(folder: Path, keep: set[str]) -> None:
