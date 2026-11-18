@@ -111,10 +111,12 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   const reflectionLabel = t("submit.v2.optimizer.models.reflection.label");
   const updateProposer = (patch: Partial<typeof proposer>) =>
     patchOptimizer({ proposer: { ...proposer, ...patch } });
-  // The server runs its default harness until the user picks one (SKY-753).
-  const harness = proposer.harness ?? DEFAULT_PROPOSER.harness;
-  // The proposer harness runs the reflection model, so it limits the effort.
-  const limitingHarness = effortHarness({ ...proposer, harness }, nativeProposer);
+  // Until the user picks a harness, the request sends none and the server
+  // chooses (SKY-753); the effort limit still assumes the default harness.
+  const limitingHarness = effortHarness(
+    { ...proposer, harness: proposer.harness ?? DEFAULT_PROPOSER.harness },
+    nativeProposer,
+  );
   const fitHarness = (config: ModelConfig) =>
     limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
   // A harness, host CLI or engine change can leave a stored effort the new
@@ -287,8 +289,14 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           onOpenChange={setProposerOpen}
           trailing={
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <HarnessLogo harness={harness} size={14} />
-              {harnessLabel(harness)}
+              {proposer.harness ? (
+                <>
+                  <HarnessLogo harness={proposer.harness} size={14} />
+                  {harnessLabel(proposer.harness)}
+                </>
+              ) : (
+                t("submit.v2.optimizer.proposer.harness_default")
+              )}
             </span>
           }
           alwaysShowTrailing
