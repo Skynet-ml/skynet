@@ -90,6 +90,9 @@ OUTPUT_CHARS = 30_000
 # parser, ``json.dumps`` and the next prompt hash raise RecursionError.
 MAX_ARGUMENT_CHARS = 200_000
 MAX_ARGUMENT_DEPTH = 32
+# Every box provider runs the command as one argv string, and Linux refuses an argv string over 128 KiB
+# (MAX_ARG_STRLEN) with E2BIG. A command under this bound gets to the box; a longer one gets an error result.
+MAX_COMMAND_BYTES = 100_000
 _REFUSED_ARGUMENTS = "{}"
 # A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
 # the same calls in the same order.
@@ -100,6 +103,8 @@ MODEL_RETRY_WAIT_SECONDS = 10.0
 # the proposer's ``max_tool_calls``, keep the prompt inside the model's context: a session at a cap ends as out of
 # budget, so its iteration still reads ``pending_eval.json``, and the run does not stop.
 MAX_PROMPT_CHARS = 400_000
+
+CANDIDATE_OUTSIDE_AGENTS = "candidate file must be a relative path under agents/"
 
 # Tests replace this, so a retry test does not wait.
 _sleep = time.sleep
@@ -569,6 +574,10 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
             # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
             return json.dumps({"error": f"Call the {BASH_TOOL['name']} tool with a command string."}), tree
+        # A lone surrogate from a JSON escape cannot encode as strict UTF-8, and the bound must not raise.
+        if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
+            error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
+            return json.dumps({"error": error}), tree
         try:
             result, tree = self._ctx.run_command(tree, command, ())
         except (TreeRejectedError, BoxFailureError) as error:
@@ -641,7 +650,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                     self._pulled.add(path)
 
     def _validate(self, spec: dict[str, Any]) -> str | None:
-        """Check a candidate spec as the native engine does, with the size reason for a file left in the tree.
+        """Check a candidate spec as the native engine does, and refuse a file that ``_pull`` does not copy.
+
+        An over-cap file left in the tree gets the size reason.
 
         Args:
             spec: One ``pending_eval.json`` candidate entry.
@@ -651,12 +662,15 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         """
         failure = super()._validate(spec)
         file = spec.get("file")
+        if failure not in (None, native_engines.CANDIDATE_MISSING) or not isinstance(file, str):
+            return failure
+        path = posixpath.normpath(file)
+        # ``_pull`` copies only these paths from the tree, so another path (an absolute one into ``agents/``
+        # included) could reach a stale local copy and not the tree's file.
+        if not path.startswith("agents/"):
+            return CANDIDATE_OUTSIDE_AGENTS
         # ``_pull`` writes no local copy of an over-cap file, so the native check finds no file.
-        if (
-            failure == native_engines.CANDIDATE_MISSING
-            and isinstance(file, str)
-            and posixpath.normpath(file) in self._oversize
-        ):
+        if failure == native_engines.CANDIDATE_MISSING and path in self._oversize:
             return native_engines.CANDIDATE_TOO_LARGE
         return failure
 

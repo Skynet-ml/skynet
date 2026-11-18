@@ -1861,3 +1861,76 @@ def test_a_billed_failure_at_the_proposer_cap_is_not_tried_again(
     assert live.best_candidate == replayed.best_candidate == best
     assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == cap
     assert live.metadata["stop_reason"] == replayed.metadata["stop_reason"] == "proposer_budget"
+
+
+@pytest.mark.parametrize(
+    ("command", "runs"),
+    [
+        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 2), True),
+        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 1), False),
+        # One two-byte character: the command is at the bound in characters, and one byte over it as UTF-8.
+        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 4) + "é", True),
+        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 3) + "é", False),
+    ],
+    ids=["ascii-at-bound", "ascii-over", "utf8-at-bound", "utf8-over"],
+)
+def test_a_command_over_its_byte_bound_gets_an_error_result(
+    command: str,
+    runs: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A command up to ``MAX_COMMAND_BYTES`` UTF-8 bytes runs; a longer one gets an error result and opens no box.
+
+    Args:
+        command: The bash command.
+        runs: Whether the command gets to the box.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files({"a.txt": b"a"})
+
+    output, after = worker._exec(tree, {"id": "c", "name": "bash", "arguments": {"command": command}})
+
+    if runs:
+        assert json.loads(output)["exit_code"] == 0
+    else:
+        assert f"at most {meta_mod.MAX_COMMAND_BYTES} bytes" in json.loads(output)["error"]
+        assert after == tree
+        assert boxes.opened == 0
+
+
+@pytest.mark.parametrize("form", ["absolute", "dot-dot"])
+def test_a_candidate_path_that_is_not_relative_under_agents_is_refused(
+    form: str, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A path into ``agents/`` that ``_pull`` does not copy is refused, so no stale local copy gets benchmarked.
+
+    Args:
+        form: How the entry spells the path into ``agents/``.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    stale = worker.work_dir / "agents" / "c1.txt"
+    stale.write_text("stale")
+    file = str(stale) if form == "absolute" else f"../{worker.work_dir.name}/agents/c1.txt"
+    tree = loop.put_files({"logs/run/pending_eval.json": _pending(file), "agents/c1.txt": b"tree"})
+
+    worker._pull(tree)
+
+    assert stale.read_text() == "stale"
+    assert worker._validate({"name": "c1", "file": file}) == meta_mod.CANDIDATE_OUTSIDE_AGENTS
+    assert worker._validate({"name": "c1", "file": "agents/c1.txt"}) is None
