@@ -195,7 +195,7 @@ class RuntimeBoxSource:
         """Open a new box whose network is the grant list.
 
         Args:
-            agent_id: The agent that runs the step; each call gets its own box.
+            agent_id: The box key (``run_id:agent_id``); each call gets its own box.
             grants: The step's grants; empty means no network.
 
         Returns:

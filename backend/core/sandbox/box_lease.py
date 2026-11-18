@@ -1,4 +1,4 @@
-"""Keep one warm box for each agent, placed by grants and quota, under a start budget (SKY-732).
+"""Keep one warm box for each run's agent, placed by grants and quota, under a start budget (SKY-732).
 
 :class:`BoxLease` is a :class:`~core.sandbox.trees.BoxSource`. ``acquire``
 gives the agent its warm box, and a healthy ``release`` keeps the box for the
@@ -143,7 +143,7 @@ class _Lease(Generic[BoxT]):
 
 
 class BoxLease(Generic[BoxT]):
-    """Give each agent its warm box, and replace the box when it fails."""
+    """Give each box key (a run and its agent) its warm box, and replace the box when it fails."""
 
     # The reaper errors that stop the run; one of them replaces a kept error of another type.
     stop_errors: ClassVar[tuple[type[BaseException], ...]] = (BudgetReached,)
@@ -245,10 +245,11 @@ class BoxLease(Generic[BoxT]):
         return self._keep_warm
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> BoxT:
-        """Return the agent's warm box, or open a new one.
+        """Return the key's warm box, or open a new one.
 
         Args:
-            agent_id: The agent.
+            agent_id: The box key. The caller builds it from the run and the
+                agent (``run_id:agent_id``), so two runs never share a box.
             grants: The box's grants; a warm box with other grants is replaced.
 
         Returns:
@@ -507,7 +508,7 @@ class BoxLease(Generic[BoxT]):
         """Take the key's warm box, or reserve a new box and its provider.
 
         Args:
-            key: The agent id.
+            key: The box key, built from the run and the agent (``run_id:agent_id``).
             grants: The box's grants.
             wanted: The normalized grants; a warm box with other grants is replaced.
 
