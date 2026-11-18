@@ -5,16 +5,12 @@ it posts each version through the parent's evaluator capability, and the
 parent lays it out on a copy of the already set-up tree, then calls the
 user's ``score(repo_path)`` (or ``score(repo_path, case)``).
 
-Each evaluation uses two boxes (SKY-398). The candidate box C holds the
-prepared tree with the version laid out, and runs the ``[run]`` entry on the
-case's ``input`` only (E42). C comes from the run's warm box lease (SKY-805):
-the parent reads its output, then gives C back to the lease, which resets it
-for the next version and closes it when the run ends. The reset stops every
-process that the version left (SKY-809). A run that failed or timed out
-closes C instead, so the next version gets a new box. The metric box M is new for each
-evaluation. It holds only the metric files and the runner, never the
-repository tree, and opens while C runs. M gets the metric files and C's
-output only after C went back to the lease, and runs
+Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
+the prepared tree with the version laid out, and runs the ``[run]`` entry on
+the case's ``input`` only (E42). The parent reads its output, then ends C;
+every process the version started ends with it. The metric box M holds only
+the metric files and the runner, never the repository tree, and opens while
+C runs. M gets the metric files and C's output only after C ended, and runs
 ``score(repo_path, case, output)`` with ``repo_path`` the folder that holds
 the metric files at their repository paths (E41). A check that needs the
 version's code belongs in the ``[run]`` entry: without one, the metric sees
@@ -368,8 +364,7 @@ class RepoScorer:
                 repository's ``optimize.toml``.
             secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
                 the run.
-            budget: The run budget, which meters a call with a Skynet key
-                and parks each warm candidate box between evaluations.
+            budget: The run budget, which meters a call with a Skynet key.
             recorder: Writes each relayed service and MCP call into the run
                 record; ``None`` records nothing.
 
@@ -395,9 +390,6 @@ class RepoScorer:
         self._run_entry = run_entry
         self._run_timeout = run_timeout
         self._workspace = workspace
-        if budget is not None and getattr(budget, "park", None) is not None:
-            # A warm candidate box waits in the lease between evaluations (SKY-647, SKY-805).
-            workspace.park_in(budget)
         self._gateway = gateway
         self._code = code
         self._timeout_seconds = timeout_seconds
@@ -419,9 +411,8 @@ class RepoScorer:
 
         The metric box opens while the candidate box runs, but gets the
         metric files and the candidate's output only after the candidate box
-        went back to the lease (SKY-398, SKY-805). The metric box closes when
-        the evaluation ends, also on a failure, and settles its own hold. The
-        lease keeps a healthy candidate box warm for the next version.
+        ended (SKY-398). Both boxes close when the evaluation ends, also on a
+        failure, so each releases or settles its own hold.
 
         Args:
             patch: The version as a git patch against the starting commit.
@@ -464,16 +455,12 @@ class RepoScorer:
             opener = ThreadPoolExecutor(max_workers=1, thread_name_prefix="metric-box")
             metric_box = opener.submit(contextvars.copy_context().run, self._open_parked_metric)
             try:
-                healthy = False
                 try:
                     ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
-                    # A failed or timed-out run can leave the box in any state, so the lease replaces it.
-                    healthy = ran is None or not ran.get("error")
                 finally:
                     # A budget error from the close must not leave the metric box parked.
                     try:
-                        # A run that raised may leave the box broken, so the lease replaces it.
-                        opened.close(healthy=healthy)
+                        opened.close()
                     finally:
                         self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
@@ -496,7 +483,7 @@ class RepoScorer:
                     metric_box.result().close()
 
     def _open_parked_metric(self) -> MetricBox:
-        """Open the metric box and park it in the run budget until the candidate box went back to the lease.
+        """Open the metric box and park it in the run budget until the candidate box ended.
 
         The open metric box only waits for the candidate box, so the run
         budget may stop a run whose candidate box waits on a model call (SKY-647).
@@ -511,7 +498,7 @@ class RepoScorer:
         return metric
 
     def _unpark(self, metric_box: Future[MetricBox]) -> None:
-        """Wait for the metric box to open, then end its park, once the candidate box went back to the lease.
+        """Wait for the metric box to open, then end its park, once the candidate box ended.
 
         Args:
             metric_box: The metric box being opened; a failed open parked nothing.
@@ -635,10 +622,8 @@ class RepoScorer:
     ) -> dict[str, Any]:
         """Run the ``[run]`` entry on the case's input in the candidate box.
 
-        The box holds no metric file and no earlier call folder. After this
-        returns, the caller gives the box back to the run's lease, which resets
-        it for the next version and stops every process that the entry left
-        in the background (SKY-809).
+        The box holds no metric file and no earlier call; the caller ends it
+        after this returns, and with it every process the entry left.
 
         Args:
             candidate: The evaluation's open candidate box.
@@ -1129,20 +1114,16 @@ class RepoScorer:
         return _for_proposer(document, self._root, self._hidden)
 
     def close(self) -> None:
-        """Delete the workspace's saved states, close its warm candidate boxes and delete this scorer's snapshots.
+        """Delete the workspace's saved states and this scorer's snapshots.
 
         Raises:
-            BudgetReached: And the other budget errors, from a box close or a snapshot delete.
-            Exception: A warm box's close error, raised after the snapshot deletes.
+            BudgetReached: And the other budget errors, from a snapshot delete.
         """
-        try:
-            self._workspace.close()
-        finally:
-            # A warm box's close error must not keep the snapshots.
-            self._workspace.release_snapshot()
-            with self._stage_snapshot_lock:
-                self._stage_snapshot_id = None
-                self._release_stage_snapshot()
+        self._workspace.close()
+        self._workspace.release_snapshot()
+        with self._stage_snapshot_lock:
+            self._stage_snapshot_id = None
+            self._release_stage_snapshot()
 
     def _release_stage_snapshot(self) -> None:
         """Delete the stage snapshot; the caller holds ``_stage_snapshot_lock``.

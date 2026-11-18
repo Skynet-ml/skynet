@@ -544,18 +544,6 @@ class Settings(BaseSettings):
         le=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS,
         description="Ceiling on a sandbox's lifetime in seconds. 2700 (45 minutes) is the Hobby plan limit; Pro and Enterprise teams can raise it to 86400 (24 hours), the most Vercel accepts. A job that outlives its box reopens one on its next call.",
     )
-    repo_candidate_vercel_cap: int = Field(
-        default=50,
-        ge=1,
-        alias="REPO_CANDIDATE_VERCEL_CAP",
-        description="Most warm candidate boxes one repository run keeps open on Vercel (SKY-805). At the cap, the next candidate waits for a free box; it never spills to another provider.",
-    )
-    repo_candidate_starts_per_minute: int = Field(
-        default=30,
-        ge=1,
-        alias="REPO_CANDIDATE_STARTS_PER_MINUTE",
-        description="Most new candidate boxes one repository run starts in any 60 seconds (SKY-805). A start over the budget waits for the next free start.",
-    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",

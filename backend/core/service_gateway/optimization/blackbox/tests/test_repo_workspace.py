@@ -7,7 +7,6 @@ import builtins
 import json
 import logging
 import os
-import posixpath
 import re
 import shlex
 import shutil
@@ -16,7 +15,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -33,14 +31,10 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
-from core.billing.usage_tags import box_tag
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
-from core.config import Settings, settings
-from core.sandbox.box_lease import BoxLease
 from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
-from core.sandbox.services import ComposeService, stop_command
 
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
@@ -50,7 +44,6 @@ from ..repo_workspace import (
     METRIC_REPO_DIR,
     METRIC_SITE_DIR,
     PREPARED_DIR,
-    REPO_DIR,
     WORK_DIR,
     CandidateBox,
     Checkout,
@@ -244,10 +237,10 @@ def workspace(tmp_path: Path) -> Iterator[tuple[RepoWorkspace, _Runtime, Path, P
     space.close()
 
 
-def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_clean_candidate_tree(
+def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_new_candidate_box(
     workspace: tuple[RepoWorkspace, _Runtime, Path, Path],
 ) -> None:
-    """Setup runs once online without secrets; each version gets a clean offline tree from the saved state (SKY-398, SKY-805)."""
+    """Setup runs once online without secrets; each version opens a new offline box from the saved state (SKY-398)."""
     space, runtime, archive, root = workspace
 
     first = _open(space, _patch(root / "one", archive, {"src/app.py": "x = 2\n"}))
@@ -263,8 +256,9 @@ def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_clean_candidate_
         second.close()
 
     setup, *candidates = runtime.boxes
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert setup.closed
+    assert all(box.closed for box in candidates)
     assert [command for box in runtime.boxes for command, _ in box.commands if "built.txt" in command] == [
         next(command for command, _ in setup.commands if "built.txt" in command)
     ]
@@ -274,7 +268,7 @@ def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_clean_candidate_
     assert "key=unset" in space.setup_log
     assert all(not box.online and box.spec.snapshot_archive for box in candidates)
     keys = [box.spec.operation_key for box in runtime.boxes]
-    assert keys == ["op:setup-0", "op:candidate-1"]
+    assert keys == ["op:setup-0", "op:candidate-1", "op:candidate-2"]
 
 
 def test_failed_setup_and_broken_patches_are_reported(tmp_path: Path) -> None:
@@ -1560,7 +1554,7 @@ def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
 def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Closing a metric box releases it through the box source as healthy; a candidate box goes back to the lease (SKY-718, SKY-805)."""
+    """Closing an evaluation box releases it through the box source as healthy (SKY-718)."""
     released: list[bool] = []
     release = RepoBoxSource.release
 
@@ -1576,15 +1570,13 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
         release(self, box, healthy)
 
     monkeypatch.setattr(RepoBoxSource, "release", recorded)
-    runtime = _Runtime()
-    space, _ = _scoring_space(tmp_path, runtime)
+    space, _ = _scoring_space(tmp_path, _Runtime())
     try:
         _open(space, "").close()
         space.open_metric().close()
     finally:
         space.close()
-    assert released == [True]
-    assert all(box.closed for box in _candidates(runtime))
+    assert released == [True, True]
 
 
 def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
@@ -1603,9 +1595,8 @@ def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Pat
 
 
 def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Closing a metric box, or the workspace with a warm candidate box, raises the box's close error (SKY-805)."""
+    """Closing a candidate or metric box raises the box's close error, as a plain session close does."""
     space, _ = _scoring_space(tmp_path, _Runtime())
-    closed = False
     try:
         candidate = _open(space, "")
         metric = space.open_metric()
@@ -1620,15 +1611,11 @@ def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, m
             raise RuntimeError("settlement failed")
 
         monkeypatch.setattr(_Box, "close", broken)
-        candidate.close()
-        with pytest.raises(RuntimeError, match="settlement failed"):
-            metric.close()
-        closed = True
-        with pytest.raises(RuntimeError, match="settlement failed"):
-            space.close()
+        for box in (candidate, metric):
+            with pytest.raises(RuntimeError, match="settlement failed"):
+                box.close()
     finally:
-        if not closed:
-            space.close()
+        space.close()
 
 
 @pytest.mark.parametrize(
@@ -1722,34 +1709,33 @@ def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
 def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The failure path releases through the box session, so the session cannot release the box again (SKY-785, SKY-805)."""
+    """The failure path releases through the box session, so the session cannot release the box again (SKY-785)."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
     space = _space(archive, _Runtime(), setup=None)
     opened: list[BoxSession] = []
     releases: list[bool] = []
     open_box = RepoWorkspace._open_box
-    release = BoxLease.release
+    release = RepoBoxSource.release
 
-    def recorded_open(self: RepoWorkspace, *args: Any, **options: Any) -> BoxSession:
+    def recorded_open(self: RepoWorkspace, *args: Any) -> BoxSession:
         """Open the box and keep its session.
 
         Args:
             self: The workspace.
             *args: The open's arguments.
-            **options: The open's keyword arguments.
 
         Returns:
             The session.
         """
-        box = open_box(self, *args, **options)
+        box = open_box(self, *args)
         opened.append(box)
         return box
 
-    def recorded_release(self: BoxLease[Any], box: Any, healthy: bool) -> None:
+    def recorded_release(self: RepoBoxSource, box: Any, healthy: bool) -> None:
         """Record the health, then release the box.
 
         Args:
-            self: The candidate box lease.
+            self: The box source.
             box: The box.
             healthy: The box's health.
         """
@@ -1759,7 +1745,7 @@ def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_n
     try:
         space.prepare()
         monkeypatch.setattr(RepoWorkspace, "_open_box", recorded_open)
-        monkeypatch.setattr(BoxLease, "release", recorded_release)
+        monkeypatch.setattr(RepoBoxSource, "release", recorded_release)
         checkout = space.open_candidate(
             "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
         )
@@ -1977,865 +1963,3 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
     finally:
         session.close()
     assert _containers(tag) == []
-
-
-def _candidates(runtime: _Runtime) -> list[_Box]:
-    """Return the candidate boxes that a runtime opened.
-
-    Args:
-        runtime: The recording runtime.
-
-    Returns:
-        The boxes whose operation key names a candidate, in open order.
-    """
-    return [box for box in runtime.boxes if ":candidate-" in (box.spec.operation_key or "")]
-
-
-def test_a_slot_keeps_its_warm_candidate_box_and_resets_it_for_the_next_version(tmp_path: Path) -> None:
-    """The next version reuses the slot's warm box, without the last version's checkout; the close ends it (SKY-805)."""
-    runtime = _Runtime()
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    space = _space(archive, runtime, setup=None)
-    try:
-        first = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
-        first.session.run(f"touch {WORK_DIR}/stray.txt")
-        first.close()
-        (box,) = _candidates(runtime)
-        assert not box.closed
-        second = _open(space, "")
-        assert second.session is first.session
-        assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        assert second.session.read_file(f"{WORK_DIR}/stray.txt") is None
-        second.close()
-        assert _candidates(runtime) == [box]
-        assert not box.closed
-    finally:
-        space.close()
-    assert box.closed
-
-
-def test_a_warm_box_that_fails_its_reset_is_replaced_by_a_new_box_with_the_candidates_key(tmp_path: Path) -> None:
-    """A warm box whose prepared tree changed fails the reset, closes, and the version gets a new box (SKY-805)."""
-    space, archive = _guarded(tmp_path)
-    runtime = space._runtime
-    try:
-        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
-        box = _open(space, version)
-        box.session.run(f"touch {PREPARED_DIR}/planted.py")
-        box.close()
-        (old,) = _candidates(runtime)  # type: ignore[arg-type]
-        replaced = _open(space, version)
-        assert any(" find .app-repo " in command for command in old.root_commands)
-        assert old.closed
-        new = _candidates(runtime)[-1]  # type: ignore[arg-type]
-        assert replaced.session is new
-        assert new is not old
-        assert replaced.session.read_file(f"{WORK_DIR}/planted.py") is None
-        assert [box.spec.operation_key for box in _candidates(runtime)] == ["op:candidate-1", "op:candidate-2"]  # type: ignore[arg-type]
-        replaced.close()
-    finally:
-        space.close()
-
-
-def test_parallel_candidates_each_keep_their_own_warm_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two candidates at the same time get two boxes under the run and slot keys, and both stay warm (SKY-805)."""
-    keys: list[str] = []
-    acquire = BoxLease.acquire
-
-    def recorded(self: BoxLease[Any], agent_id: str, grants: Any) -> Any:
-        """Record the lease key, then acquire.
-
-        Args:
-            self: The lease.
-            agent_id: The lease key.
-            grants: The grants.
-
-        Returns:
-            The box.
-        """
-        keys.append(agent_id)
-        return acquire(self, agent_id, grants)
-
-    monkeypatch.setattr(BoxLease, "acquire", recorded)
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        for _ in range(2):
-            first, second = _open(space, ""), _open(space, "")
-            assert first.session is not second.session
-            first.close()
-            second.close()
-        assert len(_candidates(runtime)) == 2
-        assert keys == ["op:candidate-0", "op:candidate-1"] * 2
-    finally:
-        space.close()
-    assert all(box.closed for box in _candidates(runtime))
-
-
-def test_at_the_cap_a_candidate_waits_for_a_free_box(tmp_path: Path) -> None:
-    """With every slot held, the next candidate waits and then takes the freed warm box, with no new box (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
-    try:
-        held = _open(space, "")
-        opened: list[CandidateBox] = []
-        waiter = threading.Thread(target=lambda: opened.append(_open(space, "")))
-        waiter.start()
-        waiter.join(timeout=0.5)
-        assert waiter.is_alive()
-        assert opened == []
-        held.close()
-        waiter.join(timeout=30)
-        assert not waiter.is_alive()
-        assert opened[0].session is held.session
-        assert len(_candidates(runtime)) == 1
-        opened[0].close()
-    finally:
-        space.close()
-
-
-def test_an_unhealthy_close_replaces_the_warm_box(tmp_path: Path) -> None:
-    """A candidate box closed as unhealthy ends at once, and the next version gets a new box (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        first = _open(space, "")
-        first.close(healthy=False)
-        assert _candidates(runtime)[0].closed
-        second = _open(space, "")
-        assert second.session is not first.session
-        second.close()
-    finally:
-        space.close()
-
-
-def test_closing_the_workspace_closes_a_held_candidate_box_at_its_release(tmp_path: Path) -> None:
-    """The run end closes the lease; a box that a candidate still holds closes when the candidate ends (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    held = _open(space, "")
-    space.close()
-    (box,) = _candidates(runtime)
-    assert not box.closed
-    held.close()
-    assert box.closed
-    opened = len(runtime.boxes)
-    with pytest.raises(RuntimeError, match="lease is closed"):
-        space.open_candidate("")
-    # A late candidate fails before setup, so it opens no paid setup box.
-    assert len(runtime.boxes) == opened
-
-
-def test_the_candidate_lease_takes_its_cap_and_start_budget_from_the_settings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The lease gets REPO_CANDIDATE_VERCEL_CAP and REPO_CANDIDATE_STARTS_PER_MINUTE: 50 and 30 (SKY-805)."""
-    assert Settings.model_fields["repo_candidate_vercel_cap"].default == 50
-    assert Settings.model_fields["repo_candidate_starts_per_minute"].default == 30
-    monkeypatch.setattr(settings, "repo_candidate_vercel_cap", 7)
-    monkeypatch.setattr(settings, "repo_candidate_starts_per_minute", 11)
-    seen: dict[str, Any] = {}
-    init = BoxLease.__init__
-
-    def recorded(self: BoxLease[Any], *args: Any, **options: Any) -> None:
-        """Record the options, then build the lease.
-
-        Args:
-            self: The lease.
-            *args: The opener and the closer.
-            **options: The lease options.
-        """
-        seen.update(options)
-        init(self, *args, **options)
-
-    monkeypatch.setattr(BoxLease, "__init__", recorded)
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), _Runtime(), setup=None)
-    space.close()
-    assert (seen["vercel_cap"], seen["starts_per_minute"]) == (7, 11)
-    assert space._free_slots == list(range(7))
-
-
-def test_each_score_still_gets_a_new_metric_box_next_to_a_warm_candidate_box(tmp_path: Path) -> None:
-    """Metric boxes never come from the lease: each score opens one and its close ends it (SKY-805, SKY-398)."""
-    runtime = _Runtime()
-    space, _ = _scoring_space(tmp_path, runtime)
-    try:
-        metrics = []
-        for _ in range(2):
-            _open(space, "").close()
-            metric = space.open_metric()
-            metric.close()
-            metrics.append(metric.session)
-        assert metrics[0] is not metrics[1]
-        assert all(box.closed for box in metrics)
-        assert not set(map(id, metrics)) & set(map(id, _candidates(runtime)))
-    finally:
-        space.close()
-
-
-def test_a_reset_removes_every_earlier_call_folder_and_keeps_the_prepared_tree(tmp_path: Path) -> None:
-    """The next version on a warm box sees no input, output or runner of an earlier call (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        first = _open(space, "")
-        first.session.write_files(
-            {".app-repo/calls/000001/candidate/input.json": "{}", ".app-repo/app_runner.py": "runner\n"}
-        )
-        first.close()
-        second = _open(space, "")
-        assert second.session is first.session
-        assert second.session.read_file(".app-repo/calls/000001/candidate/input.json") is None
-        assert second.session.read_file(".app-repo/app_runner.py") is None
-        assert second.session.read_file(f"{PREPARED_DIR}/src/app.py") == "x = 1\n"
-        assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        second.close()
-    finally:
-        space.close()
-
-
-_API = ComposeService(name="api", command="python -m api")
-
-
-class _ServiceBox(_Box):
-    """Record each start of the compose services."""
-
-    def __init__(self, inner: Any, spec: SandboxSpec) -> None:
-        """Wrap a local session with no service started.
-
-        Args:
-            inner: The real local session.
-            spec: The spec the box opened with.
-        """
-        super().__init__(inner, spec)
-        self.starts: list[str] = []
-
-    def start_services(self, base_dir: str) -> None:
-        """Record the folder the services start in.
-
-        Args:
-            base_dir: The absolute folder the services run in.
-        """
-        self.starts.append(base_dir)
-
-
-class _ServiceRuntime(_Runtime):
-    """Open boxes that can start compose services."""
-
-    def open(self, spec: SandboxSpec) -> _Box:
-        """Open one recording box that can start services."""
-        box = _ServiceBox(self._local.open(spec), spec)
-        self.boxes.append(box)
-        return box
-
-
-def _service_space(tmp_path: Path) -> tuple[RepoWorkspace, _ServiceRuntime]:
-    """Build a workspace whose candidate boxes run one compose service.
-
-    Args:
-        tmp_path: Scratch folder.
-
-    Returns:
-        The workspace and its runtime.
-    """
-    runtime = _ServiceRuntime()
-    space = RepoWorkspace(
-        runtime=runtime,
-        spec=replace(_ONLINE, services=(_API,)),
-        archive=_archive(tmp_path, {"src/app.py": "x = 1\n"}),
-        editable_paths=["src"],
-        readonly_paths=[],
-        setup_command=None,
-        secrets={},
-    )
-    return space, runtime
-
-
-def test_a_reset_stops_the_compose_services_and_starts_them_again(tmp_path: Path) -> None:
-    """A warm box's reset stops the service of the last version, then starts it on a new copy (SKY-805)."""
-    space, runtime = _service_space(tmp_path)
-    try:
-        for _ in range(3):
-            _open(space, "").close()
-        (box,) = _candidates(runtime)  # type: ignore[arg-type]
-        assert isinstance(box, _ServiceBox)
-        assert len(box.starts) == 3
-        resets = [command for command in box.root_commands if command.startswith(stop_command(_API))]
-        assert len(resets) == 2
-    finally:
-        space.close()
-
-
-def test_after_the_reaper_closes_an_idle_slot_box_the_next_candidate_gets_a_new_checked_box(tmp_path: Path) -> None:
-    """The idle close drops the slot's box; the next version opens a new box, checks its digest and starts services."""
-    space, runtime = _service_space(tmp_path)
-    space._candidates._sleep_after = 0.05
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)  # type: ignore[arg-type]
-        deadline = time.monotonic() + 10
-        while not old.closed and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert old.closed
-        box = _open(space, "")
-        new = _candidates(runtime)[-1]  # type: ignore[arg-type]
-        assert box.session is new
-        assert new is not old
-        assert isinstance(new, _ServiceBox)
-        assert len(new.starts) == 1
-        assert any(command.startswith(f"cd {PREPARED_DIR} && ") for command, _ in new.commands)
-        assert not any(command.startswith("find .app-repo ") for command in new.root_commands)
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_kept_reaper_error_reaches_the_candidate_and_keeps_the_snapshots(tmp_path: Path) -> None:
-    """A lease error before a new box opens is no lost snapshot: setup does not run again (SKY-805)."""
-    runtime = _SnapshotRuntime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        _open(space, "").close()
-        opened = len(runtime.boxes)
-        space._candidates._keep_reap_error(RuntimeError("the idle box close failed"))
-        with pytest.raises(RuntimeError, match="idle box close failed"):
-            space.open_candidate("")
-        assert len(runtime.boxes) == opened
-        assert not space._snapshots_off
-        box = _open(space, "")
-        assert box.session is _candidates(runtime)[0]  # type: ignore[arg-type]
-        assert len(runtime.boxes) == opened
-        box.close()
-    finally:
-        space.close()
-
-
-class _Parks:
-    """A run budget that records each park and unpark of a box tag."""
-
-    def __init__(self) -> None:
-        """Start with no event."""
-        self.events: list[tuple[str, str]] = []
-
-    def park(self, box: str) -> None:
-        """Record one park."""
-        self.events.append(("park", box))
-
-    def unpark(self, box: str) -> None:
-        """Record one unpark."""
-        self.events.append(("unpark", box))
-
-
-def test_a_warm_candidate_box_is_parked_in_the_run_budget_under_its_first_key_between_candidates(
-    tmp_path: Path,
-) -> None:
-    """The budget sees a warm box wait between candidates, so it can stop the run early (SKY-647, SKY-805)."""
-    budget = _Parks()
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    space.park_in(budget)  # type: ignore[arg-type]
-    first, fourth = box_tag("op:candidate-1"), box_tag("op:candidate-4")
-    try:
-        box = _open(space, "")
-        assert budget.events == []
-        box.close()
-        assert budget.events == [("park", first)]
-        box = _open(space, "")
-        assert budget.events == [("park", first), ("unpark", first)]
-        # A reused box keeps the key it opened with, not this candidate's op:candidate-2.
-        box.close()
-        assert budget.events[-1] == ("park", first)
-        _open(space, "").close(healthy=False)
-        assert budget.events[-1] == ("unpark", first)
-        _open(space, "").close()
-        assert budget.events[-1] == ("park", fourth)
-    finally:
-        space.close()
-    assert budget.events == [
-        ("park", first),
-        ("unpark", first),
-        ("park", first),
-        ("unpark", first),
-        ("park", fourth),
-        ("unpark", fourth),
-    ]
-
-
-_KEEP_PTH = 'mkdir -p "$HOME/.local" && echo keep > "$HOME/.local/keep.pth"'
-
-
-def test_a_reset_clears_what_a_version_wrote_in_the_home_caches_user_base_and_temp_folder(tmp_path: Path) -> None:
-    """A warm box gives the next version the box user's state of a new box, and keeps what setup left (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=_KEEP_PTH)
-    try:
-        first = _open(space, "")
-        first.session.run(
-            'mkdir -p "$HOME/.cache/pip" "$HOME/.local/lib/site-packages" "$TMPDIR/left"'
-            ' && echo cached > "$HOME/.cache/pip/wheel"'
-            ' && echo "import os" > "$HOME/.local/lib/site-packages/planted.pth"'
-            ' && echo hook > "$HOME/.local/lib/site-packages/sitecustomize.py"'
-            ' && echo note > "$TMPDIR/note" && echo deep > "$TMPDIR/left/deep"'
-        )
-        first.close()
-        second = _open(space, "")
-        assert second.session is first.session
-        (box,) = _candidates(runtime)
-        for path in (
-            ".cache/pip/wheel",
-            ".local/lib/site-packages/planted.pth",
-            ".local/lib/site-packages/sitecustomize.py",
-        ):
-            assert not (box.path / path).exists(), path
-        assert not (box.path / ".local/lib").exists()
-        assert not (box.path / "tmp/note").exists()
-        assert not (box.path / "tmp/left").exists()
-        assert (box.path / ".local/keep.pth").read_text() == "keep\n"
-        # The open records the state and the reset clears it, both as the box user:
-        # a local Docker root cannot remove that user's files.
-        script = shlex.quote(repo_workspace._USER_STATE)
-        reads = [command for command, _ in box.commands if script in command]
-        assert len(reads) == 2
-        assert reads[0].endswith(script)
-        assert re.search(r" [0-9.]+$", reads[1])
-        assert not any(script in command for command in box.root_commands)
-        second.close()
-    finally:
-        space.close()
-
-
-def test_a_warm_box_whose_setup_file_in_the_user_base_changed_is_replaced_by_a_new_box(tmp_path: Path) -> None:
-    """A changed file that setup left cannot be restored in place, so the next version gets a new box (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=_KEEP_PTH)
-    try:
-        first = _open(space, "")
-        first.session.run('echo "import planted" > "$HOME/.local/keep.pth"')
-        first.close()
-        second = _open(space, "")
-        old, new = _candidates(runtime)
-        assert old.closed
-        assert second.session is new
-        assert (new.path / ".local/keep.pth").read_text() == "keep\n"
-        second.close()
-    finally:
-        space.close()
-
-
-def test_an_interrupt_in_the_reset_gives_the_warm_box_back_so_the_next_candidate_does_not_wait(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A KeyboardInterrupt in the reset releases the box unhealthy, so the lease holds no busy entry (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-
-        def interrupted(*_args: Any) -> bool:
-            """Stop the reset as an interrupt does."""
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(space, "_reset", interrupted)
-        with pytest.raises(KeyboardInterrupt):
-            space.open_candidate("")
-        assert old.closed
-        monkeypatch.undo()
-        opened: list[CandidateBox] = []
-        waiter = threading.Thread(target=lambda: opened.append(_open(space, "")), daemon=True)
-        waiter.start()
-        waiter.join(timeout=30)
-        assert not waiter.is_alive()
-        assert opened[0].session is _candidates(runtime)[-1]
-        assert opened[0].session is not old
-        opened[0].close()
-    finally:
-        space.close()
-
-
-_UNPACK = "base64 -d | tar -xzf - -C .;"
-
-
-def test_a_warm_box_from_a_tar_state_skips_the_unpack_and_a_new_box_runs_it(tmp_path: Path) -> None:
-    """With snapshots off, only a box that the lease opened for the call unpacks the tar state (SKY-805)."""
-    runtime = _SnapshotRuntime(failing=True)
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        _open(space, "").close()
-        assert space._snapshots_off
-        (warm,) = _candidates(runtime)
-        assert sum(_UNPACK in command for command, _ in warm.commands) == 1
-        box = _open(space, "")
-        assert box.session is warm
-        assert sum(_UNPACK in command for command, _ in warm.commands) == 1
-        box.close(healthy=False)
-        box = _open(space, "")
-        new = _candidates(runtime)[-1]
-        assert box.session is new
-        assert new is not warm
-        assert sum(_UNPACK in command for command, _ in new.commands) == 1
-        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_budget_error_in_the_reset_gives_the_box_back_unhealthy_frees_the_slot_and_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A budget stop in a warm box's reset closes the box and frees its slot before it reaches the run (SKY-805)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-
-        def stopped(*_args: Any) -> bool:
-            """Stop the reset as the run budget does."""
-            raise BudgetReached("stopped")
-
-        monkeypatch.setattr(space, "_reset", stopped)
-        with pytest.raises(BudgetReached):
-            space.open_candidate("")
-        assert old.closed
-        assert space._free_slots == [0]
-        monkeypatch.undo()
-        box = _open(space, "")
-        assert box.session is _candidates(runtime)[-1]
-        assert box.session is not old
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_warm_box_whose_clear_command_fails_is_replaced_like_a_digest_mismatch(tmp_path: Path) -> None:
-    """A failed clear of the repository folder closes the warm box, and the version gets a new box (SKY-805)."""
-    runtime = _Runtime()
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    space = _space(archive, runtime, setup=None)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-        run = old.run
-
-        def failing(command: str, **options: Any) -> CommandResult:
-            """Fail the reset's clear and run every other command.
-
-            Args:
-                command: The shell command.
-                **options: The run's other arguments.
-
-            Returns:
-                The command's result.
-            """
-            if " find .app-repo " in command:
-                return CommandResult(exit_code=1, stderr="rm: busy")
-            return run(command, **options)
-
-        old.run = failing  # type: ignore[method-assign]
-        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
-        assert old.closed
-        assert box.session is _candidates(runtime)[-1]
-        assert box.session is not old
-        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
-        box.close()
-    finally:
-        space.close()
-
-
-def _replaced(runtime: _Runtime, old: _Box, box: CandidateBox) -> None:
-    """Check that the warm box closed and the version runs in a new box.
-
-    Args:
-        runtime: The recording runtime.
-        old: The warm box.
-        box: The next version's open box.
-    """
-    assert old.closed
-    assert box.session is _candidates(runtime)[-1]
-    assert box.session is not old
-
-
-@pytest.mark.parametrize("link", [REPO_DIR, PREPARED_DIR])
-def test_a_link_in_place_of_the_repository_folder_or_prepared_tree_replaces_the_warm_box(
-    tmp_path: Path, link: str
-) -> None:
-    """A link passes the clear and the digest but can hold a stale checkout, so the box is replaced (SKY-805).
-
-    The link points at a clean copy outside the box, so only the link check
-    can tell this box from a clean one.
-    """
-    runtime = _Runtime()
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    space = _space(archive, runtime, setup=None)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    try:
-        first = _open(space, "")
-        target = shlex.quote(str(outside / posixpath.basename(link)))
-        copied = first.session.run(
-            f"cp -a {PREPARED_DIR} {outside}/prepared && rm -rf {link} && ln -s {target} {link}"
-            if link == PREPARED_DIR
-            else f"mkdir {target} && cp -a {PREPARED_DIR} {target}/prepared && rm -rf {link} && ln -s {target} {link}"
-        )
-        assert copied.ok, copied.stderr
-        first.close()
-        (old,) = _candidates(runtime)
-        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
-        _replaced(runtime, old, box)
-        assert not (box.session.path / REPO_DIR).is_symlink()  # type: ignore[attr-defined]
-        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_warm_box_whose_clear_leaves_an_entry_in_the_repository_folder_is_replaced(tmp_path: Path) -> None:
-    """The repository folder must hold only the prepared tree after the clear, or the box is replaced (SKY-805)."""
-    runtime = _Runtime()
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    space = _space(archive, runtime, setup=None)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-        run = old.run
-
-        def removes_nothing(command: str, **options: Any) -> CommandResult:
-            """Make the reset's clear remove nothing, and run every command.
-
-            Args:
-                command: The shell command.
-                **options: The run's other arguments.
-
-            Returns:
-                The command's result.
-            """
-            return run(command.replace(" find .app-repo ", " true .app-repo "), **options)
-
-        old.run = removes_nothing  # type: ignore[method-assign]
-        box = _open(space, "")
-        _replaced(runtime, old, box)
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_checkout_folder_already_in_the_box_stops_the_apply_and_the_box_is_replaced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``cp -a`` into a checkout that is already there would keep its files, so the apply stops (SKY-805)."""
-    runtime = _Runtime()
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    space = _space(archive, runtime, setup=None)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-        reset = space._reset
-
-        def leaves_a_checkout(session: Any, slot: str) -> bool:
-            """Reset the box, then leave a stale checkout in it.
-
-            Args:
-                session: The warm box.
-                slot: The slot's lease key.
-
-            Returns:
-                The reset's result.
-            """
-            ready = reset(session, slot)
-            session.run(f"mkdir -p {WORK_DIR}/src && echo stale > {WORK_DIR}/src/old.py")
-            return ready
-
-        monkeypatch.setattr(space, "_reset", leaves_a_checkout)
-        with pytest.raises(RepoSetupError, match="already holds a checkout"):
-            space.open_candidate("")
-        assert old.closed
-        monkeypatch.undo()
-        box = _open(space, "")
-        assert box.session is not old
-        assert box.session.read_file(f"{WORK_DIR}/src/old.py") is None
-        box.close()
-    finally:
-        space.close()
-
-
-def _running(pid: int) -> bool:
-    """Tell whether a process runs and is not a zombie.
-
-    Args:
-        pid: The process.
-
-    Returns:
-        True when the process runs.
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    state = Path(f"/proc/{pid}/stat")
-    if state.exists():
-        return state.read_bytes().rsplit(b")", 1)[1].split()[0] != b"Z"
-    listed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
-    return bool(listed.stdout.strip()) and not listed.stdout.strip().startswith("Z")
-
-
-def _gone(pid: int) -> bool:
-    """Wait a short time for a killed process to end.
-
-    Args:
-        pid: The process.
-
-    Returns:
-        True when the process ended.
-    """
-    deadline = time.monotonic() + 5
-    while _running(pid):
-        if time.monotonic() > deadline:
-            return False
-        time.sleep(0.05)
-    return True
-
-
-_BACKGROUND = "{ nohup sleep 300 >/dev/null 2>&1 & echo $!; }"
-
-
-def test_a_background_process_of_a_version_is_stopped_before_the_next_version_on_the_warm_box(
-    tmp_path: Path,
-) -> None:
-    """A process that a version left does not run into the next version's run, and a host process stays (SKY-809)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    host = subprocess.Popen(["sleep", "300"], cwd=tmp_path)
-    try:
-        first = _open(space, "")
-        started = first.session.run(f"cd {WORK_DIR} && {_BACKGROUND}")
-        pid = int(started.stdout.split()[-1])
-        assert _running(pid)
-        first.close()
-        second = _open(space, "")
-        assert second.session is first.session
-        assert _gone(pid)
-        assert _running(host.pid)
-        (box,) = _candidates(runtime)
-        script = shlex.quote(repo_workspace._STOP_PROCESSES)
-        # A box on the host has no provider attribute, so it stops only processes inside its folder.
-        assert [command for command in box.root_commands if script in command][-1].endswith(f"{script} cwd")
-        second.close()
-    finally:
-        host.kill()
-        host.wait()
-        space.close()
-
-
-def test_a_reset_that_cannot_stop_the_last_versions_processes_replaces_the_warm_box(tmp_path: Path) -> None:
-    """A failed stop leaves processes that the next version could meet, so the box is replaced (SKY-809)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-        run = old.run
-        script = shlex.quote(repo_workspace._STOP_PROCESSES)
-
-        def cannot_stop(command: str, **options: Any) -> CommandResult:
-            """Fail the reset's stop, and run every other command.
-
-            Args:
-                command: The shell command.
-                **options: The run's other arguments.
-
-            Returns:
-                The command's result.
-            """
-            if script in command:
-                return CommandResult(exit_code=1, stderr="Processes of the last version still run.")
-            return run(command, **options)
-
-        old.run = cannot_stop  # type: ignore[method-assign]
-        box = _open(space, "")
-        _replaced(runtime, old, box)
-        box.close()
-    finally:
-        space.close()
-
-
-def test_a_provider_box_stops_the_box_users_processes_as_root(tmp_path: Path) -> None:
-    """Only a provider's box, known from its class, stops every process of the entry's user, as root (SKY-809)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        _open(space, "").close()
-        (old,) = _candidates(runtime)
-        old.root_has_capabilities = True  # type: ignore[attr-defined]
-        run = old.run
-        script = shlex.quote(repo_workspace._STOP_PROCESSES)
-        stops: list[tuple[str, bool]] = []
-
-        def recorded(command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
-            """Record the stop without running it on the host, and run every other command.
-
-            Args:
-                command: The shell command.
-                sudo: The command asks for root.
-                **options: The run's other arguments.
-
-            Returns:
-                The command's result.
-            """
-            if script in command:
-                stops.append((command, sudo))
-                return CommandResult(exit_code=0, stdout="stopped\n")
-            return run(command, sudo=sudo, **options)
-
-        old.run = recorded  # type: ignore[method-assign]
-        box = _open(space, "")
-        assert box.session is old
-        ((command, sudo),) = stops
-        assert command.endswith(f"{script} box")
-        assert sudo
-        box.close()
-    finally:
-        space.close()
-
-
-def test_the_box_scope_stop_refuses_to_run_outside_a_provider_box(tmp_path: Path) -> None:
-    """Without root, or in a folder that root owns, the box scope stops nothing and fails (SKY-809)."""
-    host = subprocess.Popen(["sleep", "300"], cwd=tmp_path)
-    try:
-        stopped = subprocess.run(
-            [sys.executable, "-I", "-S", "-c", repo_workspace._STOP_PROCESSES, "box"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert stopped.returncode != 0
-        assert "stopped" not in stopped.stdout
-        assert _running(host.pid)
-    finally:
-        host.kill()
-        host.wait()
-
-
-def test_a_reset_clears_the_home_dotfiles_config_and_box_folder_files_that_a_version_wrote(tmp_path: Path) -> None:
-    """A version's git, pip and npm config and its files beside the repository folder are gone (SKY-809)."""
-    runtime = _Runtime()
-    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
-    try:
-        first = _open(space, "")
-        written = first.session.run(
-            'mkdir -p "$HOME/.config/pip" && echo "[user]" > "$HOME/.gitconfig"'
-            ' && echo "[global]" > "$HOME/.config/pip/pip.conf" && echo "registry=x" > "$HOME/.npmrc"'
-            ' && echo left > beside.txt && echo note > "$TMPDIR/note"'
-        )
-        assert written.ok, written.stderr
-        first.close()
-        second = _open(space, "")
-        assert second.session is first.session
-        (box,) = _candidates(runtime)
-        for path in (".gitconfig", ".config", ".npmrc", "beside.txt", "tmp/note"):
-            assert not (box.path / path).exists(), path
-        assert (box.path / "tmp").is_dir()
-        second.close()
-    finally:
-        space.close()

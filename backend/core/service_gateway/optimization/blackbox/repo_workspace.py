@@ -13,22 +13,12 @@ versions. Each box holds only the code it needs (SKY-398):
 - The metric setup step runs once in its own box. It installs only the
   packages of ``METRIC_REQUIREMENTS`` and saves a second state that holds no
   repository code. Its network is open only for that install.
-- A candidate box C comes from the run's warm box lease (SKY-805). A new
-  box opens from the prepared state, checks the digest and records the box
-  user's state outside the repository folder. A warm box from the last
-  candidate of its slot first resets. It stops the compose services and
-  every process that the last version left (SKY-809). It checks that the
-  repository folder and the prepared tree are real folders, not links, and
-  removes everything in the repository folder but the prepared tree. It
-  removes what changed since the open in the box user's HOME, the box
-  folder and the box user's own temp entries (``/tmp``, ``/var/tmp`` and
-  ``/dev/shm``), and that state must match the record of the open. Then it
-  starts the services and checks the digest again. A failed step closes the
-  box and a new box opens, so a version sees the same box state as in a new
-  box. A ``[run]`` that failed or timed out also closes the box. The box
-  then lays out the version, and refuses a checkout folder that is already
-  there. Between candidates the warm box is parked in the run budget. The
-  run closes the lease at its end.
+- A candidate box C opens for each evaluation from the prepared state,
+  checks the digest and lays out the version. The parent ends it after the
+  ``[run]`` entry; closing the box is the only cleanup. No candidate box
+  serves a second version (SKY-805): a reset of a used box would have to
+  clear every state a version can leave, so each version gets a new box
+  from the saved state, and the setup does not run again.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
 
@@ -39,7 +29,6 @@ acquire, start, run and release steps match every other tree sandbox box.
 from __future__ import annotations
 
 import base64
-import heapq
 import io
 import json
 import logging
@@ -57,16 +46,11 @@ from pathlib import Path
 
 from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
-from ....billing.runtime import BudgetRuntime, UsagePendingError
+from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
-from ....billing.usage_tags import box_tag
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
-from ....config import settings
-from ....sandbox.box_lease import BoxLease
 from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.grants import Grant
-from ....sandbox.placement import Placement
-from ....sandbox.services import stop_command
 from ....sandbox.snapshots import snapshot_cache_key
 from ....sandbox.trees import BoxSource
 from .repo_tree import (
@@ -125,8 +109,6 @@ GIT = (
     " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _HASH_TIMEOUT_SECONDS = 300.0
-# The apply command's exit code when the checkout folder is already there.
-_WORK_DIR_LEFT = 97
 # One requirement specifier: a name, optional extras, markers and versions.
 # Options (``-e``, ``--index-url``, ``-r``), paths and URLs fail, so the step
 # installs only named packages from the registry and never repository code.
@@ -309,192 +291,6 @@ for folder, folders, files in os.walk(".", followlinks=False):
 print(sha.hexdigest())
 """
 
-# The box user's state outside the repository folder that a version can
-# write and the next version on a warm box could read: every entry of HOME
-# and of the box folder but the parent's own repository and services folders,
-# and the box user's own entries in the temp folders. Without TMPDIR these are
-# /tmp, /var/tmp and /dev/shm; a set TMPDIR (a local box) is the only one. The
-# provider's command files (``.app-*``) in a temp folder stay. With a time
-# argument it first removes each entry whose change time is after it: a
-# version can set a file's other times, but not its change time. It never
-# removes HOME, the box folder or a temp folder itself. It prints the time it
-# started and a digest of the remaining entries, with each file's size and
-# change time. A new box records both before the first version; at a reset
-# the digest must match again, so a warm box holds the same state as a new
-# box, or the parent replaces it.
-_USER_STATE = rf"""
-import hashlib, os, stat, sys, time
-
-started = time.time()
-since = float(sys.argv[1]) if len(sys.argv) > 1 else None
-home = os.path.abspath(os.path.expanduser("~"))
-box = os.path.abspath(".")
-temps = [os.environ["TMPDIR"]] if os.environ.get("TMPDIR") else ["/tmp", "/var/tmp", "/dev/shm"]
-temps = [os.path.abspath(temp) for temp in temps]
-keep = {{home, box, *temps}}
-tops = []
-for folder in dict.fromkeys([home, box]):
-    try:
-        names = sorted(os.listdir(folder))
-    except OSError:
-        names = []
-    tops += [os.path.join(folder, name) for name in names if name not in ({REPO_DIR!r}, {SERVICES_DIR!r})]
-for temp in temps:
-    try:
-        names = sorted(os.listdir(temp))
-    except OSError:
-        names = []
-    for name in names:
-        path = os.path.join(temp, name)
-        try:
-            if not name.startswith(".app-") and os.lstat(path).st_uid == os.getuid():
-                tops.append(path)
-        except OSError:
-            pass
-# A temp folder inside HOME is walked once, as part of HOME.
-tops = [top for top in dict.fromkeys(tops) if not any(top.startswith(other + os.sep) for other in tops)]
-
-def newer(info):
-    return since is not None and info.st_ctime > since
-
-def clear(path):
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return
-    if stat.S_ISDIR(info.st_mode):
-        for name in os.listdir(path):
-            clear(os.path.join(path, name))
-        if path not in keep and newer(os.lstat(path)) and not os.listdir(path):
-            os.rmdir(path)
-    elif newer(info):
-        os.unlink(path)
-
-def walk(path, sha):
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return
-    kind = stat.S_IFMT(info.st_mode)
-    sha.update(f"{{path}}\0{{kind}}\0".encode("utf-8", "surrogateescape"))
-    if stat.S_ISDIR(info.st_mode):
-        for name in sorted(os.listdir(path)):
-            walk(os.path.join(path, name), sha)
-    else:
-        sha.update(f"{{info.st_size}}\0{{info.st_ctime_ns}}\0".encode())
-
-if since is not None:
-    for top in tops:
-        clear(top)
-sha = hashlib.sha256()
-for top in tops:
-    walk(top, sha)
-print(f"{{started!r}} {{sha.hexdigest()}}")
-"""
-
-# Stops every process that a version left in a warm box before the reset
-# (SKY-809). ``box`` scope runs as root in a provider's box: it kills the
-# processes of the user that the supervisor starts the entry as (runner
-# ``_entry_user``): the box folder's owner, or root itself where root has no
-# capability (local Docker). It never kills PID 1 or its own ancestors.
-# ``cwd`` scope is for a box on the host, as in the tests: it kills only its
-# own user's processes whose working folder is inside the box folder, so it
-# never stops a host process outside the box. Each round lists and kills the
-# targets again, because a process can start another; targets that remain
-# after the last round fail the script.
-_STOP_PROCESSES = r"""
-import os, signal, subprocess, sys, time
-
-scope = sys.argv[1]
-box = os.path.realpath(".")
-proc = os.path.isdir("/proc")
-
-def table():
-    rows = {}
-    if proc:
-        for name in os.listdir("/proc"):
-            if not name.isdigit():
-                continue
-            try:
-                with open(f"/proc/{name}/stat", "rb") as handle:
-                    fields = handle.read().rsplit(b")", 1)[1].split()
-                with open(f"/proc/{name}/status", encoding="utf-8") as handle:
-                    uid = next(int(line.split()[1]) for line in handle if line.startswith("Uid:"))
-            except (OSError, StopIteration, ValueError, IndexError):
-                continue
-            rows[int(name)] = (int(fields[1]), uid, fields[0] == b"Z")
-    else:
-        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,uid=,stat="], capture_output=True, text=True, check=True)
-        for line in listed.stdout.splitlines():
-            pid, ppid, uid, state = line.split()[:4]
-            rows[int(pid)] = (int(ppid), int(uid), state.startswith("Z"))
-    return rows
-
-def folders():
-    found = {}
-    if proc:
-        for name in os.listdir("/proc"):
-            if name.isdigit():
-                try:
-                    found[int(name)] = os.path.realpath(os.readlink(f"/proc/{name}/cwd"))
-                except OSError:
-                    pass
-        return found
-    listed = subprocess.run(["lsof", "-a", "-d", "cwd", "-u", str(os.geteuid()), "-Fpn", "-w"], capture_output=True, text=True)
-    pid = None
-    for line in listed.stdout.splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n") and pid is not None:
-            found[pid] = os.path.realpath(line[1:])
-    return found
-
-def capable():
-    try:
-        with open("/proc/self/status", encoding="utf-8") as handle:
-            return next(int(line.split()[1], 16) for line in handle if line.startswith("CapEff:")) != 0
-    except (OSError, StopIteration, ValueError):
-        return True
-
-if scope == "box":
-    owner = os.stat(".").st_uid
-    if os.geteuid() != 0 or owner == 0:
-        sys.exit("The box scope needs root and a box folder that root does not own.")
-    user = owner if capable() else 0
-else:
-    user = os.geteuid()
-
-def targets():
-    rows = table()
-    mine, pid = set(), os.getpid()
-    while pid in rows and pid not in mine:
-        mine.add(pid)
-        pid = rows[pid][0]
-    places = folders() if scope != "box" else {}
-    found = []
-    for pid, (parent, uid, zombie) in rows.items():
-        if uid != user or zombie or pid in mine or pid == 1:
-            continue
-        place = places.get(pid, "")
-        if scope == "box" or place == box or place.startswith(box + os.sep):
-            found.append(pid)
-    return found
-
-for _ in range(20):
-    left = targets()
-    if not left:
-        print("stopped")
-        break
-    for pid in left:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    time.sleep(0.05)
-else:
-    sys.exit("Processes of the last version still run.")
-"""
-
 
 def _pick_base_python() -> str:
     """Set ``p`` in a box command to the base interpreter.
@@ -535,17 +331,6 @@ class _State:
 
     snapshot_id: str | None = None
     archive: Path | None = None
-
-
-@dataclass(frozen=True)
-class _Warm:
-    """What the parent knows of a slot's box from its open: its key, and its box user's state then."""
-
-    # The operation key the box opened with. A reused box keeps it, so its budget tag never changes.
-    key: str | None
-    # The box clock when the state was read, and the state's digest; ``None`` when it could not be read.
-    since: float | None
-    state: str | None
 
 
 def redact(text: str, secrets: Iterable[str]) -> str:
@@ -672,15 +457,6 @@ def _close_quietly(session: SandboxSession, what: str) -> None:
         logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
 
 
-def _close_session(session: SandboxSession) -> None:
-    """Close one box for good; a close error goes to the caller.
-
-    Args:
-        session: The box.
-    """
-    session.close()
-
-
 class RepoBoxSource:
     """Open a fresh evaluation box for each acquire and close it at release (SKY-718).
 
@@ -721,76 +497,6 @@ class RepoBoxSource:
             healthy: Not used: a closed box is never reused.
         """
         box.close()
-
-
-class _SlotSource:
-    """Give one candidate slot's box from the run's lease, and free the slot at the box's last release (SKY-805).
-
-    A lease key is the run and the slot, like a Cloudflare sandbox id: each
-    parallel candidate gets its own warm box, and no box crosses runs. A
-    warm box is parked in the run budget from its healthy release until the
-    slot's next acquire, so the budget sees that it waits (SKY-647).
-    """
-
-    def __init__(
-        self,
-        lease: BoxLease[SandboxSession],
-        key: str,
-        free: Callable[[], None],
-        park: Callable[[str], None],
-        unpark: Callable[[str], None],
-    ) -> None:
-        """Bind the slot to the run's lease.
-
-        Args:
-            lease: The run's candidate box lease.
-            key: The run and the slot.
-            free: Gives the slot back.
-            park: Parks the slot's warm box in the run budget.
-            unpark: Ends the park of the slot's warm box.
-        """
-        self._lease = lease
-        self.key = key
-        self._free = free
-        self._park = park
-        self._unpark = unpark
-        self._freed = False
-        self._lock = threading.Lock()
-
-    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
-        """End the park of the slot's warm box, then return it, or open a new one.
-
-        Args:
-            agent_id: The lease key.
-            grants: The grants the lease compares; the box opens with the ``[run]`` hosts.
-
-        Returns:
-            The box.
-        """
-        self._unpark(self.key)
-        return self._lease.acquire(agent_id, grants)
-
-    def release(self, box: SandboxSession, healthy: bool) -> None:
-        """Keep a healthy box warm and parked for the slot, or close it; then free the slot.
-
-        Args:
-            box: The slot's box.
-            healthy: False when the box failed, so the slot's next candidate gets a new box.
-        """
-        try:
-            self._lease.release(box, healthy)
-            if healthy and self._lease.keeps_warm:
-                self._park(self.key)
-        finally:
-            self.free()
-
-    def free(self) -> None:
-        """Give the slot back once."""
-        with self._lock:
-            if self._freed:
-                return
-            self._freed = True
-        self._free()
 
 
 def _release_failed(source: BoxSource[SandboxSession], session: SandboxSession, what: str) -> None:
@@ -954,13 +660,9 @@ class CandidateBox:
             self._unstamped = False
             return changes
 
-    def close(self, healthy: bool = True) -> None:
-        """Give the box back to its source once; the next candidate resets a healthy box.
-
-        Args:
-            healthy: False when the box failed, so the lease closes it and the next candidate gets a new box.
-        """
-        self.box.release(healthy=healthy)
+    def close(self) -> None:
+        """Give the box back to its source once; every process the version started ends with it."""
+        self.box.release(healthy=True)
 
 
 class MetricBox:
@@ -990,7 +692,7 @@ class MetricBox:
     def install_metric_files(self) -> None:
         """Put the metric files into ``METRIC_REPO_DIR`` at their repository paths.
 
-        Call it only after the candidate box went back to the lease (SKY-398, SKY-805).
+        Call it only after the candidate box ended (SKY-398).
 
         Raises:
             RepoSetupError: When the files cannot be installed.
@@ -1060,11 +762,10 @@ def _deliver(session: SandboxSession, path: str, text: str) -> bool:
 
 
 class RepoWorkspace:
-    """Prepare a repository once, then give a candidate box and a new metric box for each evaluation.
+    """Prepare a repository once, then open a fresh candidate box and metric box for each evaluation.
 
-    A candidate slot keeps its warm box for the run's next version, after a
-    reset. No metric box outlives its evaluation, so nothing one version's
-    code writes or starts reaches the metric.
+    No box outlives its evaluation, so nothing one version's code writes or
+    starts reaches the next version or the metric.
     """
 
     def __init__(
@@ -1083,7 +784,6 @@ class RepoWorkspace:
         run_vcpus: int | None = None,
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
-        candidate_cap: int | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -1105,8 +805,6 @@ class RepoWorkspace:
             run_vcpus: The ``[run] vcpus`` of the candidate box; ``None`` keeps ``spec.vcpus``.
             metric_hosts: The ``[metric] network`` hosts of the metric box; empty keeps it offline.
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
-            candidate_cap: The most warm candidate boxes the run keeps; ``None``
-                takes ``REPO_CANDIDATE_VERCEL_CAP``.
         """
         self._runtime = runtime
         self._spec = spec
@@ -1145,30 +843,8 @@ class RepoWorkspace:
             image_digest=spec.image or "", setup_command="", install_command="", lock_files={"metric": unique}
         )
         self._snapshots_off = False
-        self._closed = False
         self._opened = 0
         self._lock = threading.Lock()
-        cap = settings.repo_candidate_vercel_cap if candidate_cap is None else candidate_cap
-        # One lease for each workspace, so a warm box never serves another run (SKY-805).
-        self._run_key = spec.operation_key or unique
-        self._candidates: BoxLease[SandboxSession] = BoxLease(
-            self._open_leased,
-            _close_session,
-            # One slot for each warm box; the opener ignores the placement, so a box never spills.
-            vercel_cap=cap,
-            starts_per_minute=settings.repo_candidate_starts_per_minute,
-        )
-        self._free_slots = list(range(cap))
-        self._slots_free = threading.Condition()
-        # The lease opens a box inside acquire, in the caller's thread, so the
-        # opener reads the asking candidate's spec here and marks the box new.
-        self._pending = threading.local()
-        self._warm: dict[str, _Warm] = {}
-        # Its own lock: ``_lock`` is held through the whole setup.
-        self._park_lock = threading.Lock()
-        self._budget: BudgetRuntime | None = None
-        # The budget tag of each slot's parked warm box.
-        self._parked: dict[str, str] = {}
 
     @property
     def secrets(self) -> dict[str, str]:
@@ -1184,44 +860,6 @@ class RepoWorkspace:
     def watched(self) -> tuple[str, ...]:
         """Return the protected paths the candidate box checks."""
         return self._protected
-
-    def park_in(self, budget: BudgetRuntime) -> None:
-        """Park each warm candidate box in this run budget while it waits for the slot's next candidate.
-
-        A warm box keeps its hold between evaluations, so without the park the
-        budget would wait for it to end before it stops the run (SKY-647).
-
-        Args:
-            budget: The run budget that holds the candidate boxes.
-        """
-        with self._park_lock:
-            self._budget = budget
-
-    def _park(self, slot: str) -> None:
-        """Park the slot's warm box under the tag of the key it opened with.
-
-        Args:
-            slot: The slot's lease key.
-        """
-        with self._park_lock:
-            warm = self._warm.get(slot)
-            # After the close, nothing ends a park, and the lease closes the box.
-            if self._closed or self._budget is None or warm is None or warm.key is None or slot in self._parked:
-                return
-            tag = box_tag(warm.key)
-            self._budget.park(tag)
-            self._parked[slot] = tag
-
-    def _unpark(self, slot: str) -> None:
-        """End the park of the slot's warm box, if it has one.
-
-        Args:
-            slot: The slot's lease key.
-        """
-        with self._park_lock:
-            tag = self._parked.pop(slot, None)
-            if tag is not None and self._budget is not None:
-                self._budget.unpark(tag)
 
     def prepare(self, *, on_output: OutputSink | None = None) -> None:
         """Run the setup box and the metric setup step once, and keep both states.
@@ -1451,30 +1089,21 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(
-        self,
-        spec: SandboxSpec,
-        state: _State | None,
-        role: str,
-        grants: tuple[Grant, ...],
-        slot: _SlotSource | None = None,
-    ) -> BoxSession:
+    def _open_box(self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]) -> BoxSession:
         """Open one box from a saved state through the tree sandbox session API (SKY-718, SKY-785).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
-            role: ``candidate`` or ``metric``, or the lease key of a candidate slot.
+            role: ``candidate`` or ``metric``.
             grants: The role's network grants; empty keeps the box offline.
-            slot: The candidate slot whose warm box the run's lease gives;
-                ``None`` opens a new box that closes at its release.
 
         Returns:
-            The session that holds the box, with a tar state unpacked in a new box.
+            The session that holds the open box, with a tar state unpacked.
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
-            _SnapshotLostError: When a new box cannot open from its snapshot.
+            _SnapshotLostError: When the box cannot open from its snapshot.
         """
         if state is not None and state.snapshot_id is not None:
             spec = replace(spec, snapshot_id=state.snapshot_id)
@@ -1507,34 +1136,15 @@ class RepoWorkspace:
                     raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
 
             start = unpack
-        source: BoxSource[SandboxSession] = RepoBoxSource(self._runtime, spec)
-        if slot is not None:
-            source = slot
-            self._pending.spec = spec
-            self._pending.fresh = False
-            if start is not None:
-                unpack_new = start
-
-                def unpack_if_new(session: SandboxSession) -> None:
-                    """Unpack the tar state only into a box that the lease opened for this call.
-
-                    Args:
-                        session: The box.
-                    """
-                    if self._pending.fresh:
-                        unpack_new(session)
-
-                start = unpack_if_new
-
         try:
-            return TreeSandbox.open_session(source, role, grants, start=start, what="A box from a tar state")
+            return TreeSandbox.open_session(
+                RepoBoxSource(self._runtime, spec), role, grants, start=start, what="A box from a tar state"
+            )
         except _BUDGET_ERRORS:
             raise
         except Exception as error:
             # A saved state is a snapshot or a tar file, never both, so an error here with a snapshot is the open's.
-            # A slot's error is the open's only when the lease opened a new box in this call; a kept reaper
-            # error, a closed lease or a warm box's error leaves the snapshots in place.
-            if spec.snapshot_id is None or (slot is not None and not self._pending.fresh):
+            if spec.snapshot_id is None:
                 raise
             # Only the type: the provider's text can name the snapshot.
             logger.warning("A box did not open from its snapshot (%s)", type(error).__name__)
@@ -1614,49 +1224,29 @@ class RepoWorkspace:
         Raises:
             RepoSetupError: When the workspace is not prepared or the box does
                 not hold the prepared tree.
-            RuntimeError: When the workspace is closed.
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
-        with self._lock:
-            # Before prepare: the close forgets the saved states, so a late call would pay for setup again.
-            if self._closed:
-                raise RuntimeError("The box lease is closed.")
         self.prepare()
-        # Each candidate takes a new key, but only a new box uses it: a warm box keeps the key it opened with.
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        slot = self._take_slot()
-        try:
-            box, new = self._candidate_box(slot, spec, state)
-        except BaseException:
-            slot.free()
-            raise
+        box = self._open_box(spec, state, "candidate", self._run_grants)
         session = box.box
         try:
-            if new and self._digest_prepared(session) != self._prepared_digest:
+            if self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
                 lost = state is not None and state.snapshot_id is not None
                 raise (_SnapshotLostError if lost else RepoSetupError)(
                     "The candidate box does not hold the prepared repository."
                 )
-            if new:
-                # Before the services start, as at a reset, so the next reset clears what they write.
-                since, state = self._user_state(session)
-                self._warm[slot.key] = _Warm(spec.operation_key, since, state)
-                self._start_services(session)
+            self._start_services(session)
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
-                # cp -a into a folder that is already there copies into it, so a
-                # stale checkout must stop the apply.
-                f"set -e; if [ -e {WORK_DIR} ] || [ -L {WORK_DIR} ]; then exit {_WORK_DIR_LEFT}; fi;"
-                f" cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
+                f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
                 f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
                 return CandidateBox(self, session, box_root(session), box)
-            if applied.exit_code == _WORK_DIR_LEFT:
-                raise RepoSetupError("The candidate box already holds a checkout, so the version cannot be laid out.")
         except BaseException:
             box.release_failed("The candidate box")
             raise
@@ -1664,161 +1254,11 @@ class RepoWorkspace:
         box.release_failed("The candidate box")
         return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
-    def _take_slot(self) -> _SlotSource:
-        """Take the lowest free candidate slot, and wait while the run holds a box in every slot.
-
-        Returns:
-            The slot's box source; its last release frees the slot.
-        """
-        with self._slots_free:
-            while not self._free_slots:
-                # At the cap a run waits for its own box, and never spills to another provider.
-                self._slots_free.wait()
-            number = heapq.heappop(self._free_slots)
-
-        def free() -> None:
-            """Give the slot back and wake one waiting candidate."""
-            with self._slots_free:
-                heapq.heappush(self._free_slots, number)
-                self._slots_free.notify()
-
-        return _SlotSource(self._candidates, f"{self._run_key}:candidate-{number}", free, self._park, self._unpark)
-
-    def _candidate_box(self, slot: _SlotSource, spec: SandboxSpec, state: _State | None) -> tuple[BoxSession, bool]:
-        """Get the slot's warm box and reset it, or a new box when the slot has none or the reset fails.
-
-        Args:
-            slot: The candidate slot.
-            spec: The new box's spec without its state.
-            state: The prepared state a new box opens from.
-
-        Returns:
-            The session that holds the box, and True when the lease opened it for this call.
-
-        Raises:
-            RepoSetupError: When a tar state cannot be unpacked.
-            _SnapshotLostError: When a new box cannot open from its snapshot.
-        """
-        while True:
-            box = self._open_box(spec, state, slot.key, (), slot=slot)
-            if self._pending.fresh:
-                return box, True
-            try:
-                if self._reset(box.box, slot.key):
-                    return box, False
-            except _BUDGET_ERRORS:
-                _release_failed(self._candidates, box.box, "A warm candidate box")
-                raise
-            except Exception as error:
-                # Only the type: the provider's text can name the box.
-                logger.warning("A warm candidate box did not reset (%s)", type(error).__name__)
-            except BaseException:
-                # The lease must not keep the box held: the slot's next acquire would wait for it forever.
-                _release_failed(self._candidates, box.box, "A warm candidate box")
-                raise
-            # The unhealthy release drops the box, so the next acquire opens a new one.
-            _release_failed(self._candidates, box.box, "A warm candidate box")
-
-    def _reset(self, session: SandboxSession, slot: str) -> bool:
-        """Clear the last candidate from a warm box, restart its services and check the prepared tree.
-
-        The reset stops the last version's processes (see ``_STOP_PROCESSES``),
-        keeps only the prepared tree of the repository folder, and brings the
-        box user's HOME, box folder and temp files back to the state the box
-        had when it opened (see ``_USER_STATE``). So a version never reads or
-        changes what an earlier version left. The repository folder and the
-        prepared tree must be real folders: a link there would let the clear
-        and the digest pass while the next checkout lands in a stale one.
-
-        Args:
-            session: The warm box.
-            slot: The slot's lease key.
-
-        Returns:
-            True when the box is ready for the next version.
-
-        Raises:
-            RepoSetupError: When the services cannot start again.
-        """
-        stops = "".join(f"{stop_command(service)}; " for service in self._spec.services)
-        # Static provider knowledge, never box output: only a provider's box
-        # has the attribute, and only there may root stop the box user's
-        # processes. A box on the host stops only processes inside its folder.
-        scope = "box" if hasattr(session, "root_has_capabilities") else "cwd"
-        stopped = session.run(
-            f'{stops}{_pick_base_python()}"$p" -I -S -c {shlex.quote(_STOP_PROCESSES)} {scope}',
-            timeout_seconds=_HASH_TIMEOUT_SECONDS,
-            sudo=True,
-        )
-        if not stopped.ok:
-            return False
-        keep = posixpath.basename(PREPARED_DIR)
-        real = " && ".join(f"[ -d {path} ] && [ ! -L {path} ]" for path in (REPO_DIR, PREPARED_DIR))
-        cleared = session.run(
-            f"{real} && find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name {keep} -exec rm -rf {{}} +"
-            f' && [ "$(ls -A {REPO_DIR})" = {keep} ]',
-            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-            # The supervisor runs as root, so a call folder holds root's files.
-            sudo=True,
-        )
-        if not cleared.ok:
-            return False
-        warm = self._warm.get(slot)
-        if warm is None or warm.since is None:
-            return False
-        if self._user_state(session, warm.since)[1] != warm.state:
-            return False
-        self._start_services(session)
-        return self._digest_prepared(session) == self._prepared_digest
-
-    def _user_state(self, session: SandboxSession, since: float | None = None) -> tuple[float | None, str | None]:
-        """Read the box user's state outside the repository folder, after removing what changed since ``since``.
-
-        It runs as the box user: a local Docker root has no capability to
-        remove that user's files.
-
-        Args:
-            session: The candidate box.
-            since: The box clock when the box opened; ``None`` removes nothing.
-
-        Returns:
-            The box clock when the read started and the state's digest, or
-            ``(None, None)`` when the command failed or printed something else.
-        """
-        argument = "" if since is None else f" {since!r}"
-        result = session.run(
-            f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_USER_STATE)}{argument}',
-            timeout_seconds=_HASH_TIMEOUT_SECONDS,
-        )
-        lines = result.stdout.strip().splitlines() if result.ok else []
-        parts = lines[-1].split() if lines else []
-        if len(parts) != 2 or len(parts[1]) != 64:
-            return None, None
-        try:
-            return float(parts[0]), parts[1]
-        except ValueError:
-            return None, None
-
-    def _open_leased(self, placement: Placement, grants: Sequence[Grant]) -> SandboxSession:
-        """Open a new candidate box for the lease with the spec of the candidate that asked for it.
-
-        Args:
-            placement: Not used: the box always opens on Vercel. A box that the
-                reaper dropped counts until its close ends, so the lease can then
-                name the spill provider, and Vercel briefly holds more than the cap.
-            grants: Not used: the box gets the ``[run]`` hosts as given.
-
-        Returns:
-            The open box.
-        """
-        self._pending.fresh = True
-        return RepoBoxSource(self._runtime, self._pending.spec).acquire("candidate", self._run_grants)
-
     def open_metric(self) -> MetricBox:
         """Open a metric box from the metric state, without any repository file.
 
         Returns:
-            The open box; the caller installs the metric files once the candidate box went back to the lease.
+            The open box; the caller installs the metric files once the candidate box ended.
 
         Raises:
             RepoSetupError: When the workspace is not prepared or the box does
@@ -1977,25 +1417,12 @@ class RepoWorkspace:
         )
 
     def close(self) -> None:
-        """Delete the parent's copies of the saved states, then close the warm candidate boxes.
-
-        A box that a candidate still holds closes at its release.
-
-        Raises:
-            Exception: The first close error of a warm box, raw, after every warm box had its close.
-        """
+        """Delete the parent's copies of the saved states; no box stays open between evaluations."""
         with self._lock:
-            self._closed = True
             if self._folder is not None:
                 shutil.rmtree(self._folder, ignore_errors=True)
                 self._folder = None
                 self._prepared = False
-        # ``_closed`` is set first, so no release parks a box after this list.
-        with self._park_lock:
-            parked = list(self._parked)
-        for slot in parked:
-            self._unpark(slot)
-        self._candidates.close()
 
     def release_snapshot(self) -> None:
         """Delete this workspace's snapshots when its owner is done with them.

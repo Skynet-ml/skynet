@@ -289,17 +289,11 @@ def _park_scorer(tmp_path: Path, budget: _ParkLog) -> tuple[RepoScorer, Path]:
     return scorer, archive
 
 
-def test_the_metric_box_waits_parked_for_the_candidate_box_and_the_warm_candidate_box_between_evaluations(
-    tmp_path: Path,
-) -> None:
-    """The metric box is parked until the candidate box ended; the warm candidate box is parked until the next one.
-
-    The run budget can then stop a run whose every box waits (SKY-647, SKY-805).
-    """
+def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_path: Path) -> None:
+    """The metric box is parked until the candidate box ended; no box stays open to park between evaluations (SKY-647)."""
     budget = _ParkLog()
     scorer, archive = _park_scorer(tmp_path, budget)
     metric = box_tag("repo-scorer:owner:metric-2")
-    candidate = box_tag("repo-scorer:owner:candidate-1")
     seen: list[list[tuple[str, str]]] = []
     run = scorer._run_candidate
 
@@ -323,25 +317,21 @@ def test_the_metric_box_waits_parked_for_the_candidate_box_and_the_warm_candidat
     assert budget.events == []
     assert scorer.score("")["score"] == pytest.approx(0.1)
     assert seen == [[("park", metric)]]
-    assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric)]
+    assert budget.events == [("park", metric), ("unpark", metric)]
     with pytest.raises(RepoScoreError, match="README"):
         scorer.score(_patch(tmp_path / "bad", archive, {"README": "changed\n"}))
     scorer.close()
-    assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric), ("unpark", candidate)]
+    assert budget.events == [("park", metric), ("unpark", metric)]
 
 
 @pytest.mark.parametrize("failure", ["run_raises", "run_failed", "close_raises"])
 def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once.
-
-    Only a candidate box whose run ended without an error stays warm and parked, until the run ends (SKY-805).
-    """
+    """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once."""
     budget = _ParkLog()
     scorer, _ = _park_scorer(tmp_path, budget)
     metric = box_tag("repo-scorer:owner:metric-2")
-    candidate = box_tag("repo-scorer:owner:candidate-1")
     if failure == "run_raises":
 
         def raises(*_args: Any) -> Any:
@@ -354,14 +344,9 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
     else:
         close = CandidateBox.close
 
-        def close_raises(self: CandidateBox, healthy: bool = True) -> None:
-            """End the box, then report its bill as unconfirmed.
-
-            Args:
-                self: The candidate box.
-                healthy: Whether the box is still good.
-            """
-            close(self, healthy)
+        def close_raises(self: CandidateBox) -> None:
+            """End the box, then report its bill as unconfirmed."""
+            close(self)
             raise UsagePendingError("pending")
 
         monkeypatch.setattr(CandidateBox, "close", close_raises)
@@ -371,71 +356,7 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")
     scorer.close()
-    if failure in ("run_raises", "run_failed"):
-        assert budget.events == [("park", metric), ("unpark", metric)]
-    else:
-        assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric), ("unpark", candidate)]
-
-
-@pytest.mark.parametrize(("failure", "healthy"), [(None, True), (BudgetReached("stopped"), False)])
-def test_a_candidate_box_goes_back_unhealthy_when_its_run_raised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException | None, healthy: bool
-) -> None:
-    """A run that raised may leave the box broken, so its close tells the lease to replace it (SKY-805)."""
-    scorer, _ = _park_scorer(tmp_path, _ParkLog())
-    closes: list[bool] = []
-    close = CandidateBox.close
-
-    def recorded(self: CandidateBox, healthy: bool = True) -> None:
-        """Record the health, then close the box.
-
-        Args:
-            self: The candidate box.
-            healthy: Whether the box is still good.
-        """
-        closes.append(healthy)
-        close(self, healthy)
-
-    def raises(*_args: Any) -> Any:
-        """Fail the candidate run."""
-        raise failure  # type: ignore[misc]
-
-    monkeypatch.setattr(CandidateBox, "close", recorded)
-    if failure is not None:
-        monkeypatch.setattr(scorer, "_run_candidate", raises)
-    try:
-        if failure is None:
-            scorer.score("")
-        else:
-            with pytest.raises(BudgetReached):
-                scorer.score("")
-    finally:
-        scorer.close()
-    assert closes == [healthy]
-
-
-def test_closing_the_scorer_releases_the_snapshots_when_a_warm_box_close_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A warm candidate box's close error still reaches the caller, after the snapshots are released (SKY-805)."""
-    scorer, _ = _park_scorer(tmp_path, _ParkLog())
-    released: list[bool] = []
-    close = RepoWorkspace.close
-
-    def broken(self: RepoWorkspace) -> None:
-        """Close the workspace, then fail as a box settlement can.
-
-        Args:
-            self: The workspace.
-        """
-        close(self)
-        raise UsagePendingError("pending")
-
-    monkeypatch.setattr(RepoWorkspace, "close", broken)
-    monkeypatch.setattr(RepoWorkspace, "release_snapshot", lambda _self: released.append(True))
-    with pytest.raises(UsagePendingError):
-        scorer.close()
-    assert released == [True]
+    assert budget.events == [("park", metric), ("unpark", metric)]
 
 
 def test_no_run_secret_reaches_the_scorer(scored: tuple[RepoScorer, Path, Path]) -> None:
@@ -5157,33 +5078,6 @@ def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
         scorer.close()
     assert result["score"] == 0.0
     assert "timeout after 1 s" in result["feedback"]
-
-
-def test_a_timed_out_run_gives_its_candidate_box_back_unhealthy_so_the_next_version_gets_a_new_box(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A timed-out ``[run]`` can leave the box in any state, so the lease replaces it (SKY-805, SKY-809)."""
-    closes: list[bool] = []
-    close = CandidateBox.close
-
-    def recorded(self: CandidateBox, healthy: bool = True) -> None:
-        """Record the health, then close the box.
-
-        Args:
-            self: The candidate box.
-            healthy: Whether the box is still good.
-        """
-        closes.append(healthy)
-        close(self, healthy)
-
-    monkeypatch.setattr(CandidateBox, "close", recorded)
-    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", run_timeout=1.0)
-    try:
-        result = scorer.score("", {"input": 5})
-    finally:
-        scorer.close()
-    assert "timeout after 1 s" in result["feedback"]
-    assert closes == [False]
 
 
 def test_without_a_run_entry_the_metric_gets_no_time(tmp_path: Path) -> None:

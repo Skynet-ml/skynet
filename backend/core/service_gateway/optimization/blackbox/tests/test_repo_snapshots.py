@@ -24,7 +24,7 @@ from core.sandbox.providers.vercel import box_name
 from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
-from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError, RepoScorer
 from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, CandidateBox, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
@@ -392,8 +392,7 @@ def test_the_setup_state_is_saved_once_and_each_candidate_box_opens_from_it_offl
     try:
         first = _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
         assert first.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
-        # An unhealthy close drops the warm box, so the next version opens a new box from the snapshot.
-        first.close(healthy=False)
+        first.close()
         second = _candidate(space)
         assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
         second.close()
@@ -419,8 +418,7 @@ def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states
     try:
         box = _candidate(space)
         assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        # An unhealthy close drops the warm box, so the next version opens a new box from a tar state.
-        box.close(healthy=False)
+        box.close()
         _candidate(space).close()
     finally:
         space.close()
@@ -430,6 +428,53 @@ def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states
     assert [_setups(box) for box in runtime.boxes] == [1, 0, 1, 0, 0]
     assert len(runtime.saved) == 1
     assert space._snapshots_off
+
+
+_RUN = (
+    "import time\n"
+    "def run(value):\n"
+    "    if value == 'slow':\n"
+    "        time.sleep(30)\n"
+    "    if value == 'boom':\n"
+    "        raise RuntimeError('broke')\n"
+    "    return value\n"
+)
+
+
+@pytest.mark.parametrize("first", ["ok", "boom", "slow"])
+def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_path: Path, first: str) -> None:
+    """Give each version its own new candidate box from the snapshot, and close it also after a failed run (SKY-805).
+
+    A box is never reused, so no state of one version reaches the next one,
+    and the setup runs only once.
+
+    Args:
+        tmp_path: Scratch folder.
+        first: The first version's input: it succeeds, raises or runs out of time.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.py": _RUN})
+    runtime = _SnapshotRuntime(tmp_path / "snaps")
+    scorer = RepoScorer(
+        _space(archive, runtime),
+        "def score(repo_path, case, output):\n    return 1.0, 'ran'\n",
+        timeout_seconds=60,
+        run_entry="src/run.py:run",
+        run_timeout=1.0,
+    )
+    try:
+        results = [scorer.score("", {"input": value}) for value in (first, "ok")]
+    finally:
+        scorer.close()
+
+    assert [result["score"] for result in results] == [0.0 if first != "ok" else 1.0, 1.0]
+    candidates = [box for box in runtime.boxes if ":candidate-" in str(box.spec.operation_key)]
+    assert len(candidates) == 2
+    assert candidates[0] is not candidates[1]
+    assert [box.spec.snapshot_id for box in candidates] == ["snap-0", "snap-0"]
+    assert all(box.closed for box in runtime.boxes)
+    assert [_setups(box) for box in runtime.boxes] == [1] + [0] * (len(runtime.boxes) - 1)
+    keys = [box.spec.operation_key for box in runtime.boxes]
+    assert len(set(keys)) == len(keys)
 
 
 @pytest.mark.parametrize("fault", ["snapshot", "open"])
@@ -1030,8 +1075,7 @@ def test_services_start_in_the_candidate_box_after_the_digest_check(tmp_path: Pa
     runtime = _ServiceRuntime(tmp_path / "snaps", saves=saves)
     space = _service_space(archive, runtime)
     try:
-        # An unhealthy close drops the warm box, so the next version opens a new box and starts its services.
-        _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"})).close(healthy=False)
+        _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"})).close()
         _candidate(space).close()
     finally:
         space.close()
