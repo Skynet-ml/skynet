@@ -92,6 +92,20 @@ class StepFenceError(RuntimeError):
         self.step_id = step_id
 
 
+class ObjectTooLargeError(Exception):
+    """A capped read refused a tree object whose stored bytes are longer than the cap."""
+
+    def __init__(self, object_id: str, size: int) -> None:
+        """Keep the object's stored length.
+
+        Args:
+            object_id: The object's content hash.
+            size: The stored length in bytes.
+        """
+        super().__init__(f"object {object_id} has {size} bytes, more than the cap")
+        self.size = size
+
+
 def step_id_for(run_id: str, agent_id: str, seq: int) -> str:
     """Return the id of a run's agent step; a retry of the same step gets the same id.
 
@@ -509,46 +523,37 @@ class StepLogStore:
         step, data = buffered
         return {**{name: getattr(step, name) for name in _STEP_FIELDS}, "body": json.loads(data)}
 
-    def get_object(self, run_id: str, object_id: str) -> bytes | None:
+    def get_object(self, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
         """Return one tree object's stored bytes for a run, from the buffer when it is not flushed yet.
 
         Before its flush, an object is visible only to the run that wrote it.
-        After the flush, each run of the same account can read it.
+        After the flush, each run of the same account can read it. With ``max_bytes``, the length comes from
+        the buffer or the pack row first, and an object above the cap does not load from its pack.
 
         Args:
             run_id: The job that reads the object; its owner must own the object.
             object_id: The object's content hash.
+            max_bytes: The most stored bytes to load; ``None`` loads the object at any size.
 
         Returns:
             The stored bytes, or ``None`` when the run is unknown or its owner
             does not have the object.
+
+        Raises:
+            ObjectTooLargeError: When the stored bytes are longer than ``max_bytes``.
         """
         with self._cond:
             buffered = self._tree_objects.get((run_id, object_id))
         if buffered is not None:
+            if max_bytes is not None and len(buffered) > max_bytes:
+                raise ObjectTooLargeError(object_id, len(buffered))
             return buffered
         location = self._object_location(run_id, object_id)
-        return None if location is None else self._objects.get(*location)
-
-    def object_size(self, run_id: str, object_id: str) -> int | None:
-        """Return the length of one tree object's stored bytes for a run, and read none of the bytes.
-
-        The run sees the same objects as in :meth:`get_object`. Before the flush, the length is the buffered
-        bytes' length; after it, the length that the flush recorded for the object in its pack.
-
-        Args:
-            run_id: The job that asks; its owner must own the object.
-            object_id: The object's content hash.
-
-        Returns:
-            The stored length in bytes, or ``None`` when the run is unknown or its owner does not have the object.
-        """
-        with self._cond:
-            buffered = self._tree_objects.get((run_id, object_id))
-        if buffered is not None:
-            return len(buffered)
-        location = self._object_location(run_id, object_id)
-        return None if location is None else location[2]
+        if location is None:
+            return None
+        if max_bytes is not None and location[2] > max_bytes:
+            raise ObjectTooLargeError(object_id, location[2])
+        return self._objects.get(*location)
 
     def _object_location(self, run_id: str, object_id: str) -> tuple[str, int, int] | None:
         """Return where a flushed tree object of the run's owner lies in its pack.

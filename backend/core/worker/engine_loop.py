@@ -152,7 +152,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
     TreeSandbox,
 )
 from ..storage.models import AgentStepModel
-from ..storage.step_log_store import StepFenceError, step_id_for
+from ..storage.step_log_store import ObjectTooLargeError, StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore
 from .actors import Agent, LeaseExhaustedError, Run, StepResult
 from .step_recovery import last_committed_step, still_owns_run
@@ -623,9 +623,10 @@ class EngineLoop:
         """Read one file of a tree with no box, unless the loop hides it.
 
         A file's bytes are model output, and a tree may hold a file of up to ``MAX_TREE_BYTES``. With
-        ``max_bytes``, the loop reads the file's size from the step log's record first, and a file above the cap
-        never loads. Like a read with no cap, this is no step: the blob id is the hash of the file's bytes, so the
-        same tree and path give the same size and the same answer on a resume, before and after the flush.
+        ``max_bytes``, the step log compares the file's stored length to the cap in the same lookup that finds the
+        bytes, and a file above the cap never loads. Like a read with no cap, this is no step: the blob id is the
+        hash of the file's bytes, so the same tree and path give the same size and the same answer on a resume,
+        before and after the flush.
 
         Args:
             tree_id: The tree.
@@ -651,11 +652,10 @@ class EngineLoop:
             entry = None if folder is None else self._entries(folder).get(name)
             if entry is None or entry.mode not in {"file", "exec"}:
                 return None
-            if max_bytes is not None:
-                size = self._trees.blob_size(self._run.run_id, entry.object_id)
-                if size is not None and size > max_bytes:
-                    raise FileTooLargeError(path, size, max_bytes)
-            return self._trees.get_blob(self._run.run_id, entry.object_id)
+            try:
+                return self._trees.get_blob(self._run.run_id, entry.object_id, max_bytes)
+            except ObjectTooLargeError as error:
+                raise FileTooLargeError(path, error.size, max_bytes) from None
 
     def list_files(self, tree_id: str, path: str = "") -> list[str] | None:
         """List the files under one folder of a tree with no box, and leave out the paths that the loop hides.

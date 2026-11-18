@@ -21,7 +21,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .step_log_store import OBJECT_ID, StepLogStore
+from .step_log_store import OBJECT_ID, ObjectTooLargeError, StepLogStore
 
 TREE_MODES = frozenset({"file", "exec", "symlink", "tree"})
 _BLOB_HEADER = b"blob\0"
@@ -154,41 +154,32 @@ class TreeStore:
         self._step_log.put_object(run_id, object_id, stored)
         return object_id
 
-    def get_blob(self, run_id: str, object_id: str) -> bytes | None:
+    def get_blob(self, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
         """Return a blob's file bytes for a run, from the buffer before its flush.
 
         Args:
             run_id: The job that reads the blob.
             object_id: The blob's object id.
+            max_bytes: The most file bytes to load; ``None`` loads the blob at any size. The step log compares
+                the stored length to the cap before it loads, so a larger blob never loads.
 
         Returns:
             The file bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
+            ObjectTooLargeError: When the blob has more than ``max_bytes`` file bytes; its ``size`` is the file
+                length.
             ValueError: When the stored bytes do not match the id or are not a blob.
         """
-        stored = self._get(run_id, object_id)
+        try:
+            stored = self._get(run_id, object_id, None if max_bytes is None else max_bytes + len(_BLOB_HEADER))
+        except ObjectTooLargeError as error:
+            raise ObjectTooLargeError(object_id, error.size - len(_BLOB_HEADER)) from None
         if stored is None:
             return None
         if not stored.startswith(_BLOB_HEADER):
             raise ValueError(f"object {object_id} is not a blob")
         return stored[len(_BLOB_HEADER) :]
-
-    def blob_size(self, run_id: str, object_id: str) -> int | None:
-        """Return the length of a blob's file bytes for a run, and read none of the bytes.
-
-        The length comes from the step log's record of the object, so a caller can refuse a large blob before it
-        loads. It checks neither the hash nor the blob header: :meth:`get_blob` checks both when it reads.
-
-        Args:
-            run_id: The job that asks.
-            object_id: The blob's object id.
-
-        Returns:
-            The file length in bytes, or ``None`` when the run cannot see such an object.
-        """
-        stored = self._step_log.object_size(run_id, object_id)
-        return None if stored is None else stored - len(_BLOB_HEADER)
 
     def get_tree(self, run_id: str, object_id: str) -> list[TreeEntry] | None:
         """Return a tree's entries for a run, from the buffer before its flush.
@@ -206,20 +197,22 @@ class TreeStore:
         stored = self._get(run_id, object_id)
         return None if stored is None else decode_tree(stored)
 
-    def _get(self, run_id: str, object_id: str) -> bytes | None:
+    def _get(self, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
         """Return an object's stored bytes for a run after a check that they hash to the id.
 
         Args:
             run_id: The job that reads the object.
             object_id: The object id.
+            max_bytes: The most stored bytes to load; ``None`` loads the object at any size.
 
         Returns:
             The stored bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
+            ObjectTooLargeError: When the stored bytes are longer than ``max_bytes``.
             ValueError: When the bytes do not hash to the id.
         """
-        stored = self._step_log.get_object(run_id, object_id)
+        stored = self._step_log.get_object(run_id, object_id, max_bytes)
         if stored is not None and object_id_of(stored) != object_id:
             raise ValueError(f"object {object_id} does not match its content")
         return stored
