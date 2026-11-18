@@ -106,6 +106,25 @@ def arguments(call: Mapping[str, Any]) -> dict[str, Any] | None:
     return value if not refused and isinstance(value, dict) else None
 
 
+def refused_arguments(call: Mapping[str, Any], tool: str) -> str | None:
+    """Give the error result for a tool call whose arguments break the length or depth bound.
+
+    Args:
+        call: The tool call.
+        tool: The tool's name, for the message.
+
+    Returns:
+        The error result as JSON text, or ``None`` when the arguments are inside the bounds.
+    """
+    if not _parse(call)[1]:
+        return None
+    error = (
+        f"Send the {tool} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
+        f"nested at most {MAX_ARGUMENT_DEPTH} levels."
+    )
+    return json.dumps({"error": error})
+
+
 def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     """Give one flat tool call of the engine loop in the OpenAI form that the next prompt's history holds.
 
@@ -218,13 +237,10 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
         The tool result as JSON text, and the tree after the command.
     """
     assert ctx.run_command is not None
-    parsed, refused = _parse(call)
-    if refused:
-        error = (
-            f"Send the bash tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
-            f"nested at most {MAX_ARGUMENT_DEPTH} levels."
-        )
-        return json.dumps({"error": error}), tree
+    refused = refused_arguments(call, "bash")
+    if refused is not None:
+        return refused, tree
+    parsed, _ = _parse(call)
     command = parsed.get("command") if isinstance(parsed, dict) else None
     if call.get("name") != "bash" or not isinstance(command, str):
         # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.

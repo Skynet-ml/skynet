@@ -6,6 +6,8 @@ a scripted fake model and a pure Python scorer: no network and no paid call.
 
 from __future__ import annotations
 
+import errno
+import functools
 import json
 import math
 import re
@@ -670,7 +672,7 @@ def test_a_lab_file_whose_name_starts_with_two_dots_is_scored(
 def test_a_session_that_only_runs_commands_stops_at_the_tool_call_cap(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With no cost cap, an agent that never evaluates stops before its fourth tool call; the command never runs.
+    """With no cost cap, an agent that never evaluates stops at its third tool call, before a fourth model call.
 
     Args:
         owner: Alice and her budget generation.
@@ -685,9 +687,9 @@ def test_a_session_that_only_runs_commands_stops_at_the_tool_call_cap(
     with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
         _run(loop, native_options=_options(max_tool_calls=3))
 
-    assert len(model.calls) == 4
+    assert len(model.calls) == 3
     assert boxes.opened == 3
-    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 3 + ["model"]
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 3
 
 
 def test_the_no_evaluation_watchdog_counts_model_turns_since_the_budget_last_changed(
@@ -1209,3 +1211,168 @@ def test_a_file_the_agent_deletes_does_not_come_back_from_an_earlier_round(
     lab = _lab(tmp_path)
     assert not (lab / "notebook.md").exists()
     assert sorted(path.name for path in (lab / "work").iterdir()) == ["c1.txt", "c2.txt"]
+
+
+def test_a_file_past_the_candidate_cap_gets_an_error_result_and_spends_no_budget(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lab file larger than the candidate cap is refused before it becomes a candidate; a file at the cap scores.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 5)
+    big: Turn = lambda n: {"id": "big", "name": "evaluate", "arguments": {"file": "work/big.txt"}}  # noqa: E731
+    model = _Researcher([_WRITE, _bash("printf %s seedxx > work/big.txt"), big, _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=2, stop_at_score=None)
+
+    assert "larger than 5 bytes" in _tool_result(model, 3)["error"]
+    assert _tool_result(model, 4)["budget"] == {"used": 2, "remaining": 0}
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"file": ' + "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "]" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "}",
+        {
+            "file": "work/c1.txt",
+            "pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH), 0),
+        },
+        {"file": "work/c1.txt", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS},
+    ],
+    ids=["deep-text", "deep-mapping", "long-mapping"],
+)
+def test_evaluate_arguments_past_a_bound_get_the_bound_error(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    arguments: Any,
+) -> None:
+    """Refused evaluate arguments get the bound error, not the path error, and the transcript holds ``{}``.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        arguments: The arguments past a bound, as JSON text or as a mapping.
+    """
+    bad: Turn = lambda n: {"id": "bad", "name": "evaluate", "arguments": arguments}  # noqa: E731
+    model = _Researcher([_WRITE, bad, _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=2, stop_at_score=None)
+
+    error = _tool_result(model, 2)["error"]
+    assert error.startswith("Send the evaluate tool arguments as JSON")
+    assert f"nested at most {loop_tools.MAX_ARGUMENT_DEPTH} levels" in error
+    transcript = model.calls[2][-2]["tool_calls"][0]["function"]["arguments"]
+    assert transcript == (arguments if isinstance(arguments, str) else "{}")
+    assert (result.best_candidate, result.total_evals) == ("seedx", 2)
+
+
+def test_the_carried_lab_skips_files_past_the_caps_the_same_way_on_a_resume(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file past the per-file cap, and the files past the total cap in sorted order, stay in the tree only.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 11)
+    monkeypatch.setattr(ar_mod, "_MAX_CARRY_BYTES", 27)
+    # In order: the notebook (11 bytes), a (6, at 17), big (12, past the per-file cap), c (6, at 23), d (6, past the
+    # total cap) and seed.txt (4, at 27). A skip does not stop the scan.
+    files = (
+        "printf 123456789012 > work/big && printf 123456 > work/a && printf 123456 > work/c && printf 123456 > work/d"
+    )
+    model = _Researcher([_bash(f"printf '## Round {{n}}\\n' > notebook.md && {files}")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
+        _run(loop)
+
+    lab = _lab(tmp_path)
+    assert sorted(path.name for path in (lab / "work").iterdir()) == ["a", "c", "seed.txt"]
+    assert (lab / "notebook.md").read_text() == "## Round 1\n"
+
+    # The resume replays the committed steps, so the model is never called.
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(die_at=0), generation=2)
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
+        _run(loop)
+
+    assert sorted(path.name for path in (_lab(tmp_path, 2) / "work").iterdir()) == ["a", "c", "seed.txt"]
+
+
+def test_a_lab_file_the_local_file_system_refuses_stays_behind(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path that the local file system refuses stays in the tree only, and the run goes on to score.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    write_bytes = Path.write_bytes
+
+    def refuse_long(path: Path, data: bytes) -> int:
+        """Refuse the file named ``long`` as a path past the name length is refused, and write the others.
+
+        Args:
+            path: The local file.
+            data: The bytes.
+
+        Returns:
+            The number of bytes written.
+
+        Raises:
+            OSError: For the file named ``long``.
+        """
+        if path.name == "long":
+            raise OSError(errno.ENAMETOOLONG, "File name too long", str(path))
+        return write_bytes(path, data)
+
+    # The local boxes share the file system of the lab, so a real long path would fail in the box first.
+    monkeypatch.setattr(Path, "write_bytes", refuse_long)
+    model = _Researcher([_bash("printf x > work/long"), *_ROUND])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert sorted(path.name for path in (_lab(tmp_path) / "work").iterdir()) == ["c1.txt", "c2.txt", "seed.txt"]
+    assert result.best_candidate == "seedxx"

@@ -21,6 +21,7 @@ never calls it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import posixpath
@@ -86,6 +87,10 @@ _WRITE_UP_TURNS = 3
 # ``max_no_eval_seconds`` becomes model turns with no budget change, at a nominal 30 seconds for one model reply
 # and its tool calls. The native watchdog reads a clock; a turn count stops a resumed session at the same place.
 _SECONDS_PER_TURN = 30
+# The worker holds the carried lab in memory at each round's tree write, so the files that come back from the tree
+# are bounded: room for a few candidates of the largest size that ``evaluate`` scores, and the notebook. A file
+# past the per-file cap could never be scored, so it stays behind.
+_MAX_CARRY_BYTES = 4 * native_engines.MAX_CANDIDATE_BYTES
 
 
 class _UpstreamServer:
@@ -406,6 +411,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         idle_turns = 0
         last_used = start_used
         while True:
+            # A session at the cap would pay for a reply whose tool calls it could not run.
+            if tool_calls >= self._max_tool_calls:
+                killed = True
+                break
             if max_budget_usd is not None and float(spent) / 100 >= max_budget_usd:
                 exhausted = True
                 break
@@ -485,6 +494,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             The tool result as JSON text, cut to ``OUTPUT_CHARS`` as a command output is.
         """
         assert self._ctx.read_file is not None
+        refused = loop_tools.refused_arguments(call, EVALUATE_TOOL["name"])
+        if refused is not None:
+            return refused
         arguments = loop_tools.arguments(call) or {}
         file = arguments.get("file")
         example_ids = arguments.get("example_ids") or None
@@ -498,6 +510,11 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         data = self._ctx.read_file(tree, path)
         if data is None:
             return json.dumps({"error": f"No file {path} in the lab."})
+        if len(data) > native_engines.MAX_CANDIDATE_BYTES:
+            # The candidate is copied into the observations, the archive and the frontier, so its size is bounded.
+            return json.dumps(
+                {"error": f"{path} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."}
+            )
         try:
             candidate = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -535,6 +552,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
     def _pull(self, tree: str) -> None:
         """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
 
+        The files come in sorted order, the notebook first, and a file past the per-file cap, past the total cap,
+        or that the local file system refuses stays behind. The tree decides each skip, so a resume skips the same
+        files.
+
         Args:
             tree: The tree after the session.
         """
@@ -543,15 +564,23 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         work = self.work_dir / "work"
         shutil.rmtree(work)
         work.mkdir()
+        total = 0
         for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
             content = self._ctx.read_file(tree, path)
             local = self.work_dir / path
-            if content is None:
-                # The agent deleted its notebook, so the local copy from an earlier round must not come back.
+            if (
+                content is None
+                or len(content) > native_engines.MAX_CANDIDATE_BYTES
+                or total + len(content) > _MAX_CARRY_BYTES
+            ):
+                # A deleted or skipped notebook must not come back from an earlier round.
                 local.unlink(missing_ok=True)
                 continue
-            local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_bytes(content)
+            # A path that the local file system refuses, such as one past its name length, stays behind.
+            with contextlib.suppress(OSError):
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_bytes(content)
+                total += len(content)
 
 
 class AutoResearchEngine:
