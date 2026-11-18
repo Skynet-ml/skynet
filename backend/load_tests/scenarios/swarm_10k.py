@@ -787,7 +787,8 @@ def _drive(
             finished = _now()
             steps[index].append((ready, started, committed, finished))
             if seq + 1 < config.steps_per_agent:
-                # The pace keeps to the agent's own schedule: a late step does not push back the later ones.
+                # A late start keeps the agent's schedule; a step that lands after the next due moment makes that
+                # step wait for it, as one agent keeps one step in flight.
                 heapq.heappush(due, (max(starts[index] + (seq + 1) * interval, finished), index, seq + 1))
         # Each wait ends within 1 s, so the thread sees a stop soon also with a long step interval.
         if in_flight:

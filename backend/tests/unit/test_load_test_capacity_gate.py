@@ -3507,7 +3507,7 @@ class _ClockWaiter:
 
 
 def _fake_drive(
-    monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, steps: int, durable_after: float | None, late: float
+    monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, steps: int, durable_after: list[float] | None, late: float
 ) -> list[list[tuple[float, float, float, float]]]:
     """Run ``_drive`` for one agent on the fake clock, with a step interval of 10 s and no start offset.
 
@@ -3515,7 +3515,7 @@ def _fake_drive(
         monkeypatch: Replaces the clock, the pace, the commit and the barrier.
         clock: The fake clock.
         steps: The agent's steps.
-        durable_after: The seconds from a commit to its durable moment, or ``None`` for never.
+        durable_after: For each seq, the seconds from its commit to its durable moment, or ``None`` for never.
         late: The seconds that the first commit starts after its ready moment.
 
     Returns:
@@ -3545,7 +3545,9 @@ def _fake_drive(
     monkeypatch.setattr(
         swarm_10k,
         "_waiter",
-        lambda store, step_id: _ClockWaiter(clock, None if durable_after is None else clock.now + durable_after),
+        lambda store, step_id: _ClockWaiter(
+            clock, None if durable_after is None else clock.now + durable_after[int(step_id.removeprefix("step-"))]
+        ),
     )
     config = _swarm_config(agents=1, steps_per_agent=steps)
     return swarm_10k._drive([("run-0", "agent-00000")], config, None, None, 0.0, clock)
@@ -3558,20 +3560,20 @@ def test_swarm_late_step_does_not_push_back_the_next_step(monkeypatch: pytest.Mo
         monkeypatch: Replaces the clock, the pace, the commit and the barrier.
     """
     clock = _FakeClock(limit=100.0)
-    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=1.0, late=4.0)
+    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=[1.0, 1.0, 1.0], late=4.0)
     assert [ready for ready, _, _, _ in steps[0]] == [0.0, 10.0, 20.0]
     assert [begun for _, begun, _, _ in steps[0]] == [4.0, 10.0, 20.0]
 
 
 def test_swarm_step_that_lands_late_pushes_back_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that a step that is durable after the next due moment makes the next step ready at that time.
+    """Check that a step that lands late delays only the next step, and the agent then returns to its schedule.
 
     Args:
         monkeypatch: Replaces the clock, the pace, the commit and the barrier.
     """
     clock = _FakeClock(limit=100.0)
-    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=15.0, late=4.0)
-    assert [ready for ready, _, _, _ in steps[0]][:2] == [0.0, 19.0]
+    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=[15.0, 1.0, 1.0], late=4.0)
+    assert [ready for ready, _, _, _ in steps[0]] == [0.0, 19.0, 20.0]
 
 
 def test_swarm_driver_times_out_a_step_that_never_lands(monkeypatch: pytest.MonkeyPatch) -> None:
