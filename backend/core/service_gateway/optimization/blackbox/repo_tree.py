@@ -28,8 +28,10 @@ _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 # A stored tree may hold a folder shaped as a bare repository (``HEAD``,
 # ``objects/``, ``refs/``, ``config``). Git would read that folder's config, and
 # a filter, hook or fsmonitor in it would run code when git runs there. Every
-# Skynet git call that can run in a tree with no ``.git`` of its own sets this,
-# so git refuses such a folder. A ``git -C repo`` call on a checkout with its
+# git call in the scorer, workspace, staging and engine runner paths that can
+# run in a tree with no ``.git`` of its own sets this, so git refuses such a
+# folder. The harness shell lines are out of scope: the agent runs its own code
+# in that box anyway. A ``git -C repo`` call on a checkout with its
 # own ``.git`` does not need it: git finds that ``.git`` first. Git reads
 # ``safe.bareRepository`` only from protected config, so a repository's own
 # config cannot turn it off (SKY-812).

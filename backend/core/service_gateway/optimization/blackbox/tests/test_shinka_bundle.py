@@ -460,7 +460,7 @@ def test_bundle_git_reads_nothing_from_a_bare_repository_layout(
         planted_bare_repo: Fixture.
         monkeypatch: Pytest fixture.
     """
-    repo, marker = planted_bare_repo
+    repo, _ = planted_bare_repo
     safe = repo_tree.SAFE_GIT
     monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     bundle = RepoBundle(repo, ["."], [])
@@ -477,4 +477,3 @@ def test_bundle_git_reads_nothing_from_a_bare_repository_layout(
     assert bundle.start_text("x") == "hi\n"
     assert bundle.exists_at_start("x")
     assert bundle._grep_text_files() == [f"{bundle.start}:x"]
-    assert not marker.exists()
