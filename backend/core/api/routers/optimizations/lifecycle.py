@@ -89,6 +89,10 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
     if cas(optimization_id, expected, ends_recovery=True, **fields):
         return True
     current = job_store.get_job(optimization_id)
+    if current.get("status") in expected:
+        # A wake can move a parked run back to pending between the miss and the
+        # read; the user's stop must still win over it (SKY-814).
+        return cas(optimization_id, expected, ends_recovery=True, **fields)
     recovery = current.get("recovery")
     if current.get("status") == "paused" and isinstance(recovery, dict) and recovery.get("phase") == WAITING_PHASE:
         # A worker's park_run writes ``paused``, and the wake later moves the run
@@ -313,12 +317,13 @@ def register_lifecycle_routes(
 
         now = datetime.now(UTC).isoformat()
         # The pre-check above proved a running run with a checkpoint. A recovery
-        # sweep can requeue it to pending since; the pause still wins, because a
-        # worker would claim it and then fail on the closed admission (SKY-814).
+        # sweep can requeue it to pending, and a worker can claim it to validating,
+        # since; the pause still wins, because that worker would then fail on the
+        # closed admission (SKY-814).
         if not _set_terminal_if_active(
             job_store,
             optimization_id,
-            ("running", "pending"),
+            ("running", "pending", "validating"),
             status="paused",
             message=PAUSE_REASON,
             completed_at=now,
