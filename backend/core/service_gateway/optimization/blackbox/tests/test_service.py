@@ -1955,6 +1955,9 @@ class _AsRepositoryScorer:
 
         Args:
             name: Attribute name.
+
+        Returns:
+            The wrapped scorer's attribute of that name.
         """
         return getattr(self._scorer, name)
 

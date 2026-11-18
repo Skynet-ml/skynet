@@ -1076,6 +1076,9 @@ def test_gepa_repo_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path
         Args:
             candidate: The version's patch; empty for the seed.
             example: The case to score.
+
+        Returns:
+            The case's score, negative infinity for a failed [run] entry, and its side info.
         """
         calls.append(candidate)
         if not candidate:
