@@ -38,8 +38,10 @@ and S3 does not fail on a key that is already gone.
 A run that is deleted before its account goes the same way:
 :func:`mark_run_packs` runs in the job delete's transaction, before the
 cascade deletes the run's steps, and marks every pack that they point at.
-A run delete and an account delete both call :func:`delete_run_rows` first,
-so both take their row and budget locks in one order before the job lock.
+A run delete and an account delete both call :func:`delete_run_rows` first.
+It locks the jobs in key order before any other lock, then deletes the run
+rows, then takes the wallet and budget locks. A resume and a checkpoint
+write lock the job first too, so every path takes the job lock first.
 
 The purge is one function so that a later change can add the step log
 shards (SKY-731) in one place.
@@ -248,12 +250,14 @@ def bucket_deleter() -> Callable[[list[str]], None] | None:
 
 
 def delete_run_rows(session: Session, run_ids: list[str], embeddings: ColumnElement[bool] | None) -> int:
-    """Delete the rows of runs about to be deleted and close their budgets, before any job lock.
+    """Lock the jobs of runs about to be deleted, delete their rows and close their budgets.
 
-    A run delete and an account delete both call this before they lock the jobs. The order is
-    fixed: log, progress, embedding, checkpoint, trial, agent run, call, candidate and folder rows,
-    then the wallet and budget locks. If the two deletes took these locks in another order, or one
-    took the job lock first, each could wait for the other and PostgreSQL would abort one (SKY-733).
+    A run delete and an account delete both call this before any other lock. The order is fixed:
+    the jobs in key order, then the log, progress, embedding, checkpoint, trial, agent run, call,
+    candidate and folder rows, then the wallet and budget locks. A resume locks the job and then
+    the wallet, and a checkpoint write locks the job and then its checkpoint row. If a delete took
+    a row or wallet lock before the job lock, it and such a writer could each wait for the other,
+    and PostgreSQL would abort one (SKY-733).
 
     Args:
         session: The open delete session; the caller commits.
@@ -263,6 +267,7 @@ def delete_run_rows(session: Session, run_ids: list[str], embeddings: ColumnElem
     Returns:
         The count of deleted rows.
     """
+    _lock_jobs(session, sorted(set(run_ids)))
     deleted = 0
     if run_ids:
         for model in (LogEntryModel, ProgressEventModel):

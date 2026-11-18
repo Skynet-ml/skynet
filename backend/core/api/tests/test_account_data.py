@@ -34,7 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import Engine, create_engine, event, select, text
+from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -51,6 +51,7 @@ from ...storage.models import (
     DatasetModel,
     ExecutionBudgetModel,
     ExecutionOperationModel,
+    GepaCheckpointModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -970,116 +971,40 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
         assert session.scalars(select(StoragePackModel)).all() == []
 
 
-def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(full_schema_engine: Engine) -> None:
-    """A run delete paused between its log rows and its job lock lets a concurrent account delete finish (SKY-733).
-
-    The run delete deletes its log and progress rows, then waits until the
-    account delete is about to delete those rows. If the account delete locked
-    the job first, each would wait for the other and PostgreSQL would abort one.
+def _waits_for_a_lock(engine: Engine) -> bool:
+    """Report whether a session of this database waits for a row lock.
 
     Args:
-        full_schema_engine: Engine holding the full schema.
+        engine: Engine on the test database.
+
+    Returns:
+        True when a session waits for a lock.
     """
-    if full_schema_engine.dialect.name != "postgresql":
-        pytest.skip("Row locks need PostgreSQL.")
-    run_id = "job-race"
-    with Session(full_schema_engine) as session:
-        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
-        session.add(JobModel(optimization_id=run_id, username=_EMAIL))
-        session.add(LogEntryModel(optimization_id=run_id, level="INFO", logger="x", message="m"))
-        session.add(ProgressEventModel(optimization_id=run_id, event="e", metrics={}))
-        session.commit()
-    # The full constructor opens its own engine from a URL; delete_job needs only the session factory and engine.
-    store = object.__new__(RemoteDBJobStore)
-    store._engine = full_schema_engine
-    store._session_factory = sessionmaker(bind=full_schema_engine)
-
-    run_rows_deleted = threading.Event()
-    account_at_child_rows = threading.Event()
-    errors: list[BaseException] = []
-    account_thread_name = "account-delete"
-    real_mark = mark_run_packs
-
-    def _mark_after_the_account_delete_starts(session: Session, run_ids: list[str]) -> None:
-        """Hold the run delete after its child row deletes until the account delete reaches its own.
-
-        Args:
-            session: The run delete's open session.
-            run_ids: The runs being deleted.
-
-        Raises:
-            AssertionError: When the account delete never reaches its child row deletes.
-        """
-        run_rows_deleted.set()
-        if not account_at_child_rows.wait(timeout=30):
-            raise AssertionError("the account delete never reached the run's child rows")
-        real_mark(session, run_ids)
-
-    def _flag_child_row_delete(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
-        """Set the event when the account delete sends its first log or progress row delete.
-
-        Args:
-            conn: The connection.
-            cursor: The DBAPI cursor.
-            statement: The SQL text.
-            *args: The other listener arguments.
-        """
-        if threading.current_thread().name == account_thread_name and statement.startswith(
-            ("DELETE FROM job_logs", "DELETE FROM job_progress_events")
-        ):
-            account_at_child_rows.set()
-
-    def _delete_run() -> None:
-        """Delete the run and keep any error."""
-        try:
-            store.delete_job(run_id)
-        except BaseException as exc:
-            errors.append(exc)
-
-    def _delete_owner() -> None:
-        """Delete the account and keep any error."""
-        try:
-            _delete(full_schema_engine)
-        except BaseException as exc:
-            errors.append(exc)
-
-    event.listen(full_schema_engine, "before_cursor_execute", _flag_child_row_delete)
-    try:
-        with patch("core.storage.remote.mark_run_packs", _mark_after_the_account_delete_starts):
-            run = threading.Thread(target=_delete_run)
-            run.start()
-            assert run_rows_deleted.wait(timeout=30)
-            owner = threading.Thread(target=_delete_owner, name=account_thread_name)
-            owner.start()
-            run.join(timeout=60)
-            owner.join(timeout=60)
-    finally:
-        event.remove(full_schema_engine, "before_cursor_execute", _flag_child_row_delete)
-
-    assert not run.is_alive()
-    assert not owner.is_alive()
-    assert errors == []
-    with Session(full_schema_engine) as session:
-        assert session.get(UserModel, _EMAIL) is None
-        assert session.get(JobModel, run_id) is None
-        assert session.scalars(select(LogEntryModel)).all() == []
-        assert session.scalars(select(ProgressEventModel)).all() == []
+    with engine.connect() as connection:
+        return bool(
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        )
 
 
 @pytest.mark.parametrize(
     "seeded",
-    [("embedding",), ("run_call",), ("budget",), ("embedding", "run_call", "budget")],
-    ids=["embedding", "run_call", "budget", "all"],
+    [("log",), ("embedding",), ("run_call",), ("budget",), ("log", "embedding", "run_call", "budget")],
+    ids=["log", "embedding", "run_call", "budget", "all"],
 )
-def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
+def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(
     full_schema_engine: Engine, seeded: tuple[str, ...]
 ) -> None:
-    """A run with no log rows still lets an account delete and a run delete finish together (SKY-733).
+    """An account delete and a run delete of one of its runs finish together (SKY-733).
 
-    The run delete deletes its rows and closes its budget, then waits until the
-    account delete waits for a lock. If the account delete locked the job
-    before it reached those rows, each would wait for the other and PostgreSQL
-    would abort one.
+    The run delete locks the job, deletes the run rows and closes the budget,
+    then waits until the account delete waits for a lock. If the account delete
+    took a row or wallet lock before the job lock, each would wait for the
+    other and PostgreSQL would abort one.
 
     Args:
         full_schema_engine: Engine holding the full schema.
@@ -1094,6 +1019,9 @@ def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
         session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
         session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="queued"))
         session.flush()
+        if "log" in seeded:
+            session.add(LogEntryModel(optimization_id=run_id, level="INFO", logger="x", message="m"))
+            session.add(ProgressEventModel(optimization_id=run_id, event="e", metrics={}))
         if "embedding" in seeded:
             session.add(JobEmbeddingModel(optimization_id=run_id, user_id=_EMAIL))
         if "run_call" in seeded:
@@ -1125,24 +1053,8 @@ def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
     errors: list[BaseException] = []
     real_mark = mark_run_packs
 
-    def _account_delete_waits() -> bool:
-        """Report whether another session of this database waits for a row lock.
-
-        Returns:
-            True when a session waits for a lock.
-        """
-        with full_schema_engine.connect() as connection:
-            return bool(
-                connection.scalar(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity "
-                        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                    )
-                )
-            )
-
     def _mark_after_the_account_delete_waits(session: Session, run_ids: list[str]) -> None:
-        """Hold the run delete before its job lock until the account delete waits for one of its locks.
+        """Hold the run delete after its run rows until the account delete waits for one of its locks.
 
         Args:
             session: The run delete's open session.
@@ -1153,7 +1065,7 @@ def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
         """
         run_rows_deleted.set()
         deadline = time.monotonic() + 30
-        while not _account_delete_waits():
+        while not _waits_for_a_lock(full_schema_engine):
             if time.monotonic() > deadline:
                 raise AssertionError("the account delete never waited for a lock of the run delete")
             time.sleep(0.05)
@@ -1191,8 +1103,116 @@ def test_an_account_delete_and_a_run_delete_with_no_log_rows_do_not_deadlock(
     with Session(full_schema_engine) as session:
         assert session.get(UserModel, _EMAIL) is None
         assert session.get(JobModel, run_id) is None
+        assert session.scalars(select(LogEntryModel)).all() == []
+        assert session.scalars(select(ProgressEventModel)).all() == []
         assert session.scalars(select(JobEmbeddingModel)).all() == []
         assert session.scalars(select(RunCallModel)).all() == []
         if "budget" in seeded:
             budget = session.get(ExecutionBudgetModel, budget_id)
             assert (budget.state, budget.job_id) == ("closed", None)
+
+
+@pytest.mark.parametrize("deleted", ["account", "run"])
+@pytest.mark.parametrize("writer", ["resume", "checkpoint"])
+def test_a_job_lock_holder_and_a_delete_of_its_run_at_once_do_not_deadlock(
+    full_schema_engine: Engine, writer: str, deleted: str
+) -> None:
+    """A writer that holds the job lock and a delete of its run finish together (SKY-733).
+
+    A resume locks the job, then fences the budget, which locks the wallet and
+    the budget (``RemoteDBJobStore.requeue_for_resume``). A checkpoint write
+    locks the job, then updates its checkpoint row (``CheckpointStore.save``).
+    Here the writer locks the job, waits until the delete waits for a lock, then
+    takes its second lock. If the delete took the wallet or the checkpoint row
+    before the job, each would wait for the other and PostgreSQL would abort one.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        writer: Whether a resume or a checkpoint write holds the job lock.
+        deleted: Whether the account delete or the run delete races the writer.
+    """
+    if full_schema_engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    run_id = "job-race"
+    budget_id = "budget-race"
+    now = datetime.now(UTC)
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="running"))
+        session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus-race", balance_cents=500))
+        session.flush()
+        session.add(
+            ExecutionBudgetModel(
+                id=budget_id,
+                username=_EMAIL,
+                job_id=run_id,
+                creation_key=budget_id,
+                creation_fingerprint="f",
+                total_cents=100,
+                state="attached",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(GepaCheckpointModel(optimization_id=run_id, iteration=1, data=b"old", updated_at=now))
+        session.commit()
+    # The full constructor opens its own engine from a URL; delete_job needs only the session factory and engine.
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = full_schema_engine
+    store._session_factory = sessionmaker(bind=full_schema_engine)
+    job_locked = threading.Event()
+    errors: list[BaseException] = []
+
+    def _write() -> None:
+        """Lock the job, wait for the delete to wait, then take the writer's second lock, and keep any error.
+
+        Raises:
+            AssertionError: When the delete never waits for a lock.
+        """
+        try:
+            with Session(full_schema_engine) as session:
+                session.execute(select(JobModel).where(JobModel.optimization_id == run_id).with_for_update()).all()
+                job_locked.set()
+                deadline = time.monotonic() + 30
+                while not _waits_for_a_lock(full_schema_engine):
+                    if time.monotonic() > deadline:
+                        raise AssertionError("the delete never waited for a lock of the writer")
+                    time.sleep(0.05)
+                if writer == "resume":
+                    BudgetService(engine=full_schema_engine).fence_generation(
+                        budget_id, _EMAIL, expected_generation=0, session=session
+                    )
+                else:
+                    checkpoint = session.get(GepaCheckpointModel, (run_id, -1), with_for_update=True)
+                    assert checkpoint is not None
+                    checkpoint.data = b"new"
+                session.commit()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def _delete_run_or_owner() -> None:
+        """Delete the run or the account, and keep any error."""
+        try:
+            if deleted == "run":
+                store.delete_job(run_id)
+            else:
+                _delete(full_schema_engine)
+        except BaseException as exc:
+            errors.append(exc)
+
+    write = threading.Thread(target=_write)
+    write.start()
+    assert job_locked.wait(timeout=30)
+    delete_thread = threading.Thread(target=_delete_run_or_owner)
+    delete_thread.start()
+    write.join(timeout=60)
+    delete_thread.join(timeout=60)
+
+    assert not write.is_alive()
+    assert not delete_thread.is_alive()
+    assert errors == []
+    with Session(full_schema_engine) as session:
+        assert session.get(JobModel, run_id) is None
+        assert session.scalars(select(GepaCheckpointModel)).all() == []
+        budget = session.get(ExecutionBudgetModel, budget_id)
+        assert (budget.generation, budget.job_id) == (1 if writer == "resume" else 0, None)

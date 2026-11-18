@@ -1381,8 +1381,8 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
-            # The job lock comes where the job delete took it before; the cascade then drops the steps, so
-            # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
             mark_run_packs(session, [optimization_id])
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
             session.commit()
@@ -1471,8 +1471,8 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
-            # The job lock comes where the job delete took it before; the cascade then drops the steps, so
-            # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
             mark_run_packs(session, optimization_ids)
             deleted = (
                 session.query(JobModel)

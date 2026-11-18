@@ -554,9 +554,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         anonymized += result.rowcount or 0
 
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
-    # The run rows and budgets, then the job lock, in the same order as a run delete; another order
-    # deadlocks with a concurrent delete of one of these runs (SKY-733). The budgets close here, so
-    # the wallet and budget locks come before the job lock, as in a run delete.
+    # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
+    # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
     deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
     if job_ids:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
