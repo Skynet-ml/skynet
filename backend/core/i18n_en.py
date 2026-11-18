@@ -219,7 +219,8 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
     "optimization.deletion_storage_unavailable": (
-        "The optimization was not deleted: its stored run data could not be removed right now. Try again in a few minutes."
+        "The optimization was not deleted: its stored run data could not be removed right now. "
+        "Try again in a few minutes."
     ),
     "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
     "optimization.no_result_pending": "Optimization has no result yet.",
