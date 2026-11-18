@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -2208,3 +2209,84 @@ def test_the_command_editor_reports_a_failed_attempt_for_a_failed_or_bad_version
     assert error in str(meta["last_error_msg"])
     assert meta["last_error_msg"]
     assert not (tmp_path / "results" / "gen_1").exists()
+
+
+@pytest.mark.parametrize("path", [".git/config", "a/.GIT/hooks/x", "src/.Git/hooks/post-commit"])
+def test_the_command_editor_refuses_git_metadata_and_writes_nothing(path: str, tmp_path: Path) -> None:
+    """Refuse a version that writes a ``.git`` part in any letter case, before any file is written (SKY-815).
+
+    Args:
+        path: The Git metadata path the command sends back.
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": {"src/new.py": "x\n", path: "[core]\n"}}))
+    writes: list[Path] = []
+    real_write = Path.write_text
+
+    def spy(self: Path, *args: Any, **kwargs: Any) -> int:
+        """Record each write into a scratch worktree.
+
+        Args:
+            self: The file.
+            *args: The text and its encoding.
+            **kwargs: The write options.
+
+        Returns:
+            The written length.
+        """
+        if "command-edits" in self.parts:
+            writes.append(self)
+        return real_write(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(Path, "write_text", spy)
+        patch, meta, success = asyncio.run(
+            runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+        )
+
+    assert (patch, success, writes) == (None, False, [])
+    assert "may not write Git metadata" in str(meta["last_error_msg"])
+
+
+def test_the_command_editor_refuses_a_path_the_rules_forbid(tmp_path: Path) -> None:
+    """Hand upstream a failed attempt for a path outside the editable paths (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": {"src/new.py": "x\n", "docs/x.md": "x\n"}}))
+
+    patch, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert (patch, success) == (None, False)
+    assert "Cannot change 'docs/x.md': it is outside the editable paths." in str(meta["last_error_msg"])
+
+
+def test_the_command_editors_git_runs_no_hook_and_no_fsmonitor(tmp_path: Path) -> None:
+    """Run git for the command editor with hooks and fsmonitor off, so no planted script runs (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    mailbox = _ProposalMailbox({"files": {"src/util.py": "SCALE = 5\n"}})
+    runner = _install_command_editor(tmp_path, mailbox)
+    checkout = tmp_path / "checkout"
+    marker = tmp_path / "ran.txt"
+    script = tmp_path / "plant.sh"
+    script.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+    script.chmod(0o755)
+    hooks = checkout / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    for hook in ("post-checkout", "pre-commit", "post-index-change"):
+        shutil.copyfile(script, hooks / hook)
+        (hooks / hook).chmod(0o755)
+    subprocess.run(["git", "config", "core.fsmonitor", str(script)], cwd=checkout, check=True)
+
+    _, _, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True
+    assert not marker.exists()

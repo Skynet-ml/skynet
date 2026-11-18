@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.engine import Engine
 
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
 from core.service_gateway.optimization.blackbox import sandbox_log, shinka_evolve
@@ -2346,3 +2347,71 @@ def test_a_run_with_a_file_proposer_tells_the_child_to_ask_the_worker_for_each_v
             Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), boxes
         )
     assert inputs[0]["shinka_command"] is True
+
+
+def test_a_proposal_leaves_git_metadata_out_of_the_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Leave each ``.git`` part, in any letter case, out of the version the command's tree makes (SKY-815).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    options = _proposer_options(
+        "mkdir -p sub/.GIT/hooks && printf x > sub/.GIT/hooks/post-commit && printf 'child\\n' > main.py"
+    )
+    requests = shinka_evolve._Requests(
+        Task("seed"),
+        loop.server(lambda *args: (1.0, {}), max_evals=5),
+        ctx,
+        "n",
+        shinka_evolve._Proposer(ctx, options),
+    )
+
+    assert _propose(requests, "1", {"main.py": "parent\n"}, "task") == {"id": "1", "files": {"main.py": "child\n"}}
+
+
+@pytest.mark.parametrize(
+    ("route", "message"),
+    [
+        ({MCP_RELAY_ROUTE_KEY: {"servers": [{"name": "docs"}]}}, r"\[proposer\] mcp servers"),
+        ({MCP_RELAY_ROUTE_KEY: {"services": {"api": {}}}}, r"\[proposer\] services"),
+        ({"url": "http://gateway.test/v1", "token": "t", "model": "m"}, "cannot meter"),
+    ],
+)
+def test_a_file_proposer_is_refused_with_mcp_services_or_a_budget(
+    route: dict[str, object], message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the ``[proposer] entry`` command when it would lose its mcp or services, or spend unmetered (SKY-815).
+
+    Args:
+        route: The run's budget route.
+        message: Words the refusal holds.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Fails the test when the child starts.
+    """
+    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
+    options = _proposer_options("node agent.js")
+    options.budget_route = route
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=options,  # type: ignore[arg-type]
+        run_command=lambda *args: None,  # type: ignore[arg-type,return-value]
+        put_files=lambda *args: None,  # type: ignore[arg-type,return-value]
+        read_file=lambda *args: None,
+        list_files=lambda *args: None,
+        repo_seed=RepoSeed("tree"),
+    )
+
+    with pytest.raises(ServiceError, match=message):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), ctx
+        )

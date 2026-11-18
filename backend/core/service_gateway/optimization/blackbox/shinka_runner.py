@@ -123,6 +123,8 @@ _KIND_EMBEDDING = "embedding"
 _AGENT_PROGRAM_FILE = "program.md"
 # Where the launch writes Pi's config inside a scratch directory; never part of a version.
 _AGENT_CONFIG_DIR = ".app"
+# Git in a scratch worktree runs no hook and no fsmonitor, so files a version writes cannot run code (SKY-815).
+_HOOKLESS_GIT = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 _AGENT_KEY_ENV = re.compile(r"[?&]api_key_env=([A-Za-z0-9_]+)$")
 _AGENT_NAME = re.compile(r"^\W*NAME\W*:[\s*_]*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
 _AGENT_DESCRIPTION = re.compile(r"^\W*DESCRIPTION\W*:[\s*_]*(.+)", re.MULTILINE | re.IGNORECASE | re.DOTALL)
@@ -1410,7 +1412,7 @@ def _git(cwd: Path, *arguments: str) -> str:
         RuntimeError: When git exits non-zero.
     """
     result = subprocess.run(
-        ["git", *repo_tree.SAFE_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-500:]}")
@@ -1779,6 +1781,16 @@ class CommandEditor(AgentEditor):
         if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
             report["error"] = "The worker sent a malformed version."
             return report
+        # The proposer box is untrusted: check every path before anything is written.
+        for path in files:
+            if any(part.lower() == ".git" for part in path.split("/")):
+                # A case-insensitive file system reads ``.GIT`` as ``.git`` (SKY-810).
+                report["error"] = f"The [proposer] entry command may not write Git metadata: '{path}'."
+                return report
+            problem = self.bundle.rule_problem(path)
+            if problem is not None:
+                report["error"] = self.bundle.refusal(path, problem)
+                return report
         workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
         workspace.parent.mkdir(parents=True, exist_ok=True)
         with self._git_lock:

@@ -189,6 +189,19 @@ class ShinkaEvolveEngine:
         proposer = None
         if repo is not None and repo.get("file_proposer"):
             assert options is not None
+            if route.get("services"):
+                raise ServiceError(
+                    "ShinkaEvolve cannot give the [proposer] services to the [proposer] entry command yet. "
+                    "Choose another engine, or remove [proposer] services from optimize.toml."
+                )
+            if options.budget_route is not None:
+                # The proposer box reaches the model with a raw credential grant, and the loop does not meter
+                # those calls, so a budgeted run could spend past its budget (SKY-815).
+                raise ServiceError(
+                    "ShinkaEvolve cannot meter the [proposer] entry command's model calls, so it does not run "
+                    "the command on a budgeted run. Choose another engine, or remove [proposer] entry from "
+                    "optimize.toml."
+                )
             proposer = _Proposer(ctx, options)
         if repo is None and task.seed_candidate is None:
             # A blank run evolves an empty starting text rather than refusing.
@@ -652,7 +665,9 @@ class _Proposer:
         version: dict[str, str] = {}
         for path in self.ctx.list_files(after) or ():
             setup_output = path in self.base_paths and path not in self.seed_paths
-            if path == _TASK_PATH or (setup_output and path not in parent):
+            # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
+            git_part = any(part.lower() == ".git" for part in path.split("/"))
+            if git_part or path == _TASK_PATH or (setup_output and path not in parent):
                 continue
             data = self.ctx.read_file(after, path)
             if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:
