@@ -425,6 +425,7 @@ class RepoEnvironment:
             },
             # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
             **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
+            **({"proposer_setup": list(self.proposer_setup)} if self.proposer_setup is not None else {}),
         }
 
 

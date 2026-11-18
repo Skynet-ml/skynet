@@ -172,6 +172,8 @@ def test_the_file_proposer_applies_when_the_run_names_none() -> None:
     assert environment.proposer_entry == ("node", "my agent.js")
     assert environment.proposer_setup == ("npm", "ci")
     assert environment.notes == ("The run uses the proposer command in the contract file: node 'my agent.js'",)
+    record = environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+    assert (record["proposer_entry"], record["proposer_setup"]) == (["node", "my agent.js"], ["npm", "ci"])
 
 
 def test_the_runs_own_proposer_wins_and_says_so() -> None:
@@ -183,6 +185,8 @@ def test_the_runs_own_proposer_wins_and_says_so() -> None:
     assert environment.proposer_entry is None
     assert environment.proposer_setup is None
     assert environment.notes == ("The run's own proposer replaces the one in the contract file.",)
+    record = environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+    assert "proposer_setup" not in record
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])

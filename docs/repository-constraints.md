@@ -601,7 +601,8 @@ The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
 command, the network for setup, for versions (`[run]`) and for the metric, and each role's services
-and MCP servers.
+and MCP servers. When the run uses the file's proposer, it also holds
+`proposer_entry` and `proposer_setup`.
 A resumed run that arrives at different rules fails instead of continuing.
 
 ## Services, MCP files and secrets
