@@ -2860,9 +2860,9 @@ def test_a_stop_while_the_setup_record_is_written_leaves_no_broken_record(
             The number of characters written, for any other file.
 
         Raises:
-            KeyboardInterrupt: For a file in the setup's state folder.
+            KeyboardInterrupt: For the setup's record.
         """
-        if self.parent.name == harness_bridge.SETUP_STATE:
+        if self.name == "done.json.tmp":
             self.open("w").close()
             raise KeyboardInterrupt
         return write_text(self, *args, **kwargs)
@@ -3340,3 +3340,210 @@ def test_a_restore_through_a_parent_folder_linked_inside_the_checkout_stops(tmp_
         harness_bridge.ensure_setup(command, checkout)
 
     assert list(other.iterdir()) == []
+
+
+def _git(checkout: Path, *arguments: str) -> str:
+    """Run one git command in a checkout.
+
+    Args:
+        checkout: The checkout.
+        *arguments: Arguments after ``git``.
+
+    Returns:
+        Its standard output, stripped.
+    """
+    command = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments]
+    return subprocess.run(command, cwd=checkout, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_an_undo_after_a_setup_switches_branch_puts_head_and_both_branches_back(tmp_path: Path) -> None:
+    """A reset of HEAD alone would move the other branch to the old commit and lose its own (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    branch = _git(checkout, "symbolic-ref", "HEAD")
+    head = _git(checkout, "rev-parse", "HEAD")
+    _git(checkout, "checkout", "-qb", "other")
+    (checkout / "o.txt").write_text("o")
+    _git(checkout, "add", "o.txt")
+    _git(checkout, "commit", "-qm", "o")
+    other = _git(checkout, "rev-parse", "other")
+    _git(checkout, "checkout", "-q", branch.removeprefix("refs/heads/"))
+
+    with pytest.raises(RuntimeError, match="moved HEAD"):
+        harness_bridge.ensure_setup(["git", "checkout", "-q", "other"], checkout)
+
+    assert _git(checkout, "symbolic-ref", "HEAD") == branch
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert _git(checkout, "rev-parse", "other") == other
+    assert not (checkout / "o.txt").exists()
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_an_undo_removes_a_branch_the_setup_made_and_keeps_a_detached_head(tmp_path: Path) -> None:
+    """A failed setup's new branch goes, and a detached HEAD stays detached at its commit (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    head = _git(checkout, "rev-parse", "HEAD")
+    _git(checkout, "checkout", "-q", "--detach")
+    command = ["sh", "-c", "git branch made && git checkout -q made && exit 4"]
+
+    with pytest.raises(RuntimeError, match="failed with exit code 4"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert _git(checkout, "for-each-ref", "refs/heads/made") == ""
+    assert _git(checkout, "rev-parse", "--symbolic-full-name", "HEAD") == "HEAD"
+    assert _git(checkout, "rev-parse", "HEAD") == head
+
+
+def test_an_undo_after_a_setup_rewrites_gitignore_keeps_the_old_ignored_file(tmp_path: Path) -> None:
+    """An emptied .gitignore unhides an old ignored file, which is not setup output and is not removed (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / ".gitignore").write_text("secret.env\nkeep/\n")
+    _git(checkout, "add", ".gitignore")
+    _git(checkout, "commit", "-qm", "ignore")
+    (checkout / "secret.env").write_text("KEY")
+    (checkout / "keep").mkdir()
+    (checkout / "keep" / "old").write_text("old")
+    command = ["sh", "-c", "echo > .gitignore && echo n > keep/new && exit 2"]
+
+    with pytest.raises(RuntimeError, match="failed with exit code 2"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert (checkout / "secret.env").read_text() == "KEY"
+    assert (checkout / "keep" / "old").read_text() == "old"
+    assert not (checkout / "keep" / "new").exists()
+    assert (checkout / ".gitignore").read_text() == "secret.env\nkeep/\n"
+
+
+def test_an_undo_after_the_exclude_lines_are_written_puts_info_exclude_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after the exclude lines are added removes them, byte for byte (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Makes the write of the setup's record fail.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    exclude = checkout / ".git" / "info" / "exclude"
+    content = exclude.read_bytes()
+    write_text = Path.write_text
+
+    def fail_the_record(self: Path, *args: Any, **kwargs: Any) -> int:
+        """Fail the write of the setup's record, and write any other file.
+
+        Args:
+            self: The file to write.
+            *args: The content and other arguments of :meth:`Path.write_text`.
+            **kwargs: The keyword arguments of :meth:`Path.write_text`.
+
+        Returns:
+            The number of characters written, for any other file.
+
+        Raises:
+            OSError: For the setup's record.
+        """
+        if self.name == "done.json.tmp":
+            raise OSError("disk full")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_the_record)
+    with pytest.raises(OSError, match="disk full"):
+        harness_bridge.ensure_setup(["sh", "-c", "mkdir build && echo x > build/f"], checkout)
+
+    assert not (checkout / "build").exists()
+    assert exclude.read_bytes() == content
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+def test_the_next_session_undoes_a_killed_setup_and_runs_it_again(tmp_path: Path) -> None:
+    """A SIGTERM skips the undo, so the next session undoes the partial setup before it trusts the checkout (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the bridge config, the setup's pid file and log.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("the parent version's edit")
+    pid_file = tmp_path / "setup.pid"
+    log = tmp_path / "setup.log"
+    write = (
+        f"import os; open({str(log)!r}, 'a').write('ran\\n'); os.makedirs('partial'); open('partial/f', 'w').write('p')"
+    )
+    killed = [
+        sys.executable,
+        "-c",
+        f"{write}; open('a.txt', 'a').write('!'); open({str(pid_file)!r}, 'w').write(str(os.getpid()))"
+        "; import time; time.sleep(60)",
+    ]
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "file_command": True, "setup": killed}))
+    bridge = subprocess.Popen(
+        [sys.executable, str(Path(harness_bridge.__file__).resolve()), "--print", "x"],
+        cwd=checkout,
+        env={**os.environ, "HOME": str(tmp_path / "home"), harness_bridge.CONFIG_ENV: str(config)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the setup did not start"
+            time.sleep(0.05)
+        bridge.send_signal(signal.SIGTERM)
+        assert bridge.wait(timeout=10) == 128 + signal.SIGTERM
+    finally:
+        bridge.kill()
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert (state / "started.json").exists()
+    assert (checkout / "a.txt").read_text() == "the parent version's edit!"
+
+    # The new setup fails if the partial folder is still there.
+    harness_bridge.ensure_setup([sys.executable, "-c", write], checkout)
+
+    assert log.read_text() == "ran\nran\n"
+    assert (checkout / "a.txt").read_text() == "the parent version's edit"
+    assert (checkout / "partial" / "f").read_text() == "p"
+    assert not (state / "started.json").exists()
+    assert not (state / "undo").exists()
+    assert (state / "done.json").exists()
+
+
+def test_the_copy_of_the_checkout_counts_toward_the_setup_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow copy before the setup uses up the limit, so the setup does not start late (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+        monkeypatch: Makes the copy slow.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    log = tmp_path / "setup.log"
+    save = harness_bridge._save_checkout
+
+    def slow_save(*args: Any) -> None:
+        """Copy the checkout, and take longer than the whole time limit.
+
+        Args:
+            *args: The arguments of :func:`harness_bridge._save_checkout`.
+        """
+        save(*args)
+        time.sleep(0.6)
+
+    monkeypatch.setattr(harness_bridge, "_save_checkout", slow_save)
+    with pytest.raises(RuntimeError, match=r"no time was left within 0\.5 seconds"):
+        harness_bridge.ensure_setup([sys.executable, "-c", f"open({str(log)!r}, 'w')"], checkout, timeout_seconds=0.5)
+
+    assert not log.exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "undo").exists()
