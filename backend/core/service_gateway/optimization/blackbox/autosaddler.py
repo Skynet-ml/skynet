@@ -238,7 +238,7 @@ class AutoSaddlerEngine:
                 elif op == "evaluate":
                     reply = _evaluate(task, server, ctx, request)
                 elif op == "progress":
-                    event = request.get("event") or {}
+                    event = request.get("event", {})
                     if not isinstance(event, dict):
                         raise TypeError("event")
                     _progress(task, server, ctx, event)

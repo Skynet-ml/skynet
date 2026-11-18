@@ -1017,6 +1017,9 @@ def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
                 '{"op": "put_files", "files": {"a.txt": "a"}}',
                 '{"op": "progress", "event": {"candidate_id": 1, "score": 1.0, "candidate": "s", "total_evals": "x"}}',
                 '{"op": "progress", "event": [1]}',
+                '{"op": "progress", "event": []}',
+                '{"op": "progress", "event": 0}',
+                '{"op": "progress", "event": ""}',
                 '{"op": "result", "result": [1]}',
             )
         ),
