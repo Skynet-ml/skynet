@@ -1623,6 +1623,7 @@ def test_a_progress_publish_locks_its_two_jobs_in_key_order(full_schema_engine: 
 
     Another session holds the target job, whose key sorts first. The publish
     waits for it before it locks the source job, so the source job stays free.
+    The source row goes in first, so a lock in heap order would take it first.
 
     Args:
         full_schema_engine: Engine holding the full schema.
@@ -1632,8 +1633,9 @@ def test_a_progress_publish_locks_its_two_jobs_in_key_order(full_schema_engine: 
     target_id, source_id = "job-a", "job-b"
     with Session(full_schema_engine) as session:
         session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
-        for run_id in (target_id, source_id):
+        for run_id in (source_id, target_id):
             session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="running", execution_generation=1))
+            session.flush()
         session.commit()
     store = object.__new__(RemoteDBJobStore)
     store._engine = full_schema_engine

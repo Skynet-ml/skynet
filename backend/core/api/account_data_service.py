@@ -19,9 +19,11 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-The only outside call is the tree purge, which deletes the account's step log
-packs from the tree bucket (SKY-733). Nothing here calls Stripe, OpenRouter,
-or any other provider; severing the local link is the whole of the operation.
+This module makes no outside call. The tree purge here only locks, marks and
+plans the account's step log packs; the router deletes the unused packs from
+the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
+OpenRouter, or any other provider; severing the local link is the whole of
+the operation.
 Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
 to a follow-up.
 """
@@ -528,7 +530,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         username: The caller's lowercased-email identity.
 
     Returns:
-        Counts of hard-deleted and anonymized rows.
+        Counts of hard-deleted and anonymized rows. The summary also holds the
+        tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
         TreePurgeError: When the account has tree packs to delete and
