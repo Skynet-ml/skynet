@@ -6,8 +6,9 @@ tool loop in the worker. The tool loop is modeled on the Cloudflare Agents SDK
 tool loop, with no dependency on it: call the model with the tools, run each
 tool call, append the results, and call again until a reply asks for no tool.
 Its one tool is modeled on the Cloudflare Sandbox SDK ``exec``: one shell
-command, with the exit code, stdout and stderr as the result. Each model reply is one ``model`` step and each command is one
-``command`` step, so a killed run resumes from its last step.
+command, with the exit code, stdout and stderr as the result. Each model reply
+is one ``model`` step and each command is one ``command`` step, so a killed run
+resumes from its last step.
 
 The workspace is a tree. Each command starts from the tree that the last
 command left, and the engine writes its own files (task, skill, frontier,
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import posixpath
 from collections.abc import Iterator
@@ -32,16 +34,19 @@ from gepa.oa.budget import BudgetExhausted
 from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
+from .... import run_log
 from ....exceptions import ServiceError
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
-from . import native_engines
-from .feedback import emit_candidate, emit_case_scored
-from .native_runtime import native_task_payload, run_native_engine
+from ....worker.engine_loop import ModelCallFailedError
+from . import native_engines, sandbox_log
+from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
+from .native_runtime import native_task_payload, run_native_engine, sanitize_side_info
 from .protocol import (
     BudgetExhaustedError,
     Candidate,
     EngineContext,
     EvalServer,
+    ModelReply,
     Result,
     Task,
     candidate_key,
@@ -66,6 +71,30 @@ BASH_TOOL = {
 
 _TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
 _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
+
+# Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
+# prompt hashes that a replay checks, bounded.
+OUTPUT_CHARS = 30_000
+# A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
+# the same calls in the same order.
+MODEL_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
+
+
+def _clip(text: str) -> str:
+    """Cut a command output to ``OUTPUT_CHARS``: keep its head and tail, with a note on what was cut.
+
+    Args:
+        text: The output.
+
+    Returns:
+        The output unchanged when it fits, else its head, a note and its tail.
+    """
+    if len(text) <= OUTPUT_CHARS:
+        return text
+    half = OUTPUT_CHARS // 2
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters cut ...]\n{text[-half:]}"
 
 
 class _Budget:
@@ -153,12 +182,37 @@ class _UpstreamServer:
         infos: dict[str, Any] = {}
         for eid, case in pairs:
             try:
-                score, info = self._server.evaluate(candidate, case)
+                # As in the native mailbox, the scope tags the scorer's events and its model calls.
+                with sandbox_log.event_scope(candidate=str(trial), case=eid):
+                    score, info = self._server.evaluate(candidate, case)
             except BudgetExhaustedError as error:
                 raise BudgetExhausted(str(error)) from error
             scores.append(score)
-            infos[eid] = info
+            # The engine writes these into the proposer's workspace, and a scorer error can hold a traceback
+            # with metric source, so the proposer gets one line (as from the native mailbox).
+            infos[eid] = sanitize_side_info(info)
+            if score is not None and math.isfinite(score) and isinstance(info, dict):
+                emit_scorer_feedback(
+                    self._progress,
+                    example_id="?" if case is None else eid,
+                    score=float(score),
+                    side_info=info,
+                    candidate_id=str(trial),
+                )
             if score is not None and case is not None:
+                logger.info(
+                    "Candidate %s scored %.4f on case %s",
+                    trial,
+                    float(score),
+                    eid,
+                    extra=run_log.event_extra(
+                        source="engine",
+                        event="case.scored",
+                        fields={"score": float(score), "total": len(pairs)},
+                        candidate=trial,
+                        case=eid,
+                    ),
+                )
                 emit_case_scored(self._progress, trial=trial, example_id=eid, score=score, total=len(pairs))
         filled = fill_unscored([candidate] * len(scores), scores)
         names = [eid for eid, _ in pairs]
@@ -189,9 +243,22 @@ class _UpstreamServer:
         if isinstance(candidate, str) and math.isfinite(val_score):
             # A version with a crashed case shows no score (SKY-350, SKY-367).
             shown = None if self._server.metric_error(candidate) is not None else val_score
+            trial = self._register(candidate)
+            logger.info(
+                "Candidate %s scored %s after %s evaluations",
+                trial,
+                "no score (a case crashed)" if shown is None else f"{shown:.4f}",
+                self._server.used,
+                extra=run_log.event_extra(
+                    source="engine",
+                    event="candidate.scored",
+                    fields={"score": shown, "total_evals": self._server.used},
+                    candidate=trial,
+                ),
+            )
             emit_candidate(
                 self._progress,
-                candidate_id=str(self._register(candidate)),
+                candidate_id=str(trial),
                 parent_id=None,
                 generation=0,
                 score=shown,
@@ -269,11 +336,16 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         spent = Decimal(0)
         text = ""
         exhausted = False
+        failed = False
         while True:
             if remaining_cost is not None and float(spent) / 100 >= remaining_cost:
                 exhausted = True
                 break
-            reply = ctx.call_model(messages, [BASH_TOOL])
+            reply = self._call_model(messages)
+            if isinstance(reply, ModelCallFailedError):
+                failed = True
+                text = str(reply)
+                break
             spent += reply.cost_cents
             text = reply.text
             messages.append(
@@ -293,11 +365,31 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         return native_engines.ProposerOutcome(
             session_id=f"iter{iteration}",
             cost_usd=float(spent) / 100,
-            is_error=False,
+            is_error=failed,
             text=text,
             budget_exhausted=exhausted,
             killed=False,
         )
+
+    def _call_model(self, messages: list[dict[str, Any]]) -> ModelReply | ModelCallFailedError:
+        """Call the model with the bash tool, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
+
+        Each attempt is one ``model`` step, so a resume replays the same failures and the same retries.
+
+        Args:
+            messages: The session's messages.
+
+        Returns:
+            The reply, or the last :class:`ModelCallFailedError` when every attempt failed.
+        """
+        assert self._ctx.call_model is not None
+        failure = ModelCallFailedError("unknown")
+        for _ in range(MODEL_ATTEMPTS):
+            try:
+                return self._ctx.call_model(messages, [BASH_TOOL])
+            except ModelCallFailedError as error:
+                failure = error
+        return failure
 
     def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
         """Run one tool call as one command over the tree, modeled on the Sandbox SDK ``exec``.
@@ -327,8 +419,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             return json.dumps({"error": f"The command failed and changed nothing: {error}"}), tree
         output = {
             "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": _clip(result.stdout),
+            "stderr": _clip(result.stderr),
             "timed_out": result.timed_out,
         }
         return json.dumps(output), tree

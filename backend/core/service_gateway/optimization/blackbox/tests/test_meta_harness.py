@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import re
 from collections.abc import Mapping
 from decimal import Decimal
@@ -20,12 +21,14 @@ import pytest
 from gepa.oa.config import OptimizeAnythingConfig
 from sqlalchemy.engine import Engine
 
-from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
+from core.billing.usage_tags import current_tags
+from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MINIBATCH
 from core.exceptions import ServiceError
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, MetaHarnessEngine
+from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_CHARS, MetaHarnessEngine
+from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     EvalServer,
@@ -37,7 +40,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop
+from core.worker.engine_loop import EngineLoop, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -60,15 +63,25 @@ _CASES = [{"id": "a"}, {"id": "b"}]
 class _Proposer:
     """A scripted coding agent: one command that writes a longer candidate, then a final reply."""
 
-    def __init__(self, *, die_at: int | None = None, cost: str = "1", call: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        die_at: int | None = None,
+        cost: str = "1",
+        call: dict[str, Any] | None = None,
+        fail_at: frozenset[int] = frozenset(),
+    ) -> None:
         """Set the script.
 
         Args:
             die_at: The index of the call in which the worker dies; ``None`` never dies.
             cost: The cost of each reply, in cents.
             call: A tool call to send in place of the scripted command.
+            fail_at: The indexes of the attempts, failed ones included, that fail as a rate limit does.
         """
         self.die_at = die_at
+        self.fail_at = fail_at
+        self.attempts = 0
         self.cost = Decimal(cost)
         self.call = call
         self.calls: list[list[dict[str, Any]]] = []
@@ -86,9 +99,13 @@ class _Proposer:
 
         Raises:
             _WorkerDiedError: In the call at ``die_at``.
+            RuntimeError: In the attempts of ``fail_at``.
         """
         if len(self.calls) == self.die_at:
             raise _WorkerDiedError
+        self.attempts += 1
+        if self.attempts - 1 in self.fail_at:
+            raise RuntimeError("429 rate limited")
         assert isinstance(prompt, list)
         self.calls.append([dict(message) for message in prompt])
         self.tools.append(tools)
@@ -172,12 +189,19 @@ def _loop(
     return loop, boxes
 
 
-def _run(loop: EngineLoop, *, events: list[tuple[str, dict[str, Any]]] | None = None, **fields: Any) -> Result:
+def _run(
+    loop: EngineLoop,
+    *,
+    events: list[tuple[str, dict[str, Any]]] | None = None,
+    scorer: Any = _score,
+    **fields: Any,
+) -> Result:
     """Run Meta-Harness for two iterations on the loop.
 
     Args:
         loop: The engine loop.
         events: A list that collects the progress events.
+        scorer: The step scorer.
         **fields: Other context fields.
 
     Returns:
@@ -185,7 +209,7 @@ def _run(loop: EngineLoop, *, events: list[tuple[str, dict[str, Any]]] | None = 
     """
     sink = None if events is None else (lambda kind, data: events.append((kind, data)))
     ctx = loop.context(max_iterations=2, progress_callback=sink, **fields)
-    return MetaHarnessEngine().run(Task("seed", cases=list(_CASES)), loop.server(_score, max_evals=20), ctx)
+    return MetaHarnessEngine().run(Task("seed", cases=list(_CASES)), loop.server(scorer, max_evals=20), ctx)
 
 
 def test_the_loop_path_never_starts_the_native_runtime(
@@ -266,13 +290,59 @@ def test_a_run_killed_mid_climb_resumes_from_its_last_step(
 
 
 def test_the_climb_view_gets_its_progress_events(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Each benchmarked version sends its scored cases and one candidate event, as the native runtime does."""
+    """Each benchmarked version sends its scored cases, its notes and one candidate event, as the native runtime does.
+
+    Each scorer call runs in the candidate's and case's scope, and the run log gets the native typed events.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     events: list[tuple[str, dict[str, Any]]] = []
+    scopes: list[tuple[str | None, str | None]] = []
 
-    _run(loop, events=events)
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score by length, keep the scope tags of the call, and leave a note.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: Not used.
+
+        Returns:
+            The length and a feedback note.
+        """
+        del loop, case
+        tags = current_tags()
+        scopes.append((tags.get("candidate"), tags.get("case")))
+        return float(len(str(candidate))), {"feedback": f"length {len(str(candidate))}"}
+
+    with caplog.at_level(logging.INFO, logger=meta_mod.logger.name):
+        _run(loop, events=events, scorer=score)
+
+    assert scopes == [("0", "0"), ("0", "1"), ("1", "0"), ("1", "1"), ("2", "0"), ("2", "1")]
+    notes = [
+        (data["candidate_id"], data["example_id"], data["feedback"])
+        for kind, data in events
+        if kind == PROGRESS_MINIBATCH
+    ]
+    assert notes[:2] == [("0", "0", "length 4"), ("0", "1", "length 4")]
+    assert len(notes) == 6
+    logged = [
+        (record.run_log["event"], record.run_log["candidate"], record.run_log["case"], record.run_log["fields"])
+        for record in caplog.records
+        if record.name == meta_mod.logger.name
+    ]
+    assert logged[:3] == [
+        ("case.scored", "0", "0", {"score": 4.0, "total": 2}),
+        ("case.scored", "0", "1", {"score": 4.0, "total": 2}),
+        ("candidate.scored", "0", None, {"score": 4.0, "total_evals": 2}),
+    ]
+    assert [event for event, *_ in logged].count("candidate.scored") == 3
 
     cases = [
         (data["trial"], data["example_id"], data["score"]) for kind, data in events if kind == PROGRESS_CASE_SCORED
@@ -477,3 +547,100 @@ def test_the_worker_skill_and_tool_keep_scratch_files_in_the_workspace(tmp_path:
     assert "/tmp/" not in skill
     assert "scratch file under `scratch/` in the workspace" in skill
     assert "`scratch/`" in BASH_TOOL["description"]
+
+
+def test_a_scorer_traceback_reaches_the_proposer_as_one_line(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A scorer error can hold metric source in its traceback; the workspace keeps only its last line."""
+    traceback = (
+        "Traceback (most recent call last):\n"
+        '  File "metric.py", line 3, in score\n'
+        "    secret_metric_line()\n"
+        "ValueError: bad case"
+    )
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Fail the first case of ``seedx`` with a traceback, and score the rest by length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score and the side information.
+        """
+        del loop
+        if candidate == "seedx" and case == _CASES[0]:
+            return None, {"error": traceback}
+        return float(len(str(candidate))), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    _run(loop, events=events, scorer=score)
+
+    results = tmp_path / "loop-1" / "meta_harness" / "logs" / "run" / "results"
+    assert json.loads((results / "c1" / "val.json").read_text())["infos"]["0"] == {"error": "ValueError: bad case"}
+    assert all("secret_metric_line" not in path.read_text() for path in results.rglob("*.json"))
+    # The server keeps the raw error, so the crashed version still shows no score.
+    candidates = [data for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert [(data["candidate_id"], data["score"]) for data in candidates] == [("0", 4.0), ("1", None), ("2", 6.0)]
+
+
+def test_a_long_command_output_is_cut_to_its_head_and_tail(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Each output keeps a fixed size, so the later prompts and their hashes stay bounded and stable."""
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files({"a.txt": b"a"})
+    command = "python3 -c \"import sys; sys.stdout.write('a' * 40000 + 'b' * 40000); sys.stderr.write('e')\""
+
+    first = json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": {"command": command}})[0])
+    second = json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": {"command": command}})[0])
+
+    stdout = first["stdout"]
+    assert stdout == second["stdout"]
+    assert stdout.startswith("a" * (OUTPUT_CHARS // 2) + "\n[... 50000 characters cut ...]\n")
+    assert stdout.endswith("\n" + "b" * (OUTPUT_CHARS // 2))
+    assert first["stderr"] == "e"
+
+
+def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A transient failure commits a failed step and a retry; a resume replays both with no new model call."""
+    first, _ = _loop(
+        owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0}), die_at=2), generation=1
+    )
+    with pytest.raises(_WorkerDiedError):
+        _run(first)
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command", "model"]
+
+    _new_generation(engine)
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=2)
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    # The failed step and its retry come back from the log; only the second session's calls run.
+    assert model.attempts == 2
+    steps = _steps(engine)
+    assert [kind for _, kind, _ in steps] == ["model", "model", "command", "model", "model", "command", "model"]
+    assert [generation for _, _, generation in steps] == [1, 1, 1, 1, 2, 2, 2]
+
+
+def test_a_model_call_that_fails_on_every_attempt_ends_the_session_as_an_error(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """After the fixed number of attempts, the session fails and the run stops with the proposer error."""
+    model = _Proposer(fail_at=frozenset({0, 1, 2}))
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(ProposerFailedError, match=re.escape(str(ModelCallFailedError("RuntimeError")))):
+        _run(loop)
+    assert model.attempts == meta_mod.MODEL_ATTEMPTS
+    assert [kind for _, kind, _ in _steps(engine)] == ["model"] * meta_mod.MODEL_ATTEMPTS
+    assert boxes.opened == 0
