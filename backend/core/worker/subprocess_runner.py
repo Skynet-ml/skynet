@@ -29,7 +29,7 @@ from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandbox
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ..service_gateway.optimization.blackbox.sandbox_log import stream_logger as sandbox_stream_logger
 from ..service_gateway.optimization.blackbox.sandbox_runtime import sandbox_runtime_context
-from ..service_gateway.optimization.blackbox.service import run_blackbox_optimization
+from ..service_gateway.optimization.blackbox.service import LoopBinding, run_blackbox_optimization
 from ..service_gateway.optimization.budget_stop import BudgetReached
 from ..service_gateway.optimization.llm_error import (
     LlmErrorCapture,
@@ -132,6 +132,7 @@ def run_service_in_subprocess(
     payload_dict: dict[str, Any],
     artifact_id: str,
     event_queue: Any,
+    loop: LoopBinding | None = None,
 ) -> None:
     """Execute a repository optimization in the child process, streaming events back to the parent.
 
@@ -154,6 +155,7 @@ def run_service_in_subprocess(
             for resumable runs, the ``_gepa_log_dir`` path the worker owns.
         artifact_id: ID used to attach progress and logs to the right job.
         event_queue: Shared multiprocessing queue back to the parent.
+        loop: The worker's engine loop, when :mod:`core.worker.loop_host` runs the job there instead of in a box.
     """
     payload_dict = dict(payload_dict)
     stable_job_id = payload_dict.pop("_job_id", artifact_id)
@@ -237,6 +239,7 @@ def run_service_in_subprocess(
             target_route=target_route,
             evaluator_route=evaluator_route,
             repo_snapshot=repo_snapshot,
+            loop=loop,
         )
         safe_queue_put(
             event_queue,

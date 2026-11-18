@@ -27,8 +27,8 @@ A host that runs an engine on the loop must follow this contract. It calls
 ends before it replays every committed step raises
 :class:`StepDivergedError` there. Its model client bills no call itself, and
 raises :class:`ModelCallBilledError` for a provider failure that the provider
-billed (see the ``model`` argument of :class:`EngineLoop`). No host calls the
-loop yet: SKY-728 (remove the one-box run path) connects it.
+billed (see the ``model`` argument of :class:`EngineLoop`). The production
+host is :mod:`core.worker.loop_host` (SKY-829).
 
 A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
@@ -90,6 +90,13 @@ on a resume. :meth:`EngineLoop.context` puts these calls, ``run`` and the
 caller's :class:`RepoSeed` on the :class:`EngineContext`. The engine's seed
 names the seed tree without its hidden paths. The raw seed tree id is a hash
 of the hidden content too, so the engine never gets it.
+
+:meth:`EngineLoop.evaluate` runs a caller's own evaluation, such as one call of
+the run's repository scorer, and commits its JSON result as a step with no
+cost. The evaluation's boxes bill through the run's budget runtime, not the
+lease. A replay gives the committed result, so a resume does not run or pay for
+the evaluation again. An error of the evaluation commits nothing and stops the
+loop; a result that the engine must see as a failure goes in the result.
 
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
@@ -281,7 +288,7 @@ def _call(record: dict[str, Any]) -> str:
         record: The committed step.
 
     Returns:
-        ``model``, ``run``, ``score`` or ``room``.
+        ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
     """
     if record["kind"] == "model":
         return "model"
@@ -737,6 +744,65 @@ class EngineLoop:
                 except Exception as error:
                     raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
                 return float(Decimal(rooms[0]) / 100)
+
+    def evaluate(self, key: Mapping[str, Any], work: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Run one caller evaluation, such as a repository scorer call, and commit its JSON result as one step.
+
+        The step has no lease cost: the evaluation's boxes bill through the run's budget runtime. A replay gives
+        the committed result and does not run ``work``, so a resume does not pay for the evaluation again.
+
+        Args:
+            key: What the evaluation is of, such as the candidate and the case; a replay must ask with the same key.
+            work: Runs the evaluation and returns its result as a JSON object. A result that the engine must see
+                as a failure goes in the object, since an error of ``work`` stops the loop.
+
+        Returns:
+            The result; on a replay, the committed result, with no work.
+
+        Raises:
+            StepDivergedError: When the committed step at this place is not an evaluation with this key.
+            LoopStoppedError: When the loop stopped, the key or the result is not JSON, the run is fenced or
+                closed, the agent cannot open, ``work`` raises, or the commit fails.
+            BudgetReached: From ``work``, with no step: the run stops on the budget, and a resume runs it again.
+        """
+        with self._stops():
+            try:
+                digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
+            except (TypeError, ValueError) as error:
+                raise LoopStoppedError(
+                    f"The evaluation key cannot be hashed: {type(error).__name__}: {error}"
+                ) from error
+            log = self._log()
+            with log.lock:
+                record = self._replayed(log, "evaluate", {"key_sha256": digest})
+                if record is not None:
+                    return dict(record["body"]["result"])
+                self._check_owner()
+                run = self._run
+                try:
+                    result = work()
+                    # A result that does not commit as JSON fails the same way on a resume, so it stops here.
+                    json.dumps(result)
+                except LoopStoppedError:
+                    raise
+                except Exception as error:
+                    raise LoopStoppedError(f"The evaluation failed: {type(error).__name__}: {error}") from error
+                if not isinstance(result, dict):
+                    raise LoopStoppedError(f"The evaluation gave a {type(result).__name__}, not a JSON object.")
+                try:
+                    step_id = log.agent.commit_unpaid(
+                        "command",
+                        run.grant_list_id,
+                        lambda: (
+                            {"call": "evaluate", "key_sha256": digest, "result": result},
+                            self._trees.put_tree(run.run_id, []),
+                        ),
+                    )
+                    # The engine acts on the result only once its step can never be lost, as for a model reply.
+                    self._durable(step_id)
+                except Exception as error:
+                    raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
+                return result
 
     def run(
         self,
@@ -1434,7 +1500,7 @@ class EngineLoop:
 
         Args:
             log: The agent's log.
-            call: ``model``, ``run``, ``score`` or ``room``.
+            call: ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
             fingerprint: The body fields that the committed step must hold.
             tree_id: The tree that a committed score step must name.
             grant_list_id: The grant-list id that a committed box step must name.

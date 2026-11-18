@@ -24,7 +24,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import dspy
 
@@ -333,6 +333,27 @@ def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None)
     }
 
 
+# The ``(engine, target kind)`` pairs that run on the worker's engine loop (SKY-829), not in the native runtime.
+# Each engine port adds its own row. Auto stays native until every Auto engine has a row.
+LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset()
+
+
+def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
+    """Report whether a job runs on the worker's engine loop.
+
+    Args:
+        payload: The submitted or stored job.
+
+    Returns:
+        True for a single-engine repository run whose engine has a row in :data:`LOOP_ROUTES`.
+    """
+    return (
+        payload.strategy.mode == "single"
+        and payload.target.kind == BLACKBOX_TARGET_REPO
+        and (str(payload.strategy.engine), "repo") in LOOP_ROUTES
+    )
+
+
 def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
     """Report whether a job runs a coding-agent proposer in the native runtime.
 
@@ -340,13 +361,43 @@ def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
         payload: The submitted or stored job.
 
     Returns:
-        True for auto mode, a native engine, or any repository run.
+        True for auto mode, a native engine, or any repository run, unless the job runs on the engine loop.
     """
     return (
         payload.strategy.mode != "single"
         or payload.strategy.engine in NATIVE_ENGINES
         or payload.target.kind == BLACKBOX_TARGET_REPO
-    )
+    ) and not has_loop_route(payload)
+
+
+class LoopBinding(Protocol):
+    """The worker's engine loop, as a job sees it: steps for the scorer and the engine, and the replay check."""
+
+    def scorer(self, base: ScorerFn) -> ScorerFn:
+        """Return a scorer whose each call is one committed loop step.
+
+        Args:
+            base: The job's scorer.
+
+        Returns:
+            The scorer that the eval server and the final runs use.
+        """
+        ...
+
+    def context(self, **fields: Any) -> EngineContext:
+        """Return the engine context of the loop.
+
+        Args:
+            **fields: The job's own :class:`EngineContext` fields.
+
+        Returns:
+            The context, with the loop's model, box and file calls.
+        """
+        ...
+
+    def finish(self) -> None:
+        """Check that the run replayed every committed step of the loop."""
+        ...
 
 
 def _shinka_models(payload: BlackboxRunRequest | JobSpec, gateway: GatewayConfig) -> tuple[dict[str, str], ...]:
@@ -435,7 +486,8 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
     else:
         for name in AUTO_ENGINES:
             get_engine(name, caps)
-    needs_native = uses_native_runtime(payload)
+    # A loop-routed run calls the same proposer models with the same budget, so it keeps the same checks.
+    needs_native = uses_native_runtime(payload) or has_loop_route(payload)
     if needs_native:
         models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
         # The proposer CLI applies the main model's effort; the extra models feed
@@ -1060,6 +1112,7 @@ def run_blackbox_optimization(
     target_route: dict[str, str] | None = None,
     evaluator_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run one legacy black-box job end to end.
 
@@ -1072,6 +1125,7 @@ def run_blackbox_optimization(
         target_route: Opaque parent route for the optimized task model.
         evaluator_route: Opaque parent route for the selected external evaluator.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
+        loop: The worker's engine loop, for a run that :func:`has_loop_route` sends there.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1093,7 +1147,8 @@ def run_blackbox_optimization(
     if payload.target.kind == BLACKBOX_TARGET_REPO:
         if not evaluator_route:
             raise ServiceError("A repository run is scored only by its trusted parent.")
-        if not repo_snapshot or not repo_snapshot.get("chunks"):
+        # The engine loop reads the worker's archive; only a guest box gets the tree in chunks.
+        if not repo_snapshot or not repo_snapshot.get("archive" if loop is not None else "chunks"):
             raise ServiceError("A repository run needs the repository its parent fetched.")
         base_scorer: JobScorer = RemoteScorer(
             REPO_SCORER_URL,
@@ -1121,6 +1176,7 @@ def run_blackbox_optimization(
             target_route=target_route,
             repo_snapshot=repo_snapshot,
             repo_scorer=payload.target.kind == BLACKBOX_TARGET_REPO,
+            loop=loop,
         )
     except BudgetReached as exc:
         if isinstance(exc.result, BlackboxRunResponse):
@@ -1143,6 +1199,7 @@ def run_job(
     target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
     repo_scorer: bool = False,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run a job over an already-built scorer and close the scorer afterwards.
 
@@ -1159,6 +1216,7 @@ def run_job(
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
         repo_scorer: Whether ``base_scorer`` is the repository scorer, whose
             ``run_failed`` status marks a case where the version's run crashed.
+        loop: The worker's engine loop, if the run uses it.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1181,6 +1239,7 @@ def run_job(
             target_route=target_route,
             repo_snapshot=repo_snapshot,
             repo_scorer=repo_scorer,
+            loop=loop,
         )
     except BudgetReached as exc:
         exc.evidence.setdefault("candidate_origin", None)
@@ -1239,6 +1298,7 @@ def _run_job(
     target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
     repo_scorer: bool = False,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run the job over an already-built scorer; see :func:`run_job`.
 
@@ -1259,6 +1319,8 @@ def _run_job(
         target_route: Opaque parent route for the optimized task model.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
         repo_scorer: Whether ``base_scorer`` is the repository scorer; see :func:`run_job`.
+        loop: The worker's engine loop, if the run uses it. Each scorer call, the final runs too, is then one
+            loop step, so a resume replays the run's evaluations; the run's end checks the replay.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1278,7 +1340,10 @@ def _run_job(
             agent_run_sink=agent_run_sink,
             target_route=target_route,
         )
-    concurrency = target.concurrency if caps.agent_target else 1
+    # Each loop step must have one place in its log, so the final runs score one case at a time on the loop.
+    concurrency = target.concurrency if caps.agent_target and loop is None else 1
+    if loop is not None:
+        scorer = loop.scorer(scorer)
     counts = splits.counts
     logger.info(
         "cases: %d train, %d validation, %d held out; selecting on %s, reporting on %s",
@@ -1348,17 +1413,25 @@ def _run_job(
     # A run stored before SKY-691 has no ``[outcome]`` in its snapshot; its
     # retired ``budget.stop_at_score`` stays its stop score.
     outcome_target = ((repo_snapshot or {}).get("outcome") or {}).get("target")
-    ctx = EngineContext(
-        reflection_lm=reflection_lm,
-        native_options=native_options,
-        proposer_token_budget_usd=token_budget,
-        run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
-        seed=job.seed or 0,
-        stop_at_score=outcome_target if outcome_target is not None else job.budget._legacy_stop_at_score,
-        max_iterations=job.budget.max_iterations,
-        concurrency=concurrency,
-        target_label=f"{target.harness} · {target.model}" if caps.agent_target else None,
-        progress_callback=engine_progress,
+    fields: dict[str, Any] = {
+        "native_options": native_options,
+        "proposer_token_budget_usd": token_budget,
+        "seed": job.seed or 0,
+        "stop_at_score": outcome_target if outcome_target is not None else job.budget._legacy_stop_at_score,
+        "max_iterations": job.budget.max_iterations,
+        "target_label": f"{target.harness} · {target.model}" if caps.agent_target else None,
+        "progress_callback": engine_progress,
+    }
+    # The loop gives its own model, run directory and concurrency of 1, so that each step has one place in its log.
+    ctx = (
+        loop.context(**fields)
+        if loop is not None
+        else EngineContext(
+            reflection_lm=reflection_lm,
+            run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
+            concurrency=concurrency,
+            **fields,
+        )
     )
     # The scorer's own model calls are part of the run: they count toward
     # the cost ceiling and the usage the worker bills.
@@ -1526,6 +1599,9 @@ def _run_job(
             _raise_if_every_run_failed(
                 best_run, "optimized version" if best_candidate != seed_candidate else "starting point"
             )
+            if loop is not None:
+                # After the final runs, which are loop steps too: a resume must give back every committed step.
+                loop.finish()
     distinct_runs = {id(run): run for run in (baseline_val, best_val, baseline_run, best_run) if run is not None}
     final_scorer_runs = sum(run.runs for run in distinct_runs.values())
     baseline = baseline_run.score if baseline_run else None
