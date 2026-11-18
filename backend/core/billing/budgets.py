@@ -1588,11 +1588,21 @@ class BudgetService:
             session: Optional caller transaction for atomic lifecycle publication.
 
         Returns:
-            Closed authority with pending usage and holds retained.
+            Closed authority with pending usage and holds retained. A user's
+            cancel or pause keeps its reason against any later non-user reason.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.state == "blocked":
+                return self._snapshot(session, budget, wallet)
+            # A later budget_reached from a stale worker, or a sweep's job_failed,
+            # must not hide the user's stop: an automatic resume would then reopen
+            # it (SKY-814).
+            if (
+                budget.state == "closed"
+                and budget.blocked_reason in USER_STOP_REASONS
+                and reason not in USER_STOP_REASONS
+            ):
                 return self._snapshot(session, budget, wallet)
             budget.state = "closed"
             budget.blocked_reason = _identifier(reason)

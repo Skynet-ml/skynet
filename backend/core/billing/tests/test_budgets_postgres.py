@@ -489,3 +489,25 @@ def test_an_automatic_resume_never_reopens_a_user_stop_on_postgres(database: Eng
     assert (swept.state, swept.blocked_reason) == ("closed", reason)
     resumed = service.resume_admission(budget.id, "alice", expected_generation=generation)
     assert (resumed.state, resumed.blocked_reason) == ("attached", None)
+
+
+@pytest.mark.parametrize("reason", ["user_cancelled", "user_paused"])
+def test_a_later_non_user_stop_keeps_the_user_stop_reason_on_postgres(database: Engine, reason: str) -> None:
+    """Keep a user's stop reason against a later budget_reached; only the user's own resume reopens it (SKY-814).
+
+    Args:
+        database: Engine on the disposable test schema.
+        reason: The reason the user's cancel or pause closes admission with.
+    """
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="user-stop")
+    service.attach_to_job(budget.id, "alice", "user-stop-job", expected_revision=budget.revision)
+    generation = service.get(budget.id, "alice").generation
+    service.stop_admission(budget.id, "alice", reason=reason)
+
+    kept = service.stop_admission(budget.id, "alice", reason="budget_reached")
+    assert (kept.state, kept.blocked_reason) == ("closed", reason)
+    swept = service.resume_admission(budget.id, "alice", expected_generation=generation, automatic=True)
+    assert (swept.state, swept.blocked_reason) == ("closed", reason)
+    resumed = service.resume_admission(budget.id, "alice", expected_generation=generation)
+    assert (resumed.state, resumed.blocked_reason) == ("attached", None)

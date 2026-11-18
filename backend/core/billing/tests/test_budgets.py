@@ -560,6 +560,44 @@ def test_explicit_resume_requires_reconciliation_and_is_not_triggered_by_funding
     assert service.resume_admission(budget.id, "alice", expected_generation=0).state == "attached"
 
 
+@pytest.mark.parametrize("reason", ["user_cancelled", "user_paused"])
+def test_a_later_non_user_stop_keeps_the_user_stop_reason(engine: Engine, reason: str) -> None:
+    """Keep a user's stop reason against later stops, so only the user's own resume reopens it (SKY-814).
+
+    Args:
+        engine: Private funded ledger database.
+        reason: The reason the user's cancel or pause closes admission with.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="user-stop")
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    service.stop_admission(budget.id, "alice", reason="budget_reached")
+    assert service.stop_admission(budget.id, "alice", reason=reason).blocked_reason == reason
+
+    for later in ("budget_reached", "job_failed"):
+        kept = service.stop_admission(budget.id, "alice", reason=later)
+        assert (kept.state, kept.blocked_reason) == ("closed", reason)
+    swept = service.resume_admission(budget.id, "alice", expected_generation=0, automatic=True)
+    assert (swept.state, swept.blocked_reason) == ("closed", reason)
+    resumed = service.resume_admission(budget.id, "alice", expected_generation=0)
+    assert (resumed.state, resumed.blocked_reason) == ("attached", None)
+    assert service.stop_admission(budget.id, "alice", reason="budget_reached").blocked_reason == "budget_reached"
+
+
+def test_a_cancel_replaces_a_pause_reason(engine: Engine) -> None:
+    """Let a user's cancel replace the user's earlier pause as the stop reason (SKY-814).
+
+    Args:
+        engine: Private funded ledger database.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="pause-then-cancel")
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    service.stop_admission(budget.id, "alice", reason="user_paused")
+
+    assert service.stop_admission(budget.id, "alice", reason="user_cancelled").blocked_reason == "user_cancelled"
+
+
 def test_overrun_retains_evidence_and_coverage_without_unbounded_debit(engine: Engine) -> None:
     """Quarantine reported usage above a verified bound instead of charging beyond it."""
     service = BudgetService(engine=engine)
