@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tarfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -631,3 +635,65 @@ def test_each_autosaddler_session_worktree_gets_the_files_setup(
             check=True,
         ).stdout
         assert status == ""
+
+
+def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AutoSaddler runs sessions in its own process, without the bridge's SIGTERM handler; its stop sweep ends the setup.
+
+    Args:
+        tmp_path: The checkout and the setup's pid file.
+        monkeypatch: Home folder and the proposer key.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "a.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    pid_file = tmp_path / "setup.pid"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    proposer = {
+        "run_command": "echo done",
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "setup": [
+            sys.executable,
+            "-c",
+            f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)",
+        ],
+    }
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    session = SimpleNamespace(workspace=checkout, task_prompt="x", session_id="s0")
+    errors: list[BaseException] = []
+
+    def drive() -> None:
+        """Run the session and keep the error it ends with."""
+        try:
+            asyncio.run(transport.run(session, 120.0))
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 20
+    while not pid_file.exists() or not pid_file.read_text():
+        assert time.monotonic() < deadline, "the setup did not start"
+        time.sleep(0.05)
+    setup_pid = int(pid_file.read_text())
+    try:
+        autosaddler_runner._stop_children()
+        worker.join(timeout=20)
+
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert "[proposer] setup command in optimize.toml" in str(errors[0])
+        with pytest.raises(ProcessLookupError):
+            os.kill(setup_pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(setup_pid, signal.SIGKILL)

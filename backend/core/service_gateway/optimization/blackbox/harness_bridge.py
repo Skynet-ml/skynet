@@ -57,6 +57,11 @@ _GLOB_CHARS = re.compile(r"([*?[\\])")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
+# A stop signal that lands while a group starts waits until the group is in
+# ``_OWNED_GROUPS``, so the stop also kills it. Masking the signal instead
+# would leave it masked in the child (SKY-753).
+_STARTING = [0]
+_DEFERRED_STOP: list[int] = []
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
@@ -396,19 +401,20 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
     # Files, not pipes: a background child keeps an inherited pipe open, and a
     # read to its end would wait for that child instead of for the setup.
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=checkout,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-            )
-        except OSError as error:
-            raise RuntimeError(f"{label} could not start: {error}") from error
-        root_start = _start_time(process.pid)
-        _OWNED_GROUPS[process.pid] = (process, root_start)
+        with _defer_stop():
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=checkout,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise RuntimeError(f"{label} could not start: {error}") from error
+            root_start = _start_time(process.pid)
+            _OWNED_GROUPS[process.pid] = (process, root_start)
         try:
             finished = _wait_unreaped(process.pid, timeout_seconds)
             # A process the setup left in the background (a watcher, a server)
@@ -467,11 +473,30 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
         signum: The signal that stops the bridge.
         _frame: The interrupted frame.
     """
+    if _STARTING[0]:
+        _DEFERRED_STOP.append(signum)
+        return
     for process, root_start in list(_OWNED_GROUPS.values()):
         # Without /proc (macOS) nothing proves a reaped pid is still ours.
         if process.returncode is None or root_start is not None:
             _stop_group(process, signal.SIGKILL, root_start)
     os._exit(128 + signum)
+
+
+@contextlib.contextmanager
+def _defer_stop() -> Iterator[None]:
+    """Hold a stop signal while a group starts, then handle it once the group is owned.
+
+    Yields:
+        Nothing; the block starts one process group and adds it to ``_OWNED_GROUPS``.
+    """
+    _STARTING[0] += 1
+    try:
+        yield
+    finally:
+        _STARTING[0] -= 1
+        if _DEFERRED_STOP and not _STARTING[0]:
+            _stop_owned_groups(_DEFERRED_STOP[0], None)
 
 
 def _tail(file: IO[bytes]) -> str:
@@ -551,11 +576,11 @@ def _setup_output(checkout: Path, before: set[str]) -> set[str]:
 
 
 def _tracked_state(checkout: Path, path: str) -> str:
-    """Describe the current content of one tracked path.
+    """Describe the current content of one path of the version.
 
     Args:
         checkout: The checkout or worktree.
-        path: A checkout-relative path that git tracks.
+        path: A checkout-relative path that git tracks, or an untracked file of the version.
 
     Returns:
         A hash of the file, or ``"missing"`` when the path is gone.
@@ -579,7 +604,7 @@ def _tracked_changes(checkout: Path) -> dict[str, str]:
     return {path: _tracked_state(checkout, path) for path in paths if path}
 
 
-def ensure_setup(command: list[str], checkout: Path) -> None:
+def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
     """Run ``[proposer] setup`` in a checkout unless its output is still there.
 
     The same command in the same folder gives the same result, so a session
@@ -589,17 +614,19 @@ def ensure_setup(command: list[str], checkout: Path) -> None:
     Args:
         command: The exact argument list from ``optimize.toml``.
         checkout: The repository checkout or worktree the proposer command runs in.
+        timeout_seconds: Stop the setup, and every process it started, after this long.
 
     Raises:
-        RuntimeError: When the setup or git fails.
+        RuntimeError: When the setup or git fails, or the setup changes a file of the version.
     """
     marker = checkout / SETUP_MARKER
     if marker.exists():
         return
     # Files the parent version added are untracked too; only the setup's new paths are excluded.
     before = _untracked(checkout, folders=False)
+    version_files = {path: _tracked_state(checkout, path) for path in before}
     tracked = _tracked_changes(checkout)
-    run_setup(command, checkout)
+    run_setup(command, checkout, timeout_seconds)
     changed = sorted(
         path
         for path in tracked.keys() | _tracked_changes(checkout).keys()
@@ -610,6 +637,15 @@ def ensure_setup(command: list[str], checkout: Path) -> None:
             f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
             f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
             " files that git does not track."
+        )
+    # GEPA and Best-of-N check out a parent version with its new files untracked;
+    # a change to one of them would enter every version as well.
+    rewritten = sorted(path for path, state in version_files.items() if _tracked_state(checkout, path) != state)
+    if rewritten:
+        raise RuntimeError(
+            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed files"
+            f" of the version: {', '.join(rewritten)}. Those changes would enter every version. Make the setup"
+            " write only new files that git does not track."
         )
     added = sorted(_setup_output(checkout, before) | {SETUP_MARKER})
     exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
@@ -1678,7 +1714,7 @@ def run_session(
         The parsed answer, raw transcript, usage and exit status.
 
     Raises:
-        RuntimeError: When the setup fails, or a ``file_command`` session
+        RuntimeError: When the setup fails or uses up the session's time, or a ``file_command`` session
             outside a checkout has no ``outside_checkout`` launch.
     """
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1694,7 +1730,16 @@ def run_session(
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
     if proposer.get("setup"):
-        ensure_setup(list(proposer["setup"]), workspace)
+        # The setup counts inside the session's time limit. An in-process
+        # caller (AutoSaddler) installs no SIGTERM handler; its stop kills
+        # every process it started, this setup included.
+        setup_started = time.monotonic()
+        setup_seconds = (
+            SETUP_TIMEOUT_SECONDS if timeout_seconds is None else min(SETUP_TIMEOUT_SECONDS, timeout_seconds)
+        )
+        ensure_setup(list(proposer["setup"]), workspace, setup_seconds)
+        if timeout_seconds is not None:
+            timeout_seconds = max(0.0, timeout_seconds - (time.monotonic() - setup_started))
     if api_key is None:
         api_key = _env(KEY_ENV)
     for relative_path, content in (proposer.get("files") or {}).items():
@@ -1741,27 +1786,28 @@ def run_session(
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
     with stderr_file.open("w", encoding="utf-8") as stderr:
-        process = subprocess.Popen(
-            command,
-            cwd=workspace,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            text=True,
-            errors="replace",
-            start_new_session=True,
-        )
-        max_tool_calls = proposer.get("max_tool_calls")
-        monitor = _Monitor(
-            process,
-            proposer.get("output_format", "plain"),
-            proposer.get("price"),
-            max_cost_usd,
-            int(max_tool_calls) if max_tool_calls else None,
-            _start_time(process.pid),
-        )
-        _OWNED_GROUPS[process.pid] = (process, monitor.root_start)
+        with _defer_stop():
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                text=True,
+                errors="replace",
+                start_new_session=True,
+            )
+            max_tool_calls = proposer.get("max_tool_calls")
+            monitor = _Monitor(
+                process,
+                proposer.get("output_format", "plain"),
+                proposer.get("price"),
+                max_cost_usd,
+                int(max_tool_calls) if max_tool_calls else None,
+                _start_time(process.pid),
+            )
+            _OWNED_GROUPS[process.pid] = (process, monitor.root_start)
         try:
             reader = threading.Thread(target=monitor.pump, daemon=True)
             reader.start()

@@ -2380,3 +2380,138 @@ def test_sigterm_to_the_bridge_stops_the_setup_it_runs(tmp_path: Path) -> None:
         if setup_pid is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(setup_pid, signal.SIGKILL)
+
+
+def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(tmp_path: Path) -> None:
+    """GEPA and Best-of-N leave a parent version's new files untracked; the setup may not touch them (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "kept.txt").write_text("from the parent version")
+    (checkout / "gone.txt").write_text("from the parent version")
+    command = [
+        sys.executable,
+        "-c",
+        "open('kept.txt', 'a').write('!'); __import__('os').remove('gone.txt'); open('new.txt', 'w')",
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"(?s)setup command in optimize.toml \(.*\) changed or removed files of the version: gone\.txt, kept\.txt\.",
+    ):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert not (checkout / harness_bridge.SETUP_MARKER).exists()
+
+
+def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
+    """A setup cannot run past the session's limit, and the harness gets only the time the setup left (SKY-753).
+
+    Args:
+        tmp_path: The checkouts and the session folders.
+    """
+    slow = {**_PLAIN, "setup": [sys.executable, "-c", "import time; time.sleep(30)"]}
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"did not finish within 1 seconds"):
+        run_session(
+            slow,
+            workspace=_git_checkout(tmp_path / "slow"),
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "s1",
+            timeout_seconds=1.0,
+            api_key="k",
+        )
+    assert time.monotonic() - started < 20
+
+    proposer = {
+        **_PLAIN,
+        "run_command": "sleep 10",
+        "setup": [sys.executable, "-c", "import time; time.sleep(2)"],
+    }
+    started = time.monotonic()
+    outcome = run_session(
+        proposer,
+        workspace=_git_checkout(tmp_path / "checkout"),
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "s2",
+        timeout_seconds=3.0,
+        api_key="k",
+    )
+
+    assert outcome.timed_out
+    assert time.monotonic() - started < 4.5
+
+
+class _ExitCalledError(Exception):
+    """Stands in for ``os._exit`` so a test sees the bridge's stop without leaving pytest."""
+
+
+@pytest.mark.parametrize("starter", ["setup", "session"])
+def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
+    starter: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGTERM between the start of a group and its record waits for the record, then kills the group (SKY-753).
+
+    Args:
+        starter: Whether the group is the setup's or the harness session's.
+        tmp_path: The checkout and the session folder.
+        monkeypatch: The signal at the start, a fake ``os._exit`` and a fresh deferred-stop record.
+    """
+    real_popen = subprocess.Popen
+    started: list[subprocess.Popen[Any]] = []
+
+    def popen(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        """Start the process, then deliver the stop before the bridge records its group.
+
+        Args:
+            *args: Arguments for :class:`subprocess.Popen`.
+            **kwargs: Keyword arguments for :class:`subprocess.Popen`.
+
+        Returns:
+            The started process.
+        """
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        if len(started) == 1:
+            harness_bridge._stop_owned_groups(signal.SIGTERM, None)
+        return process
+
+    def exit_(code: int) -> None:
+        """Raise in place of ending the process.
+
+        Args:
+            code: The exit code the bridge asks for.
+
+        Raises:
+            _ExitCalledError: Always.
+        """
+        raise _ExitCalledError(code)
+
+    checkout = _git_checkout(tmp_path / "checkout")
+    monkeypatch.setattr(harness_bridge, "_DEFERRED_STOP", [])
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(os, "_exit", exit_)
+    try:
+        with pytest.raises(_ExitCalledError):
+            if starter == "setup":
+                harness_bridge.run_setup(["sleep", "30"], checkout)
+            else:
+                run_session(
+                    {**_PLAIN, "run_command": "sleep 30"},
+                    workspace=checkout,
+                    prompt="x",
+                    model="m",
+                    session_dir=tmp_path / "s",
+                    api_key="k",
+                )
+
+        assert started[0].wait(timeout=10) == -signal.SIGKILL
+    finally:
+        for process in started:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()

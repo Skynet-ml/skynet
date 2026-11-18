@@ -99,14 +99,18 @@ empty part fails the setup check, and the message names the key.
   checkout loses its output: GEPA and Best-of-N reset the checkout before and
   after each version, and AutoSaddler gives each session a new worktree. So
   write a `setup` that you can run again with the same result. The files it
-  adds never join a version. It has 30 minutes. If it fails or runs out of
-  time, the run stops, and the message names the command and its output.
+  adds never join a version. It has 30 minutes, but never more than the
+  time that the proposer session has left: the setup time counts inside the
+  session's time limit. If it fails or runs out of time, the run stops, and
+  the message names the command and its output.
   When `setup` ends, the run stops every process that it left running.
   When the run stops a proposer session, it also stops a `setup` that runs.
 - `setup` can write only files that git does not track. If it changes,
   adds to the index or removes a tracked file, the run stops. The message
   names the command and the changed files, because the change would join
   every version. Edits that the version made before `setup` ran do not count.
+  The same applies to the new files of the version that git does not track
+  yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
