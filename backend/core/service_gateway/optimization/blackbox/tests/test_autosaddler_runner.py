@@ -1159,10 +1159,10 @@ def test_long_tool_output_says_what_was_cut(tmp_path: Path, monkeypatch: pytest.
     assert autosaddler_runner.clip("read_file", "short") == "short"
 
 
-def test_a_file_read_keeps_its_clock_times(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A file read shows the file's date-times as they are, so a write back does not corrupt the file.
+def test_a_tool_output_keeps_its_clock_times(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool output shows its date-times as they are, so a write back does not corrupt the file.
 
-    A command output still hides its clock times, because they differ between a run and its resume.
+    A command output keeps its clock times too: a replay gives the committed output, so the times are the same.
 
     Args:
         tmp_path: The process folder.
@@ -1188,7 +1188,7 @@ def test_a_file_read_keeps_its_clock_times(tmp_path: Path, monkeypatch: pytest.M
 
     read, command = _requests(writer)[-1]["prompt"][-2:]
     assert read["content"] == text
-    assert command["content"] == "exit code 0\nstdout:\n<time>\nstderr:\n"
+    assert command["content"] == "exit code 0\nstdout:\n2026-11-18T01:02:03Z\nstderr:\n"
 
 
 def test_a_session_runs_tools_until_the_model_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1310,6 +1310,35 @@ def test_tool_arguments_that_are_no_json_object_give_the_model_an_error(tmp_path
 
     assert output.startswith("Error: TypeError"), output
     assert writer.getvalue() == ""
+
+
+@pytest.mark.parametrize("path", [".GIT/config", ".GIT", "a/.Git/HEAD"])
+def test_a_git_path_in_any_case_is_refused(tmp_path: Path, path: str) -> None:
+    """A case-insensitive disk opens ``.GIT`` as ``.git``, so the model can not reach it in any case.
+
+    Args:
+        tmp_path: The session workspace.
+        path: The model's path.
+    """
+    with pytest.raises(ValueError):
+        autosaddler_runner._inside(tmp_path, path)
+
+
+def test_file_lists_drop_git_paths_in_any_case(tmp_path: Path) -> None:
+    """The model's file list and the command box files leave out a ``.Git`` folder.
+
+    Args:
+        tmp_path: The process folder.
+    """
+    workspace = tmp_path / "session"
+    (workspace / "sub" / ".Git").mkdir(parents=True)
+    (workspace / "sub" / ".Git" / "config").write_text("x")
+    (workspace / "a.txt").write_text("a")
+    channel, _ = _channel()
+    transport = autosaddler_runner.StepTransport(channel, tmp_path, None, None)
+
+    assert transport.tool(workspace, _call("list_files")) == "a.txt"
+    assert transport.workspace_files(workspace) == {"a.txt": b"a"}
 
 
 def test_a_work_path_reads_as_workspace_relative(tmp_path: Path) -> None:

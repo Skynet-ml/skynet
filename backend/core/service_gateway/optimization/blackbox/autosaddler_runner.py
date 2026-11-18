@@ -570,8 +570,10 @@ def scrub(text: str, root: Path, *, times: bool = True) -> str:
     Args:
         text: Text for the model.
         root: This process's folder, which the worker makes new for each run.
-        times: Whether to also hide clock times. A workspace file is the same in a run and its resume, and a
-            ``<time>`` in its text would corrupt the file when the model writes it back.
+        times: Whether to also hide clock times. Only the session prompts need it: a replay matches the prompt
+            hash, and upstream builds those prompts live. A tool output needs no time scrub, because a replay gives
+            the committed command output and the same workspace files; a ``<time>`` there would corrupt a file
+            that the model reads and writes back, and would hide log times.
 
     Returns:
         The text with ``root`` as ``/work`` and, when ``times``, each clock time as ``<time>``.
@@ -1674,7 +1676,7 @@ class StepTransport:
                     "tool_call_id": call.get("id"),
                     "content": clip(
                         call.get("name"),
-                        scrub(self.tool(workspace, call), self.root, times=call.get("name") != "read_file"),
+                        scrub(self.tool(workspace, call), self.root, times=False),
                     ),
                 }
                 for call in calls
@@ -1702,7 +1704,7 @@ class StepTransport:
                 return "\n".join(
                     path.relative_to(workspace).as_posix()
                     for path in sorted(folder.rglob("*"))
-                    if path.is_file() and ".git" not in path.relative_to(workspace).parts
+                    if path.is_file() and not _in_git(path.relative_to(workspace))
                 )
             if name == "read_file":
                 return _inside(workspace, str(arguments["path"])).read_text(encoding="utf-8", errors="replace")
@@ -1746,7 +1748,7 @@ class StepTransport:
             changed += _git_output(workspace, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
             paths = sorted({workspace / name for name in changed if name})
         else:
-            paths = sorted(path for path in workspace.rglob("*") if ".git" not in path.relative_to(workspace).parts)
+            paths = sorted(path for path in workspace.rglob("*") if not _in_git(path.relative_to(workspace)))
         return {
             path.relative_to(workspace).as_posix(): path.read_bytes()
             for path in paths
@@ -1818,6 +1820,20 @@ def clip(name: Any, text: str) -> str:
     return f"[The first {cut} characters were cut.]\n{text[-_TOOL_OUTPUT_CHARS:]}"
 
 
+def _in_git(path: Path) -> bool:
+    """Tell whether a workspace-relative path is in, or is, a ``.git`` entry.
+
+    A case-insensitive disk opens ``.GIT`` as ``.git``, so a write there could point git at a model-made config.
+
+    Args:
+        path: The workspace-relative path.
+
+    Returns:
+        Whether any part of the path is ``.git`` in any case.
+    """
+    return any(part.casefold() == ".git" for part in path.parts)
+
+
 def _inside(workspace: Path, path: str) -> Path:
     """Resolve a model-given path, and refuse one outside the workspace or in ``.git``.
 
@@ -1833,7 +1849,7 @@ def _inside(workspace: Path, path: str) -> Path:
     """
     base = workspace.resolve()
     target = (base / path.removeprefix(_WORK_ROOT + "/").lstrip("/")).resolve()
-    if not target.is_relative_to(base) or ".git" in target.relative_to(base).parts:
+    if not target.is_relative_to(base) or _in_git(target.relative_to(base)):
         raise ValueError(f"The path {path!r} is outside the workspace.")
     return target
 
