@@ -2428,7 +2428,13 @@ def _run_fails_on(fails: dict[str, set[str]]) -> _RecordingMailbox:
     mailbox = _RecordingMailbox()
 
     def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        """Give negative infinity with a ``run_failed`` status, as the parent sends a failed [run] entry."""
+        """Give negative infinity with a ``run_failed`` status, as the parent sends a failed [run] entry.
+
+        Args:
+            candidate: The version to score.
+            example: The case to score, or ``None`` for a whole sweep.
+            **kwargs: Other mailbox options, not used.
+        """
         if example is not None and example["id"] in fails.get(candidate, set()):
             return float("-inf"), {"status": native_engines.RUN_FAILED_STATUS, "feedback": "Run failed: boom"}
         return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}

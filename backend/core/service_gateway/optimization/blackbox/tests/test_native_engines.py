@@ -1061,12 +1061,22 @@ def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
 
 
 def test_gepa_repo_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path, fake_home: Path) -> None:
-    """A repository version whose [run] fails on one case loses to the lower, fully scored seed (SKY-751)."""
+    """A repository version whose [run] fails on one case loses to the lower, fully scored seed (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the repository and the engine.
+        fake_home: Home folder whose ``bin`` holds the fake agent command.
+    """
     task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
     calls: list[str] = []
 
     def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-        """Score the seed 0.25; score a patch 0.9 on case ``a`` and fail its [run] entry on case ``b``."""
+        """Score the seed 0.25; score a patch 0.9 on case ``a`` and fail its [run] entry on case ``b``.
+
+        Args:
+            candidate: The version's patch; empty for the seed.
+            example: The case to score.
+        """
         calls.append(candidate)
         if not candidate:
             return 0.25, {"feedback": "seed"}

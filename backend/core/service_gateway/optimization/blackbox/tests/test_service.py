@@ -1354,7 +1354,12 @@ def test_a_failed_case_counts_as_zero_in_every_named_score() -> None:
 
 @pytest.mark.parametrize(("status", "run_failed"), [(RUN_FAILED_STATUS, True), (METRIC_ERROR, False)])
 def test_final_run_marks_only_a_failed_run_case(status: str, run_failed: bool) -> None:
-    """The final run records a failed ``[run]`` case apart from a metric error, for the pull request rule (SKY-751)."""
+    """The final run records a failed ``[run]`` case apart from a metric error, for the pull request rule (SKY-751).
+
+    Args:
+        status: Status the scorer gives the case with no score.
+        run_failed: Whether the final run must mark a failed ``[run]`` case.
+    """
 
     def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
         """Give the second case no score, with the given status.
@@ -1946,7 +1951,11 @@ class _AsRepositoryScorer:
         self._scorer = scorer
 
     def __getattr__(self, name: str) -> Any:
-        """Return the wrapped scorer's attribute, for example ``usage`` or ``close``."""
+        """Return the wrapped scorer's attribute, for example ``usage`` or ``close``.
+
+        Args:
+            name: Attribute name.
+        """
         return getattr(self._scorer, name)
 
     def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
@@ -2015,7 +2024,14 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Some failed cases keep the run but leave no score; the run keeps the start and says why (SKY-221, SKY-751)."""
+    """Some failed cases keep the run but leave no score; the run keeps the start and says why (SKY-221, SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the repository run.
+        monkeypatch: Sets the winner strategy.
+        caplog: Captures the service warnings.
+    """
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"hello world", "winner"}, every=2)
 
@@ -2041,7 +2057,13 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
 def test_a_scored_version_beats_a_starting_point_that_fails_some_cases(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fully scored version beats a starting point with a failed case; no start score, no improvement (SKY-751)."""
+    """A fully scored version beats a starting point with a failed case; no start score, no improvement (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the repository run.
+        monkeypatch: Sets the winner strategy.
+    """
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"hello world"}, every=2)
 

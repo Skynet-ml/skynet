@@ -4638,7 +4638,11 @@ def test_a_candidate_that_links_the_calls_folder_cannot_touch_the_metric(tmp_pat
 
 
 def test_a_failed_run_has_no_score_and_skips_the_metric(tmp_path: Path) -> None:
-    """A candidate that raises gets no score and "Run failed:" feedback; the metric never runs (E38, SKY-751)."""
+    """A candidate that raises gets no score and "Run failed:" feedback; the metric never runs (E38, SKY-751).
+
+    Args:
+        tmp_path: Folder for the repository and the metric marker.
+    """
     marker = tmp_path / "metric-ran"
     metric = f"def score(repo_path, case, output):\n    open({str(marker)!r}, 'w').write('x')\n    return 1.0\n"
     scorer = _probed(tmp_path, "src/cand.py:boom", code=metric)
@@ -4654,7 +4658,11 @@ def test_a_failed_run_has_no_score_and_skips_the_metric(tmp_path: Path) -> None:
 
 
 def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: Path) -> None:
-    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61)."""
+    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:boom")
     try:
         scorer.prepare()
@@ -4978,7 +4986,11 @@ class _LateForgeryRuntime(LocalSubprocessRuntime):
 
 
 def test_a_process_the_entry_left_cannot_forge_the_supervisor_result(tmp_path: Path) -> None:
-    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398)."""
+    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:leaves_a_forger", runtime=_LateForgeryRuntime())
     try:
         result = scorer.score("", {"input": 1})
@@ -5039,7 +5051,11 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
 
 
 def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
-    """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751)."""
+    """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     metric = "def score(repo_path, case, output=None, elapsed_s=None):\n    raise RuntimeError('metric ran')\n"
     scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric, run_timeout=1.0)
     try:

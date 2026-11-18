@@ -564,7 +564,13 @@ _METRIC_FAILS = "def score(repo_path, case, output):\n    raise RuntimeError('me
     [("success", {}), ("run fails", {"tree": _RUN_FAILS}), ("metric fails", {"code": _METRIC_FAILS})],
 )
 def test_each_box_has_its_own_hold_and_every_box_closes(tmp_path: Path, case: str, options: dict[str, Any]) -> None:
-    """Each box opens with its own operation key, so it reserves its own hold, and every box closes."""
+    """Each box opens with its own operation key, so it reserves its own hold, and every box closes.
+
+    Args:
+        tmp_path: Folder for the repository and the metric files.
+        case: Name of the outcome under test.
+        options: Overrides for the repository scorer: a failing ``[run]`` tree or a failing metric.
+    """
     runtime = _Recorder()
     scorer, _ = _repo_scorer(tmp_path, runtime, **options)
     try:
