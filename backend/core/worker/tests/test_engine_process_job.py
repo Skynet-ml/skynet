@@ -1407,6 +1407,54 @@ def test_a_filled_in_host_cli_that_the_files_proposer_replaces_gets_no_host_agen
     publish.assert_called_once()
 
 
+def test_a_filled_in_host_cli_that_staging_keeps_is_checked_once_after_staging(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """Without ``[proposer] entry`` staging keeps the filled-in host CLI, so its check runs once, after staging (SKY-753).
+
+    Args:
+        worker: The worker under test.
+        store: The fake job store that holds the run.
+    """
+    calls: list[str] = []
+    bind = MagicMock(return_value="host-token")
+    check = MagicMock(side_effect=lambda *_args, **_kwargs: calls.append("check"))
+    staged = MagicMock()
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Stage the repository the way a file without ``[proposer] entry`` leaves the payload.
+
+        Args:
+            payload: The run payload.
+            **kwargs: The staging options.
+
+        Returns:
+            The staged payload and repository.
+        """
+        calls.append("stage")
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = {}
+        return payload, staged
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        proposer={"host_cli": "claude", HOST_CLI_AUTO_KEY: True},
+        patched=_host_patches(
+            bind,
+            check_host_agent=check,
+            host_proposer=host_proposer,
+            stage_repository=MagicMock(side_effect=stage),
+        ),
+    )
+
+    assert calls == ["stage", "check"]
+    assert check.call_args.kwargs["cli"] == "claude"
+    bind.assert_called_once()
+    publish.assert_called_once()
+
+
 def test_a_gate_refused_run_binds_no_host_agent_token(worker: BackgroundWorker, store: FakeJobStore) -> None:
     """A run the repository gate refuses never gets a host-agent token (SKY-395)."""
     bind = MagicMock(return_value="host-token")
