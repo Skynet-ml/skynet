@@ -1745,6 +1745,8 @@ class RemoteDBJobStore:
         without a checkpoint (SKY-711). Its automatic resumes count against
         ``MAX_AUTOMATIC_RESUMES`` instead of ``job_max_attempts``; 4 is above
         the default ``job_max_attempts`` of 3, so a step log run gets more tries.
+        Only an automatic requeue adds 1 to ``automatic_resumes``, so a manual
+        resume does not use up the cap (SKY-801). ``attempts`` counts both.
 
         Args:
             optimization_id: The job to resume.
@@ -1755,7 +1757,8 @@ class RemoteDBJobStore:
 
         Returns:
             The new attempt count, or ``None`` when the job row is missing, was
-            changed concurrently, waits for in-flight usage, or hit its budget.
+            changed concurrently, waits for in-flight usage, hit its budget, or
+            lost the last automatic resume to another sweep.
         """
         session = self._get_session()
         try:
@@ -1822,8 +1825,12 @@ class RemoteDBJobStore:
                     "This run has no verified cumulative execution budget; authorize a new run instead."
                 )
             current_attempt = int(job.attempts or 0)
-            if automatic and step_resume_at is not None:
-                if bump_attempts and current_attempt >= MAX_AUTOMATIC_RESUMES:
+            # attempts counts automatic resumes too, so they use up the manual limit
+            # of job_max_attempts; SKY-801 keeps this, and only the automatic cap
+            # ignores manual resumes.
+            step_capped = automatic and step_resume_at is not None
+            if step_capped:
+                if bump_attempts and int(job.automatic_resumes or 0) >= MAX_AUTOMATIC_RESUMES:
                     raise CheckpointCompatibilityError(
                         f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
                     )
@@ -1931,7 +1938,8 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
-            job.execution_generation = int(job.execution_generation or 0) + 1
+            held_generation = int(job.execution_generation or 0)
+            job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None
             current = int(job.attempts or 0)
@@ -1989,6 +1997,65 @@ class RemoteDBJobStore:
                 job.message = "Resuming after a worker restart"  # type: ignore[assignment]
             else:
                 job.message = "Resuming"  # type: ignore[assignment]
+            if automatic and bump_attempts:
+                # On PostgreSQL the row lock above serializes two sweeps. The cap in
+                # this UPDATE keeps MAX_AUTOMATIC_RESUMES where there is no row lock.
+                counted = (
+                    session.query(JobModel)
+                    .filter(
+                        JobModel.optimization_id == optimization_id,
+                        *([JobModel.automatic_resumes < MAX_AUTOMATIC_RESUMES] if step_capped else []),
+                    )
+                    .update(
+                        {JobModel.automatic_resumes: JobModel.automatic_resumes + 1},
+                        synchronize_session=False,
+                    )
+                )
+                if not counted:
+                    budget_id, username = job.execution_budget_id, job.username
+                    session.rollback()
+                    # After the rollback this sweep may not end the run: it can see a
+                    # moved generation, or a usage wait that has not expired, and the
+                    # run would stay running until the next sweep. End it now with the
+                    # cap error, and close the admission that the resume reopened. When
+                    # the wait has expired, this write runs first, so the run keeps the
+                    # cap error, not the sweep's interrupted end. The guard on the
+                    # generation and the status leaves alone a run that another sweep
+                    # requeued or a worker claimed since.
+                    ended = (
+                        session.query(JobModel)
+                        .filter(
+                            JobModel.optimization_id == optimization_id,
+                            JobModel.execution_generation == held_generation,
+                            JobModel.status.in_(("running", "validating")),
+                        )
+                        .update(
+                            {
+                                JobModel.status: "failed",
+                                JobModel.stop_reason: "interrupted",
+                                JobModel.completed_at: datetime.now(UTC),
+                                JobModel.message: (
+                                    f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
+                                    f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
+                                ),
+                                JobModel.recovery: None,
+                                JobModel.claimed_by: None,
+                                JobModel.claimed_at: None,
+                                JobModel.lease_expires_at: None,
+                            },
+                            synchronize_session=False,
+                        )
+                    )
+                    if not ended:
+                        session.rollback()
+                        return None
+                    # The resume above can reopen admission. Close it in the same
+                    # transaction as the failure, so a run that another sweep
+                    # requeued keeps its admission open.
+                    budget_service.stop_admission(budget_id, username, reason="job_failed", session=session)
+                    session.commit()
+                    self._note_ended_orphan(optimization_id, held_generation)
+                    return None
             session.commit()
             return next_attempt
         finally:
@@ -2066,6 +2133,7 @@ class RemoteDBJobStore:
             job.latest_metrics = {}  # type: ignore[assignment]
             job.result = None  # type: ignore[assignment]
             job.attempts = 0  # type: ignore[assignment]
+            job.automatic_resumes = 0  # type: ignore[assignment]
             job.sandbox_image = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]
