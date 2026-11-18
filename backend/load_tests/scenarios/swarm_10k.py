@@ -105,7 +105,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, make_url, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -291,9 +291,14 @@ def _check_db_url(url: str | None) -> None:
         url: ``LOAD_TEST_SWARM_DB_URL``, or ``None`` for SQLite files.
 
     Raises:
-        RuntimeError: When the URL names a host that is not local, or no host.
+        RuntimeError: When the URL names a host that is not local, no host, or a host, hostaddr or service query key.
     """
-    if url is not None and urlsplit(url).hostname not in LOCAL_S3_HOSTS:
+    if url is None:
+        return
+    parsed = make_url(url)
+    # libpq takes the host from these query keys before the URL host, so a local URL host proves nothing.
+    redirects = {key.lower() for key in parsed.query} & {"host", "hostaddr", "service"}
+    if redirects or parsed.host not in LOCAL_S3_HOSTS:
         raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL must name a database on {sorted(LOCAL_S3_HOSTS)}")
 
 
