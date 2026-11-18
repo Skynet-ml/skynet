@@ -1779,7 +1779,7 @@ def _other_pass_rows(engine: Engine, config: swarm_10k.SwarmConfig) -> None:
 
 
 def test_swarm_pass_keeps_the_rows_of_another_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Check that a pass's cleanup deletes only its own rows, and keep the rows of another invocation.
+    """Check that a pass's cleanup deletes only its own rows, and keeps the rows of another invocation.
 
     Args:
         monkeypatch: Replaces the engine, the shard processes and the step log read.
