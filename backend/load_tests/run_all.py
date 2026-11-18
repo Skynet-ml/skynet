@@ -18,6 +18,13 @@ agents always fail it:
 
     .venv/bin/python -m load_tests.run_all --scenarios=chaos_gate,swarm_10k --swarm-agents=10000
 
+The swarm gate passes only on a throwaway Postgres and a local S3 server
+such as MinIO, the backend that its target names. Set them in the
+environment, never with a flag, so a database password stays off the
+command line: ``LOAD_TEST_SWARM_DB_URL`` (the database name starts with
+``loadtest``), ``LOAD_TEST_SWARM_S3_BUCKET`` and
+``LOAD_TEST_SWARM_S3_ENDPOINT``.
+
 Reports land in ``load_tests/results/<timestamp>.{json,md}`` and the
 console renders one block per scenario as it finishes so a long run does
 not feel silent.
@@ -100,14 +107,8 @@ _SCENARIO_KNOBS = (
     (
         "--swarm-shards",
         "LOAD_TEST_SWARM_SHARDS",
-        "step-log shards of the swarm's second pass, one OS process each"
+        "step-log shards of the swarm's gated pass, one OS process each"
         f" (default: one for each {swarm_10k.AGENTS_PER_SHARD} agents, 2 to {swarm_10k.MAX_SHARDS})",
-    ),
-    (
-        "--swarm-db-url",
-        "LOAD_TEST_SWARM_DB_URL",
-        "throwaway Postgres URL on localhost for the swarm; the database name must start with"
-        f" {swarm_10k.THROWAWAY_DB_PREFIX!r} and its jobs table must hold only swarm runs (default: SQLite files)",
     ),
 )
 
@@ -118,7 +119,14 @@ def _parse_args() -> argparse.Namespace:
     Returns:
         The parsed :class:`argparse.Namespace` carrying every knob.
     """
-    parser = argparse.ArgumentParser(description="Skynet load-test orchestrator")
+    parser = argparse.ArgumentParser(
+        description="Skynet load-test orchestrator",
+        epilog=(
+            "swarm_10k reads its throwaway Postgres URL only from LOAD_TEST_SWARM_DB_URL, so a password stays off"
+            " the command line, and its local S3 bucket from LOAD_TEST_SWARM_S3_BUCKET and"
+            " LOAD_TEST_SWARM_S3_ENDPOINT. Its gate passes only on that backend."
+        ),
+    )
     parser.add_argument(
         "--api-url",
         default=os.environ.get("LOAD_TEST_API_URL", _DEFAULT_API_URL),

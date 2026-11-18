@@ -1,5 +1,6 @@
 """The SKY-727 load-test harness: thread caps, the swarm gate, shard failures and the resume check."""
 
+import asyncio
 import queue
 import sys
 import threading
@@ -23,6 +24,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.worker.engine_loop import EngineLoop
 from load_tests import run_all
+from load_tests.lib.metrics import ScenarioMetrics
 from load_tests.scenarios import chaos_gate, reference_shapes, swarm_10k
 
 
@@ -90,16 +92,30 @@ def _pass_figures(shards: int, **overrides: Any) -> dict[str, Any]:
     return figures
 
 
+def _target_backend(monkeypatch: pytest.MonkeyPatch, config: swarm_10k.SwarmConfig) -> swarm_10k.SwarmConfig:
+    """Name a Postgres database and a local S3 bucket, the backend that the swarm target needs.
+
+    Args:
+        monkeypatch: Sets the bucket.
+        config: The swarm config.
+
+    Returns:
+        The config with a Postgres URL.
+    """
+    monkeypatch.setenv("LOAD_TEST_SWARM_S3_BUCKET", "swarm")
+    return replace(config, db_url="postgresql://user@localhost/loadtest_swarm")
+
+
 def _gate(
     monkeypatch: pytest.MonkeyPatch,
     config: swarm_10k.SwarmConfig,
     single: dict[str, Any] | None = None,
     **sharded: Any,
 ) -> list[str]:
-    """Run the swarm gate on made-up pass figures and return its violations.
+    """Run the swarm gate on made-up pass figures, on the target backend, and return its violations.
 
     Args:
-        monkeypatch: Replaces ``run_pass``.
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
         config: The swarm config.
         single: The figures to change on the 1-shard pass, or ``None``.
         **sharded: The figures to change on the sharded pass.
@@ -122,7 +138,7 @@ def _gate(
         return _pass_figures(shard_count, **(sharded if shard_count > 1 else single or {}))
 
     monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
-    result = swarm_10k.run(config)
+    result = swarm_10k.run(_target_backend(monkeypatch, config))
     assert result.slo_passed is (not result.slo_violations)
     return result.slo_violations
 
@@ -206,10 +222,10 @@ def test_swarm_pace_offers_the_target_rate(agents: int) -> None:
     """
     interval = swarm_10k.step_interval(agents)
     assert agents / interval > swarm_10k.TARGET_COMMITS_PER_SECOND
-    offsets = [swarm_10k.start_offset("swarm-000000", f"agent-{i:05d}", interval) for i in range(50)]
+    offsets = [swarm_10k.start_offset(f"agent-{i:05d}", interval) for i in range(50)]
     assert all(0 <= offset < interval for offset in offsets)
     assert len(set(offsets)) == len(offsets)
-    assert offsets == [swarm_10k.start_offset("swarm-000000", f"agent-{i:05d}", interval) for i in range(50)]
+    assert offsets == [swarm_10k.start_offset(f"agent-{i:05d}", interval) for i in range(50)]
 
 
 def test_run_all_leaves_the_swarm_out_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,7 +346,7 @@ def test_swarm_driver_stops_when_the_shard_stops(tmp_path: Path) -> None:
         tmp_path: The folder for the database and the objects.
     """
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
-    run_id = swarm_10k.run_id_for(0)
+    run_id = swarm_10k.run_id_for("test", 0)
     swarm_10k._reset(engine, [run_id])
     store = StepLogStore(
         engine,
@@ -648,7 +664,7 @@ def test_swarm_measures_a_commit_call_that_waits_for_durability(
     monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
     monkeypatch.setattr(swarm_10k, "StepLogStore", _DurableCommitStore)
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
-    run_id = swarm_10k.run_id_for(0)
+    run_id = swarm_10k.run_id_for("test", 0)
     swarm_10k._reset(engine, [run_id])
     engine.dispose()
     results: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -815,10 +831,10 @@ def test_swarm_box_caps_are_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the swarm reports its box load with the mark that the box caps are not gated.
 
     Args:
-        monkeypatch: Replaces ``run_pass``.
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
     """
     monkeypatch.setattr(swarm_10k, "run_pass", lambda config, shards, folder: _pass_figures(shards))
-    result = swarm_10k.run(_swarm_config(box_seconds=1_000_000.0))
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config(box_seconds=1_000_000.0)))
     assert result.extras["box_caps_gated"] is False
     assert result.extras["box_load_target"]["fresh_box_per_step"]["concurrency_within_cap"] is False
     assert result.slo_passed
@@ -1345,20 +1361,45 @@ def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(
     assert figures["commits_per_second_with_drain"] == 0.0
 
 
-def _named_sqlite(path: Path, name: str) -> Engine:
-    """Return a SQLite engine that answers ``current_database()`` with a name, as Postgres does.
+def _named_sqlite(path: Path, name: str, lock_free: bool = True, unlocks: list[int] | None = None) -> Engine:
+    """Return a SQLite engine that answers ``current_database()`` and the advisory lock calls, as Postgres does.
 
     Args:
         path: The database file.
         name: The database name.
+        lock_free: What ``pg_try_advisory_lock`` answers: ``False`` when another pass holds the lock.
+        unlocks: Gets the key of each ``pg_advisory_unlock`` call, or ``None``.
 
     Returns:
         The engine.
     """
     engine = create_engine(f"sqlite:///{path}")
-    event.listen(
-        engine, "connect", lambda connection, record: connection.create_function("current_database", 0, lambda: name)
-    )
+
+    def unlock(key: int) -> bool:
+        """Record one unlock.
+
+        Args:
+            key: The lock key.
+
+        Returns:
+            ``True``, as Postgres does for a held lock.
+        """
+        if unlocks is not None:
+            unlocks.append(key)
+        return True
+
+    def on_connect(connection: Any, record: Any) -> None:
+        """Add the Postgres functions that the swarm calls to a new SQLite connection.
+
+        Args:
+            connection: The DBAPI connection.
+            record: Not used.
+        """
+        connection.create_function("current_database", 0, lambda: name)
+        connection.create_function("pg_try_advisory_lock", 1, lambda key: lock_free)
+        connection.create_function("pg_advisory_unlock", 1, unlock)
+
+    event.listen(engine, "connect", on_connect)
     return engine
 
 
@@ -1442,7 +1483,7 @@ def test_swarm_takes_a_throwaway_database(tmp_path: Path) -> None:
     swarm_10k._check_throwaway(engine)
 
 
-def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> None:
+def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine, worker_id: str) -> None:
     """Make the reset also put in one swarm row in each step-log table, and one row of another worker.
 
     The rows go in after the reset's own delete, as the shard processes' rows do, so only the cleanup removes them.
@@ -1450,6 +1491,7 @@ def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> N
     Args:
         monkeypatch: Wraps ``_reset``.
         engine: The database.
+        worker_id: The worker id of the pass's first shard.
     """
     reset = swarm_10k._reset
 
@@ -1461,7 +1503,7 @@ def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> N
             runs: The job ids.
         """
         reset(reset_engine, runs)
-        pack = {"pack_key": "packs/swarm-w/0", "pack_offset": 0, "pack_length": 1}
+        pack = {"pack_key": f"packs/{worker_id}/0", "pack_offset": 0, "pack_length": 1}
         with Session(engine) as session:
             session.add_all(
                 [
@@ -1476,7 +1518,7 @@ def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> N
                         **pack,
                     ),
                     TreeObjectModel(username=runs[0], object_id="tree", byte_size=1, **pack),
-                    StoragePackModel(pack_key="packs/swarm-w/0", worker_id="swarm-w", byte_size=1),
+                    StoragePackModel(pack_key=f"packs/{worker_id}/0", worker_id=worker_id, byte_size=1),
                     TreeObjectModel(username="someone", object_id="tree", byte_size=1, **pack),
                     StoragePackModel(pack_key="packs/other/0", worker_id="other", byte_size=1),
                 ]
@@ -1519,8 +1561,9 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
         tmp_path: The pass folder.
     """
     engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     _postgres_pass(monkeypatch, engine)
-    _seed_rows_after_reset(monkeypatch, engine)
+    _seed_rows_after_reset(monkeypatch, engine, swarm_10k.worker_id_for(config.stamp, 1, 0))
     leases: list[datetime | None] = []
 
     def digest(shards: list[swarm_10k.Shard]) -> tuple[str, int]:
@@ -1537,7 +1580,6 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
         return "digest", 1
 
     monkeypatch.setattr(swarm_10k, "_digest", digest)
-    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     swarm_10k.run_pass(config, 1, tmp_path / "pass")
     assert leases
     assert all(lease is not None and lease.replace(tzinfo=UTC) > datetime.now(UTC) for lease in leases)
@@ -1556,7 +1598,7 @@ def test_swarm_cleanup_keeps_a_job_of_another_run(tmp_path: Path) -> None:
         session.add(JobModel(optimization_id="opt-real", username="someone", status="running"))
         session.commit()
     with Session(engine) as session:
-        swarm_10k._delete_swarm_rows(session)
+        swarm_10k._delete_swarm_rows(session, ["swarm-0"], [])
         session.commit()
     assert _rows(engine)["jobs"] == ["opt-real"]
     engine.dispose()
@@ -1588,14 +1630,14 @@ def test_swarm_postgres_pass_that_fails_deletes_its_rows(
         failure: The step that fails.
     """
     engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     _postgres_pass(monkeypatch, engine)
-    _seed_rows_after_reset(monkeypatch, engine)
+    _seed_rows_after_reset(monkeypatch, engine, swarm_10k.worker_id_for(config.stamp, 2, 0))
     if failure == "shard report":
         report = {"worker_id": "swarm-w", "error": "shard broke"}
         monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
     else:
         monkeypatch.setattr(swarm_10k, "_object_store", _object_store_fails)
-    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     with pytest.raises(RuntimeError, match=r"shard broke|object store failed"):
         swarm_10k.run_pass(config, 2, tmp_path / "pass")
     assert _rows(engine) == _OTHER_ROWS
@@ -1632,11 +1674,12 @@ def test_swarm_pass_that_fails_names_a_failed_cleanup(monkeypatch: pytest.Monkey
     report = {"worker_id": "swarm-w", "error": "shard broke"}
     monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
 
-    def fail(session: Session) -> None:
+    def fail(session: Session, *ids: list[str]) -> None:
         """Fail the row cleanup.
 
         Args:
             session: Not used.
+            *ids: Not used.
 
         Raises:
             OSError: Always.
@@ -1676,3 +1719,385 @@ def test_swarm_refuses_a_remote_s3_endpoint_before_any_reset(monkeypatch: pytest
     config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     with pytest.raises(RuntimeError, match="needs LOAD_TEST_SWARM_S3_ENDPOINT"):
         swarm_10k.run_pass(config, 1, tmp_path / "pass")
+
+
+def _other_pass_rows(engine: Engine, config: swarm_10k.SwarmConfig) -> None:
+    """Put in the job, step, tree object and pack rows of another swarm invocation, as a concurrent pass leaves them.
+
+    Args:
+        engine: The database.
+        config: The other invocation's config; its stamp names the rows.
+    """
+    run_id = swarm_10k.run_id_for(config.stamp, 0)
+    worker_id = swarm_10k.worker_id_for(config.stamp, 1, 0)
+    pack = {"pack_key": f"packs/{worker_id}/0", "pack_offset": 0, "pack_length": 1}
+    swarm_10k._reset(engine, [run_id])
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AgentStepModel(
+                    step_id=f"{run_id}:agent-00000:1",
+                    run_id=run_id,
+                    agent_id="agent-00000",
+                    seq=1,
+                    kind="command",
+                    execution_generation=1,
+                    grant_list_id="grants",
+                    **pack,
+                ),
+                TreeObjectModel(username=run_id, object_id="tree", byte_size=1, **pack),
+                StoragePackModel(pack_key=pack["pack_key"], worker_id=worker_id, byte_size=1),
+            ]
+        )
+        session.commit()
+
+
+def test_swarm_pass_keeps_the_rows_of_another_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a pass's reset and cleanup delete only its own rows, and keep the rows of another invocation.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes and the step log read.
+        tmp_path: The pass folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    other = replace(config, stamp="otherpass")
+    assert config.stamp != other.stamp
+    _other_pass_rows(engine, other)
+    other_rows = _rows(engine)
+    _postgres_pass(monkeypatch, engine)
+    _seed_rows_after_reset(monkeypatch, engine, swarm_10k.worker_id_for(config.stamp, 1, 0))
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+    swarm_10k.run_pass(config, 1, tmp_path / "pass")
+    rows = _rows(engine)
+    assert {table: sorted(keys) for table, keys in rows.items()} == {
+        table: sorted(other_rows[table] + _OTHER_ROWS[table]) for table in rows
+    }
+    assert all(swarm_10k.run_id_for(other.stamp, 0) in key for key in rows["agent_steps"])
+
+
+def test_swarm_refuses_a_database_that_another_pass_holds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a pass refuses a database whose swarm advisory lock another pass holds, before any reset.
+
+    Args:
+        monkeypatch: Replaces the engine and the shard processes, and makes a reset fail the test.
+        tmp_path: The pass folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", lock_free=False)
+    _postgres_pass(monkeypatch, engine)
+    monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(RuntimeError, match="another swarm pass runs"):
+        swarm_10k.run_pass(config, 1, tmp_path / "pass")
+    assert engine.pool.checkedin() == 0
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_swarm_pass_frees_its_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: bool) -> None:
+    """Check that a pass frees its advisory lock when it ends, also when a shard fails.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes and the step log read.
+        tmp_path: The pass folder.
+        fails: Whether the shard reports an error.
+    """
+    unlocks: list[int] = []
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", unlocks=unlocks)
+    _postgres_pass(monkeypatch, engine)
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+    if fails:
+        monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [{"worker_id": "swarm-w", "error": "broke"}])
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(RuntimeError, match="broke") if fails else nullcontext():
+        swarm_10k.run_pass(config, 1, tmp_path / "pass")
+    assert unlocks == [swarm_10k.SWARM_LOCK_KEY]
+
+
+def _shard_report(times: list[float], first_round_durable: float, first_agent_done: float) -> dict[str, Any]:
+    """Return a made-up shard report.
+
+    Args:
+        times: The moments the shard's steps were durable.
+        first_round_durable: The moment the first step of every agent of the shard was durable.
+        first_agent_done: The moment the first agent of the shard finished.
+
+    Returns:
+        The report, in the shape that ``_shard_process`` sends.
+    """
+    return {
+        "worker_id": "swarm-w",
+        "started": 0.0,
+        "waits": [0.1] * len(times),
+        "lates": [0.0] * len(times),
+        "commit_calls": [0.0] * len(times),
+        "times": times,
+        "first_round_durable": first_round_durable,
+        "first_agent_done": first_agent_done,
+        "boxes_opened": 0,
+        "boxes_open_max": 0,
+    }
+
+
+def test_swarm_steady_part_runs_from_the_last_first_round_to_the_first_done_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that the steady part starts at the latest shard's first round and ends at the earliest done agent.
+
+    Args:
+        monkeypatch: Replaces the shard processes with two made-up reports, and the step log read.
+        tmp_path: The pass folder.
+    """
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    monkeypatch.setattr(swarm_10k, "AGENTS_PER_RUN", 10)
+    context = SimpleNamespace(Barrier=lambda count: None, Queue=lambda: None, Process=_NoProcess)
+    monkeypatch.setattr(swarm_10k, "multiprocessing", SimpleNamespace(get_context=lambda method: context))
+    reports = [
+        _shard_report([0.5, 1.5, 2.5, 3.5, 4.5, 5.5], first_round_durable=1.0, first_agent_done=5.0),
+        _shard_report([1.0, 2.0, 3.0, 3.9, 4.1], first_round_durable=2.0, first_agent_done=4.0),
+    ]
+    monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: reports)
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 11))
+    figures = swarm_10k.run_pass(_small_pass_config(), 2, tmp_path)
+    # Only the steps after 2.0 s and up to 4.0 s count: 2.5, 3.0, 3.5 and 3.9.
+    assert figures["steady_steps"] == 4
+    assert figures["steady_seconds"] == 2.0
+    assert figures["commits_per_second"] == 2.0
+
+
+def test_swarm_digest_hashes_each_step_body(tmp_path: Path) -> None:
+    """Check that one changed byte in a step body changes the step log digest.
+
+    Args:
+        tmp_path: The folder for the database and the objects.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    run_id = swarm_10k.run_id_for("test", 0)
+    swarm_10k._reset(engine, [run_id])
+    with Session(engine) as session:
+        session.add(
+            AgentStepModel(
+                step_id=f"{run_id}:agent-00000:0",
+                run_id=run_id,
+                agent_id="agent-00000",
+                seq=0,
+                kind="model",
+                execution_generation=1,
+                grant_list_id="grants",
+                pack_key="packs/w/0",
+                pack_offset=2,
+                pack_length=5,
+            )
+        )
+        session.commit()
+    objects = LocalObjectStore(tmp_path / "objects")
+    shard = swarm_10k.Shard("sqlite", tmp_path, engine, objects, None, [run_id], "w")
+    try:
+        objects.put("packs/w/0", b"xxhelloxx")
+        first = swarm_10k._digest([shard])
+        objects.put("packs/w/0", b"xxhellpxx")
+        second = swarm_10k._digest([shard])
+        objects.put("packs/w/0", b"yyhelloyy")
+        outside = swarm_10k._digest([shard])
+    finally:
+        engine.dispose()
+    assert first[1] == second[1] == 1
+    assert first[0] != second[0]
+    # A byte outside the step's body is not part of the step log.
+    assert outside == first
+
+
+class _S3:
+    """A stand-in S3 client whose ``delete_objects`` gives a fixed response."""
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        """Keep the response.
+
+        Args:
+            response: What ``delete_objects`` returns.
+        """
+        self.response = response
+        self.deleted: list[str] = []
+
+    def delete_objects(self, Bucket: str, Delete: dict[str, Any]) -> dict[str, Any]:  # noqa: N803
+        """Record the keys and return the response.
+
+        Args:
+            Bucket: Not used.
+            Delete: The keys to delete.
+
+        Returns:
+            The fixed response.
+        """
+        self.deleted.extend(item["Key"] for item in Delete["Objects"])
+        return self.response
+
+
+@pytest.mark.parametrize(
+    "response",
+    [{}, {"Errors": []}, {"Errors": [{"Key": "packs/w/0", "Code": "AccessDenied", "Message": "no"}]}],
+)
+def test_swarm_pack_cleanup_fails_on_a_key_that_s3_did_not_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, response: dict[str, Any]
+) -> None:
+    """Check that the pack cleanup raises when S3 names a key that it did not delete, and only then.
+
+    Args:
+        monkeypatch: Sets the bucket.
+        tmp_path: The shard folder.
+        response: The S3 answer.
+    """
+    monkeypatch.setenv("LOAD_TEST_SWARM_S3_BUCKET", "swarm")
+    s3 = _S3(response)
+    objects = SimpleNamespace(list=lambda prefix: ["packs/w/0", "packs/w/1"])
+    shard = swarm_10k.Shard("sqlite", tmp_path, None, objects, s3, [], "w")
+    with (
+        pytest.raises(RuntimeError, match=r"did not delete 1 swarm pack.*packs/w/0 \(AccessDenied\)")
+        if response.get("Errors")
+        else nullcontext()
+    ):
+        swarm_10k._delete_packs(shard)
+    assert s3.deleted == ["packs/w/0", "packs/w/1"]
+
+
+def test_run_all_starts_no_stack_for_in_process_scenarios(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that ``run_all`` with only in-process scenarios starts, waits for and warms no stack.
+
+    Args:
+        monkeypatch: Sets the command line, and makes each stack step fail the test.
+        tmp_path: The report folder.
+    """
+    monkeypatch.setattr(
+        sys, "argv", ["run_all", "--scenarios=reference_shapes,chaos_gate,swarm_10k", f"--results-dir={tmp_path}"]
+    )
+    monkeypatch.setattr(run_all, "_ensure_env", lambda args: None)
+    for name in ("_bring_up", "_wait_for_http", "warm_validation_cache", "_bring_down"):
+        monkeypatch.setattr(run_all, name, _no_start)
+    ran: list[str] = []
+    result = ScenarioMetrics("reference_shapes").finish()
+    result.slo_passed = True
+
+    async def run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> list[Any]:
+        """Record the scenario names and return one passed result.
+
+        Args:
+            names: The scenario names.
+            api_url: Not used.
+            mock_lm_url: Not used.
+
+        Returns:
+            The passed result.
+        """
+        ran.extend(names)
+        return [result]
+
+    monkeypatch.setattr(run_all, "_run_scenarios", run_scenarios)
+    assert asyncio.run(run_all._async_main()) == 0
+    assert ran == ["reference_shapes", "chaos_gate", "swarm_10k"]
+
+
+def test_run_all_takes_the_swarm_database_only_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that ``run_all`` has no flag for the swarm database URL, so a password stays off the command line.
+
+    Args:
+        monkeypatch: Sets the command line.
+    """
+    assert "LOAD_TEST_SWARM_DB_URL" not in {env_name for _, env_name, _ in run_all._SCENARIO_KNOBS}
+    monkeypatch.setattr(sys, "argv", ["run_all", "--swarm-db-url=postgresql://user:secret@localhost/loadtest"])
+    with pytest.raises(SystemExit):
+        run_all._parse_args()
+
+
+@pytest.mark.parametrize("digest", ["same", "other"])
+def test_swarm_checks_only_the_step_log_of_the_two_shard_pass(monkeypatch: pytest.MonkeyPatch, digest: str) -> None:
+    """Check that the 2-shard pass runs between the others and fails the gate only on another step log.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
+        digest: The 2-shard pass's digest.
+    """
+    shard_counts: list[int] = []
+
+    def fake_pass(config: swarm_10k.SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
+        """Return good figures, with a low rate, a long wait and the digest on the 2-shard pass.
+
+        Args:
+            config: The swarm config.
+            shard_count: The pass's shard count.
+            folder: Not used.
+
+        Returns:
+            The figures.
+        """
+        shard_counts.append(shard_count)
+        if shard_count != 2:
+            return _pass_figures(shard_count)
+        slow = {"mean": 5_000.0, "p50": 5_000.0, "p99": 9_000.0, "max": 9_500.0}
+        return _pass_figures(2, commits_per_second=100.0, step_wait_ms=slow, digest=digest)
+
+    monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config(shards=13)))
+    assert shard_counts == [1, 2, 13]
+    assert result.extras["gated_pass_shards"] == 13
+    assert [figures["shards"] for figures in result.extras["passes"]] == [1, 2, 13]
+    assert result.extras["two_shard_same_step_log"] is (digest == "same")
+    assert result.slo_violations == ([] if digest == "same" else ["the shard layouts gave different step logs"])
+
+
+def test_swarm_with_two_shards_runs_the_two_shard_pass_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a 2-shard swarm gates its 2-shard pass and does not run it twice.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
+    """
+    shard_counts: list[int] = []
+
+    def fake_pass(config: swarm_10k.SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
+        """Record the shard count and return good figures.
+
+        Args:
+            config: The swarm config.
+            shard_count: The pass's shard count.
+            folder: Not used.
+
+        Returns:
+            The figures.
+        """
+        shard_counts.append(shard_count)
+        return _pass_figures(shard_count)
+
+    monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config(shards=2)))
+    assert shard_counts == [1, 2]
+    assert result.slo_passed
+
+
+@pytest.mark.parametrize(
+    ("db_url", "bucket"),
+    [
+        (None, ""),
+        ("postgresql://user@localhost/loadtest_swarm", ""),
+        (None, "swarm"),
+        ("postgresql://user@localhost/loadtest_swarm", "swarm"),
+    ],
+)
+def test_swarm_gate_needs_postgres_and_local_s3(
+    monkeypatch: pytest.MonkeyPatch, db_url: str | None, bucket: str
+) -> None:
+    """Check that the gate passes only on Postgres and a local S3 bucket, and says so on any other backend.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and sets the bucket.
+        db_url: The database URL, or ``None`` for SQLite files.
+        bucket: The S3 bucket, or empty for a local folder.
+    """
+    monkeypatch.setattr(swarm_10k, "run_pass", lambda config, shards, folder: _pass_figures(shards))
+    monkeypatch.setenv("LOAD_TEST_SWARM_S3_BUCKET", bucket)
+    result = swarm_10k.run(_swarm_config(db_url=db_url))
+    proven = db_url is not None and bool(bucket)
+    assert result.extras["target_backend"] is proven
+    assert result.slo_passed is proven
+    if not proven:
+        assert result.slo_violations == [
+            "the target is not proven on this backend: it needs Postgres (LOAD_TEST_SWARM_DB_URL)"
+            " and local S3 (LOAD_TEST_SWARM_S3_BUCKET)"
+        ]

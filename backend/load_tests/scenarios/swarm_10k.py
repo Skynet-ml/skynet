@@ -54,10 +54,11 @@ monotonic clock:
   gated (``box_caps_gated`` is ``False``): box caps are out of scope here,
   and SKY-732 owns them.
 
-The swarm runs twice: on 1 shard process, then on ``shards`` shard
-processes. Both passes must give the same step log. With fewer than 2
-shards, or fewer runs than shards, the passes are not compared and the gate
-fails.
+The swarm runs three times: on 1 shard process, on 2, then on ``shards``
+shard processes (twice when ``shards`` is 2). Every pass must give the same
+step log. The 2-shard pass checks only the step log: at 10,000 agents, 2
+shards cannot keep the step wait under its limit. With fewer than 2 shards,
+or fewer runs than shards, the passes are not compared and the gate fails.
 
 The gate passes when the sharded pass commits at least
 ``TARGET_COMMITS_PER_SECOND`` steps per second in the steady part, the
@@ -66,7 +67,9 @@ step wait p99 is at most ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows: one
 window for the batch to close, and one for the pack write and the database
 commit. Its commit call p99 must also be at most ``MAX_COMMIT_CALL_P99_MS``.
 The sharded layout is the design, so the 1-shard pass is the
-reference for the step log and its rate and wait are only reported. Real
+reference for the step log and its rate and wait are only reported. The
+target names Postgres and a local S3 server, so the gate also fails on the
+default SQLite files or local folder: there the target is not proven. Real
 steps also wait for models and boxes, so a real swarm commits fewer steps
 per second. The gate shows only that the step log is not the limit at this
 agent count; it does not measure the models or the boxes.
@@ -75,8 +78,10 @@ The database is one SQLite file per shard, unless ``LOAD_TEST_SWARM_DB_URL``
 names a throwaway Postgres on ``localhost``, ``127.0.0.1`` or ``::1``; there
 all shards share the database. Its name must start with
 ``THROWAWAY_DB_PREFIX`` (``loadtest``), and its ``jobs`` table must hold no
-row of another run. The swarm deletes its own rows at the end of each pass.
-The
+row of another run. Each invocation puts its own stamp in its run ids and
+worker ids, and deletes only the rows and packs of those ids, so it keeps the
+rows of any other swarm. A session advisory lock lets one pass at a time use
+the database: two passes at once would share the server's load. The
 objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
 bucket on a local S3 server such as MinIO; then ``LOAD_TEST_SWARM_S3_ENDPOINT``
 must name that server on ``localhost``, ``127.0.0.1`` or ``::1``, and the
@@ -107,16 +112,17 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from sqlalchemy import create_engine, delete, inspect, make_url, select, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 # ``python -m load_tests.scenarios.swarm_10k`` does not pass through run_all: litellm, which ``core`` can
@@ -163,6 +169,9 @@ DB_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "application_name"})
 # A loopback server can be a port-forward to a remote database, or the local dev database. The swarm creates
 # tables, deletes rows and puts running jobs in, so it asks for a database name that says it is a throwaway.
 THROWAWAY_DB_PREFIX = "loadtest"
+# A session advisory lock on the throwaway Postgres: one swarm pass at a time. Two passes at once would share the
+# database server, so neither pass's rate or wait would be its own.
+SWARM_LOCK_KEY = 727_010_000
 # Vercel's sandbox caps for one team: vCPU box starts per minute and concurrent vCPUs.
 VERCEL_VCPU_STARTS_PER_MINUTE = 5_000
 VERCEL_CONCURRENT_VCPUS = 10_000
@@ -199,12 +208,14 @@ class SwarmConfig:
     Attributes:
         agents: How many agents.
         steps_per_agent: How many steps each agent commits; at least ``MIN_STEPS_PER_AGENT``, for the steady rate.
-        shards: The step-log shards of the second pass; below 2 the passes are not compared.
+        shards: The step-log shards of the gated pass; below 2 the passes are not compared.
         flush_window_seconds: The step log's buffer window.
         box_seconds: The assumed life of one real box, for the box load figures.
         box_vcpus: The size of one box.
         box_steps_per_step: The boxes that one step opens on average, for the box load figures.
         db_url: A throwaway Postgres URL, or ``None`` for SQLite files.
+        stamp: The invocation's own stamp in every run id and worker id, so the swarm deletes only its own rows
+            and packs, also when another swarm uses the same database or bucket.
     """
 
     agents: int
@@ -215,6 +226,7 @@ class SwarmConfig:
     box_vcpus: int
     box_steps_per_step: float
     db_url: str | None
+    stamp: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
 class FakeBoxProvider:
@@ -263,16 +275,31 @@ class Shard:
     worker_id: str
 
 
-def run_id_for(index: int) -> str:
+def run_id_for(stamp: str, index: int) -> str:
     """Return the id of one run.
 
     Args:
+        stamp: The invocation's stamp.
         index: The run index.
 
     Returns:
         The job id.
     """
-    return f"{RUN_PREFIX}{index:06d}"
+    return f"{RUN_PREFIX}{stamp}-{index:06d}"
+
+
+def worker_id_for(stamp: str, shard_count: int, index: int) -> str:
+    """Return the step log worker id of one shard of one pass.
+
+    Args:
+        stamp: The invocation's stamp.
+        shard_count: The pass's shard count; each pass of one invocation has its own.
+        index: The shard index.
+
+    Returns:
+        The worker id; the shard's packs go under ``packs/<worker id>/``.
+    """
+    return f"{RUN_PREFIX}{stamp}-s{shard_count}-{index}"
 
 
 def _s3_settings() -> tuple[str, str] | None:
@@ -411,15 +438,23 @@ def _delete_packs(shard: Shard) -> None:
 
     Args:
         shard: The shard.
+
+    Raises:
+        RuntimeError: When the server could not delete a key.
     """
     if shard.s3 is None:
         return
     keys = shard.objects.list(f"packs/{shard.worker_id}/")
     for start in range(0, len(keys), 1000):
-        shard.s3.delete_objects(
+        response = shard.s3.delete_objects(
             Bucket=os.environ["LOAD_TEST_SWARM_S3_BUCKET"].strip(),
             Delete={"Objects": [{"Key": key} for key in keys[start : start + 1000]], "Quiet": True},
         )
+        # S3 answers a failed key in ``Errors`` with HTTP 200, so boto3 raises nothing for it.
+        errors = response.get("Errors")
+        if errors:
+            failed = ", ".join(f"{error.get('Key')} ({error.get('Code')})" for error in errors[:5])
+            raise RuntimeError(f"S3 did not delete {len(errors)} swarm pack(s): {failed}")
 
 
 def _swarm_tables() -> list[Any]:
@@ -441,16 +476,59 @@ def _swarm_tables() -> list[Any]:
     return [table for table in Base.metadata.sorted_tables if table.name in needed]
 
 
-def _delete_swarm_rows(session: Session) -> None:
-    """Delete the rows of the swarm's own runs and workers, so a shared database keeps its other rows.
+def _delete_swarm_rows(session: Session, runs: list[str], worker_ids: list[str]) -> None:
+    """Delete the rows of this pass's own runs and workers, so a shared database keeps the rows of any other pass.
 
     Args:
         session: The open session; the caller commits.
+        runs: The pass's job ids.
+        worker_ids: The pass's step log worker ids.
     """
-    session.execute(delete(AgentStepModel).where(AgentStepModel.run_id.startswith(RUN_PREFIX)))
-    session.execute(delete(TreeObjectModel).where(TreeObjectModel.username.startswith(RUN_PREFIX)))
-    session.execute(delete(StoragePackModel).where(StoragePackModel.worker_id.startswith(RUN_PREFIX)))
-    session.execute(delete(JobModel).where(JobModel.optimization_id.startswith(RUN_PREFIX)))
+    session.execute(delete(AgentStepModel).where(AgentStepModel.run_id.in_(runs)))
+    session.execute(delete(TreeObjectModel).where(TreeObjectModel.username.in_(runs)))
+    session.execute(delete(StoragePackModel).where(StoragePackModel.worker_id.in_(worker_ids)))
+    session.execute(delete(JobModel).where(JobModel.optimization_id.in_(runs)))
+
+
+def _lock_database(engine: Engine) -> Connection:
+    """Take the swarm's session advisory lock on a throwaway Postgres, or refuse when another pass holds it.
+
+    Args:
+        engine: The Postgres database.
+
+    Returns:
+        The connection that holds the lock; the caller unlocks it and closes it.
+
+    Raises:
+        RuntimeError: When another swarm pass holds the lock.
+    """
+    connection = engine.connect()
+    try:
+        locked = connection.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": SWARM_LOCK_KEY}).scalar()
+        connection.commit()
+    except BaseException:
+        connection.close()
+        raise
+    if not locked:
+        connection.close()
+        raise RuntimeError("another swarm pass runs on LOAD_TEST_SWARM_DB_URL: wait for it to end")
+    return connection
+
+
+def _unlock_database(connection: Connection) -> None:
+    """Free the swarm's advisory lock and close its connection.
+
+    The pool keeps a closed connection open, and a session lock lives as long as the database session, so the
+    unlock must come first.
+
+    Args:
+        connection: The connection that ``_lock_database`` returned.
+    """
+    try:
+        connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": SWARM_LOCK_KEY})
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _reset(engine: Engine, runs: list[str]) -> None:
@@ -464,7 +542,8 @@ def _reset(engine: Engine, runs: list[str]) -> None:
     # A local worker's orphan sweep takes a running job with no lease or a lapsed one; the lease outlasts the pass.
     lease = datetime.now(UTC) + timedelta(seconds=2 * PASS_TIMEOUT_SECONDS)
     with Session(engine) as session:
-        _delete_swarm_rows(session)
+        # The stamp makes the run ids new, so only a run of this invocation's last pass can still have rows.
+        _delete_swarm_rows(session, runs, [])
         session.add_all(
             JobModel(
                 optimization_id=run_id,
@@ -578,20 +657,20 @@ def steady_floor_seconds(config: SwarmConfig) -> float:
     )
 
 
-def start_offset(run_id: str, agent_id: str, interval: float) -> float:
+def start_offset(agent_id: str, interval: float) -> float:
     """Return one agent's start offset: a seeded random point in its first step interval.
 
-    The seed is the agent's own id, so the offset is the same on every shard layout and in every run.
+    The seed is the agent id, which is unique in the swarm and has no stamp, so the offset is the same on every
+    shard layout and in every invocation.
 
     Args:
-        run_id: The agent's job id.
         agent_id: The agent id.
         interval: The seconds between the agent's steps.
 
     Returns:
         The offset in seconds, from 0 up to ``interval``.
     """
-    return random.Random(f"{run_id}/{agent_id}").random() * interval
+    return random.Random(agent_id).random() * interval
 
 
 def _waiter(store: StepLogStore, step_id: str) -> Any:
@@ -679,7 +758,7 @@ def _drive(
     """
     interval = step_interval(config.agents)
     steps: list[list[tuple[float, float, float, float]]] = [[] for _ in agents]
-    starts = [origin + start_offset(*agent, interval) for agent in agents]
+    starts = [origin + start_offset(agent_id, interval) for _, agent_id in agents]
     due = [(start, index, 0) for index, start in enumerate(starts)]
     heapq.heapify(due)
     in_flight: deque[tuple[int, int, str, float, float, float, Any]] = deque()
@@ -900,10 +979,12 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
     _check_db_url(config.db_url)
     # Check the S3 settings before any database write, so a bad setting leaves no row behind.
     _s3_settings()
-    runs = [run_id_for(index) for index in range(math.ceil(config.agents / AGENTS_PER_RUN))]
+    runs = [run_id_for(config.stamp, index) for index in range(math.ceil(config.agents / AGENTS_PER_RUN))]
     agents = [(runs[index // AGENTS_PER_RUN], f"agent-{index:05d}") for index in range(config.agents)]
-    stamp = f"{int(time.time() * 1000) % 10**9}"
+    worker_ids = [worker_id_for(config.stamp, shard_count, index) for index in range(shard_count)]
     shards: list[Shard] = []
+    # The connection that holds the swarm's advisory lock on a shared Postgres, from before the reset to the end.
+    lock: Connection | None = None
     # The reset writes the swarm's job rows before the shard joins ``shards``; the cleanup follows the reset.
     reset_engine: Engine | None = None
     # Each engine joins this list before its checks, so a failed check still closes its pool. A dispose writes nothing.
@@ -925,14 +1006,15 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             if config.db_url is not None:
                 _check_server_addr(engine)
                 _check_throwaway(engine)
+                if index == 0:
+                    lock = _lock_database(engine)
             if config.db_url is None or index == 0:
                 _reset(engine, runs)
                 if config.db_url is not None:
                     reset_engine = engine
             shard_runs = [run for position, run in enumerate(runs) if position % shard_count == index]
             objects, s3 = _object_store(shard_folder / "objects")
-            worker_id = f"{RUN_PREFIX}{stamp}-s{shard_count}-{index}"
-            shards.append(Shard(url, shard_folder, engine, objects, s3, shard_runs, worker_id))
+            shards.append(Shard(url, shard_folder, engine, objects, s3, shard_runs, worker_ids[index]))
         if config.db_url is None:
             for shard in shards:
                 with Session(shard.engine) as session:
@@ -983,13 +1065,18 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             if reset_engine is not None:
                 try:
                     with Session(reset_engine) as session:
-                        _delete_swarm_rows(session)
+                        _delete_swarm_rows(session, runs, worker_ids)
                         session.commit()
                 except Exception as error:
                     cleanup_error = error
             for shard in shards:
                 try:
                     _delete_packs(shard)
+                except Exception as error:
+                    cleanup_error = cleanup_error or error
+            if lock is not None:
+                try:
+                    _unlock_database(lock)
                 except Exception as error:
                     cleanup_error = cleanup_error or error
         finally:
@@ -1085,16 +1172,21 @@ def box_load(config: SwarmConfig, commits_per_second: float) -> dict[str, Any]:
 
 
 def run(config: SwarmConfig) -> ScenarioResult:
-    """Run the swarm on 1 shard process, then on ``config.shards`` shard processes, and compare the step logs.
+    """Run the swarm on 1 shard process, on 2, then on ``config.shards``, and compare the step logs.
+
+    The 2-shard pass checks only the step log: at 10,000 agents, 2 single-writer shards cannot keep the step wait
+    under its limit, so its rate and wait are only reported. With ``config.shards`` of 2 the gated pass is that
+    pass.
 
     Args:
         config: The knobs.
 
     Returns:
-        The scenario result; ``slo_passed`` needs, on the sharded pass, the target steady commit rate over a
-        steady part of at least ``steady_floor_seconds``, a step wait p99 of at most
-        ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, a commit call p99 of at most ``MAX_COMMIT_CALL_P99_MS``, and
-        the same step log on both layouts.
+        The scenario result; ``slo_passed`` needs, on the ``config.shards`` pass, the target steady commit rate
+        over a steady part of at least ``steady_floor_seconds``, a step wait p99 of at most
+        ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, a commit call p99 of at most ``MAX_COMMIT_CALL_P99_MS``; the
+        same step log on every layout; and a Postgres database with a local S3 bucket, the backend that the
+        target names.
 
     Raises:
         ValueError: When there is no agent, an agent commits fewer than ``MIN_STEPS_PER_AGENT`` steps, or the
@@ -1117,7 +1209,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
     metrics = ScenarioMetrics("swarm_10k")
     passes: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="sky727-swarm-") as folder:
-        for shard_count in (1,) if not_compared else (1, config.shards):
+        # Each shard count runs once: the worker ids of a pass hold its shard count, so they stay unique.
+        for shard_count in (1,) if not_compared else tuple(dict.fromkeys((1, 2, config.shards))):
             figures = run_pass(config, shard_count, Path(folder) / f"pass-{shard_count}")
             metrics.record(status_code=200, latency_seconds=figures["seconds_to_durable"])
             passes.append(figures)
@@ -1126,7 +1219,12 @@ def run(config: SwarmConfig) -> ScenarioResult:
     same_step_log: bool | str = (
         f"not compared: {not_compared}" if not_compared else len({figures["digest"] for figures in passes}) == 1
     )
+    two_shard_same_step_log: bool | str = (
+        f"not compared: {not_compared}" if not_compared else passes[1]["digest"] == passes[0]["digest"]
+    )
     gated = passes[-1]
+    on_s3 = bool(os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip())
+    target_backend = config.db_url is not None and on_s3
     max_wait_ms = round(1000 * MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds, 2)
     min_steady_seconds = steady_floor_seconds(config)
     result = metrics.finish()
@@ -1139,9 +1237,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "database": "postgres (LOAD_TEST_SWARM_DB_URL)"
         if config.db_url
         else f"sqlite file per shard, flush cap {SQLITE_FLUSH_MAX_BYTES} bytes",
-        "object_store": "local s3 (LOAD_TEST_SWARM_S3_BUCKET)"
-        if os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip()
-        else "local folder",
+        "object_store": "local s3 (LOAD_TEST_SWARM_S3_BUCKET)" if on_s3 else "local folder",
+        "target_backend": target_backend,
         "box_provider": "in-process fake",
         "model": "mock reply in the step body",
         "target_commits_per_second": TARGET_COMMITS_PER_SECOND,
@@ -1152,6 +1249,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "gated_pass_shards": gated["shards"],
         "passes": passes,
         "same_step_log": same_step_log,
+        # The 2-shard pass gates only its step log; its rate and wait are in ``passes`` for the report.
+        "two_shard_same_step_log": two_shard_same_step_log,
         "assumed_box_seconds": config.box_seconds,
         "box_vcpus": config.box_vcpus,
         "box_steps_per_step": config.box_steps_per_step,
@@ -1193,6 +1292,11 @@ def run(config: SwarmConfig) -> ScenarioResult:
         violations.append(f"the shard layouts were not compared: {not_compared}")
     elif same_step_log is not True:
         violations.append("the shard layouts gave different step logs")
+    if not target_backend:
+        violations.append(
+            "the target is not proven on this backend: it needs Postgres (LOAD_TEST_SWARM_DB_URL)"
+            " and local S3 (LOAD_TEST_SWARM_S3_BUCKET)"
+        )
     result.slo_violations = violations
     result.slo_passed = not violations
     return result
