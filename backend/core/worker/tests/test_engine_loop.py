@@ -1961,18 +1961,20 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(hidden))
     tree = _store(trees, {secret: b"secret", "README": b"r"}, links)
 
-    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
-        loop.read_file(tree, secret)
-    assert "data" not in str(stopped.value)
-    assert "eval" not in str(stopped.value)
+    # A box step needs the run's active generation, so ``run`` goes first, on the first loop.
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         loop.run(tree, f"cat {secret}")
     assert boxes.opened == 0
-    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks each listing.
-    lister, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
+    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks each other path.
+    reader, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
+    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
+        reader.read_file(tree, secret)
+    assert "data" not in str(stopped.value)
+    assert "eval" not in str(stopped.value)
+    lister, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=3, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         lister.list_files(tree)
-    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=3, hidden=hidden_hashes(hidden))
+    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=4, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         fresh.file_ids(tree)
 
