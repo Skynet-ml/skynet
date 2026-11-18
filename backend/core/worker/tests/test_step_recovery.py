@@ -1211,6 +1211,52 @@ def test_a_cancel_after_the_last_read_is_not_lost_to_the_requeue_write(
     assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
 
 
+def test_a_lost_requeue_keeps_the_recovery_marker_of_a_newer_generation(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep whose requeue loses to a newer fence leaves that fence's marker alone (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the other fence wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+    marker = {"state": "recovering", "phase": "waiting_for_usage", "execution_generation": 99}
+
+    def other_fence(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Fence the run again as another writer does, after this sweep's own fence.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        result = waive(self, *args, **kwargs)
+        _set_job(store, execution_generation=int(store.get_job(RUN)["execution_generation"]) + 1, recovery=marker)
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", other_fence)
+
+    assert store.recover_orphaned_jobs() == 0
+
+    job = store.get_job(RUN)
+    assert job["status"] == "running"
+    assert job["recovery"] == marker
+
+
 def test_a_cancel_right_after_the_fence_commit_clears_the_recovery_marker(
     store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
