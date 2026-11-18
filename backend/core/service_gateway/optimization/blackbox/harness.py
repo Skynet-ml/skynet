@@ -404,6 +404,8 @@ def build_launch(
             install_command = _fill(target.install_command, model, gateway, protected=protected)
         if run_command is None:
             raise ServiceError("A custom harness needs a run_command.")
+        # Like APP_PROMPT_FILE: an agent-eval box runs this command without the
+        # bridge, so the launch carries the name; the bridge sets an absolute path.
         env = _base_env(model, gateway) | {ENV_TASK_FILE: PROMPT_FILE}
         if reasoning_effort:
             env.update(with_legacy_env({ENV_REASONING_EFFORT: reasoning_effort}))
