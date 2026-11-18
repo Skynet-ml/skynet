@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import posixpath
 import shutil
 from collections.abc import Iterator
@@ -480,8 +481,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         start_used = server.budget.used
         quota = self._round_quota(server)
         files = self._lab_files()
+        # The local mode carries an agent's executable in ``work/`` to the next round, as the native lab does.
+        executables = [name for name in files if os.access(self.work_dir / name, os.X_OK)]
         # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
-        tree = ctx.put_files(files, None)
+        tree = ctx.put_files(files, None, executables=executables)
         messages: list[dict[str, Any]] = [{"role": "user", "content": self._round_prompt(directive)}]
         spent = Decimal(0)
         text = ""
@@ -682,7 +685,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         return json.dumps(body, ensure_ascii=False)
 
     def _pull(self, tree: str) -> None:
-        """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
+        """Copy the agent's ``work/`` and ``notebook.md``, with each file's executable mode, into the local lab.
 
         The files come in sorted order, the notebook first. A file whose relative path passes the path or name
         byte bound, or past the per-file cap, or past the total cap stays behind. The tree decides each skip, so a
@@ -697,6 +700,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         work = self.work_dir / "work"
         shutil.rmtree(work)
         work.mkdir()
+        executables = set(self._ctx.list_files(tree, executable=True) or ())
         total = 0
         for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
             # The marker that ``_lab_files`` puts in an empty ``work/`` is not the agent's file.
@@ -725,6 +729,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 total += len(content)
                 local.parent.mkdir(parents=True, exist_ok=True)
                 local.write_bytes(content)
+                local.chmod(0o755 if path in executables else 0o644)
 
 
 class AutoResearchEngine:

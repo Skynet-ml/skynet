@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import math
+import os
 import re
 from collections.abc import Callable
 from decimal import Decimal
@@ -1684,7 +1685,10 @@ def test_the_carried_lab_reads_each_file_with_at_most_the_bytes_left_under_the_t
 
     config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(tmp_path), engine_config={"model": ""})
     ctx = EngineContext(
-        reflection_lm=str, run_dir=str(tmp_path), read_file=read_file, list_files=lambda tree_id, path: sorted(tree)
+        reflection_lm=str,
+        run_dir=str(tmp_path),
+        read_file=read_file,
+        list_files=lambda tree_id, path="", executable=False: [] if executable else sorted(tree),
     )
     worker = ar_mod._WorkerAutoResearch(config, ctx, max_tool_calls=100)
     (worker.work_dir / "work").mkdir(parents=True, exist_ok=True)
@@ -1718,19 +1722,20 @@ def test_a_run_writes_a_lab_tree_with_the_archive_under_its_cap(
     writes: list[dict[str, bytes]] = []
     put_files = EngineLoop.put_files
 
-    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None) -> str:
+    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None, **options: Any) -> str:
         """Record each tree write.
 
         Args:
             loop: The engine loop.
             files: The file bytes by path.
             base_tree_id: The base tree.
+            **options: The other write options, such as ``executables``.
 
         Returns:
             The new tree's id.
         """
         writes.append(dict(files))
-        return put_files(loop, files, base_tree_id)
+        return put_files(loop, files, base_tree_id, **options)
 
     monkeypatch.setattr(EngineLoop, "put_files", recorded)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
@@ -1767,19 +1772,20 @@ def test_an_empty_lab_folder_gets_a_keep_marker_that_never_comes_back(
     writes: list[dict[str, bytes]] = []
     put_files = EngineLoop.put_files
 
-    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None) -> str:
+    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None, **options: Any) -> str:
         """Record each tree write.
 
         Args:
             loop: The engine loop.
             files: The file bytes by path.
             base_tree_id: The base tree.
+            **options: The other write options, such as ``executables``.
 
         Returns:
             The new tree's id.
         """
         writes.append(dict(files))
-        return put_files(loop, files, base_tree_id)
+        return put_files(loop, files, base_tree_id, **options)
 
     monkeypatch.setattr(EngineLoop, "put_files", recorded)
     model = _Researcher([*_ROUND, _bash("rm -f work/*")])
@@ -1937,17 +1943,18 @@ def test_a_tree_path_past_the_fixed_bounds_stays_behind_whatever_the_local_prefi
             raise FileTooLargeError(path, len(data), max_bytes)
         return data
 
-    def list_files(tree_id: str, path: str = "") -> list[str] | None:
+    def list_files(tree_id: str, path: str = "", executable: bool = False) -> list[str] | None:
         """List the files of the fake tree under ``work/``.
 
         Args:
             tree_id: The tree.
             path: The folder.
+            executable: List only the executables; the fake tree has none.
 
         Returns:
             The sorted paths.
         """
-        return sorted(name for name in tree if name.startswith("work/"))
+        return [] if executable else sorted(name for name in tree if name.startswith("work/"))
 
     run_dir = tmp_path / prefix if prefix else tmp_path
     config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(run_dir), engine_config={"model": ""})
@@ -2322,6 +2329,114 @@ def test_each_scored_case_and_version_writes_the_native_run_log_events(
         ("case.scored", "1", "1", {"score": 6.0, "total": 2}),
         ("candidate.scored", "1", None, {"score": 6.0, "total_evals": 4}),
     ]
+
+
+@pytest.mark.parametrize("bad", [None, math.nan])
+def test_a_crashed_case_of_a_full_sweep_writes_no_case_event(
+    bad: float | None,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A case that crashes or scores NaN gets no ``case.scored`` log line or event; the other case still does.
+
+    Args:
+        bad: The crashed case's score: a metric error or NaN.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash on the second case, and score the first by length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score, or ``bad`` for a crash, and no side information.
+        """
+        del loop
+        return (bad if case == _CASES[1] else float(len(str(candidate)))), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    with caplog.at_level(logging.INFO, logger=ar_mod.logger.name):
+        _run(loop, events=events, max_evals=4, stop_at_score=None, score=score)
+
+    logged = [
+        (record.run_log["candidate"], record.run_log["case"])
+        for record in caplog.records
+        if record.name == ar_mod.logger.name and record.run_log["event"] == "case.scored"
+    ]
+    assert logged == [("0", "0"), ("1", "0")]
+    scored = [(data["trial"], data["example_id"]) for kind, data in events if kind == PROGRESS_CASE_SCORED]
+    assert scored == [(0, "0"), (1, "0")]
+
+
+def test_a_model_call_that_fails_after_exactly_one_tool_call_ends_only_the_round(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """One tool call is enough for the failure to come from tool output, so the run goes on to the next round.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    # The first call scores the seed file, so round 1 makes exactly one tool call before its model call fails.
+    seed = {"id": "seed", "name": "evaluate", "arguments": {"file": "work/seed.txt"}}
+    model = _Researcher([lambda n: seed, *_ROUND], fail_at=frozenset({1, 2, 3}))
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert result.metadata["rounds"] == 2
+    round_one = ["model", *["model"] * loop_tools.MODEL_ATTEMPTS]
+    assert [kind for _, kind, _ in _steps(engine)] == [*round_one, "model", "model", "command", "model", "model"]
+
+
+def test_an_executable_in_work_stays_executable_in_the_next_round_and_a_plain_file_stays_plain(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round 1 makes ``work/check.sh`` executable; round 2 runs it, and ``work/plain.sh`` is still not executable.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    make = (
+        "printf '#!/bin/sh\\necho ran\\n' > work/check.sh && cp work/check.sh work/plain.sh && chmod +x work/check.sh"
+    )
+    check = "./work/check.sh && test ! -x work/plain.sh && echo plain"
+    script = [_bash(f"if [ {{n}} = 1 ]; then {make}; else {check}; fi"), *_ROUND]
+    model = _Researcher(script)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert result.metadata["rounds"] == 2
+    # Round 1 makes three calls and a final reply; round 2's second call gets its first command's result.
+    output = _tool_result(model, 5)
+    assert (output["exit_code"], output["stdout"]) == (0, "ran\nplain\n")
+    lab = _lab(tmp_path)
+    assert os.access(lab / "work" / "check.sh", os.X_OK)
+    assert not os.access(lab / "work" / "plain.sh", os.X_OK)
 
 
 def test_the_result_names_the_upstream_source_and_revision(

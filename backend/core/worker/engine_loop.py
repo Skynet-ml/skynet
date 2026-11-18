@@ -106,7 +106,7 @@ import hashlib
 import json
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -581,7 +581,9 @@ class EngineLoop:
                     raise ModelCallFailedError(type(failures[0]).__name__, cost_cents=cost) from failures[0]
                 return _reply(committed)
 
-    def put_files(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+    def put_files(
+        self, files: Mapping[str, bytes], base_tree_id: str | None = None, *, executables: Collection[str] = ()
+    ) -> str:
         """Write files over a tree with no box, and return the new tree's id.
 
         This is no step: it commits nothing, opens no box and costs nothing. The tree id is the hash of the
@@ -595,6 +597,7 @@ class EngineLoop:
         Args:
             files: The file bytes by ``/``-separated path; a file keeps an existing executable mode.
             base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+            executables: The written paths to make executable.
 
         Returns:
             The new tree id.
@@ -614,7 +617,9 @@ class EngineLoop:
                 # every part is checked before the first write.
                 if any(part in {"", ".", ".."} or "\0" in part for part in path.split("/")):
                     raise ValueError(f"bad tree entry name in path {path!r}")
-            tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
+            tree_id = self._put_tree(
+                base_tree_id, {tuple(path.split("/")): data for path, data in files.items()}, frozenset(executables)
+            )
             if base_tree_id in self._run_outputs:
                 self._run_outputs.add(tree_id)
             return tree_id
@@ -657,12 +662,13 @@ class EngineLoop:
             except ObjectTooLargeError as error:
                 raise FileTooLargeError(path, error.size, max_bytes) from None
 
-    def list_files(self, tree_id: str, path: str = "") -> list[str] | None:
+    def list_files(self, tree_id: str, path: str = "", *, executable: bool = False) -> list[str] | None:
         """List the files under one folder of a tree with no box, and leave out the paths that the loop hides.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated folder; ``""`` or ``.`` is the tree's root.
+            executable: List only the executables.
 
         Returns:
             The sorted paths of the files and executables below the folder, at any depth, from the tree's root,
@@ -685,7 +691,7 @@ class EngineLoop:
             # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
             if folder is None or (parts and not self._has_visible(folder, prefix)):
                 return None
-            files = self._files(folder, prefix)
+            files = self._files(folder, prefix, executable)
             return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
 
     def remaining_cost_usd(self) -> float:
@@ -1198,12 +1204,13 @@ class EngineLoop:
             tree_id = entry.object_id
         return tree_id
 
-    def _files(self, tree_id: str, prefix: str) -> Iterator[str]:
+    def _files(self, tree_id: str, prefix: str, executable: bool = False) -> Iterator[str]:
         """Give the paths of the files and executables in a folder, at any depth.
 
         Args:
             tree_id: The folder's tree id.
             prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+            executable: Give only the executables.
 
         Yields:
             Each file path from the tree's root.
@@ -1213,16 +1220,23 @@ class EngineLoop:
         """
         for name, entry in self._entries(tree_id).items():
             if entry.mode == "tree":
-                yield from self._files(entry.object_id, f"{prefix}{name}/")
-            elif entry.mode in {"file", "exec"}:
+                yield from self._files(entry.object_id, f"{prefix}{name}/", executable)
+            elif entry.mode == "exec" or (entry.mode == "file" and not executable):
                 yield f"{prefix}{name}"
 
-    def _put_tree(self, tree_id: str | None, files: Mapping[tuple[str, ...], bytes], prefix: str = "") -> str:
+    def _put_tree(
+        self,
+        tree_id: str | None,
+        files: Mapping[tuple[str, ...], bytes],
+        executables: frozenset[str],
+        prefix: str = "",
+    ) -> str:
         """Write files over one tree level, and each changed folder below it.
 
         Args:
             tree_id: The tree of this level; ``None`` for an empty one.
             files: The file bytes by path parts below this level.
+            executables: The written paths from the tree's root to make executable.
             prefix: This level's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
 
         Returns:
@@ -1245,7 +1259,8 @@ class EngineLoop:
             # folder writes below that file; so only a folder that a file replaces can hold one more.
             if old is not None and old.mode == "tree":
                 self._refuse_hidden(old, f"{prefix}{name}")
-            mode = "exec" if old is not None and old.mode == "exec" else "file"
+            executable = f"{prefix}{name}" in executables or (old is not None and old.mode == "exec")
+            mode = "exec" if executable else "file"
             entries[name] = TreeEntry(name, mode, self._trees.put_blob(self._run.run_id, data))
             written.add(name)
         if clash := written & folders.keys():
@@ -1253,7 +1268,7 @@ class EngineLoop:
         for name, nested in folders.items():
             old = entries.get(name)
             base = old.object_id if old is not None and old.mode == "tree" else None
-            entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, f"{prefix}{name}/"))
+            entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, executables, f"{prefix}{name}/"))
         return self._trees.put_tree(self._run.run_id, entries.values())
 
     def _refuse_hidden(self, folder: TreeEntry, path: str) -> None:
