@@ -30,12 +30,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import IO, Any
 
-from gepa.oa.budget import BudgetExhausted
-
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
+from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
-from ..cost_ceiling import CostCeilingExceededError
 from . import sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
 from .native_runtime import (
@@ -47,7 +45,7 @@ from .native_runtime import (
     run_native_engine,
     sanitize_side_info,
 )
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, ScorerAbortError, Task
+from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task
 from .runner import side_info_json_default
 
 logger = logging.getLogger(__name__)
@@ -68,9 +66,6 @@ _ROUTE_URL = "http://engine-loop.invalid/v1"
 _ROUTE_LABEL = "engine-loop"
 # The budget and the evaluation limit end a run; this only bounds a lost reply.
 _TIMEOUT_SECONDS = 7 * 24 * 3600.0
-# Stops pass through to the engine loop; any other model failure goes back to
-# upstream, which retries the call as it would retry a provider error.
-_MODEL_STOPS = (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError)
 
 
 class ShinkaEvolveEngine:
@@ -186,7 +181,9 @@ class ShinkaEvolveEngine:
         try:
             returncode = self._drive(requests, workdir)
         except BudgetReached as stop:
-            # The killed child writes no result, so the best version comes from its progress.
+            # The child drains, writes an interrupted incumbent and exits 1; its
+            # progress lines report every scored version, so, as in ``_result``'s
+            # fallback, the best version comes from them.
             if requests.best is not None:
                 stop.result = requests.best_so_far(workdir)
                 stop.evidence.update(
@@ -200,7 +197,7 @@ class ShinkaEvolveEngine:
             if requests.best is None:
                 raise
             return requests.best_so_far(workdir)
-        result = self._result(workdir, returncode, server)
+        result = self._result(workdir, returncode, requests)
         result.metadata["model_cost_cents"] = str(requests.cost_cents)
         return result
 
@@ -262,20 +259,21 @@ class ShinkaEvolveEngine:
                 child.stdout.close()
 
     @staticmethod
-    def _result(workdir: Path, returncode: int, server: EvalServer) -> Result:
+    def _result(workdir: Path, returncode: int, requests: _Requests) -> Result:
         """Read the child's result document.
 
         Args:
             workdir: The child's folder.
             returncode: The child's exit code.
-            server: The eval server, which knows the versions that hit a metric error.
+            requests: The child's answers: its eval server knows the versions that
+                hit a metric error, and its progress holds the best scored version.
 
         Returns:
             The best version and its score. When upstream failed after it scored
             a version, the best version scored before the failure.
 
         Raises:
-            ServiceError: When the child failed before it scored a version, or wrote no result.
+            ServiceError: When the child failed before it scored a version without a metric error.
         """
         path = workdir / _RESULT_FILE
         document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -285,7 +283,7 @@ class ShinkaEvolveEngine:
         if (
             isinstance(incumbent, dict)
             and incumbent.get("best_score") is not None
-            and server.metric_error(incumbent.get("best_candidate")) is None
+            and requests.server.metric_error(incumbent.get("best_candidate")) is None
         ):
             logger.warning("ShinkaEvolve stopped early and keeps its best version: %s", document.get("error"))
             return Result(
@@ -295,6 +293,13 @@ class ShinkaEvolveEngine:
                 metadata={**document.get("metadata", {}), "native_artifacts_dir": str(workdir)},
             )
         if returncode != 0 or not document or document.get("error") or document.get("best_score") is None:
+            # A killed child writes no result, and a rejected incumbent is no
+            # version, but the progress can still hold a scored version.
+            if requests.best is not None:
+                logger.warning(
+                    "ShinkaEvolve stopped early and keeps its best reported version: %s", document.get("error")
+                )
+                return requests.best_so_far(workdir)
             stderr = (workdir / "stderr.log").read_text(encoding="utf-8", errors="replace")
             detail = str(document.get("error") or stderr[-2000:] or "No result was produced.")
             raise ServiceError(f"ShinkaEvolve failed: {detail}")
@@ -412,20 +417,23 @@ class _Requests:
             messages: The chat messages.
 
         Returns:
-            ``{"text": ...}``, or ``{"error": <type>}`` when the call failed.
+            ``{"text": ...}``, or ``{"error": <type>}`` when the model call failed.
 
         Raises:
             ServiceError: When the messages are malformed.
+            Exception: Any error of the model call other than a failed call, such as a stop.
         """
         if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
             raise ServiceError("ShinkaEvolve sent malformed model messages.")
         # ``run`` starts the child only with the loop's context, which sets ``call_model``.
         assert self.ctx.call_model is not None
+        # A failed call goes back to upstream, which retries it as it would retry
+        # a provider error; any other error, such as a stop, ends the run.
         try:
             reply = self.ctx.call_model(messages, None)
-        except _MODEL_STOPS:
-            raise
-        except Exception as exc:
+        except ModelCallFailedError as exc:
+            # The provider can bill a failed call, and its committed step keeps that cost on a replay.
+            self.cost_cents += exc.cost_cents
             return {"error": type(exc).__name__}
         self.cost_cents += reply.cost_cents
         return {"text": reply.text}

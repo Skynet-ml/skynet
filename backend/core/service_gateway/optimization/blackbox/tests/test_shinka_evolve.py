@@ -10,10 +10,12 @@ make no network and no paid call.
 from __future__ import annotations
 
 import io
+import json
 import stat
 import sys
 import textwrap
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from core.service_gateway.optimization.budget_stop import BudgetReached
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
+from core.worker.engine_loop import ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     _KINDS,
@@ -105,6 +108,8 @@ _FAKE_UPSTREAM = {
         END = "\\n<!-- EVOLVE-BLOCK-END -->"
         # The generation at which upstream fails, or None for a run that ends normally.
         FAIL_AFTER = None
+        # Whether upstream leaves results larger than the runner's artifact archive limit.
+        BIG_RESULTS = False
 
 
         class EvolutionConfig:
@@ -157,6 +162,10 @@ _FAKE_UPSTREAM = {
 
             async def _run(self):
                 (self.results_dir / "evaluate.py").write_text(self.evaluate_str)
+                if BIG_RESULTS:
+                    # A sparse file: past the 64 MiB limit by its size, with no disk use.
+                    with (self.results_dir / "big.bin").open("wb") as big:
+                        big.truncate(64 * 1024 * 1024 + 1)
                 db = sqlite3.connect(self.db_path)
                 db.execute("CREATE TABLE programs (id TEXT, generation INTEGER, parent_id TEXT)")
                 db.commit()
@@ -190,12 +199,13 @@ _FAKE_UPSTREAM = {
 }
 
 
-def _fake_python(tmp_path: Path, fail_after: int | None = None) -> str:
+def _fake_python(tmp_path: Path, fail_after: int | None = None, big_results: bool = False) -> str:
     """Write the fake upstream package and an interpreter wrapper that imports it.
 
     Args:
         tmp_path: Pytest's temporary folder.
         fail_after: The generation at which the fake upstream fails, or None for no failure.
+        big_results: Whether the fake upstream leaves results larger than the artifact archive limit.
 
     Returns:
         The wrapper's path: the engine's ``shinka-evolve`` interpreter.
@@ -204,7 +214,12 @@ def _fake_python(tmp_path: Path, fail_after: int | None = None) -> str:
     for name, text in _FAKE_UPSTREAM.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = textwrap.dedent(text).lstrip().replace("FAIL_AFTER = None", f"FAIL_AFTER = {fail_after}")
+        text = (
+            textwrap.dedent(text)
+            .lstrip()
+            .replace("FAIL_AFTER = None", f"FAIL_AFTER = {fail_after}")
+            .replace("BIG_RESULTS = False", f"BIG_RESULTS = {big_results}")
+        )
         path.write_text(text, encoding="utf-8")
     python = tmp_path / "shinka-python"
     python.write_text(f'#!/bin/sh\nPYTHONPATH={root} exec {sys.executable} "$@"\n', encoding="utf-8")
@@ -551,6 +566,32 @@ def test_a_child_that_fails_after_a_scored_version_returns_that_version(
     assert "upstream broke" in (tmp_path / "loop-1" / "shinka_evolve" / "native_result.json").read_text()
 
 
+def test_on_the_engine_loop_results_past_the_archive_limit_do_not_fail_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Skip the artifact archive on the engine loop, where nothing reads it, so large results keep the run's result.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path, big_results=True)).run(
+        Task("seed"),
+        loop.server(_scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")), max_evals=10),
+        loop.context(max_iterations=2),
+    )
+
+    workdir = tmp_path / "loop-1" / "shinka_evolve"
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert "error" not in json.loads((workdir / "native_result.json").read_text())
+    assert not (workdir / "native_artifacts.tar.gz.b64").exists()
+
+
 def test_a_child_that_fails_before_any_scored_version_fails_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -607,18 +648,25 @@ def test_a_worker_without_the_shinka_interpreter_runs_the_engine_in_the_sandbox(
     assert not (tmp_path / "shinka_evolve").exists()
 
 
-def _requests(tmp_path: Path, scorer: object) -> shinka_evolve._Requests:
+def _requests(
+    tmp_path: Path, scorer: object, call_model: Callable[..., object] | None = None
+) -> shinka_evolve._Requests:
     """Build the engine's request handler around a plain eval server.
 
     Args:
         tmp_path: Pytest's temporary folder.
         scorer: The eval server's scorer.
+        call_model: The loop's model call, or None for a run that makes none.
 
     Returns:
         A handler for the nonce ``n``.
     """
     task = Task("seed", cases=[{"input": "a"}])
-    ctx = EngineContext(reflection_lm=lambda prompt: "", run_dir=str(tmp_path))
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=call_model,  # type: ignore[arg-type]
+    )
     return shinka_evolve._Requests(task, EvalServer(scorer, max_evals=5), ctx, "n")
 
 
@@ -677,3 +725,186 @@ def test_a_scorer_runs_inside_the_version_and_case_labels(tmp_path: Path) -> Non
     assert (scope["candidate"], scope["case"]) == ("3", "0")
     assert (tags["candidate"], tags["case"]) == ("3", "0")
     assert '"score": 1.0' in replies.getvalue()
+
+
+def _model_request(request_id: str) -> str:
+    """Frame one model request line of the child, for the nonce ``n``.
+
+    Args:
+        request_id: The request's id.
+
+    Returns:
+        The framed line.
+    """
+    return "APP_NATIVE_RPC n " + json.dumps(
+        {"id": request_id, "kind": "model", "messages": [{"role": "user", "content": "improve"}]}
+    )
+
+
+def test_a_failed_model_call_adds_its_billed_cost_to_the_runs_model_cost(tmp_path: Path) -> None:
+    """Count the cost of a failed call that the provider billed, as its committed step keeps it on a replay.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls: list[None] = []
+
+    def call_model(messages: object, tools: object) -> SimpleNamespace:
+        """Fail the first call with a billed cost, and answer the second.
+
+        Args:
+            messages: The chat messages.
+            tools: Not used.
+
+        Returns:
+            The reply of the second call.
+
+        Raises:
+            ModelCallFailedError: At the first call, with a cost of 3 cents.
+        """
+        calls.append(None)
+        if len(calls) == 1:
+            raise ModelCallFailedError("TimeoutError", cost_cents=Decimal(3))
+        return SimpleNamespace(text="ok", cost_cents=Decimal(2))
+
+    requests = _requests(tmp_path, lambda candidate, case: (1.0, {}), call_model)
+    replies = io.StringIO()
+
+    requests.line(_model_request("1"), replies)
+    requests.line(_model_request("2"), replies)
+
+    assert [json.loads(line) for line in replies.getvalue().splitlines()] == [
+        {"id": "1", "error": "ModelCallFailedError"},
+        {"id": "2", "text": "ok"},
+    ]
+    requests.best = {"candidate": "seed", "score": 1.0}
+    assert requests.best_so_far(tmp_path).metadata["model_cost_cents"] == "5"
+
+
+def test_an_error_of_the_model_call_that_is_not_a_failed_call_ends_the_run(tmp_path: Path) -> None:
+    """Raise an error of the loop itself to the run, and do not send it to upstream as a failed call.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def call_model(messages: object, tools: object) -> SimpleNamespace:
+        """Fail as a broken loop does.
+
+        Args:
+            messages: The chat messages.
+            tools: Not used.
+
+        Raises:
+            TypeError: Always.
+        """
+        raise TypeError("the loop broke")
+
+    requests = _requests(tmp_path, lambda candidate, case: (1.0, {}), call_model)
+    replies = io.StringIO()
+
+    with pytest.raises(TypeError, match="the loop broke"):
+        requests.line(_model_request("1"), replies)
+    assert replies.getvalue() == ""
+
+
+def _scored_requests(tmp_path: Path) -> shinka_evolve._Requests:
+    """Build a request handler whose eval server scored ``good`` at 2 and gave ``bad`` a metric error.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The handler.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: (None, {}) if candidate == "bad" else (2.0, {}))
+    for candidate in ("bad", "good"):
+        requests.server.evaluate(candidate, requests.task.cases[0])
+    return requests
+
+
+def _report(requests: shinka_evolve._Requests, candidate: str, score: float, candidate_id: int) -> None:
+    """Send the progress line of one scored version, as the child reports it.
+
+    Args:
+        requests: The request handler.
+        candidate: The version.
+        score: The score the child reports.
+        candidate_id: The version's id.
+    """
+    event = {"event": "candidate", "candidate_id": candidate_id, "candidate": candidate, "score": score}
+    requests.line("APP_NATIVE_PROGRESS n " + json.dumps(event), io.StringIO())
+
+
+def _write_result(workdir: Path, document: dict[str, object] | None) -> None:
+    """Write the child's folder with its result document and an empty error log.
+
+    Args:
+        workdir: The child's folder.
+        document: The result document, or None for a child that wrote none.
+    """
+    workdir.mkdir()
+    (workdir / "stderr.log").write_text("")
+    if document is not None:
+        (workdir / "native_result.json").write_text(json.dumps(document))
+
+
+def test_a_reported_version_with_a_metric_error_has_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Show a version with a crashed case with no score, and never keep it as the best version (SKY-350).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the shown versions.
+    """
+    shown: list[object] = []
+    monkeypatch.setattr(shinka_evolve, "emit_candidate", lambda callback, **fields: shown.append(fields["score"]))
+    requests = _scored_requests(tmp_path)
+
+    _report(requests, "bad", 3.0, 1)
+
+    assert shown == [None]
+    assert requests.best is None
+
+
+def test_an_incumbent_with_a_metric_error_is_not_the_result(tmp_path: Path) -> None:
+    """Fail the run when upstream failed and its only incumbent hit a metric error.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    workdir = tmp_path / "child"
+    incumbent = {"best_candidate": "bad", "best_score": 3.0, "total_evals": 2}
+    _write_result(workdir, {"error": "upstream broke", "interrupted_incumbent": incumbent})
+
+    with pytest.raises(ServiceError, match="upstream broke"):
+        ShinkaEvolveEngine._result(workdir, 1, _scored_requests(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {
+            "error": "upstream broke",
+            "interrupted_incumbent": {"best_candidate": "bad", "best_score": 3.0, "total_evals": 2},
+        },
+        None,
+    ],
+    ids=["incumbent-with-a-metric-error", "no-result-file"],
+)
+def test_with_no_valid_result_the_run_keeps_the_best_reported_version(
+    document: dict[str, object] | None, tmp_path: Path
+) -> None:
+    """Return the best version the child reported when its result holds no valid version, or it wrote none.
+
+    Args:
+        document: The child's result document, or None for a killed child that wrote none.
+        tmp_path: Pytest's temporary folder.
+    """
+    workdir = tmp_path / "child"
+    _write_result(workdir, document)
+    requests = _scored_requests(tmp_path)
+    _report(requests, "good", 2.0, 1)
+
+    result = ShinkaEvolveEngine._result(workdir, 1 if document else -9, requests)
+
+    assert (result.best_candidate, result.best_score) == ("good", 2.0)

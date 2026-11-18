@@ -2237,10 +2237,12 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     # The gateway meters and bills every call itself; these counts only
     # attribute tokens to models, so a failed call cannot leave them short.
     document["usage_complete"] = True
-    try:
-        _archive_artifacts([("upstream", results_dir)])
-    except Exception as exc:
-        document["error"] = f"Could not preserve native artifacts: {exc}"
+    # On the engine loop nothing reads the archive, so a large run must not fail for it.
+    if not stepped:
+        try:
+            _archive_artifacts([("upstream", results_dir)])
+        except Exception as exc:
+            document["error"] = f"Could not preserve native artifacts: {exc}"
     return _json_finite(document)
 
 
