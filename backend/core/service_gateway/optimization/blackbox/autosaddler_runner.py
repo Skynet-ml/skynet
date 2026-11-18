@@ -1655,6 +1655,8 @@ class StepTransport:
         for _ in range(_MAX_TURNS):
             reply = self.channel.call("model", prompt=messages, tools=_TOOLS)
             if "error" in reply:
+                # A failed call can still be billed, and its step committed that cost.
+                cost_cents += Decimal(str(reply.get("cost_cents", "0")))
                 return self._outcome(f"The model call failed: {reply['error']}", cost_cents, failed=True)
             cost_cents += Decimal(str(reply["cost_cents"]))
             calls = list(reply.get("tool_calls") or [])

@@ -93,6 +93,7 @@ class AutoSaddlerEngine:
             The best development-confirmed candidate upstream selected.
 
         Raises:
+            BudgetExhaustedError: When no evaluation is left before the child starts.
             ServiceError: When the child fails or stops with no result.
         """
         if (
@@ -103,6 +104,9 @@ class AutoSaddlerEngine:
             or ctx.list_files is None
         ):
             return run_native_engine(self.name, task, server, ctx)
+        # Upstream refuses an evaluation budget of 0, so a spent budget would fail as a crash.
+        if server.remaining <= 0:
+            raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
         seed = ctx.repo_seed
         payload = {
             "engine_id": self.name,
@@ -193,13 +197,16 @@ class AutoSaddlerEngine:
                 line = child.stdout.readline()
             finally:
                 watchdog.cancel()
+                # A watchdog that already started must finish its kill before the check below.
+                watchdog.join()
+            # The watchdog can fire just after a full line arrives. The child is then dead, so serving the line
+            # could commit a paid step whose reply nobody reads.
+            if silent.is_set():
+                raise ServiceError(
+                    f"The AutoSaddler runner sent no request for {_IDLE_SECONDS:g} seconds; see runner.log in "
+                    "the run folder."
+                )
             if not line:
-                # The watchdog can fire just after a full line arrives; only an empty read is its kill.
-                if silent.is_set():
-                    raise ServiceError(
-                        f"The AutoSaddler runner sent no request for {_IDLE_SECONDS:g} seconds; see runner.log in "
-                        "the run folder."
-                    )
                 raise ServiceError(_NO_RESULT)
             try:
                 request = json.loads(line)
@@ -288,13 +295,13 @@ def _model(ctx: EngineContext, request: dict[str, Any]) -> dict[str, Any]:
         request: The child's prompt and tool definitions.
 
     Returns:
-        The reply text, tool calls and cost in cents, or the failure that the step committed.
+        The reply text, tool calls and cost in cents, or the failure and the cost that the step committed.
     """
     assert ctx.call_model is not None
     try:
         reply = ctx.call_model(request["prompt"], request.get("tools"))
     except ModelCallFailedError as error:
-        return {"error": f"{type(error).__name__}: {error}"}
+        return {"error": f"{type(error).__name__}: {error}", "cost_cents": str(error.cost_cents)}
     return {"text": reply.text, "tool_calls": reply.tool_calls, "cost_cents": str(reply.cost_cents)}
 
 

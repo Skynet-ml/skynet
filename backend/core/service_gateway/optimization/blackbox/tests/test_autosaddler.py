@@ -33,6 +33,7 @@ from core.service_gateway.optimization.blackbox import autosaddler, autosaddler_
 from core.service_gateway.optimization.blackbox.autosaddler import AutoSaddlerEngine
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import (
+    BudgetExhaustedError,
     EngineContext,
     EvalServer,
     ModelReply,
@@ -49,7 +50,7 @@ from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeEntry, TreeStore
 from core.storage.workspace_store import WorkspaceStore
 from core.worker.actors import User
-from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop
+from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop, ModelCallFailedError
 
 from .mocks import make_ctx
 
@@ -418,6 +419,9 @@ def _record_children(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[s
 def _no_native_box(*_: Any) -> Any:
     """Fail the test: the loop path must not ship the run to a native box.
 
+    Args:
+        *_: The native box's arguments; not used.
+
     Raises:
         AssertionError: Always.
     """
@@ -593,10 +597,39 @@ def test_a_killed_run_resumes_from_its_last_step(
     assert _steps(engine) == [(kind, 1) for kind in _KINDS[:3]] + [(kind, 2) for kind in _KINDS[3:]]
 
 
-def test_a_spent_budget_stops_the_child_with_its_seed(
+def test_a_spent_budget_fails_before_the_child_starts(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no evaluation left, the run stops as a spent budget and starts no child, as the native box does.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the child.
+    """
+    children = _record_children(monkeypatch)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    with pytest.raises(BudgetExhaustedError):
+        _session_engine(tmp_path).run(Task("seed"), loop.server(scorer, max_evals=0), loop.context())
+
+    assert not children
+    assert not _steps(engine)
+
+
+def test_an_evaluation_past_the_budget_gets_a_budget_stop(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With no evaluation left, the child hears a budget stop and the run keeps its seed.
+    """The child's evaluation after the last one gets a budget stop, and the run keeps its result.
 
     Args:
         owner: Alice and her budget generation.
@@ -606,12 +639,19 @@ def test_a_spent_budget_stops_the_child_with_its_seed(
         tmp_path: Pytest's temporary folder.
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
-    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+    request = json.dumps({"op": "evaluate", "candidate": "seed", "example": None, "candidate_id": 0})
+    script = (
+        "import json, sys\nsys.stdin.readline()\nreplies = []\n"
+        + f"print({request!r}, flush=True)\nreplies.append(json.loads(sys.stdin.readline()))\n" * 2
+        + 'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": {"replies": replies}}\n'
+        'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
+    )
 
-    result = _session_engine(tmp_path).run(Task("seed"), loop.server(scorer, max_evals=0), loop.context())
+    result = _runner(tmp_path, script).run(Task("seed"), loop.server(lambda *_: (1.0, {}), max_evals=1), loop.context())
 
-    assert (result.best_candidate, result.best_score, result.total_evals) == ("seed", None, 0)
-    assert result.metadata["stop_reason"] == "budget_reached"
+    first, second = result.metadata["replies"]
+    assert first["score"] == 1.0
+    assert second["stop_reason"] == "budget_reached"
 
 
 def test_a_failure_envelope_is_a_service_error(
@@ -909,6 +949,83 @@ def test_a_broken_or_silent_child_is_a_service_error_and_is_stopped(
         _runner(tmp_path, script).run(Task("seed"), loop.server(lambda *_: (1.0, {}), max_evals=1), loop.context())
 
     assert children[0].poll() is not None
+
+
+class _LateWatchdog:
+    """A watchdog that fires as the host cancels it: just after a full request line arrived."""
+
+    def __init__(self, _: float, function: Any, args: tuple[Any, ...]) -> None:
+        """Keep the kill to run at the cancel.
+
+        Args:
+            _: The silence limit; not used.
+            function: The kill.
+            args: The kill's arguments.
+        """
+        self.function = function
+        self.args = args
+
+    def start(self) -> None:
+        """Start nothing; the kill runs at the cancel."""
+
+    def cancel(self) -> None:
+        """Run the kill, as a timer that fired before the cancel would."""
+        self.function(*self.args)
+
+    def join(self) -> None:
+        """Return at once; the kill already ran."""
+
+
+def test_a_request_that_arrives_as_the_watchdog_fires_is_not_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the watchdog kills the child just after its request arrives, the host does not call the model.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Makes the watchdog fire late and records the child.
+    """
+    monkeypatch.setattr(autosaddler, "threading", SimpleNamespace(**{**vars(threading), "Timer": _LateWatchdog}))
+    children = _record_children(monkeypatch)
+    calls: list[Any] = []
+    request = json.dumps({"op": "model", "prompt": [{"role": "user", "content": "go"}], "tools": None})
+    script = f"import sys\nsys.stdin.readline()\nprint({request!r}, flush=True)\nsys.stdin.readline()\n"
+    ctx = make_ctx(
+        str(tmp_path),
+        call_model=lambda *args: calls.append(args) or ModelReply("x", Decimal(1), []),
+        run_command=lambda *_: None,
+        put_files=lambda *_: None,
+        read_file=lambda *_: None,
+        list_files=lambda *_: None,
+    )
+
+    with pytest.raises(ServiceError, match="sent no request"):
+        _runner(tmp_path, script).run(Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), ctx)
+
+    assert not calls
+    assert children[0].poll() is not None
+
+
+def test_a_failed_model_call_sends_its_committed_cost(tmp_path: Path) -> None:
+    """A model failure that the provider billed reaches the child with its cost.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def fail(*_: Any) -> ModelReply:
+        """Fail as a billed model call does.
+
+        Raises:
+            ModelCallFailedError: Always, with a cost of 3 cents.
+        """
+        raise ModelCallFailedError("ConnectionError", cost_cents=Decimal(3))
+
+    ctx = make_ctx(str(tmp_path), call_model=fail)
+
+    reply = autosaddler._model(ctx, {"prompt": [{"role": "user", "content": "go"}]})
+
+    assert reply == {"error": "ModelCallFailedError: The model call failed (ConnectionError).", "cost_cents": "3"}
 
 
 def test_a_child_that_does_not_exit_after_its_result_is_stopped(

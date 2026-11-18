@@ -480,7 +480,11 @@ def test_the_worker_engine_gets_the_same_long_session_timeouts_in_each_run(
 
 
 def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
-    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts."""
+    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     python = _upstream_python()
     if python is None:
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
@@ -560,7 +564,11 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
 
 
 def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> None:
-    """Run the pinned upstream loop with a non-Claude harness rendered into the workspace by upstream."""
+    """Run the pinned upstream loop with a non-Claude harness rendered into the workspace by upstream.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     python = _upstream_python()
     if python is None:
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
@@ -657,7 +665,11 @@ def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> 
 
 
 def test_runner_evolves_repository_versions_scored_by_the_parent(tmp_path: Path) -> None:
-    """Each version is a real checkout the agent edits; the parent scores its patch and the best comes back."""
+    """Each version is a real checkout the agent edits; the parent scores its patch and the best comes back.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     python = _upstream_python()
     if python is None:
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
@@ -1209,6 +1221,26 @@ def test_a_failed_model_step_or_the_turn_limit_fails_the_session(
     assert first["usage"][0]["provider_cost_unit"] is None
     assert "limit of 2" in second["text"]
     assert second["usage"][0]["status"] == "failed"
+
+
+def test_a_failed_model_step_keeps_its_committed_cost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A billed model failure adds its cost to the session's cost before the session fails.
+
+    Args:
+        tmp_path: The process folder.
+        monkeypatch: Replaces the upstream outcome types.
+    """
+    _plain_outcomes(monkeypatch)
+    channel, _ = _channel(
+        {"text": "", "cost_cents": "1", "tool_calls": [_call("list_files")]},
+        {"error": "ModelCallFailedError: ConnectionError", "cost_cents": "3"},
+    )
+
+    outcome = autosaddler_runner.StepTransport(channel, tmp_path, None, None).converse(tmp_path, "go")
+
+    assert outcome["usage"][0]["status"] == "failed"
+    assert outcome["usage"][0]["provider_cost"] == pytest.approx(0.04)
+    assert outcome["usage"][0]["provider_cost_unit"] == "usd"
 
 
 @pytest.mark.parametrize("path", ["../out.txt", "/etc/passwd/../../x/../../..", ".git/config", "a/../../b"])
