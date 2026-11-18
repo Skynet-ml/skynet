@@ -51,6 +51,8 @@ TEST_DB_URL = app_env("APP_TEST_DB_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 # Shared by the job store and notification test modules, so their xdist workers migrate APP_TEST_DB_URL one at a time.
 _MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-migrate.lock"
+# xdist runs the tests of this module on several workers at once, and claim_next_job claims any pending job.
+_JOBS_TEST_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-jobs.lock"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -149,6 +151,22 @@ def store() -> Iterator[RemoteDBJobStore]:
         yield s
     finally:
         s.engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _one_jobs_test_at_a_time() -> Iterator[None]:
+    """Run the tests of this module one at a time across xdist workers.
+
+    A claim in one test can take a job that another test seeded, and a resume
+    sets a claimed job back to pending, so the concurrent claimers saw foreign
+    and duplicate claims about 1 run in 3 (SKY-824).
+
+    Yields:
+        Nothing. The lock is held for the length of the test and its fixtures.
+    """
+    with _JOBS_TEST_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
 
 
 def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
