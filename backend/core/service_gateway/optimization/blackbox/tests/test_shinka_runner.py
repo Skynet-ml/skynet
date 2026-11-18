@@ -238,6 +238,7 @@ def test_model_names_route_through_the_gateway() -> None:
     assert (
         shinka_runner.local_model_name("m", "https://gw/v1?x=1", "VAR") == "local/m@https://gw/v1?x=1&api_key_env=VAR"
     )
+    assert shinka_runner.local_model_name("m", "https://gw/v1", None) == "local/m@https://gw/v1"
     with pytest.raises(ValueError):
         shinka_runner.local_model_name("user@model", "https://gw/v1", "VAR")
 
@@ -1259,6 +1260,38 @@ def test_upstreams_hung_evaluation_limit_does_not_follow_the_measured_times_on_t
         limits.add(shinka_runner.ShinkaEvolveRunner._get_evaluation_runtime_limit_seconds(runner))
 
     assert limits == {7 * 24 * 3600.0}
+
+
+def test_upstream_accepts_the_engine_loop_models_without_key_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run the pinned upstream's model check on the engine-loop config, in the child's environment.
+
+    The engine starts the child with no key variable, and upstream 0.0.7
+    refuses a model whose ``api_key_env`` names an unset variable.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Replaces the environment with the child's.
+    """
+    async_runner = pytest.importorskip("shinka.core.async_runner")
+    for name in list(os.environ):
+        monkeypatch.delenv(name)
+    # The variables ``ShinkaEvolveEngine._drive`` gives the child.
+    for name, value in {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "SHINKA_PRICING_MODE": "offline",
+    }.items():
+        monkeypatch.setenv(name, value)
+    config = shinka_runner.build_config(_payload(transport="stdio", timeout_seconds=60.0), str(tmp_path / "results"), 1)
+    evolution = shinka_runner.EvolutionConfig(**config["evolution"])
+
+    assert evolution.meta_llm_models
+    async_runner._validate_evo_config_model_env_access(evolution)
 
 
 def test_in_the_sandbox_an_evaluation_waits_for_the_runtime_reply_file(

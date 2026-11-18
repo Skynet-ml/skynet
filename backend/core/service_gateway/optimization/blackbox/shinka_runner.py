@@ -534,22 +534,24 @@ def generation_of(program_path: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def local_model_name(model: str, url: str, key_env: str) -> str:
+def local_model_name(model: str, url: str, key_env: str | None) -> str:
     """Name a gateway route the way upstream addresses an OpenAI-compatible endpoint.
 
     Args:
         model: Model name the gateway route serves.
         url: Gateway base URL, ending in ``/v1``.
-        key_env: Variable holding the route's token.
+        key_env: Variable holding the route's token, or ``None`` for a route with no token.
 
     Returns:
-        A ``local/<model>@<url>?api_key_env=<VAR>`` model name.
+        A ``local/<model>@<url>?api_key_env=<VAR>`` model name, or ``local/<model>@<url>`` without a token.
 
     Raises:
         ValueError: When the model name cannot be expressed in that form.
     """
     if "@" in model or not model:
         raise ValueError(f"The model name {model!r} cannot be routed through ShinkaEvolve.")
+    if key_env is None:
+        return f"local/{model}@{url}"
     separator = "&" if "?" in url else "?"
     return f"local/{model}@{url}{separator}api_key_env={key_env}"
 
@@ -622,11 +624,16 @@ def build_config(
     routes = list(payload.get("shinka_models") or [])
     if not routes:
         raise ValueError("ShinkaEvolve needs at least one optimization model.")
-    models = [local_model_name(str(route["model"]), str(route["url"]), str(route["key_env"])) for route in routes]
+    # On the engine loop the worker answers every model call, so the child gets
+    # no key, and upstream 0.0.7 refuses a model whose api_key_env variable is unset.
+    models = [
+        local_model_name(str(route["model"]), str(route["url"]), None if stepped else str(route["key_env"]))
+        for route in routes
+    ]
     meta_notes = bool(settings.get("meta_notes", True))
     meta_env = payload.get("shinka_meta_key_env")
     meta_model = (
-        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), str(meta_env))
+        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), None if stepped else str(meta_env))
         if meta_notes and meta_env
         else None
     )

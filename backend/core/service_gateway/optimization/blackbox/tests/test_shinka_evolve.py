@@ -90,10 +90,12 @@ _FAKE_UPSTREAM = {
     "shinka/core/runner.py": '''
         import asyncio
         import json
+        import os
         import sqlite3
         import subprocess
         import uuid
         from pathlib import Path
+        from urllib.parse import parse_qsl, urlparse
 
         from shinka.llm import llm as shinka_llm
 
@@ -110,6 +112,14 @@ _FAKE_UPSTREAM = {
             """Score the start, then one model-written version per generation, one at a time."""
 
             def __init__(self, evo_config, job_config, db_config, init_program_str, evaluate_str, **runner):
+                # Upstream 0.0.7 refuses a local model whose api_key_env variable is unset.
+                models = list(evo_config.llm_models)
+                if evo_config.meta_rec_interval and evo_config.meta_llm_models:
+                    models += evo_config.meta_llm_models
+                for model in models:
+                    for key, value in parse_qsl(urlparse(model.split("@", 1)[1]).query):
+                        if key == "api_key_env" and not os.getenv(value, "").strip():
+                            raise ValueError(f"The model {model} needs the unset variable {value}.")
                 self.evo = evo_config
                 self.python = job_config.python_executable
                 self.db_path = db_config.db_path
