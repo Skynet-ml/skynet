@@ -536,15 +536,22 @@ def _repo_reply(prompt: str | list[dict[str, Any]], tools: list[dict[str, Any]] 
     return ModelReply("", Decimal(1), [{"id": f"call-{n}", "name": "bash", "arguments": {"command": command}}])
 
 
+@pytest.mark.parametrize("every_case", [False, True])
 def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_lead(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    every_case: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
 ) -> None:
     """Each session edits the leader's tree; the tree it leaves, without the workspace, is one benchmarked version.
 
-    Iteration one's version is a metric error, so it shows no score and iteration two starts again from the seed.
-    Iteration two's version is the final pick (SKY-825).
+    Iteration one's version is a metric error, on one case or on every case. It shows as a candidate with no score,
+    and iteration two starts again from the seed. Iteration two's version is the final pick (SKY-825).
 
     Args:
+        every_case: Give the metric error on every case, so the version has no finite mean.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -568,7 +575,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
         return _repo_reply(prompt, tools)
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
-        """Score a version tree by the length of its ``a.py``, with a metric error on case ``b`` at a length of two.
+        """Score a version tree by the length of its ``a.py``, with a metric error at a length of two.
 
         Args:
             loop: The engine loop.
@@ -580,7 +587,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
         """
         assert loop.list_files(candidate, ".meta-harness") is None
         text = (loop.read_file(candidate, "a.py") or b"").decode()
-        value = None if len(text) == 2 and case == _CASES[1] else float(len(text))
+        value = None if len(text) == 2 and (every_case or case == _CASES[1]) else float(len(text))
         scored.append((candidate, text, value))
         return value, {}
 
@@ -594,7 +601,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
     assert [(text, value) for _, text, value in scored] == [
         ("a", 1.0),
         ("a", 1.0),
-        ("ax", 2.0),
+        ("ax", None if every_case else 2.0),
         ("ax", None),
         ("axx", 3.0),
         ("axx", 3.0),
@@ -1401,6 +1408,8 @@ def test_a_sweep_with_no_scored_case_lists_every_case_as_unscored(
 ) -> None:
     """As in the native runner, a sweep with no finite score keeps the unscored mean and lists every case.
 
+    The version still shows as a candidate, with no score (SKY-825).
+
     Args:
         owner: Alice and her budget generation.
         engine: The database.
@@ -1411,12 +1420,17 @@ def test_a_sweep_with_no_scored_case_lists_every_case_as_unscored(
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     scores = iter([math.nan, None])
     server = loop.server(lambda _loop, _candidate, _case: (next(scores), {}), max_evals=20)
-    adapter = meta_mod._UpstreamServer(server, list(_CASES), loop.context())
+    events: list[tuple[str, dict[str, Any]]] = []
+    ctx = loop.context(progress_callback=lambda kind, data: events.append((kind, data)))
+    adapter = meta_mod._UpstreamServer(server, list(_CASES), ctx)
 
     mean, info = adapter.evaluate_examples("seed")
+    adapter.log_progress(mean, "seed")
 
     assert mean == float("-inf")
     assert info[native_engines.UNSCORED_CASES_KEY] == ["0", "1"]
+    candidates = [(data["score"], data["per_example"]) for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert candidates == [(None, [])]
 
 
 def test_a_full_sweep_logs_its_start_as_the_native_runner_does(

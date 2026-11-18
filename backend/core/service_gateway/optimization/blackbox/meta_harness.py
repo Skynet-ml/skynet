@@ -302,7 +302,8 @@ class _UpstreamServer:
             The score, as the gepa.oa server returns it.
         """
         del reflection_cost
-        if isinstance(candidate, str) and math.isfinite(val_score):
+        # A version with a metric error on every case has no finite mean, but it still shows, with no score.
+        if isinstance(candidate, str) and (math.isfinite(val_score) or self.crashed(candidate)):
             # A version with a crashed case shows no score (SKY-350, SKY-367).
             shown = None if self.crashed(candidate) else val_score
             trial = self._register(candidate)

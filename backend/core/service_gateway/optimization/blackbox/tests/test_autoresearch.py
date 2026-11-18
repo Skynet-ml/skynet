@@ -865,15 +865,22 @@ def test_a_billed_failed_call_counts_in_the_proposer_cost_live_and_on_a_resume(
         assert live.metadata["rounds"] == replayed.metadata["rounds"] == 1
 
 
+@pytest.mark.parametrize("every_case", [False, True])
 def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_lead(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    every_case: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
 ) -> None:
     """Each round edits the leader's tree; the engine sweeps the tree it leaves, without the lab, as one version.
 
-    Round one's version is a metric error, so it shows no score and round two starts again from the seed. Round
-    two's version reaches the target and is the final pick (SKY-825).
+    Round one's version is a metric error, on one case or on every case. It shows as a candidate with no score, and
+    round two starts again from the seed. Round two's version reaches the target and is the final pick (SKY-825).
 
     Args:
+        every_case: Give the metric error on every case, so the version has no finite mean.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -883,7 +890,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
     scored: list[tuple[str, str, float | None]] = []
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
-        """Score a version tree by the length of its ``a.py``, with a metric error on case ``b`` at a length of two.
+        """Score a version tree by the length of its ``a.py``, with a metric error at a length of two.
 
         Args:
             loop: The engine loop.
@@ -895,7 +902,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
         """
         assert loop.list_files(candidate, ".autoresearch") is None
         text = (loop.read_file(candidate, "a.py") or b"").decode()
-        value = None if len(text) == 2 and case == _CASES[1] else float(len(text))
+        value = None if len(text) == 2 and (every_case or case == _CASES[1]) else float(len(text))
         scored.append((candidate, text, value))
         return value, {}
 
@@ -910,7 +917,7 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
     assert [(text, value) for _, text, value in scored] == [
         ("a", 1.0),
         ("a", 1.0),
-        ("ax", 2.0),
+        ("ax", None if every_case else 2.0),
         ("ax", None),
         ("axx", 3.0),
         ("axx", 3.0),
@@ -1425,6 +1432,44 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
     ]
     notes = [data["score"] for kind, data in events if kind == PROGRESS_MINIBATCH]
     assert notes == [5.0, 6.0]
+
+
+def test_a_version_with_a_metric_error_on_every_case_shows_with_no_score_and_is_not_the_pick(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one's version is a metric error on every case: it shows as a candidate with no score (SKY-825).
+
+    Round two's version scores, so it is the final pick.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Give round one's version a metric error on every case, and score any other by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: Not used.
+
+        Returns:
+            The score, or ``None`` for a metric error, and no side information.
+        """
+        del loop, case
+        return (None if candidate == "seedx" else float(len(str(candidate)))), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, max_evals=4, stop_at_score=None, score=score)
+
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [None, 6.0]
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
 
 
 def test_a_repeated_case_id_is_scored_once_and_the_mean_is_over_distinct_cases(

@@ -350,7 +350,8 @@ class _UpstreamServer:
         if candidate is not None:
             entry["candidate_id"] = self._register(candidate)
         self._progress_log.append(entry)
-        if isinstance(candidate, str) and math.isfinite(val_score):
+        # A version with a metric error on every case has no finite mean, but it still shows, with no score.
+        if isinstance(candidate, str) and (math.isfinite(val_score) or self.crashed(candidate)):
             sweep = self._sweeps.pop(candidate_key(candidate), [])
             # A version with a crashed case shows no score (SKY-350, SKY-367).
             shown = None if self.crashed(candidate) else val_score
