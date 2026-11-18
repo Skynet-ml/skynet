@@ -35,6 +35,7 @@ from core.service_gateway.optimization.blackbox.harness_bridge import hidden_has
 from core.service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     RepoSeed,
     Result,
@@ -2973,3 +2974,170 @@ def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
 
     assert first != second
     assert reads.count(sub) == 1
+
+
+class _Loads:
+    """Record the blob, object, pack-lookup and range loads of a capped read.
+
+    A test uses the record to show that a large file never loads and that a read finds its object once.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wrap the blob read, the step log's object read and pack lookup, and the object store's range read.
+
+        Args:
+            monkeypatch: Pytest's patcher; it undoes the wraps after the test.
+        """
+        self.blobs: list[str] = []
+        self.objects: list[str] = []
+        self.locations: list[str] = []
+        self.ranges: list[int | None] = []
+        get_blob, get_object, get = TreeStore.get_blob, StepLogStore.get_object, LocalObjectStore.get
+        locate = StepLogStore._object_location
+
+        def blob(store: TreeStore, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
+            """Record a blob that loads; a refused blob raises before the record.
+
+            Args:
+                store: The tree store.
+                run_id: The job that reads.
+                object_id: The blob's id.
+                max_bytes: The cap of the read.
+
+            Returns:
+                The blob's bytes.
+            """
+            data = get_blob(store, run_id, object_id, max_bytes)
+            self.blobs.append(object_id)
+            return data
+
+        def stored(store: StepLogStore, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
+            """Record an object that loads; a refused object raises before the record.
+
+            Args:
+                store: The step log.
+                run_id: The job that reads.
+                object_id: The object's id.
+                max_bytes: The cap of the read.
+
+            Returns:
+                The object's stored bytes.
+            """
+            data = get_object(store, run_id, object_id, max_bytes)
+            self.objects.append(object_id)
+            return data
+
+        def located(store: StepLogStore, run_id: str, object_id: str) -> tuple[str, int, int] | None:
+            """Record a pack lookup.
+
+            Args:
+                store: The step log.
+                run_id: The job that reads.
+                object_id: The object's id.
+
+            Returns:
+                The object's pack key, offset and length.
+            """
+            self.locations.append(object_id)
+            return locate(store, run_id, object_id)
+
+        def ranged(store: LocalObjectStore, key: str, offset: int = 0, length: int | None = None) -> bytes:
+            """Record the length of a range read.
+
+            Args:
+                store: The object store.
+                key: The pack key.
+                offset: The first byte.
+                length: The bytes to read; ``None`` reads to the end.
+
+            Returns:
+                The bytes of the range.
+            """
+            self.ranges.append(length)
+            return get(store, key, offset, length)
+
+        monkeypatch.setattr(TreeStore, "get_blob", blob)
+        monkeypatch.setattr(StepLogStore, "get_object", stored)
+        monkeypatch.setattr(StepLogStore, "_object_location", located)
+        monkeypatch.setattr(LocalObjectStore, "get", ranged)
+
+
+def test_a_capped_read_refuses_a_larger_file_before_it_loads_from_the_buffer_or_a_pack(
+    owner: tuple[User, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file above the cap never loads, before or after its flush; a resume on another worker gets the same answer.
+
+    Before the flush the file is in the buffer; after it, a second worker at the next generation reads the tree
+    from its pack, as a resume does. The step logs have a long window, so only the explicit flush writes. After
+    the flush, a capped read that passes the cap finds its object in one pack lookup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder; it holds the shared object store.
+        monkeypatch: Pytest's patcher, for the load records.
+    """
+    big = b"\0" * (1 << 20)
+    first_log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "worker-1", flush_window_seconds=60.0)
+    second_log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "worker-2", flush_window_seconds=60.0)
+    try:
+        first_trees = TreeStore(first_log)
+        tree = _store(first_trees, {"big.bin": big, "src/a.py": b"abcd"})
+        big_id = first_trees.put_blob(RUN_ID, big)
+        small_id = first_trees.put_blob(RUN_ID, b"abcd")
+        first, _, _ = _loop(owner, engine, first_log, first_trees, tmp_path, generation=1)
+        ctx = first.context()
+        assert ctx.read_file is not None
+        loads = _Loads(monkeypatch)
+
+        with pytest.raises(FileTooLargeError, match=f"^file big.bin has {len(big)} bytes, more than the cap of 4$"):
+            ctx.read_file(tree, "big.bin", max_bytes=4)
+        assert ctx.read_file(tree, "src/a.py", max_bytes=4) == b"abcd"
+        with pytest.raises(FileTooLargeError) as small:
+            ctx.read_file(tree, "src/a.py", max_bytes=3)
+        assert (small.value.size, small.value.max_bytes) == (4, 3)
+        assert big_id not in loads.blobs + loads.objects
+        assert loads.ranges == []
+
+        first_log.flush()
+        _new_generation(engine)
+        resumed, _, _ = _loop(owner, engine, second_log, TreeStore(second_log), tmp_path, generation=2)
+        with pytest.raises(FileTooLargeError) as again:
+            resumed.read_file(tree, "big.bin", max_bytes=len(big) - 1)
+        assert (again.value.size, again.value.max_bytes) == (len(big), len(big) - 1)
+        loads.locations.clear()
+        assert resumed.read_file(tree, "src/a.py", max_bytes=4) == b"abcd"
+        assert loads.locations.count(small_id) == 1
+        assert big_id not in loads.blobs + loads.objects
+        # The tree reads come from the pack, and none of them is as long as the large file.
+        assert loads.ranges
+        assert all(length is not None and length < len(big) for length in loads.ranges)
+        assert resumed.read_file(tree, "big.bin", max_bytes=len(big)) == big
+    finally:
+        first_log.close()
+        second_log.close()
+
+
+def test_a_capped_read_gives_none_for_a_hidden_missing_or_folder_path(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A capped read keeps the rules of a read: a hidden path gives ``None`` like a missing one, and tells no size.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log of the loop.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval"]))
+    tree = _store(trees, {"eval/metric.py": b"secret", "src/a.py": b"a", "empty.txt": b""})
+
+    for path in ["eval/metric.py", "eval", "missing.py", "src", "src/a.py/x"]:
+        assert loop.read_file(tree, path, max_bytes=0) is None
+    assert loop.read_file(tree, "empty.txt", max_bytes=0) == b""
+    with pytest.raises(FileTooLargeError):
+        loop.read_file(tree, "src/a.py", max_bytes=0)
+    assert loop.read_file(tree, "src/a.py") == b"a"
+    assert boxes.opened == 0
+    assert _steps(engine) == []
