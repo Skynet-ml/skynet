@@ -43,7 +43,7 @@ def upgrade() -> None:
         "agent_steps",
         sa.Column("step_id", sa.String(112), primary_key=True),
         # No foreign key: the job row is on the main database, so a job or account delete does not
-        # cascade to these rows. SKY-733 purges them on each shard (core/storage/tree_purge.py).
+        # cascade to these rows. The purge of shard rows comes with SKY-733 (tree retention and purge).
         sa.Column("run_id", sa.String(36), nullable=False),
         sa.Column("agent_id", sa.String(64), nullable=False),
         sa.Column("seq", sa.Integer(), nullable=False),
