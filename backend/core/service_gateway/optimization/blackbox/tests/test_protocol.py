@@ -12,6 +12,7 @@ from ..protocol import (
     METRIC_ERROR,
     NO_FEEDBACK_WARNING,
     RUN_FAILED_STATUS,
+    STATUS_KEY,
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
@@ -26,6 +27,7 @@ from ..protocol import (
     warn_once_without_feedback,
 )
 from ..runner import normalize_score
+from ..scorer import normalize_score as scorer_normalize_score
 from .mocks import vowel_scorer
 
 
@@ -270,6 +272,46 @@ def test_scorer_abort_is_not_floored() -> None:
 
     with pytest.raises(ScorerAbortError, match="harness is dead"):
         server.evaluate("anything")
+
+
+def _wrong_form_after_good(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Score "good" with a valid answer; read every other version's bare number as a wrong answer form.
+
+    Args:
+        candidate: The version.
+        case: Ignored.
+
+    Returns:
+        The checked answer.
+
+    Raises:
+        ServiceError: For every version other than "good".
+    """
+    return scorer_normalize_score({"score": 1.0} if candidate == "good" else 0.5)
+
+
+def test_a_wrong_answer_form_before_any_score_stops_the_run() -> None:
+    """The first answer has a wrong form, so the run stops instead of spending its budget on errors (SKY-769)."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    with pytest.raises(ScorerAbortError, match=r"bare number\. Return one object"):
+        server.evaluate("bad")
+
+    assert server.used == 1
+
+
+def test_a_wrong_answer_form_after_a_score_is_one_versions_metric_error() -> None:
+    """After a version has a score, a wrong answer form gives that version a metric error, and the run goes on."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    good = server.lane(2).evaluate("good")
+    score, side_info = server.evaluate("bad")
+
+    assert good[0] == 1.0
+    assert score is None
+    assert side_info[STATUS_KEY] == METRIC_ERROR
+    assert "bare number" in side_info["error"]
+    assert server.used == 2
 
 
 def _scores_without_feedback(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:

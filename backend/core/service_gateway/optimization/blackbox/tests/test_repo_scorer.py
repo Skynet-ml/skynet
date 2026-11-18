@@ -178,7 +178,6 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
     improved = scorer.score(_patch(root / "v1", archive, {"src/app.py": "x = 7\n"}), {"id": 3})
     assert improved["score"] == pytest.approx(0.7)
     assert json.loads(improved["feedback"])["case"] == {"id": 3}
-    assert "cases" not in improved
     assert improved["scores"] == {
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
@@ -869,6 +868,60 @@ def test_a_score_that_is_not_a_number_gets_a_fixed_422(tmp_path: Path, score: An
         reply = scorer.dispatch({"candidate": ""})
         assert reply.status == 422
         assert reply.body.decode() == "The scorer returned a score that is not a number."
+    finally:
+        scorer.close()
+
+
+def test_a_metric_answer_with_cases_is_refused_with_the_key_that_replaced_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The older ``cases`` key is an error that names ``scores``, so the version has no score (SKY-769).
+
+    Args:
+        tmp_path: Scratch folder.
+        caplog: The test's log capture.
+    """
+    scorer = _leaky(
+        tmp_path,
+        "def score(repo_path):\n    return {'score': 1.0, 'cases': {'a': {'score': 1.0}}}\n",
+    )
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="raised an error"):
+            scorer.score("")
+        assert "unknown key `cases`. Use `scores`." in caplog.text
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(
+    "side_info",
+    [{"feedback": "ok", "status": "run_failed"}, {"feedback": "ok", "illegal_approach": True}],
+    ids=["status", "illegal_approach"],
+)
+def test_the_parent_refuses_a_metric_box_answer_with_a_key_the_answer_form_does_not_have(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, side_info: dict[str, Any]
+) -> None:
+    """The parent checks the metric box's answer again, so a forged key gives no score (SKY-769).
+
+    The runner checks the answer, so the code rewrites the output file after the runner writes it.
+
+    Args:
+        tmp_path: Scratch folder.
+        caplog: The test's log capture.
+        side_info: The forged side info.
+    """
+    forged = json.dumps({"score": 0.5, "side_info": side_info, "error": None})
+    scorer = _leaky(
+        tmp_path,
+        "import atexit, os, sys\n"
+        f"atexit.register(lambda: open(os.path.join(sys.argv[1], 'output.json'), 'w').write({forged!r}))\n"
+        "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="does not have the valid form"):
+            scorer.score("")
+        key = next(key for key in side_info if key != "feedback")
+        assert f"unknown key `{key}`" in caplog.text
     finally:
         scorer.close()
 

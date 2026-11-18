@@ -2457,6 +2457,58 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
         service_mod._raise_if_every_run_failed(run, "starting point")
 
 
+class _FailedRunRelay:
+    """Stand in for the parent relay: the repository scorer reports a failed ``[run]`` entry on every case."""
+
+    def __init__(self, route: dict[str, str], *, timeout_seconds: float, label: str) -> None:
+        """Accept the relay's arguments.
+
+        Args:
+            route: The parent-issued capability.
+            timeout_seconds: The request timeout.
+            label: Names the scorer in failure messages.
+        """
+
+    def __call__(self, candidate: Candidate, case: Any = None) -> dict[str, Any]:
+        """Return the repository scorer's reply for a failed run.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            A reply with no score and the ``run_failed`` status.
+        """
+        return {"score": None, "feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_a_repository_run_trusts_the_failed_run_status_of_its_scorer(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository run reads its own scorer's ``run_failed`` reply as a failed run, not a wrong answer (SKY-769).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Sets the relay, the engine path and the winner strategy.
+    """
+    _winner_strategy(monkeypatch)
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
+    payload = _payload(
+        max_cost_cents=100, target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}}
+    )
+
+    with pytest.raises(ServiceError, match=r"starting point failed on every case \(1 of 1\).*\(1 of 1\): x$"):
+        run_blackbox_optimization(
+            payload,
+            artifact_id="job-trusted-reply",
+            gepa_log_dir_path=str(tmp_path),
+            evaluator_route={"token": "route"},
+            repo_snapshot={"chunks": ["chunk"]},
+        )
+
+
 def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:
     """One metric_error case nulls the version's final score and named scores, and the log shows the error."""
 

@@ -23,6 +23,7 @@ from gepa.oa.budget import BudgetExhausted
 from ....billing.usage_tags import usage_scope
 from ..cost_ceiling import CostCeilingExceededError
 from ..timing import STAGE_TRAINING
+from .runner import ANSWER_FORM
 
 if TYPE_CHECKING:
     from ....sandbox.grants import Grant
@@ -576,6 +577,8 @@ class EvalServer:
         self._on_eval = on_eval
         self.used = 0
         self._records: dict[str, CandidateRecord] = {}
+        # Set on the root at the first score: after it, a wrong answer is one version's error.
+        self._scored = False
         # Locks are only ever taken child → parent, so lanes cannot deadlock.
         self._lock = threading.Lock()
 
@@ -662,6 +665,8 @@ class EvalServer:
             side_info: What the scorer said about it.
         """
         root = self._root
+        if score is not None:
+            root._scored = True
         server: EvalServer | None = self
         while server is not None and candidate is not None:
             with server._lock:
@@ -700,13 +705,18 @@ class EvalServer:
             The score and side information, or ``(None, {"error": ..., "status": "metric_error"})``.
 
         Raises:
-            ScorerAbortError: When the scorer asks to stop the run.
+            ScorerAbortError: When the scorer asks to stop the run, or the
+                metric answer has a wrong form before any version has a score.
         """
         try:
             score, side_info = self._scorer(candidate, example)
         except (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError):
             raise
         except Exception as exc:
+            # A wrong answer form usually comes on every version, so going on
+            # spends the whole budget on errors. After a score, it is one version's error.
+            if ANSWER_FORM in str(exc) and not self._scored:
+                raise ScorerAbortError(str(exc)) from exc
             error = f"{type(exc).__name__}: {exc}"
             logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
             return None, {"error": error, STATUS_KEY: METRIC_ERROR}

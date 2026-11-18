@@ -570,11 +570,19 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
-        side_info = dict(output.get("side_info") or {})
-        # SKY-221: only a crashed [run] entry above sets this status, so the
-        # metric's own ``status`` key cannot mark a scored case as a failure.
-        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
-            del side_info[STATUS_KEY]
+        side_info = output.get("side_info") or {}
+        # The metric box runs the version's code, so the parent checks the
+        # answer again: only a crashed [run] entry above adds ``status`` (SKY-221).
+        try:
+            if not isinstance(side_info, dict):
+                raise runner.ScorerError(f"The side info is {type(side_info).__name__}, not an object.")
+            score, side_info = runner.normalize_score({**side_info, "score": score}, own_keys=False)
+        except runner.ScorerError as exc:
+            # The error text can name keys that the version's code sets (SKY-353).
+            logger.warning("Repository scorer answer refused: %s", exc)
+            raise RepoScoreError(
+                "The scorer answer does not have the valid form, so the version has no score."
+            ) from None
         return {**side_info, "score": score}
 
     def _run_candidate(

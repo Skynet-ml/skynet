@@ -32,7 +32,9 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from .. import scorer as scorer_mod
 from ..preflight import verify_anything_in_sandbox
+from ..protocol import RUN_FAILED_STATUS
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
@@ -493,6 +495,55 @@ def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     assert check["status"] == "failed"
     assert "The scorer raised an error" in check["message"]
     assert "evaluator_readiness" not in result
+
+
+class _FailedRunRelay:
+    """Stand in for the parent relay: the repository scorer reports a failed ``[run]`` entry."""
+
+    def __init__(self, route: dict[str, str], *, timeout_seconds: float, label: str) -> None:
+        """Accept the relay's arguments.
+
+        Args:
+            route: The parent-issued capability.
+            timeout_seconds: The request timeout.
+            label: Names the scorer in failure messages.
+        """
+
+    def __call__(self, candidate: Any, case: Any = None) -> dict[str, Any]:
+        """Return the repository scorer's reply for a failed run.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            A reply with no score and the ``run_failed`` status.
+        """
+        return {"score": None, "feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_the_setup_check_trusts_the_failed_run_status_of_the_repository_scorer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup check reads its own scorer's ``run_failed`` reply as a failed run, not a wrong answer (SKY-769).
+
+    Args:
+        monkeypatch: Sets the relay.
+    """
+    monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
+    payload = {
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return {'score': 1.0}\n"},
+        "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
+        "cases": [{"input": "x"}],
+        "_skynet_evaluator_route": {"token": "route"},
+    }
+
+    result = verify_anything_in_sandbox(
+        payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
+    )
+
+    assert result["scorer_result"]["score"] is None
+    assert result["scorer_result"]["side_info"] == {"feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
 
 
 def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:
