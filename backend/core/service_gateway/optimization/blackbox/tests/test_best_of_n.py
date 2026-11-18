@@ -954,6 +954,19 @@ def test_a_diff_that_ends_with_empty_context_lines_still_applies_after_upstream_
     assert _as_patch(diff) == diff
 
 
+@pytest.mark.parametrize(("count", "padding"), [("17", 16), ("18", 0), ("999999999", 0), ("9999999999999", 0)])
+def test_a_hunk_header_with_a_huge_count_gets_no_padding(count: str, padding: int) -> None:
+    """The model writes the hunk header, so a count past what the strip can drop adds no line.
+
+    Args:
+        count: The old and new line count that the hunk header claims.
+        padding: How many empty lines the patch may get back after its final newline.
+    """
+    sample = f"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,{count} +1,{count} @@\n a"
+
+    assert _as_patch(sample) == sample + "\n" + "\n" * padding
+
+
 def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

@@ -37,7 +37,10 @@ _BRIEF_MAX_READS = 256
 # token the encoder writes decodes; a longer run splits into several tokens.
 _ESCAPE = re.compile("<<|`{3,9999}")
 _UNESCAPE = re.compile(r"<<<<|<<(\d{1,4}) backticks>>")
-_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", re.MULTILINE)
+# The model writes the hunk header, so its counts are untrusted: the digits are
+# bounded, and a gap larger than a few stripped lines gets no padding at all.
+_HUNK_HEADER = re.compile(r"^@@ -\d{1,9}(?:,(\d{1,9}))? \+\d{1,9}(?:,(\d{1,9}))? @@", re.MULTILINE)
+_MAX_STRIPPED_LINES = 16
 
 
 class _SampleStream:
@@ -350,7 +353,8 @@ def _stripped_context_lines(patch: str) -> int:
 
     Returns:
         How many lines the last hunk lacks against its header, when only empty context lines can explain the
-        gap; otherwise ``0``, so a complete or malformed diff stays as it is.
+        gap and the gap is at most :data:`_MAX_STRIPPED_LINES`; otherwise ``0``, so a complete, malformed or
+        hostile diff stays as it is.
     """
     headers = list(_HUNK_HEADER.finditer(patch))
     if not headers:
@@ -371,7 +375,7 @@ def _stripped_context_lines(patch: str) -> int:
             new_missing -= 1
         else:
             return 0
-    return old_missing if old_missing == new_missing and old_missing > 0 else 0
+    return old_missing if old_missing == new_missing and 0 < old_missing <= _MAX_STRIPPED_LINES else 0
 
 
 def _unescape_backticks(text: str) -> str:
