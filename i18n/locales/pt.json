@@ -250,6 +250,7 @@
     "notifier.title.failed": "Otimização falhada",
     "notifier.title.new": "Nova otimização",
     "optimization.already_terminal": "A otimização já está no estado terminal '{status}'.",
+    "optimization.cancel_conflict": "A otimização mudou de estado durante o cancelamento. Está agora no estado '{status}'. Tente cancelá-la novamente.",
     "optimization.cannot_delete": "Não é possível eliminar uma otimização no estado '{status}'. Cancele-a primeiro.",
     "optimization.cannot_resubmit_payload": "Não é possível voltar a submeter o payload guardado: {error}",
     "optimization.clone_no_payload": "A otimização de origem não tem nenhum payload guardado para clonar.",

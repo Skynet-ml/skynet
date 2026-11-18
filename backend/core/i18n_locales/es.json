@@ -250,6 +250,7 @@
     "notifier.title.failed": "La optimización falló",
     "notifier.title.new": "Nueva optimización",
     "optimization.already_terminal": "La optimización ya está en el estado terminal '{status}'.",
+    "optimization.cancel_conflict": "La optimización cambió de estado durante la cancelación. Ahora está en '{status}'. Intenta cancelarla de nuevo.",
     "optimization.cannot_delete": "No se puede eliminar una optimización en estado '{status}'. Cancélala primero.",
     "optimization.cannot_resubmit_payload": "No se puede reenviar la carga útil guardada: {error}",
     "optimization.clone_no_payload": "La optimización de origen no tiene ninguna carga útil guardada para clonar.",

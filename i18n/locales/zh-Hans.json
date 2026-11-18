@@ -250,6 +250,7 @@
     "notifier.title.failed": "优化失败",
     "notifier.title.new": "新优化",
     "optimization.already_terminal": "优化已处于终止状态 '{status}'。",
+    "optimization.cancel_conflict": "取消期间优化的状态发生了变化。它现在处于 '{status}' 状态。请再次尝试取消。",
     "optimization.cannot_delete": "无法删除处于 '{status}' 状态的优化。请先取消它。",
     "optimization.cannot_resubmit_payload": "无法重新提交已保存的载荷：{error}",
     "optimization.clone_no_payload": "源优化没有可克隆的已保存载荷。",

@@ -250,6 +250,7 @@
     "notifier.title.failed": "Optimierung fehlgeschlagen",
     "notifier.title.new": "Neue Optimierung",
     "optimization.already_terminal": "Die Optimierung befindet sich bereits im Endzustand '{status}'.",
+    "optimization.cancel_conflict": "Die Optimierung hat ihren Zustand während des Abbruchs geändert. Sie ist jetzt im Zustand '{status}'. Versuchen Sie erneut, sie abzubrechen.",
     "optimization.cannot_delete": "Eine Optimierung im Zustand '{status}' kann nicht gelöscht werden. Brechen Sie sie zuerst ab.",
     "optimization.cannot_resubmit_payload": "Die gespeicherte Nutzlast kann nicht erneut übermittelt werden: {error}",
     "optimization.clone_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast zum Klonen.",

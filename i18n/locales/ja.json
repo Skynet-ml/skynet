@@ -250,6 +250,7 @@
     "notifier.title.failed": "最適化が失敗しました",
     "notifier.title.new": "新規最適化",
     "optimization.already_terminal": "最適化はすでに終了状態 '{status}' です。",
+    "optimization.cancel_conflict": "キャンセル中に最適化の状態が変わりました。現在の状態は '{status}' です。もう一度キャンセルしてください。",
     "optimization.cannot_delete": "状態 '{status}' の最適化は削除できません。先にキャンセルしてください。",
     "optimization.cannot_resubmit_payload": "保存されたペイロードを再送信できません: {error}",
     "optimization.clone_no_payload": "複製元の最適化に、複製できる保存済みペイロードがありません。",

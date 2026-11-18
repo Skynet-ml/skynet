@@ -27,6 +27,7 @@ from sqlalchemy.pool import NullPool
 
 import core.storage.remote as remote_mod
 from core.api.auth import AuthenticatedUser, get_authenticated_user
+from core.api.errors import DomainError
 from core.api.routers.optimizations.lifecycle import cancel_optimization, register_lifecycle_routes
 from core.billing.budgets import BudgetService
 from core.config import app_env
@@ -1208,3 +1209,140 @@ def test_a_cancel_that_misses_both_writes_reads_the_run_again_and_cancels_it(
     assert store.get_job(RUN)["status"] == "cancelled"
     assert store.claim_next_job("pod-b", 60.0) is None
     assert _budget(store).reserved_cents == 0
+
+
+def _miss_writes(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch, misses: int, before_first: Any = None
+) -> list[tuple[str, ...]]:
+    """Make the cancel's first writes miss without a change to the row, as lost races would.
+
+    Args:
+        store: The job store.
+        monkeypatch: Pytest's monkeypatch.
+        misses: How many writes miss; the later writes run for real.
+        before_first: Optional call that changes the row before the first write.
+
+    Returns:
+        The expected statuses of each write, in call order.
+    """
+    write = store.update_job_if_status
+    calls: list[tuple[str, ...]] = []
+
+    def miss(*args: Any, **kwargs: Any) -> bool:
+        """Record the write, and miss it while ``misses`` allows.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        calls.append(args[1])
+        # A retry with no end would hang the test, so fail it at once.
+        assert len(calls) <= 20, "the cancel retries without end"
+        if len(calls) == 1 and before_first is not None:
+            before_first()
+        if len(calls) <= misses:
+            return False
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", miss)
+    return calls
+
+
+def _lifecycle_client(store: StepJobStore) -> TestClient:
+    """Return a client of the lifecycle routes, signed in as the run's owner.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The client.
+    """
+    # The single route reads the owner from the payload, the bulk route from the overview.
+    store.update_job(
+        RUN,
+        payload={**store.get_job(RUN)["payload"], "username": "owner"},
+        payload_overview={"username": "owner"},
+    )
+    router = APIRouter()
+    register_lifecycle_routes(router, job_store=store, get_worker_ref=lambda: None)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_authenticated_user] = lambda: OWNER
+    return TestClient(app)
+
+
+def test_a_cancel_that_misses_every_try_stops_and_keeps_the_holds(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that moves on every try gets three tries of two writes, a retryable 409, and keeps its holds."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    calls = _miss_writes(store, monkeypatch, misses=10**9)
+
+    with pytest.raises(DomainError) as raised:
+        _cancel(store)
+
+    assert len(calls) == 6
+    assert (raised.value.status_code, raised.value.code) == (409, "optimization.cancel_conflict")
+    assert raised.value.params == {"status": "running"}
+    assert store.get_job(RUN)["status"] == "running"
+    assert _budget(store).reserved_cents == 5
+
+
+def test_a_cancel_retry_writes_the_status_it_read_again_first(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After both writes miss on a ``paused`` read, the retry uses the status it reads again, not the first one."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = _miss_writes(store, monkeypatch, misses=2, before_first=store._wake_waiting_runs)
+
+    response = _cancel(store)
+
+    assert response.status == "cancelled"
+    assert calls == [("paused",), ("pending", "validating", "running"), ("pending", "validating", "running")]
+    assert store.get_job(RUN)["status"] == "cancelled"
+
+
+def test_a_cancel_stops_retrying_when_the_run_ends(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the read after the missed writes shows a terminal run, the cancel stops and reports that status."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    calls = _miss_writes(store, monkeypatch, misses=10**9, before_first=lambda: _set_job(store, status="success"))
+
+    with pytest.raises(DomainError) as raised:
+        _cancel(store)
+
+    assert len(calls) == 2
+    assert (raised.value.status_code, raised.value.code) == (409, "optimization.already_terminal")
+    assert raised.value.params == {"status": "success"}
+
+
+@pytest.mark.parametrize("route", ["single", "bulk"])
+@pytest.mark.parametrize(
+    ("final_status", "code"),
+    [("running", "optimization.cancel_conflict"), ("success", "optimization.already_terminal")],
+)
+def test_the_cancel_routes_report_a_missed_cancel_by_the_status_now(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch, route: str, final_status: str, code: str
+) -> None:
+    """Both cancel routes call a missed cancel terminal only when the run is terminal now."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    client = _lifecycle_client(store)
+    _miss_writes(store, monkeypatch, misses=10**9, before_first=lambda: _set_job(store, status=final_status))
+    detail = DomainError(code, status=409, params={"status": final_status}).detail
+
+    if route == "single":
+        response = client.post(f"/optimizations/{RUN}/cancel")
+        assert (response.status_code, response.json()["detail"]) == (409, detail)
+    else:
+        response = client.post("/optimizations/bulk-cancel", json={"optimization_ids": [RUN]})
+        assert response.status_code == 200
+        assert response.json()["cancelled"] == []
+        assert response.json()["skipped"] == [{"optimization_id": RUN, "reason": f"error: {detail}"}]

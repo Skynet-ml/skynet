@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -50,12 +52,15 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     assert store.get_job("protected-cancel")["status"] == "cancelled"
 
 
-def test_cancel_succeeds_when_the_budget_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed release of the unstarted holds does not turn a cancelled run into a route error."""
+def test_cancel_succeeds_when_the_budget_release_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed release of the unstarted holds does not turn a cancelled run into a route error, and logs one error."""
     store = _BaseFakeJobStore()
-    for run_id in ("single-run", "bulk-run"):
+    budgets = {"single-run": "budget-a", "bulk-run": "budget-b"}
+    for run_id, budget_id in budgets.items():
         store.seed_job(run_id, status="running", username="alice")
-        store.update_job(run_id, execution_budget_id="budget")
+        store.update_job(run_id, execution_budget_id=budget_id)
     store.engine = object()
 
     class Budgets:
@@ -88,6 +93,7 @@ def test_cancel_succeeds_when_the_budget_release_fails(monkeypatch: pytest.Monke
     app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
     bypass_auth(app)
     client = TestClient(app)
+    caplog.set_level(logging.ERROR, logger=lifecycle.__name__)
 
     single = client.post("/optimizations/single-run/cancel")
     bulk = client.post("/optimizations/bulk-cancel", json={"optimization_ids": ["bulk-run"]})
@@ -96,6 +102,15 @@ def test_cancel_succeeds_when_the_budget_release_fails(monkeypatch: pytest.Monke
     assert single.json()["status"] == "cancelled"
     assert bulk.status_code == 200
     assert bulk.json()["cancelled"] == ["bulk-run"]
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "core.api.routers.optimizations.lifecycle" and record.levelno == logging.ERROR
+    ]
+    assert len(errors) == 2
+    for message, (run_id, budget_id) in zip(errors, budgets.items(), strict=True):
+        assert run_id in message
+        assert budget_id in message
     assert bulk.json()["skipped"] == []
     assert store.get_job("single-run")["status"] == "cancelled"
     assert store.get_job("bulk-run")["status"] == "cancelled"

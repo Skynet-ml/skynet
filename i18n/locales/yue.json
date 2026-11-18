@@ -240,6 +240,7 @@
     "notifier.title.failed": "優化失敗",
     "notifier.title.new": "新嘅優化",
     "optimization.already_terminal": "優化已經處於終止狀態「{status}」。",
+    "optimization.cancel_conflict": "取消期間優化嘅狀態改變咗。佢而家處於「{status}」狀態。請再試一次取消。",
     "optimization.cannot_delete": "無法刪除處於「{status}」狀態嘅優化。請先取消佢。",
     "optimization.cannot_resubmit_payload": "無法重新提交已儲存嘅 payload：{error}",
     "optimization.clone_no_payload": "來源優化冇已儲存嘅 payload 可以複製。",

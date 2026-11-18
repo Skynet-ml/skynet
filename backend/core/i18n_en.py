@@ -211,6 +211,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "hosted_link.linked_unknown_account": "your account",
     "notifier.body.stuck": "No improvement over the last {percent}% of the optimization's evaluation budget.",
     "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
+    "optimization.cancel_conflict": (
+        "The optimization changed its state during the cancel. It is now in '{status}'. Try to cancel it again."
+    ),
     "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",
     "optimization.cannot_resubmit_payload": "Cannot resubmit the saved payload: {error}",
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",

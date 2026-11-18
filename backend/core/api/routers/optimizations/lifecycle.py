@@ -158,8 +158,32 @@ def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: 
                 expected_generation=int(job.get("execution_budget_generation") or 0),
             )
         except Exception:  # isolation boundary: the run is already cancelled, so the cancel still succeeds
-            logger.exception("Optimization %s: could not free the budget holds of the cancelled run", optimization_id)
+            logger.exception(
+                "Optimization %s: could not free the holds of budget %s after the cancel",
+                optimization_id,
+                job["execution_budget_id"],
+            )
     return cancelled
+
+
+def _cancel_miss_error(job_store: Any, optimization_id: str) -> DomainError:
+    """Build the 409 for a cancel whose writes all missed, from the row's status now.
+
+    After ``_CANCEL_TRIES`` misses the row can still be active, because each try
+    lost a race to a live owner. Only a terminal row gets ``already_terminal``;
+    an active row gets a conflict that tells the user to cancel again.
+
+    Args:
+        job_store: The active job store.
+        optimization_id: ID of the run that the cancel missed.
+
+    Returns:
+        The error to raise.
+    """
+    current = status_to_job_status(job_store.get_job(optimization_id).get("status", "pending"))
+    if current in TERMINAL_STATUSES and current != OptimizationStatus.paused:
+        return DomainError("optimization.already_terminal", status=409, params={"status": current.value})
+    return DomainError("optimization.cancel_conflict", status=409, params={"status": current.value})
 
 
 def _is_judge_session(job_store: Any, optimization_id: str, job: dict[str, Any]) -> bool:
@@ -236,8 +260,9 @@ def cancel_optimization(
 
     Raises:
         DomainError: 404 if unknown or inaccessible, 403 if the caller's
-            share role is below ``editor``, 409 if already terminal. A
-            ``paused`` run is not terminal here and can be cancelled.
+            share role is below ``editor``, 409 if already terminal, or 409
+            ``optimization.cancel_conflict`` if the run moved on every try.
+            A ``paused`` run is not terminal here and can be cancelled.
     """
     job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
 
@@ -257,10 +282,7 @@ def cancel_optimization(
         worker.cancel_job(optimization_id)
 
     if not _cancel_run(job_store, optimization_id, job_data, datetime.now(UTC).isoformat()):
-        # The worker reached a terminal status in the window after the
-        # pre-check above; reflect the row's actual status.
-        current = status_to_job_status(job_store.get_job(optimization_id).get("status", "pending"))
-        raise DomainError("optimization.already_terminal", status=409, params={"status": current.value})
+        raise _cancel_miss_error(job_store, optimization_id)
     logger.info("Optimization %s (%s) cancelled", optimization_id, status.value)
     return JobCancelResponse(optimization_id=optimization_id, status="cancelled")
 
@@ -442,7 +464,7 @@ def register_lifecycle_routes(
                     if worker:
                         worker.cancel_job(optimization_id)
                     if not _cancel_run(job_store, optimization_id, job, now):
-                        raise ValueError("The run has already reached a terminal state.")
+                        raise ValueError(_cancel_miss_error(job_store, optimization_id).detail)
                 except Exception as exc:
                     logger.exception("Bulk cancel failed for %s", optimization_id)
                     skipped.append(

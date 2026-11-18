@@ -250,6 +250,7 @@
     "notifier.title.failed": "فشل التحسين",
     "notifier.title.new": "تحسين جديد",
     "optimization.already_terminal": "التحسين في حالة نهائية بالفعل '{status}'.",
+    "optimization.cancel_conflict": "تغيّرت حالة التحسين أثناء الإلغاء. هو الآن في الحالة '{status}'. حاول إلغاءه مجددًا.",
     "optimization.cannot_delete": "لا يمكن حذف تحسين في الحالة '{status}'. ألغِه أولاً.",
     "optimization.cannot_resubmit_payload": "تعذّرت إعادة إرسال الحمولة المحفوظة: {error}",
     "optimization.clone_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لاستنساخها.",
