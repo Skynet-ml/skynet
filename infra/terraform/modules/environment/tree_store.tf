@@ -16,6 +16,7 @@ resource "aws_s3_bucket_public_access_block" "trees" {
   restrict_public_buckets = true
 }
 
+# The AWS-managed S3 key is enough here; a CMK adds cost and key admin.
 #trivy:ignore:AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "trees" {
   bucket = aws_s3_bucket.trees.id
@@ -25,6 +26,36 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "trees" {
       sse_algorithm = "AES256"
     }
   }
+}
+
+data "aws_iam_policy_document" "trees_bucket" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.trees.arn,
+      "${aws_s3_bucket.trees.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "trees" {
+  bucket = aws_s3_bucket.trees.id
+  policy = data.aws_iam_policy_document.trees_bucket.json
+
+  depends_on = [aws_s3_bucket_public_access_block.trees]
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "trees" {

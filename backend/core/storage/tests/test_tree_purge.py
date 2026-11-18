@@ -9,6 +9,7 @@ names one. The row lock tests need PostgreSQL.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -417,6 +418,156 @@ def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engin
     if engine.dialect.name == "postgresql":
         assert statements[0].endswith("FOR UPDATE")
         assert statements[first_pack_lock].endswith("FOR UPDATE")
+
+
+def _move_to_a_new_pack(engine: Engine, objects: LocalObjectStore, old: str) -> str:
+    """Move every row of a pack to a new pack and retire the old one, as a compactor merge commits it.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        old: The pack whose rows move.
+
+    Returns:
+        The new pack key.
+    """
+    new = f"{tree_compactor.COMPACTED_PREFIX}/{uuid4().hex}.pack"
+    objects.put(new, objects.get(old))
+    with Session(engine) as session:
+        session.add(StoragePackModel(pack_key=new, worker_id=tree_compactor.COMPACTOR_ID, byte_size=1))
+        for model in (AgentStepModel, TreeObjectModel):
+            session.execute(update(model).where(model.pack_key == old).values(pack_key=new))
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key == old).values(created_at=datetime.now(UTC))
+        )
+        session.commit()
+    return new
+
+
+def _purge_after_a_merge_moves_ada(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, list[tuple[list[str], int]], list[str]]:
+    """Purge ``ada`` while a merge moves the rows of her own pack to a new pack between the key read and the lock.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The pack keys.
+        monkeypatch: Pytest's monkeypatch.
+
+    Returns:
+        The new pack key, each pack lock call with the deletes run before it, and the deleted objects.
+    """
+    read = tree_purge._read_pack_keys
+    lock = tree_purge._lock_packs
+    moved: list[str] = []
+    locks: list[tuple[list[str], int]] = []
+    deletes: list[str] = []
+
+    def read_then_merge(session: Session, username: str, run_ids: list[str]) -> set[str]:
+        """Read the pack keys, then let a merge commit before the purge locks them.
+
+        Args:
+            session: The purge transaction.
+            username: The account.
+            run_ids: The account's runs.
+
+        Returns:
+            The keys as read before the merge.
+        """
+        keys = read(session, username, run_ids)
+        if not moved:
+            moved.append(_move_to_a_new_pack(engine, objects, packs["ada"]))
+        return keys
+
+    def record_lock(session: Session, keys: set[str]) -> None:
+        """Record the keys of each lock call and the deletes before it.
+
+        Args:
+            session: The purge transaction.
+            keys: The pack keys.
+        """
+        locks.append((sorted(keys), len(deletes)))
+        lock(session, keys)
+
+    def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        """Record each DELETE statement.
+
+        Args:
+            conn: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        if statement.lstrip().startswith("DELETE"):
+            deletes.append(statement)
+
+    monkeypatch.setattr(tree_purge, "_read_pack_keys", read_then_merge)
+    monkeypatch.setattr(tree_purge, "_lock_packs", record_lock)
+    deleted: list[str] = []
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        _purge(engine, deleted.extend)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return moved[0], locks, deleted
+
+
+def test_a_merge_between_the_key_read_and_the_lock_makes_the_purge_lock_the_union_in_order(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The purge finds the new pack after its lock, locks the union again in key order, and never locks after a delete."""
+    new, locks, deleted = _purge_after_a_merge_moves_ada(engine, objects, packs, monkeypatch)
+
+    assert locks == [
+        (sorted([packs["shared"], packs["ada"]]), 0),
+        (sorted([packs["shared"], packs["ada"], new]), 0),
+    ]
+    assert deleted == [new]
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
+
+
+def test_the_purge_keeps_a_pack_that_a_merge_retired(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pack that the purge locked but whose rows a merge moved away stays for the compactor's grace time."""
+    _, _, deleted = _purge_after_a_merge_moves_ada(engine, objects, packs, monkeypatch)
+
+    assert packs["ada"] not in deleted
+    assert packs["ada"] in objects.list("")
+    assert _marked(engine) == {packs["shared"]}
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"], packs["ada"]}
+
+
+def test_a_purge_whose_packs_keep_moving_fails_and_can_be_retried(
+    engine: Engine, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the keys change on each read, the purge gives up after a few tries and deletes nothing."""
+    read = tree_purge._read_pack_keys
+    before = _rows(engine, "ada", ADA_RUNS)
+    reads: list[int] = []
+
+    def read_a_new_key(session: Session, username: str, run_ids: list[str]) -> set[str]:
+        """Read the pack keys, plus one new key on each read, as if a merge committed before each read.
+
+        Args:
+            session: The purge transaction.
+            username: The account.
+            run_ids: The account's runs.
+
+        Returns:
+            The keys with one new key.
+        """
+        reads.append(len(reads))
+        return read(session, username, run_ids) | {f"{tree_compactor.COMPACTED_PREFIX}/{len(reads):04d}.pack"}
+
+    monkeypatch.setattr(tree_purge, "_read_pack_keys", read_a_new_key)
+
+    with pytest.raises(TreePurgeError, match="try again"):
+        _purge(engine, lambda keys: None)
+    assert len(reads) == tree_purge.PACK_LOCK_TRIES + 1
+    assert _rows(engine, "ada", ADA_RUNS) == before
 
 
 def test_an_open_purge_holds_the_account_job_and_pack_locks(engine: Engine, packs: dict[str, str]) -> None:

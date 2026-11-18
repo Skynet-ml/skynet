@@ -47,7 +47,9 @@ other accounts also use (:mod:`core.storage.tree_purge`). The purge sets
 ``needs_rewrite`` on such a pack. A marked pack is a candidate at any size and
 comes first, and a pass may rewrite it alone. The rewrite copies only the
 entries that rows still point at, so the deleted bytes go when the old pack is
-retired and deleted.
+retired and deleted. A marked pack with ``MAX_ROWS_PER_PASS`` rows or more
+moves in parts: each pass moves its first ``MAX_ROWS_PER_PASS - 1`` rows by
+offset, alone. The pack keeps its mark until its last row moves.
 """
 
 from __future__ import annotations
@@ -301,6 +303,15 @@ class TreeCompactor:
                     ).where(_OBJECTS.c.pack_key == key)
                 ).all()
                 rows = len(pack_steps) + len(pack_objects)
+                if rows and not keys and key in rewrite and rows >= MAX_ROWS_PER_PASS:
+                    # A marked pack never fits under the cap at this size, so it moves in parts, alone. Rows
+                    # still point at it, so it stays marked and is not retired until the last part moves.
+                    part = sorted([*pack_steps, *pack_objects], key=lambda row: row.pack_offset)
+                    part = part[: MAX_ROWS_PER_PASS - 1]
+                    keys.append(key)
+                    steps += [row for row in part if "step_id" in row._fields]
+                    tree_objects += [row for row in part if "step_id" not in row._fields]
+                    break
                 # No rows: another pass merged the pack, or a delete removed its rows, after the candidate read.
                 # A pack at the row cap is full.
                 if rows == 0 or rows >= MAX_ROWS_PER_PASS or row_count + rows > MAX_ROWS_PER_PASS:
@@ -354,6 +365,12 @@ class TreeCompactor:
         del pack
         if broken:
             self._mark_broken(broken)
+            if broken & rewrite:
+                logger.error(
+                    "Packs %s have needs_rewrite but are broken: they leave the candidates, and the bytes of a "
+                    "deleted account stay in them until someone repairs them",
+                    ", ".join(sorted(broken & rewrite)),
+                )
             keys = [key for key in keys if key not in broken]
             if not self._worth_a_pass(keys, rewrite):
                 return 0

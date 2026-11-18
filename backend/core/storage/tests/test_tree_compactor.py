@@ -1099,6 +1099,72 @@ def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine,
     assert objects.list(f"{COMPACTED_PREFIX}/") == [stuck]
 
 
+def _offsets_on(engine: Engine, pack_key: str) -> list[int]:
+    """Return the sorted offsets of the step and tree object rows that point at one pack.
+
+    Args:
+        engine: The test engine.
+        pack_key: The pack.
+
+    Returns:
+        The offsets.
+    """
+    with Session(engine) as session:
+        return sorted(
+            [
+                *session.scalars(select(AgentStepModel.pack_offset).where(AgentStepModel.pack_key == pack_key)),
+                *session.scalars(select(TreeObjectModel.pack_offset).where(TreeObjectModel.pack_key == pack_key)),
+            ]
+        )
+
+
+def test_a_marked_pack_over_the_row_cap_moves_in_parts_until_it_is_empty(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """A marked pack with more rows than the cap moves cap - 1 rows per pass, by offset, and stays marked until empty."""
+    written = _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    offsets = _offsets_on(engine, marked)
+    assert len(offsets) == 9
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 4)
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+
+    assert make_compactor().merge() == 1
+    assert _offsets_on(engine, marked) == offsets[3:]
+    with Session(engine) as session:
+        pack = session.get(StoragePackModel, marked)
+        assert pack.needs_rewrite
+        assert pack.byte_size != BROKEN_BYTE_SIZE
+    assert _pass(make_compactor) == (1, 0)
+    assert _offsets_on(engine, marked) == offsets[6:]
+
+    assert _pass(make_compactor) == (1, 0)
+    assert marked not in _pack_keys_of_rows(engine)
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert marked not in objects.list("")
+    _assert_all_readable(store, written)
+
+
+def test_a_marked_pack_that_breaks_logs_an_error(engine, objects, store, make_compactor, caplog) -> None:
+    """A marked pack with no object leaves the candidates with the deleted bytes, so the pass logs an error."""
+    _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    objects._path(marked).unlink()
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+
+    with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
+        assert make_compactor().merge() == 0
+
+    assert any(
+        record.levelno == logging.ERROR and "needs_rewrite" in record.getMessage() and marked in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, store, make_compactor, monkeypatch) -> None:
     """The oldest pack has no object; the pass keeps its rows on it, and the next pass merges the other two."""
     _fill(store)
