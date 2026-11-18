@@ -1,7 +1,7 @@
 """Add ``storage_packs.needs_rewrite`` (SKY-733).
 
 Revision ID: e3b7d1f5a9c2
-Revises: c4f1a7e9d2b6
+Revises: 1c02f9da1d9f
 
 A pack gets the mark when an entry in it has no row: an account deletion,
 a stale step, a duplicate, or an entry of a job that is gone. The compactor
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "e3b7d1f5a9c2"
-down_revision: str | Sequence[str] | None = "c4f1a7e9d2b6"
+down_revision: str | Sequence[str] | None = "1c02f9da1d9f"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
