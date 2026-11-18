@@ -1618,9 +1618,9 @@ def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
 
 @pytest.mark.parametrize(
     "arguments",
-    # json.loads accepts the escape of a lone surrogate, but UTF-8 cannot hold it; a set is no JSON value at all.
-    [json.loads('{"text": "\\ud800"}'), {"items": {1, 2}}],
-    ids=["lone-surrogate", "set"],
+    # A set is no JSON value at all. A lone surrogate is escaped before the check (SKY-821), so it is not here.
+    [{"items": {1, 2}}],
+    ids=["set"],
 )
 def test_a_reply_that_is_not_utf8_json_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
     owner: tuple[User, int],
@@ -1702,6 +1702,71 @@ def test_a_tool_only_reply_with_no_text_gives_an_empty_text_live_and_on_a_resume
     _new_generation(engine)
     resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_with_lone_surrogates_commits_and_the_run_goes_on_and_a_resume_replays_it(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lone surrogate is no UTF-8, so a reply that holds one must not stop the run at its commit (SKY-821).
+
+    Arguments that parse to a surrogate keep their raw text, so the engine refuses only that call. Surrogates in
+    the text, the tool name and arguments that a client already parsed become escapes.
+
+    Args:
+        monkeypatch: Replaces the loop's model with one that gives the bad reply first.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    calls = tool_calls_from_openai(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": '{"text":"\\ud800"}'}},
+                {"id": "call_b", "type": "function", "function": {"name": "ed\udfffit", "arguments": "{}"}},
+            ],
+        }
+    )
+
+    def bad(prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None) -> ModelReply:
+        """Give a reply with lone surrogates in its text and in a parsed argument key, then answer as the fake.
+
+        Args:
+            prompt: The prompt.
+            tools: The tool definitions.
+
+        Returns:
+            The bad reply for the first prompt; the fake model's reply after it.
+        """
+        if prompt != "improve seed":
+            return model(prompt, tools)
+        parsed: ToolCall = {"id": "call_c", "name": "edit", "arguments": {"k\ud83d": ["\udc00"]}}
+        return ModelReply("bad \ud800 text", Decimal(1), [*calls, parsed])
+
+    monkeypatch.setattr(first, "_model", bad)
+    reply = first.call_model("improve seed", _TOOLS)
+    after = first.call_model("go on", _TOOLS)
+
+    assert reply == ModelReply(
+        "bad \\ud800 text",
+        Decimal(1),
+        [
+            {"id": "call_a", "name": "edit", "arguments": '{"text":"\\ud800"}'},
+            {"id": "call_b", "name": "ed\\udfffit", "arguments": {}},
+            {"id": "call_c", "name": "edit", "arguments": '{"k\\ud83d": ["\\udc00"]}'},
+        ],
+    )
+    assert after.text == "onx"
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model"]
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed.call_model("go on", _TOOLS) == after
     assert resumed_model.prompts == []
 
 

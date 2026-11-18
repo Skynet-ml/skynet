@@ -148,6 +148,8 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    escape_surrogates,
+    safe_tool_call,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from ..service_gateway.optimization.blackbox.tree_sandbox import (
@@ -255,19 +257,16 @@ class ModelReplyNotJSONError(ValueError):
     """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
 
 
-def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
-    """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
+def _check_reply_depth(body: dict[str, Any]) -> None:
+    """Refuse a model step body that nests more than its bound, before any recursive work on it.
 
     The walk keeps its own stack, so no depth of reply can raise :class:`RecursionError` here.
 
     Args:
         body: The model step body that holds the reply; it is one level of depth.
-        cost_cents: The reply's reported cost, which :meth:`Agent.step` adds to the body as it commits.
 
     Raises:
         ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
-        ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
-        ModelReplyNotJSONError: When it holds a value that is not JSON, or a lone surrogate that UTF-8 cannot hold.
     """
     stack: list[tuple[Any, int]] = [(body, 1)]
     while stack:
@@ -281,6 +280,21 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
         if depth > _MAX_REPLY_DEPTH:
             raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
         stack.extend((child, depth + 1) for child in children)
+
+
+def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
+    """Refuse a model step body that nests or weighs more than its bounds.
+
+    Args:
+        body: The model step body that holds the reply; it is one level of depth.
+        cost_cents: The reply's reported cost, which :meth:`Agent.step` adds to the body as it commits.
+
+    Raises:
+        ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
+        ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
+        ModelReplyNotJSONError: When it holds a value that is not JSON, or a lone surrogate that UTF-8 cannot hold.
+    """
+    _check_reply_depth(body)
     # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
     # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
     cost = _ledger_cents(cost_cents)
@@ -576,7 +590,8 @@ class EngineLoop:
         Both shapes are flat and provider-neutral. A tool definition is ``{"name", "description",
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
         (:class:`ToolCall`), with ``arguments`` as a dict, or as raw text when it is not a JSON object. The
-        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`.
+        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`. The step stores each
+        lone surrogate of the reply as an escape, and arguments that hold one as their JSON text.
 
         Args:
             prompt: The prompt text or messages.
@@ -633,10 +648,15 @@ class EngineLoop:
                         cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
-                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
-                    if reply.tool_calls:
-                        body["tool_calls"] = reply.tool_calls
+                    # Model output is untrusted: a lone surrogate in it would fail the UTF-8 commit and stop the
+                    # run (SKY-821).
+                    body: dict[str, Any] = {"prompt_sha256": digest, "text": escape_surrogates(reply.text or "")}
                     try:
+                        if reply.tool_calls:
+                            body["tool_calls"] = reply.tool_calls
+                            # safe_tool_call recurses, so the depth bound runs first (SKY-817).
+                            _check_reply_depth(body)
+                            body["tool_calls"] = [safe_tool_call(call) for call in reply.tool_calls]
                         _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
                         failures.append(error)
