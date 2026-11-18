@@ -51,7 +51,7 @@ from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import SEQ_MAX, StepLogStore, step_id_for
-from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore, object_id_of
 from core.storage.workspace_store import WorkspaceStore
 from core.worker import engine_loop
 from core.worker.actors import LeaseExhaustedError, User
@@ -2779,7 +2779,9 @@ def test_finish_does_not_count_a_harness_capture_of_the_run(
     assert model.prompts == []
 
 
-@pytest.mark.parametrize("path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/"])
+@pytest.mark.parametrize(
+    "path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/", ".git/config", "a/.GIT/x", "a/.Git"]
+)
 def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     path: str,
     owner: tuple[User, int],
@@ -2792,7 +2794,7 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     """The tree store refuses a bad name only at its folder, so put_files checks each part before the first blob.
 
     Args:
-        path: A path with an empty, ``.`` or ``..`` part, or a NUL byte.
+        path: A path with an empty, ``.`` or ``..`` part, a ``.git`` part in any letter case, or a NUL byte.
     """
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     writes: list[Any] = []
@@ -2801,3 +2803,182 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     with pytest.raises(ValueError, match="bad tree entry name"):
         loop.put_files({"ok.txt": b"1", path: b"2"})
     assert writes == []
+
+
+def _put_raw_tree(trees: TreeStore, rows: list[list[str]]) -> str:
+    """Store a tree object without :func:`encode_tree`, as a tree stored before SKY-810 can be.
+
+    Args:
+        trees: The tree store.
+        rows: The ``[name, mode, object_id]`` entries, unchecked.
+
+    Returns:
+        The tree's object id.
+    """
+    stored = b"tree\0" + json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    object_id = object_id_of(stored)
+    trees._step_log.put_object(RUN_ID, object_id, stored)
+    return object_id
+
+
+def test_a_tree_stored_before_sky_810_loses_its_git_entries_on_a_rewrite(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The context and put_files write back a legacy tree without its ``.git`` entries, as other writers do."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    secret = trees.put_blob(RUN_ID, b"secret")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    raw = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["metric.py", "file", secret], ["sub", "tree", sub]]
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(raw, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    written = loop.put_files({"sub/b.py": b"b"}, raw)
+    assert written == _store(trees, {"README": b"seed", "metric.py": b"secret", "sub/a.py": b"seed", "sub/b.py": b"b"})
+
+
+def test_a_legacy_tree_with_only_git_entries_reads_as_a_tree_without_them(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Reads, listings and the context hide ``.git`` entries at any depth, as if the tree never held them.
+
+    The ``empty/`` folder holds only a ``.Git`` file, so it reads as an empty folder, not as a hidden one.
+    """
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob], ["x", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    empty = _put_raw_tree(trees, [[".Git", "file", blob]])
+    legacy = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["empty", "tree", empty], ["sub", "tree", sub]]
+    )
+    clean_sub = trees.put_tree(RUN_ID, [TreeEntry("a.py", "file", blob)])
+    clean = trees.put_tree(
+        RUN_ID,
+        [
+            TreeEntry("README", "file", blob),
+            TreeEntry("empty", "tree", trees.put_tree(RUN_ID, [])),
+            TreeEntry("sub", "tree", clean_sub),
+        ],
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(legacy, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == clean
+    assert loop.list_files(legacy) == ["README", "sub/a.py"]
+    for path in ["", "sub", "empty", ".GIT", ".git", "sub/.GIT", "empty/.Git"]:
+        assert loop.list_files(legacy, path) == loop.list_files(clean, path)
+    for path in ["README", "sub/a.py", "sub/.GIT/x", ".GIT/config", ".git/config", "empty/.Git"]:
+        assert loop.read_file(legacy, path) == loop.read_file(clean, path)
+    assert loop.read_file(legacy, "sub/.GIT/x") is None
+
+
+def test_a_legacy_folder_with_only_a_hidden_folder_and_git_lists_as_missing(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A folder that holds only a hidden folder and a ``.git`` file lists as missing, as without the ``.git``."""
+    hidden = hidden_hashes(["d/eval"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    evals = trees.put_tree(RUN_ID, [TreeEntry("score.py", "file", blob)])
+    folder = _put_raw_tree(trees, [[".git", "file", blob], ["eval", "tree", evals]])
+    tree = _put_raw_tree(trees, [["README", "file", blob], ["d", "tree", folder]])
+
+    assert loop.list_files(tree, "d") is None
+
+
+def test_a_symlink_below_a_legacy_git_entry_does_not_stop_the_loop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The link check skips a ``.git`` entry, as the box never gets it, so a link below it stops nothing."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    readme = trees.put_blob(RUN_ID, b"x")
+    git = _put_raw_tree(trees, [["l", "symlink", trees.put_blob(RUN_ID, b"/etc")]])
+    tree = _put_raw_tree(trees, [[".git", "tree", git], ["README", "file", readme]])
+
+    assert loop.read_file(tree, "README") == b"x"
+
+
+def test_put_files_drops_git_entries_from_folders_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """An unchanged folder of the base loses its ``.git`` entries too, so the id matches a base without them."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_drops_git_entries_two_levels_below_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A ``.git`` entry deep in an unchanged folder goes too, so the id matches a base without it."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["b.py", "file", blob]])
+    sub = _put_raw_tree(trees, [["a.py", "file", blob], ["x", "tree", x]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed", "sub/x/b.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_keeps_hidden_paths_in_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Dropping ``.git`` from an unchanged folder keeps its hidden files, which the proposer never wrote."""
+    hidden = hidden_hashes(["eval/x/answer.txt"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["answer.txt", "file", blob]])
+    evals = _put_raw_tree(trees, [["score.py", "file", blob], ["x", "tree", x]])
+    base = _put_raw_tree(trees, [["README", "file", blob], ["eval", "tree", evals]])
+
+    tree = loop.put_files({"README": b"y"}, base)
+
+    def stored(tree_id: str) -> dict[str, str]:
+        """Return the ids of a stored tree's entries by name."""
+        return {entry.name: entry.object_id for entry in trees.get_tree(RUN_ID, tree_id)}
+
+    folder = stored(tree)["eval"]
+    assert sorted(stored(folder)) == ["score.py", "x"]
+    assert sorted(stored(stored(folder)["x"])) == ["answer.txt"]
+
+
+def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second write over the same base does not read its unchanged folder again."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    base = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+    sub = next(entry.object_id for entry in trees.get_tree(RUN_ID, base) if entry.name == "sub")
+    reads: list[str] = []
+    stored = loop._stored
+    monkeypatch.setattr(loop, "_stored", lambda tree_id: reads.append(tree_id) or stored(tree_id))
+
+    first = loop.put_files({"README": b"y"}, base)
+    second = loop.put_files({"README": b"z"}, base)
+
+    assert first != second
+    assert reads.count(sub) == 1

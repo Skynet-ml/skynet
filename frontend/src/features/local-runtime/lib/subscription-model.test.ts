@@ -448,30 +448,45 @@ test("Droid is not a CLI choice, even when an older backend still reports it", (
   assert.deepEqual(hostCliPatch("droid", "full_access"), {
     host_cli: undefined,
     host_permission: undefined,
+    host_cli_auto: undefined,
   });
 });
 test("the proposer host CLI select starts at workspace only, sends null for off and no pick for the default", () => {
   assert.deepEqual(hostCliPatch("codex", undefined), {
     host_cli: "codex",
     host_permission: "workspace_only",
+    host_cli_auto: undefined,
   });
   assert.deepEqual(hostCliPatch("claude", "full_access"), {
     host_cli: "claude",
     host_permission: "full_access",
+    host_cli_auto: undefined,
   });
   // An explicit null keeps the sandboxed proposer; the backend fills only a missing pick.
   const off = hostCliPatch("off", "full_access");
-  assert.deepEqual(off, { host_cli: null, host_permission: undefined });
+  assert.deepEqual(off, { host_cli: null, host_permission: undefined, host_cli_auto: undefined });
   assert.equal(
     JSON.stringify(withSupportedHostCli({ harness: "codex", ...off })),
     '{"harness":"codex","host_cli":null}',
   );
   const engineDefault = hostCliPatch("default", "full_access");
-  assert.deepEqual(engineDefault, { host_cli: undefined, host_permission: undefined });
+  assert.deepEqual(engineDefault, {
+    host_cli: undefined,
+    host_permission: undefined,
+    host_cli_auto: undefined,
+  });
   assert.equal(
     JSON.stringify(withSupportedHostCli({ harness: "codex", ...engineDefault })),
     '{"harness":"codex"}',
   );
+});
+test("picking a host CLI clears the server's filled-in mark, so the server keeps the pick", () => {
+  // A proposer that still holds the mark, as a stored run or an old draft has it (SKY-753).
+  const proposer = { harness: "codex", host_cli: "codex", host_cli_auto: true } as const;
+  for (const value of ["claude", "codex", "off", "default"]) {
+    const merged = { ...proposer, ...hostCliPatch(value, undefined) };
+    assert.equal(JSON.stringify(withSupportedHostCli(merged)).includes("host_cli_auto"), false, value);
+  }
 });
 
 test("the own-key hint names no platform fee in local mode", () => {

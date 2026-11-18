@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from ...billing.service import FREE_GRANT_CENTS, free_grant_cents
 from ...config import settings
 from ...local.cli_probe import clear_probe_cache
-from ...models.blackbox import BlackboxProposer
+from ...models.blackbox import HOST_CLI_AUTO_KEY, BlackboxProposer
 from ...registry.core import ServiceRegistry
 from ...storage.models import (
     AgentEnginePreferenceModel,
@@ -27,6 +27,7 @@ from ...storage.models import (
     UserIdentityModel,
     UserModel,
 )
+from ...worker import repo_staging
 from .. import agent_engine
 from ..agent_engine import fill_proposer_host_cli
 from ..app import create_app
@@ -907,6 +908,28 @@ def test_blackbox_proposer_follows_the_agent_engine(monkeypatch: pytest.MonkeyPa
     assert request.proposer.host_cli == "claude"
 
 
+def test_a_filled_in_proposer_cli_is_not_the_runs_own_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stored request marks a filled-in CLI, so a repository's ``[proposer] entry`` still applies (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    request = SimpleNamespace(proposer=BlackboxProposer())
+
+    fill_proposer_host_cli(None, "alice", request)
+    stored = request.proposer.model_dump(mode="json")
+    again = BlackboxProposer.model_validate(stored)
+
+    assert stored["host_cli"] == "claude"
+    assert stored[HOST_CLI_AUTO_KEY] is True
+    assert again.host_cli == "claude"
+    assert again.model_dump(mode="json") == stored
+    assert not repo_staging._names_proposer({"proposer": stored})
+    assert repo_staging._names_proposer({"proposer": BlackboxProposer(host_cli="claude").model_dump(mode="json")})
+
+
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])
 def test_local_wizard_check_evidence_starts_a_run_on_the_engine_cli(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, route: str
@@ -995,7 +1018,8 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     checked = response.json()
     assert checked["status"] == "succeeded", checked
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
-    proposer = {**payload.get("proposer", {}), "host_cli": checked.get("proposer_host_cli")}
+    # The mark keeps the CLI filled in, so a repository's [proposer] entry applies as in the check (SKY-753).
+    proposer = {**payload.get("proposer", {}), "host_cli": checked.get("proposer_host_cli"), HOST_CLI_AUTO_KEY: True}
 
     submitted = harness.client.post(
         "/blackbox/run",
@@ -1011,6 +1035,121 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     assert submitted.status_code == 201, submitted.text
     job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
     assert job["payload"]["proposer"]["host_cli"] == "codex"
+    assert job["payload"]["proposer"][HOST_CLI_AUTO_KEY] is True
+
+
+def test_a_check_on_a_filled_in_cli_is_not_evidence_for_the_same_cli_picked(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A picked CLI replaces ``[proposer] entry`` and a filled-in one does not, so the check must run again (SKY-753).
+
+    Args:
+        harness: Real setup, wallet, and job services.
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="picked")
+    payload = {
+        **_run_payload(**_SUBSCRIPTION_RUN),
+        "execution_budget_id": budget.id,
+        "execution_budget_revision": budget.revision,
+    }
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "succeeded", checked
+
+    submitted = harness.client.post(
+        "/blackbox/run",
+        json={
+            **payload,
+            "proposer": {**payload.get("proposer", {}), "host_cli": checked["proposer_host_cli"]},
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert submitted.status_code == 409, submitted.text
+
+
+@pytest.mark.parametrize(
+    "named",
+    [{"harness": "codex"}, {"run_command": "python propose.py"}, {"install_command": "pip install proposer"}],
+    ids=["harness", "run_command", "install_command"],
+)
+def test_a_check_cli_sent_back_without_its_mark_stays_current_when_the_run_names_its_proposer(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, named: dict[str, str]
+) -> None:
+    """A named harness or command never uses ``[proposer] entry``, so the mark cannot make the check stale (SKY-753).
+
+    Args:
+        harness: Real setup, wallet, and job services.
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+        named: The proposer field that the request names.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="named")
+    payload = {
+        **_run_payload(**_SUBSCRIPTION_RUN),
+        "proposer": named,
+        "execution_budget_id": budget.id,
+        "execution_budget_revision": budget.revision,
+    }
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "succeeded", checked
+
+    submitted = harness.client.post(
+        "/blackbox/run",
+        json={
+            **payload,
+            "proposer": {**named, "host_cli": checked["proposer_host_cli"]},
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert submitted.status_code == 201, submitted.text
+    job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
+    assert job["payload"]["proposer"]["host_cli"] == "claude"
+
+
+def test_the_openapi_schema_documents_the_filled_in_cli_mark() -> None:
+    """A client can learn about ``host_cli_auto`` from openapi.json (SKY-753)."""
+    with (
+        patch("core.api.app.get_job_store"),
+        patch("core.api.app.get_worker"),
+    ):
+        application = create_app(registry=ServiceRegistry())
+    schemas = application.openapi()["components"]["schemas"]
+    proposer = schemas.get("BlackboxProposer") or schemas["BlackboxProposer-Input"]
+    field = proposer["properties"][HOST_CLI_AUTO_KEY]
+
+    assert field["type"] == "boolean"
+    assert "proposer_host_cli" in field["description"]
 
 
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])

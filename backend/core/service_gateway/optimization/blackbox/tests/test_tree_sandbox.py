@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
+import logging
 import random
 import tarfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -157,8 +159,9 @@ class _FailingTarSession(_DyingSession):
         Returns:
             The inner box's result.
         """
-        if "tar -czf" in command:
-            command = 'tar() { command tar "$@"; return 2; }; ' + command
+        # The pack runs in a clean shell, so the function goes into its quoted script, not the box shell.
+        tar = "set -e; COPYFILE_DISABLE=1 tar"
+        command = command.replace(tar, 'tar() { command tar "$@"; return 2; }; ' + tar, 1)
         return self._inner.run(command, **options)
 
 
@@ -304,8 +307,43 @@ def test_run_gives_the_output_and_the_new_tree_and_commits_one_step(trees: TreeS
     assert step["tree_id"] == new_tree
     assert step["body"]["command"] == "cat a.txt; echo two > b.txt"
     assert step["body"]["stdout"] == "one\n"
-    assert candidates.acquired == [("agent-1", (Grant("api.example.com"),))]
+    assert candidates.acquired == [(f"{RUN}:agent-1", (Grant("api.example.com"),))]
     assert (runtime.specs[0].network_disabled, runtime.specs[0].allowed_hosts) == (False, ("api.example.com",))
+    assert candidates.released == [True]
+
+
+def test_a_git_folder_the_command_makes_is_left_out_of_the_new_tree(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A ``.git`` the command makes, in any letter case and at any depth, is left out; near names stay."""
+    sandbox, candidates, _ = _sandbox(trees, step_log, _Runtime())
+
+    _, new_tree = sandbox.run(
+        _step(),
+        _tree(trees, {}),
+        "mkdir -p .git sub/.GIT a/b/.GiT/c .github a.git && echo c > .git/config && echo x > sub/.GIT/x"
+        " && echo x > a/b/.GiT/c/x && echo k > .gitignore && echo s > sub/keep && echo w > .github/w"
+        " && echo g > x.git && echo b > a.git/b && echo d > a/b/keep",
+        [],
+    )
+
+    def paths(tree_id: str, prefix: str) -> set[str]:
+        """List the file paths of a stored tree.
+
+        Args:
+            tree_id: The tree id.
+            prefix: The path of the tree's folder, with a trailing slash, or empty at the top.
+
+        Returns:
+            The file paths.
+        """
+        found: set[str] = set()
+        for entry in trees.get_tree(RUN, tree_id) or []:
+            if entry.mode == "tree":
+                found |= paths(entry.object_id, f"{prefix}{entry.name}/")
+            else:
+                found.add(f"{prefix}{entry.name}")
+        return found
+
+    assert paths(new_tree, "") == {".gitignore", "sub/keep", ".github/w", "x.git", "a.git/b", "a/b/keep"}
     assert candidates.released == [True]
 
 
@@ -349,7 +387,7 @@ def test_score_runs_the_metric_in_a_box_with_only_the_outputs_and_metric_trees(
     assert value == 1.0
     assert metrics.files == [["./metric/score.sh", "./outputs/answer.txt"]]
     assert (runtime.specs[-1].network_disabled, runtime.specs[-1].allowed_hosts) == (True, ())
-    assert metrics.acquired == [("agent-1", ())]
+    assert metrics.acquired == [(f"{RUN}:agent-1", ())]
     assert len(candidates.acquired) == 1
     step = step_log.get_step(f"{RUN}:agent-1:2")
     assert step is not None
@@ -701,6 +739,51 @@ def test_a_release_error_after_good_work_is_a_box_failure_without_the_provider_t
     assert raised.value.step_id == f"{RUN}:agent-1:1"
     assert "box-secret-name" not in str(raised.value)
     assert source.released == [True]
+
+
+class _TimedOutMetricBox(_FakeBox):
+    """A fake box whose ``metric`` command times out."""
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Time out the ``metric`` command and answer every other command with success.
+
+        Args:
+            command: The shell command.
+            **options: Not used.
+
+        Returns:
+            A timed-out result for ``metric``, else the fake box's success.
+        """
+        if command == "metric":
+            return CommandResult(exit_code=137, timed_out=True)
+        return super().run(command, **options)
+
+
+def test_a_release_error_after_work_that_drops_the_box_is_a_box_failure(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """Work that ends but gives its box back unhealthy has no error of its own, so the release error goes up."""
+    error = SandboxInfraError("box-secret-name")
+    sandbox, source = _fake_sandbox(trees, step_log, _TimedOutMetricBox(), error)
+    empty = _tree(trees, {})
+
+    with pytest.raises(BoxFailureError) as raised:
+        sandbox.score(_step(), empty, empty, "metric")
+
+    assert str(raised.value) == f"Step {RUN}:agent-1:1: The box did not go back (SandboxInfraError)."
+    assert raised.value.__cause__ is error
+    assert source.released == [False]
+
+
+def test_a_metric_that_times_out_gives_its_box_back_unhealthy(trees: TreeStore, step_log: StepLogStore) -> None:
+    """The timeout kills only the metric's process group, so its box must not serve another score."""
+    sandbox, _, metrics = _sandbox(trees, step_log, _Runtime(), timeout_seconds=1)
+    empty = _tree(trees, {})
+
+    with pytest.raises(MetricFailedError):
+        sandbox.score(_step(), empty, empty, "sleep 30")
+
+    assert metrics.released == [False]
 
 
 @pytest.mark.parametrize("error", [BudgetReached("stopped"), UsagePendingError("pending")])
@@ -1158,3 +1241,189 @@ def test_a_box_tree_with_too_many_files_is_refused_not_retried(
 
     assert not isinstance(raised.value, BoxFailureError)
     assert raised.value.step_id == f"{RUN}:agent-1:1"
+
+
+class _RecordingBox(_FakeBox):
+    """A fake box that records the options of each command."""
+
+    def __init__(self) -> None:
+        """Start with no recorded command."""
+        super().__init__()
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Record the command and its options, then answer with success.
+
+        Args:
+            command: The command line.
+            **options: The options of the call.
+
+        Returns:
+            A successful result.
+        """
+        self.calls.append((command, options))
+        return super().run(command, **options)
+
+
+def test_a_session_with_no_start_only_acquires_and_releases_once() -> None:
+    """A session needs no tree store or step log; the box goes back healthy once, also after a second release."""
+    box = _RecordingBox()
+    source = _FakeSource(box)
+
+    session = TreeSandbox.open_session(source, "agent-1", [])
+
+    assert session.box is box
+    assert source.acquired == ["agent-1"]
+    assert box.calls == []
+    session.release(healthy=True)
+    session.release(healthy=False)
+    assert source.released == [True]
+
+
+def test_a_session_run_passes_only_the_options_the_caller_set() -> None:
+    """A run without options reaches the box with the timeout only; ``sudo`` and the rest pass when set."""
+    box = _RecordingBox()
+    session = TreeSandbox.open_session(_FakeSource(box), "agent-1", [])
+
+    def sink(stream: str, data: str) -> None:
+        """Ignore the output.
+
+        Args:
+            stream: Not used.
+            data: Not used.
+        """
+
+    session.run("plain", timeout_seconds=5)
+    session.run("full", timeout_seconds=9, env={"A": "1"}, on_output=sink, sudo=True)
+
+    assert box.calls == [
+        ("plain", {"timeout_seconds": 5}),
+        ("full", {"timeout_seconds": 9, "env": {"A": "1"}, "on_output": sink, "sudo": True}),
+    ]
+
+
+def test_a_session_start_runs_on_the_new_box_before_the_caller_gets_it() -> None:
+    """The start gets the acquired box, and the session holds the same box."""
+    box = _RecordingBox()
+    started: list[SandboxSession] = []
+
+    session = TreeSandbox.open_session(_FakeSource(box), "agent-1", [], start=started.append)
+
+    assert started == [box]
+    assert session.box is box
+
+
+@pytest.mark.parametrize("error", [RuntimeError("bad state"), KeyboardInterrupt()])
+def test_a_failed_start_gives_the_box_back_unhealthy_and_raises_its_error(error: BaseException) -> None:
+    """A start error, also a cancel, goes up unchanged after an unhealthy release.
+
+    Args:
+        error: The start's error.
+    """
+    source = _FakeSource(_RecordingBox())
+
+    def start(box: SandboxSession) -> None:
+        """Fail to start.
+
+        Args:
+            box: Not used.
+
+        Raises:
+            BaseException: The chosen error.
+        """
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        TreeSandbox.open_session(source, "agent-1", [], start=start)
+
+    assert raised.value is error
+    assert source.released == [False]
+
+
+def test_a_release_error_after_a_failed_start_logs_only_its_type(caplog: pytest.LogCaptureFixture) -> None:
+    """The start's error goes up; the release error is logged by type, without its text.
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    source = _FakeSource(_RecordingBox(), release_error=RuntimeError("provider text"))
+
+    def start(box: SandboxSession) -> None:
+        """Fail to start.
+
+        Args:
+            box: Not used.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad state")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="bad state"):
+        TreeSandbox.open_session(source, "agent-1", [], start=start, what="The test box")
+
+    assert "The test box did not close cleanly (RuntimeError)" in caplog.text
+    assert "provider text" not in caplog.text
+    assert source.released == [False]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BudgetReached("stopped"), BudgetError("no room"), UsagePendingError("pending"), UnpricedOperationError("x")],
+)
+def test_a_budget_error_of_the_release_after_a_failed_start_replaces_the_start_error(error: BaseException) -> None:
+    """A budget stop of the release must not be lost behind the start's own error.
+
+    Args:
+        error: The release's budget error.
+    """
+    source = _FakeSource(_RecordingBox(), release_error=error)
+
+    def start(box: SandboxSession) -> None:
+        """Fail to start.
+
+        Args:
+            box: Not used.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad state")
+
+    with pytest.raises(type(error)) as raised:
+        TreeSandbox.open_session(source, "agent-1", [], start=start)
+
+    assert raised.value is error
+
+
+@pytest.mark.parametrize(("fails", "healthy"), [(False, True), (True, False)])
+def test_a_session_block_releases_the_box_by_how_the_block_ended(fails: bool, healthy: bool) -> None:
+    """A ``with`` block gives the box back healthy only when it raised nothing.
+
+    Args:
+        fails: Whether the block raises.
+        healthy: The expected health at release.
+    """
+    source = _FakeSource(_RecordingBox())
+
+    with (
+        pytest.raises(RuntimeError) if fails else contextlib.nullcontext(),
+        TreeSandbox.open_session(source, "agent-1", []) as session,
+    ):
+        session.run("true", timeout_seconds=1)
+        if fails:
+            raise RuntimeError("boom")
+
+    assert source.released == [healthy]
+
+
+def test_a_release_that_raises_does_not_release_the_box_again() -> None:
+    """The session marks itself released first, so a retry after a failed release does nothing."""
+    source = _FakeSource(_RecordingBox(), release_error=RuntimeError("close failed"))
+    session = TreeSandbox.open_session(source, "agent-1", [])
+
+    with pytest.raises(RuntimeError):
+        session.release(healthy=True)
+    session.release(healthy=True)
+
+    assert source.released == [True]

@@ -31,7 +31,9 @@ def _toml(extra: str = "") -> bytes:
     Returns:
         The file's bytes.
     """
-    return f'version = 1\n\n[sandbox]\ncompose = "deploy/compose.yaml"\n{extra}'.encode()
+    return (
+        f'version = 1\n\n[run]\nentry = "run.py:main"\n\n[sandbox]\ncompose = "deploy/compose.yaml"\n{extra}'.encode()
+    )
 
 
 def _archive(tmp_path: Path, files: dict[str, bytes]) -> Path:
@@ -63,7 +65,7 @@ def test_parse_keeps_the_compose_path() -> None:
 
 def test_no_sandbox_section_means_no_compose() -> None:
     """Leave the compose fields empty when the file has no ``[sandbox]`` section."""
-    constraints = parse_constraints(b"version = 1\n")
+    constraints = parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n')
 
     assert constraints.compose_file is None
     assert constraints.compose_services == ()

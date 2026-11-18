@@ -18,7 +18,9 @@ no version code at all. A run that times out, raises, returns no JSON, is
 killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
 feedback, and the metric is not called. A nonzero exit of a command entry is
 an output like any other. Neither box gets the run's secrets: only the model
-route reaches the box.
+route reaches the box. Both the ``[run]`` entry and the metric run through
+the tree sandbox session API (SKY-785), and the metric box never gets the
+candidate tree.
 
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to
@@ -88,7 +90,7 @@ from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .protocol import STATUS_KEY
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY
 from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
@@ -201,10 +203,6 @@ _TARGET_ROLE = "target."
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
 RUN_FAILED = "Run failed: "
-# SKY-221: the side info ``status`` of a case whose entry failed. The final run
-# reads it, not the feedback, because pending rule-judge notes go in front of
-# the feedback.
-RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -464,8 +462,9 @@ class RepoScorer:
                 if ran is not None and ran.get("error"):
                     error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
                     error = error[len(RUN_FAILED) :]
+                    # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
-                        "score": 0.0,
+                        "score": None,
                         "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
                         STATUS_KEY: RUN_FAILED_STATUS,
                     }
@@ -564,7 +563,7 @@ class RepoScorer:
             session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
-                result = session.run(
+                result = metric.box.run(
                     f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
@@ -676,7 +675,7 @@ class RepoScorer:
                 forward(stream, data)
 
             with sandbox_log.event_scope(source="run"):
-                result = session.run(
+                result = candidate.box.run(
                     f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.

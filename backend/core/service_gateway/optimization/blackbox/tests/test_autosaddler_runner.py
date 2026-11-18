@@ -11,16 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import math
 import os
 import random
+import shlex
+import signal
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -29,7 +34,7 @@ from unittest import mock
 
 import pytest
 
-from .. import autosaddler_runner, native_runtime, repo_tree
+from .. import autosaddler_runner, harness_bridge, native_runtime, repo_tree
 
 # The runner needs the pinned upstream package on Python 3.12, which the
 # backend venv does not carry; point this at an interpreter that has it.
@@ -68,6 +73,8 @@ class ScriptedProvider:
                 "updates": {name: text + "aaa" for name, text in components.items()},
             }
         elif kind == "evolve":
+            with Path("evolve.log").open("a") as log:
+                log.write(json.dumps(context["candidate_ids"]) + "\\n")
             output = {
                 "schema_version": "app-autosaddler-evolution/v1",
                 "parent_ids": [context["candidate_ids"][-1]],
@@ -297,6 +304,73 @@ def _run_worker(
     return host.requests, result
 
 
+class _FailedRunHost(_ReplayHost):
+    """A fake host whose scorer reports a failed ``[run]`` entry, with no score, on case 0 for some versions."""
+
+    def __init__(self, files: dict[str, bytes], seed_fails: bool) -> None:
+        """Hold the seed tree's files and choose whether the seed fails too.
+
+        Args:
+            files: The seed tree's file bytes by path.
+            seed_fails: Whether the seed's case 0 also fails.
+        """
+        super().__init__(files)
+        self.seed_fails = seed_fails
+
+    def answer(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Fail case 0 of every child, and of the seed when asked; answer the rest as the replay host does.
+
+        Args:
+            request: The runner's request.
+
+        Returns:
+            The reply.
+        """
+        failed = request["op"] == "evaluate" and request["example"]["id"] == 0
+        if failed and (request["candidate"] != "bcd" or self.seed_fails):
+            return {"score": None, "info": {"feedback": "Run failed: boom", "status": "run_failed"}}
+        return super().answer(request)
+
+
+@pytest.mark.parametrize("seed_fails", [False, True], ids=["seed-scored", "seed-fails"])
+def test_a_worker_run_never_selects_or_scores_a_version_with_a_failed_run_case(
+    tmp_path: Path, seed_fails: bool
+) -> None:
+    """In worker mode, a failed ``[run]`` case has no score: the run finishes and keeps the scored seed (SKY-751).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        seed_fails: Whether the seed also fails, so no version has a score.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    payload = {
+        "engine_id": "autosaddler",
+        "task": {
+            "name": "autosaddler",
+            "seed_candidate": "bcd",
+            "objective": "maximize vowel density",
+            "background": "",
+            "train_set": [{"id": 0}, {"id": 1}],
+        },
+        "max_evals": 12,
+        "max_iterations": 2,
+        "stop_at_score": None,
+        "repo": None,
+    }
+    host = _FailedRunHost({}, seed_fails)
+
+    requests, result = _run_worker(python, tmp_path / "run", payload, {}, host=host)
+
+    assert "error" not in result, result
+    assert any(r["op"] == "evaluate" and r["candidate"] != "bcd" and r["example"]["id"] == 0 for r in requests)
+    assert result["best_candidate"] == "bcd"
+    expected = None if seed_fails else pytest.approx(_vowel_fraction(json.dumps("bcd")))
+    assert result["best_score"] == expected
+    assert result["metadata"]["selection"]["development_score"] == expected
+
+
 @pytest.mark.parametrize("repository", [False, True], ids=["text", "repository"])
 def test_a_worker_run_and_its_replay_send_the_same_requests(tmp_path: Path, repository: bool) -> None:
     """Run the worker mode twice with the same replies: the two request streams and results are the same.
@@ -479,18 +553,18 @@ def test_the_worker_engine_gets_the_same_long_session_timeouts_in_each_run(
     assert min(timeouts[0].values()) >= 7 * 24 * 3600
 
 
-def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
-    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts.
+def _scripted_payload(seed: str, train_set: list[dict[str, str]], val_set: list[dict[str, str]]) -> dict[str, Any]:
+    """Build a runner payload whose proposer the wrapper replaces with the scripted provider.
 
     Args:
-        tmp_path: Pytest's temporary folder.
+        seed: Seed candidate text.
+        train_set: Training examples.
+        val_set: Validation examples.
+
+    Returns:
+        The payload.
     """
-    python = _upstream_python()
-    if python is None:
-        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
-    (tmp_path / "rpc").mkdir()
-    (tmp_path / "wrapper.py").write_text(_WRAPPER)
-    payload = {
+    return {
         "nonce": "testnonce",
         "engine_id": "autosaddler",
         "model": "claude-test",
@@ -501,15 +575,33 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         "max_iterations": 2,
         "timeout_seconds": 60,
         "source": native_runtime.AUTOSADDLER_REVISION,
-        "proposer": {"harness": "custom"},
+        "proposer": {"harness": "custom", "model": "claude-test", "price": {"input": 0.0, "output": 0.0}},
         "task": {
             "name": "test",
-            "seed_candidate": "bcd",
+            "seed_candidate": seed,
             "objective": "maximize vowel density",
-            "train_set": [{"id": "a"}, {"id": "b"}],
-            "val_set": [{"id": "c"}],
+            "train_set": train_set,
+            "val_set": val_set,
         },
     }
+
+
+def _run_scripted(
+    tmp_path: Path, python: str, payload: dict[str, Any], respond: Callable[[str, str], dict[str, Any]]
+) -> tuple[dict[str, Any], list[tuple[str, str]], list[dict[str, Any]]]:
+    """Run the runner under the scripted wrapper and answer each scorer request as the parent does.
+
+    Args:
+        tmp_path: Working folder of the run.
+        python: Interpreter with the pinned upstream package.
+        payload: Runner payload.
+        respond: Builds the parent's response from the candidate and the example id.
+
+    Returns:
+        The runner result, each scored ``(candidate, example id)`` pair, and the progress events.
+    """
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "wrapper.py").write_text(_WRAPPER)
     (tmp_path / "input.json").write_text(json.dumps(payload))
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
     process = subprocess.Popen(
@@ -530,7 +622,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
                 continue
             request = json.loads(line.split(" ", 2)[2])
             scored.append((request["candidate"], request["example"]["id"]))
-            response = {"score": _vowel_fraction(request["candidate"]), "info": {"feedback": "counted"}}
+            response = respond(request["candidate"], request["example"]["id"])
             (tmp_path / "rpc" / f"{request['id']}.json").write_text(json.dumps(response))
         stderr = process.stderr.read()
         result_file = tmp_path / "native_result.json"
@@ -539,9 +631,29 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         if process.poll() is None:
             process.kill()
             process.wait()
-
     result = json.loads((tmp_path / "native_result.json").read_text())
     assert "error" not in result, result
+    return result, scored, progress
+
+
+def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
+    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts.
+
+    Args:
+        tmp_path: Folder for the runner files and the run store.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    payload = _scripted_payload("bcd", [{"id": "a"}, {"id": "b"}], [{"id": "c"}])
+
+    result, scored, progress = _run_scripted(
+        tmp_path,
+        python,
+        payload,
+        lambda candidate, _example: {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}},
+    )
+
     assert result["best_candidate"] == "bcdaaaaaa"
     assert result["best_score"] == pytest.approx(_vowel_fraction("bcdaaaaaa"))
     assert result["total_evals"] == len(scored)
@@ -561,6 +673,91 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
     assert all(len(event["per_example"]) == cases[0]["total"] for event in versions)
     assert {event["candidate_id"] for event in cases} == set(range(len(versions)))
     assert all(event["example_id"].isdigit() and event["total"] >= 1 for event in cases)
+
+
+@pytest.mark.parametrize(
+    ("seed_crashes", "crashed_cases"),
+    [(False, {"b"}), (True, {"b"}), (True, {"a", "b"})],
+    ids=["child-crashes", "every-version-crashes", "every-case-crashes"],
+)
+def test_upstream_run_finishes_when_a_train_case_crashes(
+    tmp_path: Path, seed_crashes: bool, crashed_cases: set[str]
+) -> None:
+    """A crashed case gets upstream's floor: the run finishes, keeps the scored seed, never shows the floor (SKY-751).
+
+    Args:
+        tmp_path: Working folder of the run.
+        seed_crashes: Whether the seed also crashes, so no version scores every case.
+        crashed_cases: Cases that crash. On every case, upstream sums several floors.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    seed = "bcde"
+
+    def respond(candidate: str, example: str) -> dict[str, Any]:
+        """Crash every child, and the seed when asked, on the crashed cases; score the rest by vowel density.
+
+        Args:
+            candidate: Candidate text.
+            example: Example id.
+
+        Returns:
+            The parent's response.
+        """
+        if example in crashed_cases and (candidate != seed or seed_crashes):
+            return {"score": None, "info": {"feedback": "Run failed: boom", "status": "run_failed"}}
+        return {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}}
+
+    result, scored, progress = _run_scripted(
+        tmp_path, python, _scripted_payload(seed, [{"id": "a"}, {"id": "b"}], []), respond
+    )
+
+    assert any(candidate != seed and example in crashed_cases for candidate, example in scored)
+    assert result["best_candidate"] == seed
+    expected = None if seed_crashes else pytest.approx(_vowel_fraction(seed))
+    assert result["best_score"] == expected
+    assert result["metadata"]["selection"]["development_score"] == expected
+    shown = [event["score"] for event in progress if "score" in event]
+    shown += [score for event in progress for _, score in event.get("per_example", [])]
+    assert all(0.0 <= score <= 1.0 for score in shown)
+
+
+@pytest.mark.parametrize(("info", "offered"), [({"error": "KeyError: 'x'"}, 2), ({"status": "run_failed"}, 1)])
+def test_only_a_failed_run_case_keeps_a_version_out_of_the_evolve_parents(
+    tmp_path: Path, info: dict[str, Any], offered: int
+) -> None:
+    """In a full run, only a failed ``[run]`` case keeps a version out of the evolve parents (SKY-751).
+
+    Args:
+        tmp_path: Working folder of the run.
+        info: The parent's side info for the child's unscored development case.
+        offered: How many versions the last evolve session offers as parents.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    seed = "bcd"
+
+    def respond(candidate: str, example: str) -> dict[str, Any]:
+        """Give every child no score on case "c", outside the training batch; score the rest by vowel density.
+
+        Args:
+            candidate: Candidate text.
+            example: Example id.
+
+        Returns:
+            The parent's response.
+        """
+        if example == "c" and candidate != seed:
+            return {"score": None, "info": info}
+        return {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}}
+
+    cases = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    _run_scripted(tmp_path, python, _scripted_payload(seed, cases, []), respond)
+
+    offers = [json.loads(line) for line in (tmp_path / "evolve.log").read_text().splitlines()]
+    assert len(offers[-1]) == offered
 
 
 def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> None:
@@ -1628,21 +1825,32 @@ def test_an_unconstrained_repository_block_keeps_naming_the_paths(
 
 
 def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> None:
-    """A filled mean with a crashed case is not best and does not stop the run (SKY-367)."""
+    """A mean with a crashed case is not best, shows no score and does not stop the run (SKY-367, SKY-751)."""
     emitted: list[Any] = []
     evaluator = SimpleNamespace(
         best_development=None,
+        no_score_candidates=set(),
+        run_failed_candidates=set(),
         stop_at_score=0.5,
         versions={"c1": 1, "c2": 2},
         case_ids={"a": "0", "b": "1"},
         mailbox=SimpleNamespace(total_evals=2, emit=lambda *args: emitted.append(args)),
     )
-    crashed = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=None)]
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    crashed = [
+        SimpleNamespace(case_id="a", score=0.9, metadata={}),
+        SimpleNamespace(case_id="b", score=floor, metadata={"scorer_feedback": {"status": "run_failed"}}),
+    ]
 
-    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", 0.9, crashed)
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", (0.9 + floor) / 2, crashed)
 
     assert evaluator.best_development is None
     assert emitted == []
+    assert evaluator.no_score_candidates == evaluator.run_failed_candidates == {"c1"}
+    metric_error = [SimpleNamespace(**{**vars(item), "metadata": {}}) for item in crashed]
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c3", "text three", None, metric_error)
+    assert evaluator.no_score_candidates == {"c1", "c3"}
+    assert evaluator.run_failed_candidates == {"c1"}
     scored = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=0.7)]
     with pytest.raises(autosaddler_runner.TargetReached):
         autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
@@ -1717,3 +1925,608 @@ def test_harness_sessions_send_each_refusal_to_the_run_log(
     record = json.loads(lines[0].split(" ", 2)[2])
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
+
+
+# The setup marks its own output; the fake proposer logs whether that output
+# is in the folder it runs in, and prints a reply.
+_SESSION_SETUP = """
+import os, pathlib, sys
+pathlib.Path("setup-out").mkdir()
+pathlib.Path("setup-out/ready").write_text("ok")
+with open(sys.argv[1], "a") as log:
+    log.write(f"setup {os.getcwd()}\\n")
+"""
+_SESSION_AGENT = """
+import os, pathlib, sys
+with open(sys.argv[1], "a") as log:
+    log.write(f"agent {os.getcwd()} {pathlib.Path('setup-out/ready').exists()}\\n")
+print("done")
+"""
+
+
+def test_each_autosaddler_session_worktree_gets_the_files_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upstream gives each session a new worktree; the setup runs once, and each worktree gets its output (SKY-753).
+
+    Args:
+        tmp_path: Guest folder.
+        monkeypatch: Working folder, home folder and the upstream classes the guest builds.
+    """
+    tree = io.BytesIO()
+    with tarfile.open(fileobj=tree, mode="w:gz") as packed:
+        info = tarfile.TarInfo("src.txt")
+        info.size = 1
+        packed.addfile(info, io.BytesIO(b"v"))
+    chunk = tmp_path / "chunk-0"
+    chunk.write_text(base64.b64encode(tree.getvalue()).decode("ascii"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    monkeypatch.setattr(autosaddler_runner, "GitHarnessSpace", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "SessionUsage", SimpleNamespace)
+    monkeypatch.setattr(autosaddler_runner, "TransportOutcome", SimpleNamespace)
+    log = tmp_path / "proposer.log"
+    proposer = {
+        "run_command": shlex.join([sys.executable, "-c", _SESSION_AGENT, str(log)]),
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "file_command": True,
+        "setup": [sys.executable, "-c", _SESSION_SETUP, str(log)],
+    }
+    repo = {"chunks": [str(chunk)], "editable_paths": ["."], "readonly_paths": []}
+    mailbox = autosaddler_runner.EvaluatorMailbox("testnonce", 1.0)
+
+    space, _base = autosaddler_runner.repo_space(repo, "", tmp_path / "run", proposer, mailbox)
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    worktrees = [tmp_path / "run" / "worktrees" / name for name in ("w1", "w2")]
+    for index, worktree in enumerate(worktrees):
+        subprocess.run(
+            ["git", "worktree", "add", "--quiet", "--detach", str(worktree), space.base_revision],
+            cwd=space.source_repo,
+            check=True,
+        )
+        session = SimpleNamespace(workspace=worktree, task_prompt="Improve it.", session_id=f"s{index}")
+        asyncio.run(transport.run(session, 30.0))
+
+    assert log.read_text().splitlines() == [
+        f"setup {worktrees[0]}",
+        f"agent {worktrees[0]} True",
+        f"agent {worktrees[1]} True",
+    ]
+    assert not (space.source_repo / "setup-out").exists()
+    for worktree in worktrees:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status == ""
+
+
+def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AutoSaddler runs sessions in its own process, without the bridge's SIGTERM handler; its stop ends the setup.
+
+    Args:
+        tmp_path: The checkout and the setup's pid file.
+        monkeypatch: Home folder and the proposer key.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "a.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    pid_file = tmp_path / "setup.pid"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    proposer = {
+        "run_command": "echo done",
+        "output_format": "plain",
+        "files": {},
+        "env": {},
+        "setup": [
+            sys.executable,
+            "-c",
+            f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)",
+        ],
+    }
+    transport = autosaddler_runner.HarnessTransport(proposer, "m1")
+    session = SimpleNamespace(workspace=checkout, task_prompt="x", session_id="s0")
+    errors: list[BaseException] = []
+
+    def drive() -> None:
+        """Run the session and keep the error it ends with."""
+        try:
+            asyncio.run(transport.run(session, 120.0))
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 20
+    while not pid_file.exists() or not pid_file.read_text():
+        assert time.monotonic() < deadline, "the setup did not start"
+        time.sleep(0.05)
+    setup_pid = int(pid_file.read_text())
+    try:
+        autosaddler_runner._stop_children()
+        worker.join(timeout=20)
+
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert "[proposer] setup command in optimize.toml" in str(errors[0])
+        with pytest.raises(ProcessLookupError):
+            os.kill(setup_pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(setup_pid, signal.SIGKILL)
+
+
+def _evaluation(
+    scores: dict[str, float | None], failed: frozenset[str] = frozenset(), split: str = "train"
+) -> SimpleNamespace:
+    """Build an upstream-shaped evaluation with one observation per case.
+
+    Args:
+        scores: Each case's score; ``None`` is an invalid observation, as upstream records a non-finite score.
+        failed: Cases whose scorer feedback has the run-failed status.
+        split: Upstream split of the evaluation.
+
+    Returns:
+        An evaluation with upstream's fields and aggregate over the valid cases.
+    """
+    observations = [
+        SimpleNamespace(
+            case_id=case_id,
+            repetition=0,
+            score=score,
+            is_valid=score is not None,
+            metadata={
+                "scorer_feedback": {"feedback": "Run failed: boom", "status": "run_failed"}
+                if case_id in failed
+                else {"feedback": "ok"}
+            },
+        )
+        for case_id, score in scores.items()
+    ]
+    valid = [score for score in scores.values() if score is not None]
+    return SimpleNamespace(
+        aggregate_score=sum(valid) / len(valid) if valid else None,
+        requested_case_ids=tuple(scores),
+        observations=observations,
+        split=split,
+    )
+
+
+def _three(aggregate: float, crashed: bool, split: str = "train") -> SimpleNamespace:
+    """Build an evaluation over cases ``a``, ``b`` and ``c``, where ``c`` may have a failed [run] entry.
+
+    Args:
+        aggregate: Score of every valid case, so also upstream's mean.
+        crashed: Whether case ``c`` had a failed [run] entry.
+        split: Upstream split of the evaluation.
+
+    Returns:
+        The evaluation.
+    """
+    if crashed:
+        return _evaluation({"a": aggregate, "b": aggregate, "c": None}, frozenset({"c"}), split)
+    return _evaluation({"a": aggregate, "b": aggregate, "c": aggregate}, split=split)
+
+
+class _MeanRanking:
+    """Rank like upstream: the highest mean over the valid cases wins, and no mean is an error."""
+
+    def select(self, candidates: list[tuple[Any, Any]]) -> tuple[Any, Any]:
+        """Select the pair with the highest aggregate.
+
+        Args:
+            candidates: ``(candidate, evaluation)`` pairs.
+
+        Returns:
+            The selected pair.
+
+        Raises:
+            ValueError: A pair has no aggregate, as upstream raises.
+        """
+        if any(evaluation.aggregate_score is None for _, evaluation in candidates):
+            raise ValueError("Ranking requires valid development aggregates")
+        return max(candidates, key=lambda item: item[1].aggregate_score)
+
+
+class _StrictImprovement:
+    """Accept like upstream: a higher mean over the matched valid cases wins, and no matched case is an error."""
+
+    def compare(self, parent: Any, child: Any) -> SimpleNamespace:
+        """Accept the child when its mean over the matched valid cases is higher.
+
+        Args:
+            parent: Parent evaluation.
+            child: Child evaluation.
+
+        Returns:
+            A verdict with ``accepted``.
+
+        Raises:
+            ValueError: No case is valid on both sides, as upstream raises.
+        """
+        pairs = [
+            (before.score, after.score)
+            for before, after in zip(parent.observations, child.observations, strict=True)
+            if before.is_valid and after.is_valid
+        ]
+        if not pairs:
+            raise ValueError("Acceptance has no matched valid observations")
+        return SimpleNamespace(accepted=sum(after for _, after in pairs) > sum(before for before, _ in pairs))
+
+
+def _acceptance(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Build the wrapped acceptance with upstream's verdict type stood in.
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module, which needs Python 3.12.
+
+    Returns:
+        The acceptance policy the runner uses.
+    """
+    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(PatchVerdict=SimpleNamespace))
+    return autosaddler_runner.NoScoreRejectedAcceptance(_StrictImprovement())
+
+
+def test_ranking_never_selects_a_version_with_a_failed_run_case() -> None:
+    """A version that crashed on one case and scored high elsewhere loses to a lower, fully scored one (SKY-751)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+
+    assert ranking.select([("crashed", _three(0.9, True)), ("scored", _three(0.3, False))])[0] == "scored"
+    assert ranking.select([("crashed", _three(0.9, True)), ("low", _three(0.1, True))])[0] == "crashed"
+
+
+def test_ranking_returns_the_seed_when_no_version_has_a_score() -> None:
+    """With no version free of a failed ``[run]`` case, ranking returns the seed, reported with no score (SKY-751)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+    nothing = _evaluation({"a": None}, frozenset({"a"}), "development")
+    partial = _evaluation({"a": 0.4, "b": None}, frozenset({"b"}), "development")
+    metric_error = _evaluation({"a": 0.9, "b": None}, split="development")
+
+    assert ranking.select([("seed", nothing), ("child", partial)])[0] == "seed"
+    assert ranking.select([("seed", nothing), ("child", nothing)])[0] == "seed"
+    assert ranking.select([("seed", metric_error), ("child", partial)])[0] == "seed"
+    assert ranking.select([("child", partial), ("other", nothing)])[0] == "child"
+
+
+def test_ranking_still_ranks_versions_with_a_metric_error_by_score() -> None:
+    """A metric error on one case for every version keeps the fill, so the best mean still wins (SKY-751, SKY-367)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+    seed = _evaluation({"a": 0.2, "b": None}, split="development")
+    better = _evaluation({"a": 0.9, "b": None}, split="development")
+    worse = _evaluation({"a": 0.1, "b": None}, split="development")
+
+    assert ranking.select([("seed", seed), ("better", better), ("worse", worse)])[0] == "better"
+    assert ranking.select([("seed", seed), ("worse", worse)])[0] == "seed"
+
+
+def test_training_evidence_never_shows_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent's evidence shows no score for a crashed case, never upstream's floor (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(sha256_digest=lambda text: "sha256:" + text))
+    store = SimpleNamespace(write_json=lambda path, document, kind: document)
+    evaluation = _evaluation({"a": 0.5, "b": autosaddler_runner._NO_SCORE_FLOOR}, frozenset({"b"}))
+    evaluation.evaluation_id, evaluation.candidate_id, evaluation.purpose = "e", "c", "train_before"
+    for observation in evaluation.observations:
+        observation.disposition = "task_failure"
+
+    document = autosaddler_runner.AppEvidenceBuilder(store, {}).build(evaluation)
+
+    assert [record["per_repetition"][0]["score"] for record in document["case_records"]] == [0.5, None]
+
+
+def test_a_scorer_run_failed_status_with_a_score_is_not_a_failed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scorer may report the run-failed status with a real score, which counts as a score (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    scored = _evaluation({"a": 0.9, "b": 0.9}, frozenset({"b"}))
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+
+    assert not autosaddler_runner._run_failed(scored)
+    assert ranking.select([("scored", scored), ("low", _evaluation({"a": 0.1, "b": 0.1}))])[0] == "scored"
+    assert _acceptance(monkeypatch).compare(_evaluation({"a": 0.1, "b": 0.1}), scored).accepted
+
+
+def test_acceptance_rejects_a_child_with_a_failed_run_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crashed child never replaces a fully scored parent; a child that fixes the crash does (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    acceptance = _acceptance(monkeypatch)
+
+    rejected = acceptance.compare(_three(0.3, False), _three(0.9, True))
+    fixed = acceptance.compare(_three(0.9, True), _three(0.3, False))
+
+    assert not rejected.accepted
+    assert (rejected.before_score, rejected.after_score) == (0.3, 0.9)
+    assert rejected.compared_case_ids == ("a", "b", "c")
+    assert fixed.accepted
+    assert acceptance.compare(_three(0.3, False), _three(0.5, False)).accepted
+
+
+@pytest.mark.parametrize(
+    ("parent", "child"),
+    [
+        (_evaluation({"a": None}, frozenset({"a"})), _evaluation({"a": None}, frozenset({"a"}))),
+        (
+            _evaluation({"a": None, "b": 0.5}, frozenset({"a"})),
+            _evaluation({"a": 0.5, "b": None}, frozenset({"b"})),
+        ),
+    ],
+    ids=["one-case-both-crash", "each-crashes-on-another-case"],
+)
+def test_acceptance_rejects_when_no_case_is_valid_on_both_versions(
+    monkeypatch: pytest.MonkeyPatch, parent: SimpleNamespace, child: SimpleNamespace
+) -> None:
+    """Both versions failed and no case is valid on both, so the child is rejected, not an upstream error (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+        parent: Parent's training evaluation.
+        child: Child's training evaluation.
+    """
+    verdict = _acceptance(monkeypatch).compare(parent, child)
+
+    assert not verdict.accepted
+    assert verdict.reason == "no case has a valid score on both versions"
+    assert verdict.compared_case_ids == parent.requested_case_ids
+
+
+def test_acceptance_checks_the_split_and_cases_as_upstream_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wrapper refuses evaluations upstream acceptance refuses, before it records a verdict (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    acceptance = _acceptance(monkeypatch)
+
+    with pytest.raises(ValueError, match="training evaluations only"):
+        acceptance.compare(_three(0.3, False, "development"), _three(0.9, True, "development"))
+    with pytest.raises(ValueError, match="identical ordered case set"):
+        acceptance.compare(_three(0.3, False), _evaluation({"a": 0.9}, frozenset({"a"})))
+
+
+_HISTORY = ".autosaddler/history"
+
+
+def _prompt_pack(
+    monkeypatch: pytest.MonkeyPatch, history: dict[str, str], run_failed: set[str]
+) -> autosaddler_runner.AppPromptPack:
+    """Build the app prompt pack with upstream's domain, history and assets stood in.
+
+    Args:
+        monkeypatch: Stands in for the upstream modules, which need Python 3.12.
+        history: The workspace files upstream's history bundle returns.
+        run_failed: Versions with a failed ``[run]`` case in development.
+
+    Returns:
+        The prompt pack the runner uses.
+    """
+    monkeypatch.setattr(
+        autosaddler_runner,
+        "as_domain",
+        SimpleNamespace(
+            canonical_json=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+            sha256_digest=lambda text: f"sha256:{len(text)}",
+        ),
+    )
+    monkeypatch.setattr(autosaddler_runner, "HISTORY_ROOT", _HISTORY)
+    monkeypatch.setattr(
+        autosaddler_runner, "build_history_bundle", lambda store, context: SimpleNamespace(workspace_files=history)
+    )
+    monkeypatch.setattr(autosaddler_runner, "SessionSpec", SimpleNamespace)
+    monkeypatch.setattr(
+        autosaddler_runner,
+        "resolved_assets",
+        lambda kind, skills, prefix: SimpleNamespace(system_context="", task_prompt="", skills=(), provenance=()),
+    )
+    return autosaddler_runner.AppPromptPack(
+        store=None, component_names=["prompt"], objective=None, background=None, run_failed_candidates=run_failed
+    )
+
+
+def test_session_context_and_history_never_show_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstream's raw means and case scores read as no score, never the floor, in every file the agent reads (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    record = {"train_after_aggregate": (0.5 + floor) / 2, "train_after_case_scores": {"a": 0.5, "b": floor}}
+    history = {
+        f"{_HISTORY}/iterations/0000.json": json.dumps({"iteration": 0, **record}) + "\n",
+        f"{_HISTORY}/diffs/x.patch": "-1e300\n",
+        f"{_HISTORY}/manifest.json": json.dumps({"files": {}, "through_sequence": 3}) + "\n",
+    }
+    pack = _prompt_pack(monkeypatch, history, set())
+
+    files = pack.session(
+        "reflect", {"candidate_ids": ["c1"], "train_before_aggregate": -0.25, **record}
+    ).workspace_files
+
+    context = json.loads(files[autosaddler_runner._SESSION_CONTEXT_PATH])
+    iteration = json.loads(files[f"{_HISTORY}/iterations/0000.json"])
+    for document in (context, iteration):
+        assert document["train_after_aggregate"] is None
+        assert document["train_after_case_scores"] == {"a": 0.5, "b": None}
+    assert context["train_before_aggregate"] == -0.25
+    assert files[f"{_HISTORY}/diffs/x.patch"] == "-1e300\n"
+    manifest = json.loads(files[f"{_HISTORY}/manifest.json"])
+    assert manifest["through_sequence"] == 3
+    assert manifest["files"] == {
+        path: {"sha256": f"sha256:{len(text)}", "bytes": len(text.encode("utf-8"))}
+        for path, text in files.items()
+        if path.startswith(_HISTORY) and not path.endswith("manifest.json")
+    }
+
+
+def test_a_version_with_a_failed_run_case_is_never_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstream accepts on the training batch only; the evolve session never offers a failed-run version (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    history = {f"{_HISTORY}/manifest.json": json.dumps({"files": {}}) + "\n"}
+    context = {"candidate_ids": ["seed", "c1"], "component_source_options": {"x": ["c1"], "y": ["seed", "c1"]}}
+
+    spec = _prompt_pack(monkeypatch, history, {"c1"}).session("evolve", context)
+
+    properties = spec.output_schema["properties"]
+    assert properties["parent_ids"]["items"]["enum"] == ["seed"]
+    assert properties["component_sources"]["properties"] == {"y": {"type": "string", "enum": ["seed"]}}
+    rendered = json.loads(spec.workspace_files[autosaddler_runner._SESSION_CONTEXT_PATH])
+    assert rendered["candidate_ids"] == ["seed"]
+    assert rendered["component_source_options"] == {"y": ["seed"]}
+    every = _prompt_pack(monkeypatch, history, {"seed", "c1"}).session("evolve", context)
+    assert every.output_schema["properties"]["parent_ids"]["items"]["enum"] == ["seed", "c1"]
+
+
+def test_a_version_with_a_metric_error_is_still_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A metric error fails for every version, so its version stays a parent the agent can pick (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    evaluator = SimpleNamespace(no_score_candidates=set(), run_failed_candidates=set())
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    observations = [
+        SimpleNamespace(case_id="a", score=0.9, metadata={}),
+        SimpleNamespace(case_id="b", score=floor, metadata={}),
+    ]
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text", None, observations)
+    history = {f"{_HISTORY}/manifest.json": json.dumps({"files": {}}) + "\n"}
+    context = {"candidate_ids": ["seed", "c1"], "component_source_options": {"x": ["seed", "c1"]}}
+
+    spec = _prompt_pack(monkeypatch, history, evaluator.run_failed_candidates).session("evolve", context)
+
+    assert evaluator.no_score_candidates == {"c1"}
+    assert spec.output_schema["properties"]["parent_ids"]["items"]["enum"] == ["seed", "c1"]
+
+
+def test_mailbox_reads_a_null_parent_score_as_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent sends null for a case with no score; the mailbox reads it as negative infinity, no error (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the response file.
+        monkeypatch: Working folder and a fixed request id.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(autosaddler_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r1"))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps({"score": None, "info": {"status": "run_failed"}}))
+
+    score, info = autosaddler_runner.EvaluatorMailbox("testnonce", 1.0).evaluate("x", {"id": "a"})
+
+    assert score == float("-inf")
+    assert info == {"status": "run_failed"}
+
+
+_UPSTREAM_POLICIES = """
+import autosaddler_runner as runner
+from autosaddler.v2.core import domain as d, policies as p
+
+
+def evaluation(name, scores, split, status="run_failed"):
+    observations = tuple(
+        d.Observation.create(
+            candidate_id=d.sha256_digest(name), case_id=case, split=split, repetition=0,
+            disposition="task_failure", score=runner._NO_SCORE_FLOOR if score is None else score,
+            evaluator_fingerprint="f", cost=d.Cost(rollouts=1),
+            metadata={"scorer_feedback": {"status": status} if score is None else {}},
+        )
+        for case, score in scores
+    )
+    return d.Evaluation(
+        evaluation_id=d.sha256_digest(name + split), candidate_id=d.sha256_digest(name), split=split,
+        purpose="development" if split == "development" else "train_before", iteration=0,
+        requested_case_ids=tuple(case for case, _ in scores), observations=observations,
+        artifact_dir=d.ArtifactRef(uri="x", kind="k"),
+    )
+
+
+acceptance = runner.NoScoreRejectedAcceptance(p.MatchedValidStrictImprovement())
+one = acceptance.compare(evaluation("s", [("a", None)], "train"), evaluation("c", [("a", None)], "train"))
+two = acceptance.compare(
+    evaluation("s", [("a", None), ("b", 0.5)], "train"), evaluation("c", [("a", 0.5), ("b", None)], "train")
+)
+better = acceptance.compare(
+    evaluation("s", [("a", None), ("b", 0.2)], "train"), evaluation("c", [("a", None), ("b", 0.5)], "train")
+)
+crashed = acceptance.compare(
+    evaluation("s", [("a", 0.2), ("b", 0.2)], "train"), evaluation("c", [("a", None), ("b", 0.9)], "train")
+)
+ranking = runner.NoScoreLastRanking(p.MeanDevelopmentRanking())
+seed = evaluation("s", [("a", None)], "development")
+print(one.accepted, one.compared_case_ids, two.accepted, two.compared_case_ids)
+print(better.accepted, better.before_score, better.after_score, crashed.accepted, crashed.reason)
+print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", None)], "development"))])[0])
+print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", 0.4), ("b", None)], "development"))])[0])
+scored_seed = evaluation("s", [("a", 0.2), ("b", 0.2)], "development")
+print(ranking.select([("seed", scored_seed), ("child", evaluation("c", [("a", 0.9), ("b", None)], "development"))])[0])
+metric = [
+    (name, evaluation(name, [("a", score), ("b", None)], "development", "metric_error"))
+    for name, score in (("seed", 0.2), ("best", 0.9), ("worse", 0.1))
+]
+print(ranking.select(metric)[0])
+"""
+
+
+def test_upstream_policies_handle_the_no_score_floor(tmp_path: Path) -> None:
+    """Check that crashed versions never win under upstream's policies and the floor (SKY-751).
+
+    Args:
+        tmp_path: Folder with the runner files and the probe script.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    for name, text in native_runtime._runner_files("autosaddler").items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    (tmp_path / "probe.py").write_text(_UPSTREAM_POLICIES)
+
+    run = subprocess.run([python, "probe.py"], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines() == [
+        "False ('a',) False ('a', 'b')",
+        "True 0.2 0.5 False the child has a failed [run] entry",
+        "seed",
+        "seed",
+        "seed",
+        "best",
+    ]
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        autosaddler_runner._git_output(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert autosaddler_runner._git_output(repo, "rev-parse", "--git-dir").strip() == "."

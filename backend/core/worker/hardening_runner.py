@@ -773,7 +773,8 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score, or NaN when ``fix_diff`` does not apply.
+            The metric score, or NaN when ``fix_diff`` does not apply or the
+            patch's ``[run]`` entry failed.
 
         Raises:
             Exception: The box's first open failure, again on each later call
@@ -801,7 +802,9 @@ class RepoHardeningRunner(HardeningRunner):
                 self._score_failures[fixes] = exc
                 raise
             self._scorers[fixes] = scorer
-        return float(scorer.score(patch)["score"])
+        score = scorer.score(patch)["score"]
+        # SKY-751: a failed [run] entry has no score; NaN fails every check, as above.
+        return float("nan") if score is None else float(score)
 
     def _fixed_archive(self, fixes: tuple[str, ...]) -> Path:
         """Pack the trusted tree with the given metric fixes applied in order.
