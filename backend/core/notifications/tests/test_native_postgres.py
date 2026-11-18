@@ -15,6 +15,7 @@ Without that env var the module is skipped.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, make_url, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -49,6 +50,25 @@ pytestmark = pytest.mark.skipif(
 _T0 = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
+def _upgrade_to_head(db_url: str) -> None:
+    """Upgrade ``db_url`` to Alembic head, and never touch the ``REMOTE_DB_URL`` database.
+
+    ``alembic/env.py`` replaces ``sqlalchemy.url`` with ``REMOTE_DB_URL`` when
+    that variable is set, and ``tests/conftest.py`` loads a developer's
+    ``backend/.env`` (which points it at the dev database). So the variable
+    is set to the test URL for the length of the upgrade only (SKY-824).
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+    """
+    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("REMOTE_DB_URL", db_url)
+        command.upgrade(alembic_cfg, "head")
+
+
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
     """Upgrade the live database to Alembic head.
@@ -57,16 +77,32 @@ def engine() -> Iterator[Engine]:
         The engine.
     """
     _reset_legacy_schema(TEST_DB_URL or "")
-    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
-    alembic_cfg.set_main_option("sqlalchemy.url", TEST_DB_URL or "")
-    command.upgrade(alembic_cfg, "head")
+    _upgrade_to_head(TEST_DB_URL or "")
 
     engine = create_engine(TEST_DB_URL or "", pool_size=12)
     try:
         yield engine
     finally:
         engine.dispose()
+
+
+def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database.
+
+    The ``engine`` fixture runs first, so a legacy test database gets its reset before this upgrade.
+    """
+    other_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_{uuid.uuid4().hex[:8]}")
+    other = other_url.render_as_string(hide_password=False)
+    monkeypatch.setenv("REMOTE_DB_URL", other)
+
+    # The other database does not exist, so an upgrade that went to it would raise.
+    _upgrade_to_head(TEST_DB_URL or "")
+
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert os.environ["REMOTE_DB_URL"] == other
 
 
 @pytest.fixture
