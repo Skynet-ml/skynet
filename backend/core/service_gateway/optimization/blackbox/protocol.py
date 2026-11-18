@@ -323,8 +323,9 @@ class RepoSeed:
     path. Links inside a hidden folder count only when the folder is reached through a link, since no box gets
     the folder itself. When the seed hides paths of its own, the tree must also have no other symlink loop and no
     other symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell what it
-    reaches. The engine loop does not enforce the editable, read-only
-    and constrained paths; the caller enforces them where it accepts a candidate.
+    reaches. A candidate may change a constrained path, but only within the rules of the constraints file
+    (``optimize.toml``). The engine loop does not enforce the editable, read-only and constrained paths; the
+    caller enforces them where it accepts a candidate.
     """
 
     tree_id: str

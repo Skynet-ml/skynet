@@ -7,7 +7,8 @@ metric opens a box only through :meth:`TreeSandbox.run` and
 model response and every command is one step in the agent's log. A failed
 model call or box step also commits one step, with no cost; a failed model
 call that the provider billed (:class:`ModelCallBilledError`) commits and
-settles its known cost.
+settles its known cost. The engine's :class:`ModelCallFailedError` carries the
+committed cost, live and on a replay, so the engine's own cost count holds it.
 
 A resume is a replay. When an agent starts, the loop reads the agent's
 committed steps. The engine runs again from its start, and each call that a
@@ -203,8 +204,8 @@ class StepDivergedError(LoopStoppedError):
 class ModelCallFailedError(RuntimeError):
     """A model call failed; its committed step gives the same failure on a replay."""
 
-    def __init__(self, error_type: str) -> None:
-        """Name the failure by its exception class only.
+    def __init__(self, error_type: str, *, cost_cents: Decimal = Decimal(0)) -> None:
+        """Name the failure by its exception class only, and keep its committed cost.
 
         The step log keeps the class and not the message: a provider message can hold a route key, a URL
         with a token or response text, and the loop does not know the secret values that a redaction needs.
@@ -212,9 +213,11 @@ class ModelCallFailedError(RuntimeError):
 
         Args:
             error_type: The class name of the model call's exception.
+            cost_cents: The cost that the call's step committed, in cents; 0 when the provider billed nothing.
         """
         super().__init__(f"The model call failed ({error_type}).")
         self.error_type = error_type
+        self.cost_cents = cost_cents
 
 
 class ModelCallBilledError(RuntimeError):
@@ -309,7 +312,8 @@ class EngineLoop:
                 reply with the provider's cost in cents. The agent's lease is the one ledger path of a model call:
                 the loop settles the reply's cost there. So the client must not reserve or settle the call on the
                 budget itself, for example through :class:`BudgetRuntime`, or the call is billed twice. A failed
-                call that the provider billed raises :class:`ModelCallBilledError` with the cost. When the client
+                call that the provider billed raises :class:`ModelCallBilledError` with the cost, and the engine gets
+                the committed cost on its :class:`ModelCallFailedError`. When the client
                 cannot know the bill of a failed call, it raises any other error: the call fails with no cost, and
                 the lease bills nothing. Skynet takes that loss, up to ``model_max_cents``, on purpose (Gilad,
                 2026-11-17). A :class:`UsagePendingError`, or its subclass :class:`ProviderFailedError`, can come
@@ -511,7 +515,8 @@ class EngineLoop:
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
             ModelCallFailedError: When the model call fails; its step settles the cost of a
-                :class:`ModelCallBilledError`, and a replay raises a committed failure again.
+                :class:`ModelCallBilledError`, and a replay raises a committed failure again. Its ``cost_cents``
+                is the committed cost, live and on a replay.
         """
         with self._stops():
             # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
@@ -561,16 +566,17 @@ class EngineLoop:
                     # repeats it.
                     self._durable(step_id)
                     # The ledger rounds the cost up, so the live call reads the committed cost that a replay gives.
-                    committed = None if failures else self._run.step_log.get_step(step_id)
+                    committed = self._run.step_log.get_step(step_id)
                 except Exception as error:
                     # The work catches the model's own failures, so any error here is the step's frame: a
                     # closed run or step log, a cost above the bound, a budget stop, or a settle or durable
                     # failure after the commit. The step may be committed, so the engine gets no result.
                     raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
-                if failures:
-                    raise ModelCallFailedError(type(failures[0]).__name__) from failures[0]
                 if committed is None:
                     raise LoopStoppedError(f"Step {step_id} is durable but cannot be read.")
+                if failures:
+                    cost = Decimal(committed["body"]["cost_cents"])
+                    raise ModelCallFailedError(type(failures[0]).__name__, cost_cents=cost) from failures[0]
                 return _reply(committed)
 
     def put_files(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
@@ -1394,7 +1400,7 @@ class EngineLoop:
         log.replay.popleft()
         if "error" in body:
             if call == "model":
-                raise ModelCallFailedError(body["error"])
+                raise ModelCallFailedError(body["error"], cost_cents=Decimal(body["cost_cents"]))
             raise _BOX_ERRORS[body["error"]](record["step_id"], body["message"])
         return record
 

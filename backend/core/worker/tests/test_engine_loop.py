@@ -2647,6 +2647,67 @@ def test_a_billed_model_failure_settles_its_known_cost_and_records_it_in_the_ste
     assert loop.remaining_cost_usd() == pytest.approx(9.985)
 
 
+@pytest.mark.parametrize(("billed", "committed"), [("1.5", "1.5"), ("0.0000000001", "0.000000001")])
+def test_a_billed_model_failure_gives_the_engine_its_committed_cost_live_and_on_a_replay(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    billed: str,
+    committed: str,
+) -> None:
+    """The engine's failure carries the cost that the ledger committed, so its own cost count holds it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: Engine with the step log and job tables.
+        step_log: The run's step log.
+        trees: The step log's tree store.
+        tmp_path: The loop's local folder.
+        billed: What the provider billed, in cents.
+        committed: The cost that the ledger commits, rounded up to nine fractional digits.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.error = ModelCallBilledError(billed)
+    with pytest.raises(ModelCallFailedError) as live:
+        first.model("improve seed")
+    assert live.value.cost_cents == Decimal(committed)
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError) as replayed:
+        resumed.model("improve seed")
+    assert replayed.value.cost_cents == Decimal(committed)
+    assert str(replayed.value) == str(live.value)
+    assert resumed_model.prompts == []
+
+
+def test_an_unbilled_model_failure_gives_the_engine_no_cost_live_and_on_a_replay(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A failed call with no known bill gives the engine a cost of 0, live and on a replay.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: Engine with the step log and job tables.
+        step_log: The run's step log.
+        trees: The step log's tree store.
+        tmp_path: The loop's local folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.error = TimeoutError("the provider did not answer")
+    with pytest.raises(ModelCallFailedError) as live:
+        first.model("improve seed")
+    assert live.value.cost_cents == 0
+
+    _new_generation(engine)
+    resumed, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError) as replayed:
+        resumed.model("improve seed")
+    assert replayed.value.cost_cents == 0
+
+
 def test_an_engine_that_ends_before_its_replay_is_over_diverges_at_finish(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
