@@ -36,10 +36,6 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-# The in-process scenarios import ``core``, and litellm fetches its price map over HTTPS at import unless this
-# is set. The Dockerfile sets the same value. It must come before the scenario imports.
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-
 from .lib.metrics import ScenarioResult
 from .lib.reporter import print_result, write_json_report, write_markdown_report
 from .lib.warmup import warm_validation_cache

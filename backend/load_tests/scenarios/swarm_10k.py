@@ -87,6 +87,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import heapq
+import ipaddress
 import json
 import math
 import multiprocessing
@@ -105,7 +106,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import create_engine, delete, make_url, select
+from sqlalchemy import create_engine, delete, make_url, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -143,6 +144,8 @@ DEFAULT_FLUSH_MAX_BYTES = Settings.model_fields["step_log_flush_max_bytes"].defa
 # command and metric, and a command and a metric after each of the 2 model steps.
 REFERENCE_BOX_STEPS_PER_STEP = 6 / 8
 LOCAL_S3_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# The only libpq query keys the swarm database URL may carry: none of them can change the host.
+DB_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "application_name"})
 # Vercel's sandbox caps for one team: vCPU box starts per minute and concurrent vCPUs.
 VERCEL_VCPU_STARTS_PER_MINUTE = 5_000
 VERCEL_CONCURRENT_VCPUS = 10_000
@@ -291,15 +294,43 @@ def _check_db_url(url: str | None) -> None:
         url: ``LOAD_TEST_SWARM_DB_URL``, or ``None`` for SQLite files.
 
     Raises:
-        RuntimeError: When the URL names a host that is not local, no host, or a host, hostaddr or service query key.
+        RuntimeError: When the URL names a host that is not local, or no host; when it has a query key off the
+            allowed list; or when a libpq environment variable can send the connection to another host.
     """
     if url is None:
         return
     parsed = make_url(url)
-    # libpq takes the host from these query keys before the URL host, so a local URL host proves nothing.
-    redirects = {key.lower() for key in parsed.query} & {"host", "hostaddr", "service"}
-    if redirects or parsed.host not in LOCAL_S3_HOSTS:
+    # libpq takes the host from query keys (host, hostaddr, service, a nested dsn) before the URL host, so a
+    # local URL host proves nothing unless every other query key is refused.
+    unknown = {key.lower() for key in parsed.query} - DB_QUERY_KEYS
+    if unknown or parsed.host not in LOCAL_S3_HOSTS:
         raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL must name a database on {sorted(LOCAL_S3_HOSTS)}")
+    # PGHOSTADDR overrides the URL host, and a service file can set hostaddr; PGHOST is safe only when local.
+    redirects = [
+        name
+        for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+        if os.environ.get(name, "").strip() and not (name == "PGHOST" and os.environ[name].strip() in LOCAL_S3_HOSTS)
+    ]
+    if redirects:
+        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL is refused while {redirects} are set: unset them")
+
+
+def _check_server_addr(engine: Engine) -> None:
+    """Refuse a Postgres server that does not answer on a loopback address.
+
+    This is a second guard after ``_check_db_url``: it asks the server where the connection really went.
+
+    Args:
+        engine: The Postgres database.
+
+    Raises:
+        RuntimeError: When the server address is not loopback.
+    """
+    with engine.connect() as connection:
+        address = connection.execute(text("SELECT inet_server_addr()")).scalar()
+    # NULL means a Unix socket, which is local by definition.
+    if address is not None and not ipaddress.ip_address(str(address).split("/")[0]).is_loopback:
+        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL reached server address {address}, which is not loopback")
 
 
 def _delete_packs(shard: Shard) -> None:
@@ -795,6 +826,8 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             # A Postgres shard shares the server, as the step log's run shards share one database cluster.
             url = config.db_url or f"sqlite:///{shard_folder / 'db.sqlite'}"
             engine = create_engine(url, connect_args={"timeout": 60} if url.startswith("sqlite") else {})
+            if config.db_url is not None:
+                _check_server_addr(engine)
             if config.db_url is None or index == 0:
                 _reset(engine, runs)
             shard_runs = [run for position, run in enumerate(runs) if position % shard_count == index]

@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,12 +85,18 @@ def _pass_figures(shards: int, **overrides: Any) -> dict[str, Any]:
     return figures
 
 
-def _gate(monkeypatch: pytest.MonkeyPatch, config: swarm_10k.SwarmConfig, **sharded: Any) -> list[str]:
+def _gate(
+    monkeypatch: pytest.MonkeyPatch,
+    config: swarm_10k.SwarmConfig,
+    single: dict[str, Any] | None = None,
+    **sharded: Any,
+) -> list[str]:
     """Run the swarm gate on made-up pass figures and return its violations.
 
     Args:
         monkeypatch: Replaces ``run_pass``.
         config: The swarm config.
+        single: The figures to change on the 1-shard pass, or ``None``.
         **sharded: The figures to change on the sharded pass.
 
     Returns:
@@ -97,7 +104,7 @@ def _gate(monkeypatch: pytest.MonkeyPatch, config: swarm_10k.SwarmConfig, **shar
     """
 
     def fake_pass(config: swarm_10k.SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
-        """Return made-up figures, with the changes on the sharded pass.
+        """Return made-up figures, with the changes on each pass.
 
         Args:
             config: The swarm config.
@@ -107,7 +114,7 @@ def _gate(monkeypatch: pytest.MonkeyPatch, config: swarm_10k.SwarmConfig, **shar
         Returns:
             The figures.
         """
-        return _pass_figures(shard_count, **(sharded if shard_count > 1 else {}))
+        return _pass_figures(shard_count, **(sharded if shard_count > 1 else single or {}))
 
     monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
     result = swarm_10k.run(config)
@@ -257,6 +264,16 @@ def test_swarm_gate_fails_each_broken_limit(
     violations = _gate(monkeypatch, _swarm_config(), **sharded)
     assert len(violations) == 1
     assert text in violations[0]
+
+
+def test_swarm_gate_fails_a_lost_step_on_the_one_shard_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the 1-shard pass also fails the gate when it stored fewer steps than it committed.
+
+    Args:
+        monkeypatch: Replaces ``run_pass``.
+    """
+    violations = _gate(monkeypatch, _swarm_config(), single={"steps_stored": 99_999})
+    assert violations == ["1-shard pass stored 99999 of 100000"]
 
 
 def test_swarm_gate_fails_when_the_layouts_are_not_compared(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -612,33 +629,107 @@ def test_swarm_pass_cleans_every_shard_and_keeps_the_first_error(
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "env"),
     [
-        "postgresql://user@db.example.com/swarm",
-        "postgresql://user@10.0.0.5:5432/swarm",
-        "postgresql:///swarm",
-        "postgresql://user@localhost/swarm?host=db.example.com",
-        "postgresql://user@localhost/swarm?hostaddr=10.0.0.5",
-        "postgresql://user@127.0.0.1/swarm?service=remote",
+        ("postgresql://user@db.example.com/swarm", {}),
+        ("postgresql://user@10.0.0.5:5432/swarm", {}),
+        ("postgresql:///swarm", {}),
+        ("postgresql://user@localhost/swarm?host=db.example.com", {}),
+        ("postgresql://user@localhost/swarm?hostaddr=10.0.0.5", {}),
+        ("postgresql://user@127.0.0.1/swarm?service=remote", {}),
+        ("postgresql://user@localhost/swarm?dsn=hostaddr%3D192.0.2.1", {}),
+        ("postgresql://user@localhost/swarm?options=-c%20x%3D1", {}),
+        ("postgresql://user@localhost/swarm", {"PGHOSTADDR": "192.0.2.1"}),
+        ("postgresql://user@localhost/swarm", {"PGSERVICE": "remote"}),
+        ("postgresql://user@localhost/swarm", {"PGSERVICEFILE": "/etc/pg_service.conf"}),
+        ("postgresql://user@localhost/swarm", {"PGHOST": "db.example.com"}),
     ],
 )
-def test_swarm_refuses_a_database_that_is_not_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str) -> None:
-    """Check that the swarm refuses a database URL off the local host, before it opens the database.
+def test_swarm_refuses_a_database_that_is_not_local(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str, env: dict[str, str]
+) -> None:
+    """Check that the swarm refuses a database URL or environment off the local host, before it opens the database.
 
     Args:
-        monkeypatch: Makes an opened database fail the test.
+        monkeypatch: Makes an opened database fail the test, and sets the environment.
         tmp_path: The pass folder.
         url: The URL.
+        env: The libpq environment variables to set.
     """
+    for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(swarm_10k, "create_engine", _no_start)
     with pytest.raises(RuntimeError, match="LOAD_TEST_SWARM_DB_URL"):
         swarm_10k.run_pass(_swarm_config(db_url=url), 2, tmp_path)
 
 
-def test_swarm_takes_a_local_database() -> None:
-    """Check that a database URL on the local host passes the check."""
-    for url in (None, "postgresql://user@localhost:5432/swarm", "postgresql://user@127.0.0.1/swarm"):
+def test_swarm_takes_a_local_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a database URL on the local host passes the check.
+
+    Args:
+        monkeypatch: Sets the environment.
+    """
+    for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PGHOST", "localhost")
+    for url in (
+        None,
+        "postgresql://user@localhost:5432/swarm",
+        "postgresql://user@127.0.0.1/swarm",
+        "postgresql://user@localhost/swarm?sslmode=disable&connect_timeout=5&application_name=swarm",
+    ):
         swarm_10k._check_db_url(url)
+
+
+class _FakeServer:
+    """A stand-in Postgres engine that answers ``inet_server_addr()`` with a fixed address."""
+
+    def __init__(self, address: str | None) -> None:
+        """Keep the address.
+
+        Args:
+            address: The server address, or ``None`` for a Unix socket.
+        """
+        self.address = address
+
+    def connect(self) -> Any:
+        """Return a connection whose one query gives the address.
+
+        Returns:
+            The connection, as a context manager.
+        """
+        result = SimpleNamespace(scalar=lambda: self.address)
+        connection = SimpleNamespace(execute=lambda statement: result)
+        return nullcontext(connection)
+
+
+@pytest.mark.parametrize("address", ["192.0.2.1", "10.0.0.5/32", "2001:db8::1"])
+def test_swarm_refuses_a_server_off_loopback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, address: str) -> None:
+    """Check that the swarm refuses a server that answers on an address off loopback, before it resets any row.
+
+    Args:
+        monkeypatch: Replaces the engine and makes a reset fail the test.
+        tmp_path: The pass folder.
+        address: The server address.
+    """
+    for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(swarm_10k, "create_engine", lambda url, connect_args: _FakeServer(address))
+    monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    with pytest.raises(RuntimeError, match="not loopback"):
+        swarm_10k.run_pass(_swarm_config(db_url="postgresql://user@localhost/swarm"), 2, tmp_path)
+
+
+@pytest.mark.parametrize("address", [None, "127.0.0.1", "::1"])
+def test_swarm_takes_a_loopback_server(address: str | None) -> None:
+    """Check that a server on loopback, or on a Unix socket, passes the address check.
+
+    Args:
+        address: The server address, or ``None`` for a Unix socket.
+    """
+    swarm_10k._check_server_addr(_FakeServer(address))
 
 
 def test_swarm_box_caps_are_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -785,6 +876,36 @@ def test_run_with_a_seq_gap_is_not_ok() -> None:
     assert not outcome.ok
 
 
+def test_run_with_no_box_or_no_replay_is_not_ok() -> None:
+    """Check that a run that opened no box, or whose replay failed, is not ok when every other check passes."""
+    outcome = _passing_outcome(reference_shapes.SHAPES[0])
+    assert outcome.ok
+    outcome.replayed = False
+    assert not outcome.ok
+    outcome = _passing_outcome(reference_shapes.SHAPES[0])
+    outcome.meter.opened = 0
+    assert not outcome.ok
+
+
+def test_replay_with_another_result_fails(tmp_path: Path) -> None:
+    """Check that a clean replay fails when its result is not the live run's result.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    shape = reference_shapes.SHAPES[0]
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        outcome = reference_shapes.run_shape(harness, shape, "one-0", rounds=1)
+        assert outcome.ok, outcome.error
+        assert outcome.result is not None
+        best, score, evals = outcome.result
+        assert not reference_shapes._replays(harness, shape, "one-0", 1, (best, score, evals + 1))
+        assert reference_shapes._replays(harness, shape, "one-0", 1, outcome.result)
+    finally:
+        harness.close()
+
+
 def test_run_that_repeats_a_committed_step_is_not_ok() -> None:
     """Check that a resumed worker that did a committed step again fails the run, also when the replay works."""
     outcome = _passing_outcome(reference_shapes.SHAPES[0])
@@ -927,6 +1048,108 @@ def test_commit_kill_loses_the_step_before_the_flush(tmp_path: Path) -> None:
     assert outcome.work.done["model improve 1"] == 2
     assert outcome.repeated == []
     assert outcome.ok, outcome.error
+
+
+def test_commit_kill_after_the_flush_does_not_excuse_a_redo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a cut step stored in its own generation takes back its lost try, so its redo fails the run.
+
+    The flusher can store the step before the fence moves. Then the kill lost nothing, and a resume that does
+    the step again did committed work again.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Makes the harness report each cut step as stored in the generation of its commit.
+    """
+    switch = _KillAfterModelCommit()
+    monkeypatch.setattr(
+        reference_shapes.Harness,
+        "stored_generation",
+        lambda self, step_id: next(generation for cut_id, generation, _ in switch.cuts if cut_id == step_id),
+    )
+    outcome = _run_one(tmp_path, reference_shapes.SHAPES[0], switch)
+    assert switch.fired == {"commit": 1}
+    assert outcome.cuts_lost == 0
+    assert outcome.work.lost == {"model improve 1": 0}
+    assert outcome.repeated == ["model improve 1"]
+    assert not outcome.ok
+
+
+def test_reference_shapes_fails_a_shape_that_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the reference run names each shape whose run is not ok, and only that shape.
+
+    Args:
+        monkeypatch: Replaces ``run_shape`` with made-up outcomes and keeps the boxes local.
+    """
+    broken = reference_shapes.SHAPES[1]
+
+    def made_run(
+        harness: Any, shape: reference_shapes.Shape, run_id: str, *, rounds: int
+    ) -> reference_shapes.RunOutcome:
+        """Return a passing outcome, or a not-ok one for the broken shape.
+
+        Args:
+            harness: Not used.
+            shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+
+        Returns:
+            The outcome.
+        """
+        outcome = _passing_outcome(shape)
+        if shape.gpu:
+            outcome.meter.placements["gpu:A10G"] = 1
+        if shape is broken:
+            outcome.replayed = False
+        return outcome
+
+    monkeypatch.delenv("LOAD_TEST_BOX_IMAGE", raising=False)
+    monkeypatch.setattr(reference_shapes, "run_shape", made_run)
+    result = reference_shapes.run(reference_shapes.ReferenceShapesConfig(rounds=1, model_wait_seconds=1.0))
+    assert result.slo_violations == [f"{broken.name} did not finish correct and replayable"]
+    assert not result.slo_passed
+
+
+def test_chaos_gate_fails_a_run_that_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the chaos gate names a run that is not ok, also when every kill kind fired and a cut was lost.
+
+    Args:
+        monkeypatch: Runs one made-up shape run that fires each kill kind, and stops the chaos job.
+    """
+    shape = reference_shapes.SHAPES[0]
+
+    def broken_run(
+        harness: Any, made_shape: reference_shapes.Shape, run_id: str, *, rounds: int, switch: Any
+    ) -> reference_shapes.RunOutcome:
+        """Fire each kill kind on the switch and return an outcome whose replay failed.
+
+        Args:
+            harness: Not used.
+            made_shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+            switch: The run's chaos switch.
+
+        Returns:
+            The outcome.
+        """
+        switch.fired.update(dict.fromkeys(reference_shapes.KILL_KINDS, 1))
+        outcome = _passing_outcome(made_shape)
+        outcome.cuts_lost = 1
+        outcome.replayed = False
+        outcome.error = "replay failed"
+        return outcome
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", (shape,))
+    monkeypatch.setattr(chaos_gate, "run_shape", broken_run)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=1, rounds=1, workers=1, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    assert result.extras["runs_ok"] == 0
+    assert result.slo_violations == [f"made-0 ({shape.name}) did not finish correct and replayable: replay failed"]
+    assert not result.slo_passed
 
 
 def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:

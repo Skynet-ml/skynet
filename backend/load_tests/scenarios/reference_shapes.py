@@ -260,8 +260,8 @@ class ChaosSwitch:
         self._armed: str | None = None
         self.live = False
         self.fired: Counter[str] = Counter()
-        # ``(step id, generation)`` of each step that a commit kill cut off before it was durable.
-        self.cuts: list[tuple[str, int]] = []
+        # ``(step id, generation, work key)`` of each step that a commit kill cut off, maybe before it was durable.
+        self.cuts: list[tuple[str, int, str | None]] = []
         # A lost step is done again, so only the last box attempt of a step decides whether its candidate failed.
         self.box_failed: set[str] = set()
 
@@ -314,15 +314,16 @@ class ChaosSwitch:
         with self._lock:
             return frozenset(int(step.split()[-1]) for step in self.box_failed if step)
 
-    def cut(self, step_id: str, generation: int) -> None:
-        """Keep one step that a commit kill cut off before it was durable.
+    def cut(self, step_id: str, generation: int, step: str | None) -> None:
+        """Keep one step that a commit kill cut off, maybe before it was durable.
 
         Args:
             step_id: The step id.
             generation: The generation of the commit.
+            step: The step's key in the work log, or ``None`` when the commit recorded no new work.
         """
         with self._lock:
-            self.cuts.append((step_id, generation))
+            self.cuts.append((step_id, generation, step))
 
     def disarm(self) -> None:
         """Drop an armed kill that did not fire."""
@@ -376,6 +377,15 @@ class WorkLog:
         """
         with self._lock:
             self.lost[step] += 1
+
+    def unlose(self, step: str) -> None:
+        """Take back one lost try: the cut step was durable after all, so its resume must not do it again.
+
+        Args:
+            step: The step's key.
+        """
+        with self._lock:
+            self.lost[step] -= 1
 
     def repeated(self) -> list[str]:
         """Return the steps done more often than once and once more for each lost try.
@@ -690,10 +700,11 @@ class ChaosStepLog(StepLogStore):
         step_id = super().commit(**fields)
         step = self._work.take_last() if self._work is not None else None
         if self._switch.take("commit") == "commit":
-            # The step is only in the buffer, so the resume may do its work again.
+            # The step may be only in the buffer, so the resume may do its work again; run_shape takes the
+            # credit back when the flusher stored the step before the fence moved.
             if self._work is not None and step is not None:
                 self._work.lose(step)
-            self._switch.cut(step_id, fields["execution_generation"])
+            self._switch.cut(step_id, fields["execution_generation"], step)
             raise WorkerKilledError
         return step_id
 
@@ -1130,11 +1141,14 @@ def run_shape(
     steps = harness.steps(run_id)
     outcome.steps = len(steps)
     outcome.gapless = _gapless(steps)
-    outcome.repeated = outcome.work.repeated()
     if switch is not None:
-        outcome.cuts_lost = sum(
-            1 for step_id, generation in switch.cuts if harness.stored_generation(step_id) != generation
-        )
+        for step_id, cut_generation, step in switch.cuts:
+            if harness.stored_generation(step_id) != cut_generation:
+                outcome.cuts_lost += 1
+            elif step is not None:
+                # The flusher made the step durable before the fence moved, so a redo of it is wrong work.
+                outcome.work.unlose(step)
+    outcome.repeated = outcome.work.repeated()
     failed = switch.failed_candidates() if switch is not None else frozenset()
     if outcome.finished:
         outcome.correct = _correct(shape, rounds, outcome.result, failed=failed)
