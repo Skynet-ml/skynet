@@ -1529,6 +1529,73 @@ def test_tool_arguments_nested_past_the_bound_commit_as_refused_text_and_a_resum
     assert resumed_model.prompts == []
 
 
+# 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack, for example
+# LiteLLM's Anthropic conversion, can raise and fail every later model call.
+@pytest.mark.parametrize(
+    "arguments",
+    ["[" * 900 + "]" * 900, '{"a": ' * 900 + "1" + "}" * 900, "[" * 900],
+    ids=["array", "object", "bad-json"],
+)
+def test_deep_tool_argument_text_commits_as_refused_text_whatever_the_stack(
+    arguments: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Argument text that opens more levels than the bound fails only its call; shallow text that is no JSON stays.
+
+    Args:
+        arguments: Tool call argument text that opens 900 levels.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": arguments},
+        {"id": "call_1", "name": "edit", "arguments": '{"text": '},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.cost_cents == Decimal(1)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": '{"text": '},
+    ]
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_tool_argument_text_at_the_depth_bound_commits_and_one_level_deeper_commits_as_refused_text(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Argument text that opens exactly the arguments' bound of levels stays; one level more is refused.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    levels = engine_loop._MAX_REPLY_DEPTH - 3
+    at_bound = "[" * levels + "]" * levels
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": at_bound},
+        {"id": "call_1", "name": "edit", "arguments": f"[{at_bound}]"},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert [call["arguments"] for call in reply.tool_calls] == [at_bound, TOO_DEEP_ARGUMENTS]
+
+
 @pytest.mark.parametrize("deep", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
 def test_a_reply_nested_past_the_bound_outside_tool_arguments_is_a_failed_model_call_with_its_cost(
     deep: dict[str, Any],

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -270,6 +271,75 @@ class ModelReplyTooDeepError(ValueError):
 # goes on. It must stay valid JSON: engines put it unchanged into the next prompt, and a provider that gets text that
 # is not a JSON object can fail every later call in the session.
 TOO_DEEP_ARGUMENTS = '{"error": "tool call arguments nest too deep"}'
+# The most levels that tool call arguments may nest. It equals the engine loop's bound for arguments, so a call that
+# passes here also commits there. It is far below Python's recursion limit, so later code that reads the arguments
+# again does not run out of stack, whatever stack depth it reads them at.
+_MAX_ARGUMENTS_DEPTH = 97
+_JSON_STRUCTURE = re.compile(r'[\[\]{}"\\]')
+
+
+def nests_deeper(value: Any, levels: int) -> bool:
+    """Tell whether a value nests more than a number of levels of objects and arrays, with no recursion.
+
+    The walk also enters mapping keys: the commit's ``sort_keys`` encoding compares keys, and two deep tuple keys
+    would make that comparison raise :class:`RecursionError`.
+
+    Args:
+        value: The value; a mapping, a list or a tuple is one level.
+        levels: The most levels that the value may nest.
+
+    Returns:
+        ``True`` when a mapping, a list or a tuple sits deeper than ``levels``.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = [*item, *item.values()]
+        elif isinstance(item, list | tuple):
+            children = item
+        else:
+            continue
+        if depth > levels:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def text_nests_deeper(text: str, levels: int) -> bool:
+    """Tell whether JSON text opens more than a number of levels of objects and arrays, with no parse.
+
+    The answer does not depend on the stack, unlike a parse that raises :class:`RecursionError` only when it runs out
+    of stack. It holds for text that is not valid JSON too, which a later parse can still recurse into.
+
+    Args:
+        text: The text; brackets inside JSON strings do not count.
+        levels: The most levels that the text may open.
+
+    Returns:
+        ``True`` when the text opens more than ``levels`` brackets at one time.
+    """
+    depth = 0
+    in_string = False
+    escaped_at = -1
+    for match in _JSON_STRUCTURE.finditer(text):
+        position, char = match.start(), match.group()
+        if position == escaped_at:
+            continue
+        if in_string:
+            if char == "\\":
+                escaped_at = position + 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > levels:
+                return True
+        elif char in "]}":
+            depth -= 1
+    return False
 
 
 class ToolDefinition(TypedDict):
@@ -323,12 +393,13 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
-    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
-    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
-    Text too deep to read and a value too deep to write both become :data:`TOO_DEEP_ARGUMENTS`, so the engine
-    refuses only that call. Deep raw text must not reach the transcript: a later call would read it again, raise
-    :class:`RecursionError` and fail every later model call in the session.
+    call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
+    ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
+    keeps the value and the arguments stay a dict or text. Text or a value that nests more than
+    ``_MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
+    only that call. Deep text must not reach the transcript: a later call would read it again, raise
+    :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
+    stack, so the same reply always gives the same calls.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -345,17 +416,18 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         if isinstance(raw, dict):
             # Some clients parse the arguments already.
             arguments: dict[str, Any] | str = raw
+        elif (
+            text_nests_deeper(raw, _MAX_ARGUMENTS_DEPTH)
+            if isinstance(raw, str)
+            else nests_deeper(raw, _MAX_ARGUMENTS_DEPTH)
+        ):
+            arguments = TOO_DEEP_ARGUMENTS
         elif not isinstance(raw, str):
-            try:
-                arguments = json.dumps(raw, default=str)
-            except RecursionError:
-                arguments = TOO_DEEP_ARGUMENTS
+            arguments = json.dumps(raw, default=str)
         else:
             try:
                 parsed = json.loads(raw)
-            except RecursionError:
-                arguments = TOO_DEEP_ARGUMENTS
-            except (TypeError, ValueError):
+            except ValueError:
                 arguments = raw
             else:
                 arguments = parsed if isinstance(parsed, dict) else raw

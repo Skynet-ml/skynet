@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from .. import protocol
 from ..protocol import (
     METRIC_ERROR,
     RUN_FAILED_STATUS,
@@ -569,19 +570,27 @@ def _deep_list(levels: int) -> list[Any]:
     return value
 
 
+# 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack can raise. 5000
+# levels raises at any stack.
 @pytest.mark.parametrize(
-    ("arguments", "kept"),
-    [("[" * 5000 + "]" * 5000, TOO_DEEP_ARGUMENTS), (_deep_list(5000), TOO_DEEP_ARGUMENTS)],
-    ids=["text", "value"],
+    "arguments",
+    [
+        "[" * 900 + "]" * 900,
+        '{"a": ' * 900 + "1" + "}" * 900,
+        "[" * 900,
+        _deep_list(900),
+        "[" * 5000 + "]" * 5000,
+        _deep_list(5000),
+    ],
+    ids=["array-text", "object-text", "bad-text", "list-value", "text-past-limit", "value-past-limit"],
 )
-def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any, kept: str) -> None:
-    """Arguments past Python's recursion limit give ``TOO_DEEP_ARGUMENTS``, not a raise that loses the reply.
+def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any) -> None:
+    """Arguments past the fixed depth bound give ``TOO_DEEP_ARGUMENTS``, whatever the stack and the JSON shape.
 
-    Deep raw text must not reach the transcript, because a later call would read it again and raise.
+    Deep text must not reach the transcript, because a later call would read it again and raise.
 
     Args:
-        arguments: The deep arguments, as JSON text to read or as a value to write as JSON text.
-        kept: The text that the call keeps: ``TOO_DEEP_ARGUMENTS`` for both shapes.
+        arguments: The deep arguments, as text to read or as a value to write as JSON text.
     """
     message = {
         "tool_calls": [
@@ -591,9 +600,52 @@ def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(argu
     }
 
     assert tool_calls_from_openai(message) == [
-        {"id": "call_x", "name": "bash", "arguments": kept},
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
         {"id": "call_y", "name": "bash", "arguments": {"command": "ls"}},
     ]
+
+
+def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
+    """Arguments that nest exactly ``_MAX_ARGUMENTS_DEPTH`` levels stay; one level more gives ``TOO_DEEP_ARGUMENTS``."""
+    bound = protocol._MAX_ARGUMENTS_DEPTH
+    at_bound = "[" * bound + "]" * bound
+    message = {
+        "tool_calls": [
+            {"id": "call_a", "type": "function", "function": {"name": "bash", "arguments": at_bound}},
+            {"id": "call_b", "type": "function", "function": {"name": "bash", "arguments": f"[{at_bound}]"}},
+            {"id": "call_c", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound)}},
+            {"id": "call_d", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound + 1)}},
+        ]
+    }
+
+    assert [call["arguments"] for call in tool_calls_from_openai(message)] == [
+        at_bound,
+        TOO_DEEP_ARGUMENTS,
+        json.dumps(_deep_list(bound)),
+        TOO_DEEP_ARGUMENTS,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "deeper"),
+    [
+        ('{"a": "' + "[" * 200 + '"}', False),
+        ('{"a": "\\\\", "b": [[1]]}', True),
+        ('{"a": "\\"[[["}', False),
+        ("[[1]]", False),
+        ("[[[1]]]", True),
+        ("[[1], [2]]", False),
+    ],
+    ids=["brackets-in-string", "escaped-backslash", "escaped-quote", "at-bound", "past-bound", "siblings"],
+)
+def test_text_nests_deeper_counts_only_brackets_outside_strings(text: str, deeper: bool) -> None:
+    """Brackets inside JSON strings, and quotes that a backslash escapes, do not change the depth.
+
+    Args:
+        text: The JSON text.
+        deeper: Whether it opens more than two levels at one time.
+    """
+    assert protocol.text_nests_deeper(text, 2) is deeper
 
 
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:

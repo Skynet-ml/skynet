@@ -150,6 +150,8 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    nests_deeper,
+    text_nests_deeper,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from ..service_gateway.optimization.blackbox.tree_sandbox import (
@@ -257,34 +259,6 @@ class ModelReplyNotJSONError(ValueError):
     """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
 
 
-def _nests_deeper(value: Any, levels: int) -> bool:
-    """Tell whether a value nests more than a number of levels of objects and arrays, with no recursion.
-
-    The walk also enters mapping keys: the commit's ``sort_keys`` encoding compares keys, and two deep tuple keys
-    would make that comparison raise :class:`RecursionError`.
-
-    Args:
-        value: The value; a mapping, a list or a tuple is one level.
-        levels: The most levels that the value may nest.
-
-    Returns:
-        ``True`` when a mapping, a list or a tuple sits deeper than ``levels``.
-    """
-    stack: list[tuple[Any, int]] = [(value, 1)]
-    while stack:
-        item, depth = stack.pop()
-        if isinstance(item, dict):
-            children: Any = [*item, *item.values()]
-        elif isinstance(item, list | tuple):
-            children = item
-        else:
-            continue
-        if depth > levels:
-            return True
-        stack.extend((child, depth + 1) for child in children)
-    return False
-
-
 def _bounded_call(call: Any) -> Any:
     """Put ``TOO_DEEP_ARGUMENTS`` in place of tool call arguments that push the step body past its depth bound.
 
@@ -296,8 +270,16 @@ def _bounded_call(call: Any) -> Any:
     Returns:
         The call, or a copy of it with ``TOO_DEEP_ARGUMENTS`` as its arguments.
     """
-    # The step body, its tool call list and the call sit above the arguments.
-    if isinstance(call, dict) and _nests_deeper(call.get("arguments"), _MAX_REPLY_DEPTH - 3):
+    if not isinstance(call, dict):
+        return call
+    arguments = call.get("arguments")
+    # The step body, its tool call list and the call sit above the arguments. Text is bounded by the levels that it
+    # opens, because a later call reads it again, for example LiteLLM's Anthropic conversion at a deeper stack.
+    if isinstance(arguments, str):
+        too_deep = text_nests_deeper(arguments, _MAX_REPLY_DEPTH - 3)
+    else:
+        too_deep = nests_deeper(arguments, _MAX_REPLY_DEPTH - 3)
+    if too_deep:
         return {**call, "arguments": TOO_DEEP_ARGUMENTS}
     return call
 
@@ -317,7 +299,7 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
         ModelReplyNotJSONError: When it holds a value or key that is not JSON, or a lone surrogate that UTF-8 cannot
             hold.
     """
-    if _nests_deeper(body, _MAX_REPLY_DEPTH):
+    if nests_deeper(body, _MAX_REPLY_DEPTH):
         raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
     # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
     # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
