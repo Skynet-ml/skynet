@@ -1,4 +1,8 @@
-"""Tests for GEPA's parallel batch scoring: the concurrency bound, order, attempt keys and stops (SKY-429)."""
+"""Tests for GEPA: parallel batch scoring (SKY-429), and repository runs on the worker engine loop (SKY-720).
+
+The engine-loop tests use a SQLite file, the local-filesystem object store,
+local subprocess boxes and a fake model: no network and no paid call.
+"""
 
 from __future__ import annotations
 
@@ -6,21 +10,38 @@ import contextvars
 import re
 import threading
 import time
+from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetService
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
 from core.sandbox.errors import SandboxInfraError
+from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
+from core.storage.object_store import LocalObjectStore
+from core.storage.step_log_store import StepLogStore
+from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.workspace_store import WorkspaceStore
+from core.worker.actors import User
+from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop, LoopStoppedError
 
 from ...budget_stop import BudgetReached
 from .. import gepa_engine as gepa_mod
 from ..agent_eval import SandboxAgentScorer
 from ..gepa_engine import GepaEngine
 from ..harness import GatewayConfig
-from ..protocol import EvalServer, Task
-from ..sandbox import CommandResult
+from ..harness_bridge import hidden_hashes
+from ..native_runtime import NativeOptions
+from ..protocol import BudgetExhaustedError, EvalServer, ModelReply, RepoSeed, Result, Task
+from ..sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox_contract import SandboxSession
+from ..tree_sandbox import RuntimeBoxSource
 from .mocks import FakeSandboxRuntime, FakeSandboxSession, make_ctx, vowel_scorer
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
@@ -402,3 +423,742 @@ def test_an_exhausted_server_ends_the_parallel_batch(monkeypatch: pytest.MonkeyP
     assert server.used == 2
     assert len(runtime.sessions) == 2
     assert all(session.closed for session in runtime.sessions)
+
+
+_RUN_ID = "run-1"
+_BOX_SPEC = SandboxSpec(lifetime_seconds=60, allowed_hosts=(), operation_key="op")
+_CASES = [{"case": 0}, {"case": 1}]
+_OPTIONS = NativeOptions(
+    runtime="docker",
+    model="m",
+    gateway=_GATEWAY,
+    max_token_cost=None,
+    repo={"editable_paths": ["answer.txt"], "readonly_paths": [], "constrained": False},
+)
+_FILE_NOTE = re.compile(r"^answer\.txt:\n(.*)", re.DOTALL)
+
+
+class _Stores:
+    """The database, step log and tree store of one run."""
+
+    def __init__(self, folder: Path) -> None:
+        """Create the database with a funded wallet for ``alice`` and the running job.
+
+        Args:
+            folder: Where the database and the objects live.
+        """
+        folder.mkdir(parents=True, exist_ok=True)
+        self.engine: Engine = create_engine(f"sqlite:///{folder / 'db.sqlite'}", connect_args={"timeout": 30})
+        Base.metadata.create_all(self.engine)
+        with Session(self.engine) as session:
+            session.add(
+                BillingCustomerModel(
+                    username="alice", stripe_customer_id="local-alice", balance_cents=10_000, grant_remaining=0
+                )
+            )
+            session.add(JobModel(optimization_id=_RUN_ID, username="alice", status="running", execution_generation=1))
+            session.commit()
+        self.step_log = StepLogStore(
+            self.engine, LocalObjectStore(folder / "objects"), "worker-1", flush_window_seconds=0.02
+        )
+        self.trees = TreeStore(self.step_log)
+        budgets = BudgetService(engine=self.engine)
+        budget = budgets.create("alice", 1_000, idempotency_key="workspace-budget")
+        budget = budgets.attach_to_job(budget.id, "alice", _RUN_ID, expected_revision=budget.revision)
+        self.user = User("alice", engine=self.engine, budgets=budgets)
+        WorkspaceStore(self.engine).set_budget(self.user.workspace().id, budget.id)
+        self.budget_generation = budget.generation
+
+    def tree(self, name: str, text: str) -> str:
+        """Store one file as a tree.
+
+        Args:
+            name: The file name.
+            text: The file text.
+
+        Returns:
+            The tree id.
+        """
+        blob = self.trees.put_blob(_RUN_ID, text.encode())
+        return self.trees.put_tree(_RUN_ID, [TreeEntry(name, "file", blob)])
+
+    def steps(self) -> list[tuple[int, str, int]]:
+        """Return the root agent's committed steps.
+
+        Returns:
+            ``(seq, kind, execution_generation)`` for each step, in order.
+        """
+        with Session(self.engine) as session:
+            rows = session.execute(
+                select(AgentStepModel.seq, AgentStepModel.kind, AgentStepModel.execution_generation)
+                .where(AgentStepModel.run_id == _RUN_ID, AgentStepModel.agent_id == ROOT_AGENT_ID)
+                .order_by(AgentStepModel.seq)
+            )
+            return [(row.seq, row.kind, row.execution_generation) for row in rows]
+
+    def new_generation(self) -> None:
+        """Move the job to generation 2, as the orphan sweep does after a worker dies."""
+        with Session(self.engine) as session:
+            session.execute(update(JobModel).where(JobModel.optimization_id == _RUN_ID).values(execution_generation=2))
+            session.commit()
+
+    def close(self) -> None:
+        """Close the step log and the database."""
+        self.step_log.close()
+        self.engine.dispose()
+
+
+@pytest.fixture
+def stores(tmp_path: Path) -> Iterator[_Stores]:
+    """Yield the stores of one run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Yields:
+        The stores.
+    """
+    created = _Stores(tmp_path / "stores")
+    yield created
+    created.close()
+
+
+class _WorkerDiedError(BaseException):
+    """The worker dies in the middle of a model call: like a kill, no handler of ``Exception`` sees it."""
+
+
+class _CountingSource(RuntimeBoxSource):
+    """Open a local box for each acquire, and count the boxes that are open now and in total."""
+
+    def __init__(self, counter: dict[str, int]) -> None:
+        """Bind the source to a shared counter.
+
+        Args:
+            counter: Holds ``open`` and ``opened``.
+        """
+        super().__init__(LocalSubprocessRuntime(), _BOX_SPEC)
+        self.counter = counter
+
+    def acquire(self, agent_id: str, grants: Any) -> SandboxSession:
+        """Open a box and count it.
+
+        Args:
+            agent_id: The agent that runs the step.
+            grants: The step's grants.
+
+        Returns:
+            The box.
+        """
+        box = super().acquire(agent_id, grants)
+        self.counter["open"] += 1
+        self.counter["opened"] += 1
+        return box
+
+    def release(self, box: SandboxSession, healthy: bool) -> None:
+        """Close the box and count it as closed.
+
+        Args:
+            box: The box.
+            healthy: Whether the step finished.
+        """
+        try:
+            super().release(box, healthy)
+        finally:
+            self.counter["open"] -= 1
+
+
+class _RepoModel:
+    """A fake model: it runs one command, reads ``answer.txt``, then writes it back with one more ``x``."""
+
+    def __init__(self, counter: dict[str, int], die_at: int | None = None) -> None:
+        """Bind the model to the box counter.
+
+        Args:
+            counter: The box counter.
+            die_at: The index of the call in which the worker dies; ``None`` never dies.
+        """
+        self.counter = counter
+        self.die_at = die_at
+        self.calls = 0
+        self.open_boxes: list[int] = []
+
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelReply:
+        """Answer one turn of a proposal.
+
+        Args:
+            prompt: The proposal's messages.
+            tools: Not used.
+
+        Returns:
+            The reply and its cost in cents.
+
+        Raises:
+            _WorkerDiedError: In the call at ``die_at``.
+        """
+        self.open_boxes.append(self.counter["open"])
+        if self.calls == self.die_at:
+            raise _WorkerDiedError
+        self.calls += 1
+        assert isinstance(prompt, list)
+        last = str(prompt[-1]["content"])
+        if last.startswith("Exit code"):
+            return ModelReply("Let me read it.\n```read\nanswer.txt\n```", Decimal(1))
+        if seen := _FILE_NOTE.match(last):
+            return ModelReply(f"Here it is.\n```file answer.txt\n{seen[1].strip()}x\n```", Decimal(1))
+        return ModelReply("First the size.\n```sh\nwc -c < answer.txt\n```", Decimal(1))
+
+
+def _repo_run(
+    stores: _Stores, run_dir: Path, *, generation: int, die_at: int | None = None
+) -> tuple[Result, _RepoModel, dict[str, int], EngineLoop]:
+    """Run repository GEPA on an engine loop over local boxes and the fake model.
+
+    Args:
+        stores: The run's stores.
+        run_dir: The loop's local folder.
+        generation: The job's execution generation.
+        die_at: The model call in which the worker dies.
+
+    Returns:
+        The result, the model, the box counter and the loop.
+    """
+    run = stores.user.workspace().start_run(
+        _RUN_ID,
+        step_log=stores.step_log,
+        execution_generation=generation,
+        budget_generation=stores.budget_generation,
+        grant_list_id="grants-1",
+        chunk_cents=10,
+        lease_slices=4,
+    )
+    counter = {"open": 0, "opened": 0}
+    model = _RepoModel(counter, die_at=die_at)
+    loop = EngineLoop(
+        run,
+        engine=stores.engine,
+        trees=stores.trees,
+        candidates=_CountingSource(counter),
+        metrics=_CountingSource(counter),
+        model=model,
+        model_max_cents=2,
+        run_dir=run_dir,
+    )
+    metric_tree = stores.tree("metric.txt", "len")
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Measure ``answer.txt`` of one version in a metric box.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: Not used.
+
+        Returns:
+            The length of ``answer.txt`` and some feedback.
+        """
+        return loop.score(str(candidate), metric_tree, "wc -c < outputs/answer.txt"), {"feedback": "make it longer"}
+
+    seed = RepoSeed(stores.tree("answer.txt", "a\n"), editable_paths=("answer.txt",))
+    ctx = loop.context(native_options=_OPTIONS, repo_seed=seed)
+    result = GepaEngine().run(Task("", cases=list(_CASES)), loop.server(score, max_evals=24), ctx)
+    return result, model, counter, loop
+
+
+def _no_native(*args: Any, **kwargs: Any) -> Result:
+    """Fail when a repository run on the loop goes to the native runtime.
+
+    Args:
+        *args: Not used.
+        **kwargs: Not used.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError("a repository GEPA run on the loop called run_native_engine")
+
+
+def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(
+    monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
+) -> None:
+    """Run repository GEPA on the loop: no box for a model call or a file, and one step for each reply and command."""
+    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
+
+    result, model, counter, loop = _repo_run(stores, tmp_path / "loop", generation=1)
+
+    answer = loop.read_file(str(result.best_candidate), "answer.txt")
+    assert answer is not None
+    assert answer.startswith(b"axx")
+    assert result.best_score == len(answer)
+    assert model.calls > 0
+    assert model.open_boxes == [0] * model.calls
+    assert counter["open"] == 0
+    kinds = [kind for _, kind, _ in stores.steps()]
+    assert kinds.count("model") == model.calls
+    # Each proposal runs one command; the read and the write open no box and commit no step.
+    assert kinds.count("command") == counter["opened"]
+    assert [seq for seq, _, _ in stores.steps()] == list(range(len(kinds)))
+
+
+def test_a_killed_repository_run_resumes_to_the_population_of_a_clean_run(
+    monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
+) -> None:
+    """Kill the worker in the middle of the second proposal, and resume it in the same folder."""
+    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
+    clean_stores = _Stores(tmp_path / "clean")
+    try:
+        clean, clean_model, _, _ = _repo_run(clean_stores, tmp_path / "clean-loop", generation=1)
+        clean_steps = [kind for _, kind, _ in clean_stores.steps()]
+    finally:
+        clean_stores.close()
+
+    # Call 4 is the second proposal's read reply: its command is already committed.
+    with pytest.raises(_WorkerDiedError):
+        _repo_run(stores, tmp_path / "loop", generation=1, die_at=4)
+    committed = len(stores.steps())
+    stores.new_generation()
+    resumed, model, _, _ = _repo_run(stores, tmp_path / "loop", generation=2)
+
+    # A tree id is the hash of its content, so the two databases give the same ids.
+    assert resumed.best_candidate == clean.best_candidate
+    assert resumed.best_score == clean.best_score
+    assert resumed.metadata["candidate_tree"] == clean.metadata["candidate_tree"]
+    assert len(resumed.metadata["candidate_tree"]) > 2
+    steps = stores.steps()
+    assert [kind for _, kind, _ in steps] == clean_steps
+    assert [generation for _, _, generation in steps] == [1] * committed + [2] * (len(steps) - committed)
+    # The committed replies come back from the log; only the calls past it reach the model.
+    assert model.calls == clean_model.calls - 4
+
+
+class _FakeCalls:
+    """The loop's calls for the proposer: scripted model replies, and files and commands that run nowhere."""
+
+    def __init__(self, replies: list[str], cents: int = 1) -> None:
+        """Set the model's replies in order, and the cost of each one.
+
+        Args:
+            replies: The model's replies.
+            cents: The cost of each reply in cents.
+        """
+        self.replies = replies
+        self.cents = cents
+        self.prompts: list[str] = []
+        self.commands: list[str] = []
+        self.reads: list[str] = []
+        self.listings: list[str] = []
+        self.writes: list[tuple[dict[str, bytes], str | None]] = []
+
+    def model(self, prompt: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+        """Return the next reply.
+
+        Args:
+            prompt: The messages.
+            tools: Not used.
+
+        Returns:
+            The reply.
+        """
+        self.prompts.append(str(prompt[-1]["content"]))
+        return ModelReply(self.replies.pop(0), Decimal(self.cents))
+
+    def run(self, tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Record a command.
+
+        Args:
+            tree_id: Not used.
+            command: The command.
+            grants: Not used.
+
+        Returns:
+            A passing result and a new tree id.
+        """
+        self.commands.append(command)
+        return CommandResult(0, "listed", ""), "tree-command"
+
+    def put(self, files: dict[str, bytes], base_tree_id: str | None) -> str:
+        """Record a tree write.
+
+        Args:
+            files: The files.
+            base_tree_id: The base tree.
+
+        Returns:
+            A new tree id.
+        """
+        self.writes.append((dict(files), base_tree_id))
+        return f"tree-{len(self.writes)}"
+
+    def read(self, tree_id: str, path: str) -> bytes | None:
+        """Record a file read.
+
+        Args:
+            tree_id: Not used.
+            path: The path.
+
+        Returns:
+            The file, or ``None`` for a path other than ``answer.txt``, as the loop gives for a hidden path.
+        """
+        self.reads.append(path)
+        return b"a\n" if path == "answer.txt" else None
+
+    def list_files(self, tree_id: str, path: str = "") -> list[str] | None:
+        """Record a folder listing.
+
+        Args:
+            tree_id: Not used.
+            path: The folder.
+
+        Returns:
+            The files under the root or ``src``, or ``None`` for another folder.
+        """
+        self.listings.append(path)
+        return {"": ["answer.txt", "src/a.py"], "src": ["src/a.py"]}.get(path)
+
+    def ctx(self, tmp_path: Path, **overrides: Any) -> Any:
+        """Build an engine context over these calls and a seed with each kind of path rule.
+
+        Args:
+            tmp_path: The run folder.
+            **overrides: Other context fields.
+
+        Returns:
+            The context.
+        """
+        seed = RepoSeed(
+            "tree-seed",
+            editable_paths=("answer.txt", "src"),
+            readonly_paths=("vendor",),
+            constrained_paths=("src/rules.toml",),
+            hidden_hashes=hidden_hashes(["eval/metric.py", "secret"]),
+        )
+        fields = {
+            "call_model": self.model,
+            "run_command": self.run,
+            "put_files": self.put,
+            "read_file": self.read,
+            "list_files": self.list_files,
+        }
+        return make_ctx(str(tmp_path), **{**fields, "repo_seed": seed, **overrides})
+
+
+def _file(path: str, text: str = "new\n") -> str:
+    """Return a reply that writes one file.
+
+    Args:
+        path: The file path.
+        text: The file text.
+
+    Returns:
+        The reply.
+    """
+    return f"```file {path}\n{text}```"
+
+
+def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_box(tmp_path: Path) -> None:
+    """Refuse hidden, protected, read-only, outside and invalid paths; then write the valid files over the parent."""
+    calls = _FakeCalls(
+        [
+            _file("eval/metric.py"),
+            _file("secret/key.txt"),
+            _file(".optimize/exploits/a.py"),
+            _file("src/rules.toml"),
+            _file("vendor/lib.py"),
+            _file("../escape.txt") + "\n" + _file("README.md"),
+            "````file answer.txt\n```sh\nls\n```\n````\n" + _file("src/new.py"),
+        ]
+    )
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+    gepa_mod._MAX_TURNS, turns = 7, gepa_mod._MAX_TURNS
+    try:
+        assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
+    finally:
+        gepa_mod._MAX_TURNS = turns
+
+    notes = calls.prompts[1:]
+    assert notes[0] == "The files break the editing rules: 'eval/metric.py' may not be changed."
+    assert notes[1] == "The files break the editing rules: 'secret/key.txt' may not be changed."
+    assert notes[2] == "The files break the editing rules: '.optimize/exploits/a.py' may not be changed."
+    assert "protected by the repository rules" in notes[3]
+    assert "read-only" in notes[4]
+    assert "'../escape.txt' is not a path inside the repository." in notes[5]
+    assert "'README.md' is outside the editable paths." in notes[5]
+    assert calls.writes == [({"answer.txt": b"```sh\nls\n```\n", "src/new.py": b"new\n"}, "tree-parent")]
+    assert calls.commands == []
+    assert proposer.total_cost == pytest.approx(0.07)
+
+
+def test_the_proposer_lists_and_reads_with_no_box_and_keeps_the_parent_when_turns_run_out(
+    tmp_path: Path,
+) -> None:
+    """List folders and read a file with no box, run one command, and keep the parent with no version."""
+    replies = ["```ls\n```", "```ls\nsrc\n```", "```ls\nnone\n```", "```read\nanswer.txt\n```", "```sh\nls\n```"]
+    calls = _FakeCalls([*replies, "no block"])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert calls.prompts[1] == "Files (2):\nanswer.txt\nsrc/a.py"
+    assert calls.prompts[2] == "Files (1):\nsrc/a.py"
+    assert calls.prompts[3] == "'none' is not a folder of the current version."
+    assert calls.prompts[4] == "answer.txt:\na\n"
+    assert calls.prompts[5].startswith("Exit code 0.\nstdout:\nlisted")
+    assert calls.listings == ["", "src", "none"]
+    assert calls.reads == ["answer.txt"]
+    assert calls.commands == ["ls\n"]
+    assert calls.writes == []
+
+
+def test_the_reflection_cost_cap_stops_the_repository_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """GEPA's cost stopper reads the committed cost of the proposer's replies."""
+    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
+    calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)], cents=5)
+    server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=200)
+
+    GepaEngine().run(Task("", cases=list(_CASES)), server, calls.ctx(tmp_path, proposer_token_budget_usd=0.12))
+
+    # Each proposal costs 5 cents, so the 12-cent cap stops GEPA after its third proposal.
+    assert len(calls.writes) == 3
+
+
+def test_a_loop_stop_in_the_proposer_stops_the_repository_run(tmp_path: Path) -> None:
+    """GEPA logs a proposer error and goes on, so the engine raises the loop's stop after GEPA returns."""
+
+    def stopped(prompt: Any, tools: Any) -> ModelReply:
+        """Stop, as a fenced or closed loop does.
+
+        Args:
+            prompt: Not used.
+            tools: Not used.
+
+        Raises:
+            LoopStoppedError: Always.
+        """
+        raise LoopStoppedError("Run run-1 is closed.")
+
+    server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=40)
+    ctx = _FakeCalls([]).ctx(tmp_path, call_model=None)
+    ctx.call_model = stopped
+
+    with pytest.raises(LoopStoppedError):
+        GepaEngine().run(Task("", cases=list(_CASES)), server, ctx)
+    assert server.used < 40
+
+
+def test_a_repository_run_with_no_loop_keeps_the_native_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Until the cutover (SKY-728), a repository run with no loop calls or no seed runs in the native runtime."""
+    native = Result(best_candidate="patch", best_score=1.0, total_evals=0)
+    monkeypatch.setattr(gepa_mod, "run_native_engine", lambda *args: native)
+    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
+    no_calls = _FakeCalls([]).ctx(tmp_path, native_options=_OPTIONS, put_files=None)
+    no_seed = make_ctx(str(tmp_path), native_options=_OPTIONS)
+
+    assert GepaEngine().run(Task(""), server, no_calls) is native
+    assert GepaEngine().run(Task(""), server, no_seed) is native
+
+
+@pytest.mark.parametrize(
+    "path", [".optimize", ".OPTIMIZE", ".optimize/exploits", ".Optimize/Exploits", ".optimize/EXPLOITS/a.py"]
+)
+def test_the_proposer_refuses_the_exploits_folder_its_parents_and_their_case_variants(
+    path: str, tmp_path: Path
+) -> None:
+    """A file at a parent of the exploits folder would block the hidden suite, so each case variant is refused."""
+    calls = _FakeCalls([_file(path)] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
+    ctx = calls.ctx(tmp_path, repo_seed=RepoSeed("tree-seed", editable_paths=(".",)))
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert calls.prompts[1] == f"The files break the editing rules: '{path}' may not be changed."
+    assert calls.writes == []
+
+
+def test_the_proposer_writes_a_path_that_only_starts_like_the_exploits_folder(tmp_path: Path) -> None:
+    """``.optimizer`` and ``.optimize/exploits2`` are neither the exploits folder nor one of its parents."""
+    calls = _FakeCalls([_file(".optimizer") + "\n" + _file(".optimize/exploits2/a.py")])
+    ctx = calls.ctx(tmp_path, repo_seed=RepoSeed("tree-seed", editable_paths=(".",)))
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
+    assert calls.writes == [({".optimizer": b"new\n", ".optimize/exploits2/a.py": b"new\n"}, "tree-parent")]
+
+
+def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
+    """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``optimize.toml`` to the engine."""
+    metric, config = "the-hidden-metric-42", "the-hidden-config-43"
+    run = stores.user.workspace().start_run(
+        _RUN_ID,
+        step_log=stores.step_log,
+        execution_generation=1,
+        budget_generation=stores.budget_generation,
+        grant_list_id="grants-1",
+        chunk_cents=10,
+        lease_slices=4,
+    )
+    counter = {"open": 0, "opened": 0}
+    replies = [
+        "```ls\n```",
+        "```ls\neval\n```",
+        "```read\neval/metric.py\n```",
+        "```read\noptimize.toml\n```",
+        "```sh\ncat eval/metric.py optimize.toml\n```",
+        _file("optimize.toml"),
+        "no block",
+    ]
+    calls = _FakeCalls(replies)
+    hidden = hidden_hashes(["eval", "optimize.toml"])
+    loop = EngineLoop(
+        run,
+        engine=stores.engine,
+        trees=stores.trees,
+        candidates=_CountingSource(counter),
+        metrics=_CountingSource(counter),
+        model=calls.model,
+        model_max_cents=2,
+        run_dir=tmp_path / "loop",
+        hidden_hashes=hidden,
+    )
+    seed_tree = loop.put_files(
+        {"answer.txt": b"a\n", "eval/metric.py": metric.encode(), "optimize.toml": config.encode()}
+    )
+    seed = RepoSeed(seed_tree, editable_paths=("answer.txt",), hidden_hashes=hidden)
+    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    gepa_mod._MAX_TURNS, turns = 7, gepa_mod._MAX_TURNS
+    try:
+        assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
+    finally:
+        gepa_mod._MAX_TURNS = turns
+    notes = calls.prompts[1:]
+    assert notes[0] == "Files (1):\nanswer.txt"
+    assert notes[1] == "'eval' is not a folder of the current version."
+    assert notes[2] == "'eval/metric.py' is not a file of the current version."
+    assert notes[3] == "'optimize.toml' is not a file of the current version."
+    assert notes[4].startswith("Exit code ")
+    assert not notes[4].startswith("Exit code 0.")
+    assert notes[5] == "The files break the editing rules: 'optimize.toml' may not be changed."
+    assert all(metric not in note and config not in note for note in calls.prompts)
+    assert counter["opened"] == 1
+
+
+def test_a_file_at_a_folder_that_holds_a_hidden_file_is_refused_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
+    """A file at ``eval`` would replace the folder and drop the hidden ``eval/metric.py``, so the write is refused."""
+    run = stores.user.workspace().start_run(
+        _RUN_ID,
+        step_log=stores.step_log,
+        execution_generation=1,
+        budget_generation=stores.budget_generation,
+        grant_list_id="grants-1",
+        chunk_cents=10,
+        lease_slices=4,
+    )
+    counter = {"open": 0, "opened": 0}
+    calls = _FakeCalls([_file("eval")] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
+    hidden = hidden_hashes(["eval/metric.py"])
+    loop = EngineLoop(
+        run,
+        engine=stores.engine,
+        trees=stores.trees,
+        candidates=_CountingSource(counter),
+        metrics=_CountingSource(counter),
+        model=calls.model,
+        model_max_cents=2,
+        run_dir=tmp_path / "loop",
+        hidden_hashes=hidden,
+    )
+    seed_tree = loop.put_files({"answer.txt": b"a\n", "eval/metric.py": b"metric"})
+    seed = RepoSeed(seed_tree, editable_paths=(".",), hidden_hashes=hidden)
+    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
+    assert calls.prompts[1] == "The files break the editing rules: 'eval' may not be changed."
+    assert counter["opened"] == 0
+
+
+def test_a_file_at_a_parent_of_a_protected_or_read_only_path_is_refused(tmp_path: Path) -> None:
+    """A file at ``cfg`` or ``lib`` would replace the protected or read-only path under it."""
+    calls = _FakeCalls([_file("cfg") + "\n" + _file("lib")] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
+    seed = RepoSeed(
+        "tree-seed", editable_paths=(".",), constrained_paths=("cfg/rules.toml",), readonly_paths=("lib/sub",)
+    )
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert calls.prompts[1] == "The files break the editing rules: 'cfg' may not be changed. 'lib' may not be changed."
+    assert calls.writes == []
+
+
+def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -> None:
+    """The brief lists the visible protected and read-only paths, and leaves out the hidden ones."""
+    calls = _FakeCalls([_file("answer.txt")])
+    seed = RepoSeed(
+        "tree-seed",
+        editable_paths=("answer.txt",),
+        constrained_paths=("optimize.toml", "src/rules.toml"),
+        readonly_paths=("eval/data", "vendor"),
+        hidden_hashes=hidden_hashes(["optimize.toml", "eval"]),
+    )
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert "The repository rules protect: src/rules.toml." in calls.prompts[0]
+    assert "Submodules and Git LFS files stay as fetched: vendor." in calls.prompts[0]
+    assert "optimize.toml" not in calls.prompts[0]
+    assert "eval/data" not in calls.prompts[0]
+
+
+def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
+    """A long file or listing ends with a notice, so the model does not write back a part as the whole file."""
+    calls = _FakeCalls(["```read\nlong.txt\n```", "```ls\n```"] + ["no block"] * (gepa_mod._MAX_TURNS - 2))
+    names = [f"f{index:04}" for index in range(1000)]
+    ctx = calls.ctx(tmp_path, read_file=lambda tree_id, path: b"x" * 5000, list_files=lambda tree_id, path="": names)
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
+    assert proposer is not None
+
+    proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert calls.prompts[1] == "long.txt:\n" + "x" * 4000 + "\n[cut at 4000 of 5000 characters; read the rest with sh]"
+    assert calls.prompts[2].endswith("\n[cut at 4000 of 5999 characters; read the rest with sh]")
+    assert calls.prompts[2].startswith("Files (1000):\nf0000\n")
+
+
+def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Path) -> None:
+    """On the loop a version is a tree id, so a run with no scorer calls left returns the seed tree."""
+    ctx = _FakeCalls([]).ctx(tmp_path)
+    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=0)
+
+    result = GepaEngine().run(Task("text seed", cases=list(_CASES)), server, ctx)
+
+    assert result.best_candidate == "tree-seed"
+
+
+def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When GEPA stops with no saved state, a loop run returns the seed tree, not the task's text seed."""
+
+    def exhausted(**kwargs: Any) -> None:
+        """Stop as the scorer cap does before GEPA saves a state.
+
+        Args:
+            **kwargs: Not used.
+
+        Raises:
+            BudgetExhaustedError: Always.
+        """
+        raise BudgetExhaustedError
+
+    monkeypatch.setattr(gepa_mod, "optimize_anything", exhausted)
+    ctx = _FakeCalls([]).ctx(tmp_path)
+    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
+
+    result = GepaEngine().run(Task("text seed", cases=list(_CASES)), server, ctx)
+
+    assert result.best_candidate == "tree-seed"
