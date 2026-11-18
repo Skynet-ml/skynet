@@ -112,6 +112,7 @@ from .protocol import (
     Task,
     candidate_key,
     is_metric_error,
+    is_run_failed,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
 from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
@@ -549,6 +550,9 @@ class FinalRun:
     # How many cases returned each named score. ``named`` holds a name's mean
     # but cannot show that some cases left the name out (SKY-692).
     named_cases: dict[str, int] = field(default_factory=dict)
+    # Whether the version's ``[run]`` entry failed on any case, not only the
+    # metric: only that makes the starting code lose to a scored version (SKY-751).
+    run_failed: bool = False
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
@@ -726,6 +730,7 @@ def _final_run(
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
         failures=errors,
+        run_failed=any(score is None and is_run_failed(side_info) for score, side_info, _ in scored),
     )
 
 
@@ -1597,6 +1602,9 @@ def _run_job(
             **finite_json(result.metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
+            # SKY-751: whether the starting code's final run had a failed [run]
+            # case; the pull request decision reads it with ``baseline_score``.
+            "baseline_run_failed": baseline_run.run_failed if baseline_run else None,
             # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
             **({"outcome": verdict} if verdict else {}),
         },

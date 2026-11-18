@@ -1352,6 +1352,29 @@ def test_a_failed_case_counts_as_zero_in_every_named_score() -> None:
     assert run.named["accuracy"].score == pytest.approx(0.4)
 
 
+@pytest.mark.parametrize(("status", "run_failed"), [(RUN_FAILED_STATUS, True), (METRIC_ERROR, False)])
+def test_final_run_marks_only_a_failed_run_case(status: str, run_failed: bool) -> None:
+    """The final run records a failed ``[run]`` case apart from a metric error, for the pull request rule (SKY-751)."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Give the second case no score, with the given status.
+
+        Args:
+            candidate: The version under test.
+            case: The case to score.
+
+        Returns:
+            The score and side info.
+        """
+        if case["n"] == 2:
+            return None, {"feedback": "no score", "status": status}
+        return 0.5, {"feedback": "ok"}
+
+    run = service_mod._final_run(scorer, "v", [{"n": 1}, {"n": 2}], label="starting point", phase=PHASE_BASELINE)
+
+    assert (run.score, run.run_failed) == (None, run_failed)
+
+
 def test_final_run_keeps_each_cases_observation_for_both_versions() -> None:
     """A scorer that measures its runs gives each case result the baseline's and the winner's observation."""
 

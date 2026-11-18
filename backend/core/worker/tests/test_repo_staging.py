@@ -2146,7 +2146,12 @@ _RUN_FAILED_START = {
 @pytest.mark.parametrize(
     "result",
     [
-        _result(None, 0.4, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(
+            None,
+            0.4,
+            versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}],
+            details={"baseline_run_failed": True},
+        ),
         _result(None, None, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
     ],
 )
@@ -2156,6 +2161,22 @@ def test_a_scored_version_beats_a_starting_code_with_no_score(result: dict[str, 
     body = repo_staging._description(result, _EDIT, "https://x/run")
     assert "The starting code has no score" in body
     assert "This version scored 0.4." in body
+
+
+def test_a_starting_code_whose_final_run_failed_loses_to_a_scored_version() -> None:
+    """The search scored the starting code, but its final ``[run]`` failed, so the winner opens a PR (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": True})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_a_metric_error_in_the_final_run_never_lets_a_version_win() -> None:
+    """The final run decides: a metric error there opens no PR, even after a search ``[run]`` failure (SKY-751)."""
+    versions = [_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": False})
+
+    assert repo_staging.improved_patch(result) is None
 
 
 def test_a_version_whose_run_failed_is_never_published() -> None:
