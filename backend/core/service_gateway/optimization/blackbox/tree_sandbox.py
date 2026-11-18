@@ -75,7 +75,7 @@ from types import TracebackType
 from typing import Any, TypeVar
 
 from ....billing.budgets import BudgetError
-from ....billing.operation_pricing import UnpricedOperationError
+from ....billing.operation_pricing import UnpricedOperationError, json_fingerprint
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....sandbox.box_lease import BoxLease
@@ -215,8 +215,12 @@ class RuntimeBoxSource:
             The open box.
 
         Raises:
-            GrantError: When the grant list does not resolve.
+            GrantError: When the grant list does not resolve or asks for a GPU.
         """
+        gpu = gpu_type(grants)
+        if gpu is not None:
+            # Refused before any box opens: this source opens CPU boxes only, and a GPU step must not run without it.
+            raise GrantError(f"This box source cannot start a box with GPU type {gpu!r}; only the warm box lease can.")
         return self._runtime.open(resolve_grants(grants, self._registry).apply(self._spec))
 
     def release(self, box: SandboxSession, healthy: bool) -> None:
@@ -788,16 +792,19 @@ class TreeSandbox:
             grants: The grants.
 
         Returns:
-            The grant-list id the step records.
+            The grant-list id the step records; it names the GPU type when a grant asks for one.
 
         Raises:
             GrantDeniedError: When the grants do not resolve.
         """
         try:
             # A gpu:<type> grant places the box; it is not a network grant.
-            return resolve_grants(network_grants(grants), self._registry).grant_list_id
+            network_id = resolve_grants(network_grants(grants), self._registry).grant_list_id
+            gpu = gpu_type(grants)
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
+        # The step log is the record, so it shows the hardware; a CPU step keeps its network-only id.
+        return network_id if gpu is None else json_fingerprint([network_id, f"gpu:{gpu}"])
 
     def _in_box(
         self,

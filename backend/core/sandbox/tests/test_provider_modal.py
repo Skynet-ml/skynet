@@ -416,11 +416,16 @@ async def test_create_starts_the_sandbox_with_the_gpu_type(fake_modal: FakeModal
 def test_every_other_provider_refuses_a_gpu_type(caps: EnvironmentCapabilities) -> None:
     """Refuse a GPU type on a provider without GPU types, also one that takes a GPU count or picks an instance type.
 
+    A type that is not text or is blank gets the name error first, on every provider.
+
     Args:
         caps: The capabilities of a provider that is not Modal.
     """
     with pytest.raises(SandboxSpecError, match=f"The {caps.name} sandbox cannot start a box with GPU type 'a100'"):
         validate_spec(SandboxSpec(lifetime_seconds=60, gpu_type="a100"), caps)
+    for bad in (7, "  "):
+        with pytest.raises(SandboxSpecError, match="must be a non-empty name"):
+            validate_spec(SandboxSpec(lifetime_seconds=60, gpu_type=bad), caps)  # type: ignore[arg-type]
 
 
 def test_resource_kwargs_leave_out_memory_when_unset() -> None:
