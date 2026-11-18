@@ -324,8 +324,9 @@ def register_lifecycle_routes(
 
         Raises:
             DomainError: 404 if unknown or inaccessible, 403 if the caller's
-                share role is below ``editor``, 409 if already terminal. A
-                ``paused`` run is not terminal here and can be cancelled.
+                share role is below ``editor``, 409 if already terminal, or
+                409 ``optimization.cancel_conflict`` if the run moved on every
+                try. A ``paused`` run is not terminal here and can be cancelled.
         """
         return cancel_optimization(job_store, optimization_id, current_user, get_worker_ref())
 
