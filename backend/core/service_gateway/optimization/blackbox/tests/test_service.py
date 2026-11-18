@@ -1978,6 +1978,63 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
     assert "contract_source" not in repo_meta
 
 
+class _NativeOptionsBuiltError(Exception):
+    """Stop a run once the service builds its native options."""
+
+
+def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_engines(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+) -> None:
+    """The snapshot's ``file_proposer`` and ``proposer_setup`` reach ``NativeOptions.repo`` (SKY-753).
+
+    Args:
+        fake_lm: Fake reflection model for the run.
+        tmp_path: Log folder for the run.
+        monkeypatch: Native runtime switch and the options capture.
+        fake_native_proposers: Fake native proposers, so no engine starts.
+    """
+    built: list[dict[str, Any]] = []
+
+    def capture(**options: Any) -> NativeOptions:
+        """Keep the native options and stop the run.
+
+        Args:
+            **options: The options the service builds.
+
+        Raises:
+            _NativeOptionsBuiltError: Always, after it keeps the options.
+        """
+        built.append(options)
+        raise _NativeOptionsBuiltError
+
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: True)
+    monkeypatch.setattr(service_mod, "NativeOptions", capture)
+    payload = _payload(max_cost_cents=100)
+    job = replace(
+        service_mod.job_spec_from_payload(payload),
+        target=BlackboxTarget(kind="repo", repo=BlackboxRepoSource(repository="o/r", editable_paths=["src"])),
+    )
+    setup = ["npm", "ci"]
+
+    with pytest.raises(_NativeOptionsBuiltError):
+        service_mod.run_job(
+            job,
+            service_mod.build_scorer(payload.scorer, job_id="job-file-proposer"),
+            service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+            artifact_id="job-file-proposer",
+            started=time.perf_counter(),
+            progress_callback=None,
+            gepa_log_dir_path=str(tmp_path),
+            repo_snapshot={"chunks": [], "file_proposer": True, "proposer_setup": setup},
+        )
+
+    assert built[0]["repo"]["file_proposer"] is True
+    assert built[0]["repo"]["proposer_setup"] == setup
+
+
 def test_a_run_where_every_case_scores_a_valid_zero_succeeds(
     fake_lm: FakeReflectionLM,
     tmp_path: Path,

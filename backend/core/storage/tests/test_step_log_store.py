@@ -14,6 +14,7 @@ import time
 import uuid
 import weakref
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -207,7 +208,13 @@ def _set_generation(engine: Engine, generation: int, run_id: str = "job-1") -> N
 
 
 def test_commit_returns_the_step_id_before_any_write(make_store, engine, objects) -> None:
-    """A commit only buffers: no PUT, no row, and ``durable`` is not done yet."""
+    """A commit only buffers: no PUT, no row, and ``durable`` is not done yet.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     store = make_store()
 
     step_id = _commit(store)
@@ -223,7 +230,13 @@ def test_commit_returns_the_step_id_before_any_write(make_store, engine, objects
 
 
 def test_durable_waits_for_the_object_put(make_store, engine, objects) -> None:
-    """While the PUT is held, ``durable`` does not return; after it, the pack and row exist."""
+    """While the PUT is held, ``durable`` does not return; after it, the pack and row exist.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     objects.gate.clear()
     store = make_store(flush_window_seconds=0.05)
     step_id = _commit(store)
@@ -240,7 +253,13 @@ def test_durable_waits_for_the_object_put(make_store, engine, objects) -> None:
 
 
 def test_durable_waits_for_the_postgres_commit(make_store, engine, objects) -> None:
-    """With the pack already written, ``durable`` still waits until the transaction commits."""
+    """With the pack already written, ``durable`` still waits until the transaction commits.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     committing = threading.Event()
     release = threading.Event()
 
@@ -269,7 +288,12 @@ def test_durable_waits_for_the_postgres_commit(make_store, engine, objects) -> N
 
 
 def test_a_stale_generation_fails_the_step_with_a_fence_error(make_store, engine) -> None:
-    """A generation bump before the flush fails the step on ``durable`` and on the next commit."""
+    """A generation bump before the flush fails the step on ``durable`` and on the next commit.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     step_id = _commit(store)
     with Session(engine) as session:
@@ -288,7 +312,12 @@ def test_a_stale_generation_fails_the_step_with_a_fence_error(make_store, engine
 
 
 def test_a_fresh_run_lands_while_a_stale_run_in_the_same_flush_fails(make_store, engine) -> None:
-    """The fence is per run: one flush keeps the current run's step and fails only the stale one."""
+    """The fence is per run: one flush keeps the current run's step and fails only the stale one.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     fresh = _commit(store, agent_id="agent-a")
     stale = _commit(store, agent_id="agent-b", run_id="job-2")
@@ -306,7 +335,13 @@ def test_a_fresh_run_lands_while_a_stale_run_in_the_same_flush_fails(make_store,
 
 
 def test_a_retried_commit_with_the_same_step_id_is_a_no_op(make_store, engine, objects) -> None:
-    """A retry in the buffer, after the flush, and from a new worker leaves one row with the first body."""
+    """A retry in the buffer, after the flush, and from a new worker leaves one row with the first body.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     store = make_store()
     first = _commit(store, body={"command": "ls", "output": "a\n"})
     assert _commit(store, body={"command": "ls", "output": "a\n"}) == first
@@ -325,7 +360,11 @@ def test_a_retried_commit_with_the_same_step_id_is_a_no_op(make_store, engine, o
 
 
 def test_a_retry_after_the_flush_reads_the_first_body(make_store) -> None:
-    """Between a retry and its flush, a reader sees the stored first body, not the retry's."""
+    """Between a retry and its flush, a reader sees the stored first body, not the retry's.
+
+    Args:
+        make_store: The factory of step log stores.
+    """
     store = make_store()
     first = _commit(store, body={"command": "ls", "output": "a\n"})
     store.flush()
@@ -336,7 +375,12 @@ def test_a_retry_after_the_flush_reads_the_first_body(make_store) -> None:
 
 
 def test_after_a_generation_bump_only_the_new_generation_retry_of_a_durable_step_succeeds(make_store, engine) -> None:
-    """The old generation's retry fails the fence; the new one's retry is a no-op, and its next seq lands."""
+    """The old generation's retry fails the fence; the new one's retry is a no-op, and its next seq lands.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     first = _commit(store)
     store.flush()
@@ -357,7 +401,12 @@ def test_after_a_generation_bump_only_the_new_generation_retry_of_a_durable_step
 
 
 def test_a_stale_generation_commit_after_the_current_one_landed_fails_the_fence(make_store, engine) -> None:
-    """Generation 2 lands seq 5; a later generation 1 commit of seq 5 fails, and the row stays generation 2's."""
+    """Generation 2 lands seq 5; a later generation 1 commit of seq 5 fails, and the row stays generation 2's.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     _set_generation(engine, 2)
     current = _commit(store, seq=5, execution_generation=2, body={"command": "new", "output": ""})
@@ -376,7 +425,12 @@ def test_a_stale_generation_commit_after_the_current_one_landed_fails_the_fence(
 
 
 def test_a_stale_generation_commit_on_another_worker_fails_the_fence(make_store, engine) -> None:
-    """A generation 1 commit of a seq that generation 2 landed fails on a second store with another worker id."""
+    """A generation 1 commit of a seq that generation 2 landed fails on a second store with another worker id.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     other = make_store(worker_id="w2")
     _set_generation(engine, 2)
@@ -394,7 +448,12 @@ def test_a_stale_generation_commit_on_another_worker_fails_the_fence(make_store,
 
 
 def test_two_generations_of_one_step_in_one_flush_land_only_the_current_one(make_store, engine) -> None:
-    """Generations 1 and 2 commit seq 5 in one window: generation 2 lands its body, generation 1 fails."""
+    """Generations 1 and 2 commit seq 5 in one window: generation 2 lands its body, generation 1 fails.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     old = _commit(store, seq=5, execution_generation=1, body={"command": "old", "output": ""})
     _set_generation(engine, 2)
@@ -413,7 +472,12 @@ def test_two_generations_of_one_step_in_one_flush_land_only_the_current_one(make
 
 
 def test_a_fenced_step_stays_fenced_after_the_new_generation_lands_the_same_seq(make_store, engine) -> None:
-    """Generation 1's fenced seq 5 still fails after generation 2 commits and lands seq 5."""
+    """Generation 1's fenced seq 5 still fails after generation 2 commits and lands seq 5.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     old = _commit(store, seq=5, execution_generation=1)
     _set_generation(engine, 2)
@@ -428,7 +492,12 @@ def test_a_fenced_step_stays_fenced_after_the_new_generation_lands_the_same_seq(
 
 
 def test_durable_without_a_buffered_entry_checks_the_current_generation(make_store, engine) -> None:
-    """With nothing buffered, ``durable`` fails an old generation's landed step and does not know an unknown id."""
+    """With nothing buffered, ``durable`` fails an old generation's landed step and does not know an unknown id.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     step_id = _commit(store)
     store.flush()
@@ -443,7 +512,12 @@ def test_durable_without_a_buffered_entry_checks_the_current_generation(make_sto
 
 
 def test_a_fence_error_of_an_old_generation_does_not_fail_the_new_generation(make_store, engine) -> None:
-    """A fenced old incarnation stops; the run resumes at a new generation and its first commit lands."""
+    """A fenced old incarnation stops; the run resumes at a new generation and its first commit lands.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     _commit(store, execution_generation=1)
     with Session(engine) as session:
@@ -461,7 +535,14 @@ def test_a_fence_error_of_an_old_generation_does_not_fail_the_new_generation(mak
 
 
 def test_a_pack_that_another_store_applied_reports_its_fenced_step(make_store, engine, objects, monkeypatch) -> None:
-    """When recovery by another store applies the pack first, ``durable`` still fails the step it fenced."""
+    """When recovery by another store applies the pack first, ``durable`` still fails the step it fenced.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     recovering = make_store()
     fenced = _commit(store)
@@ -493,7 +574,14 @@ def test_a_pack_that_another_store_applied_reports_its_fenced_step(make_store, e
 def test_a_pack_that_another_store_applied_fences_a_stale_retry_of_a_landed_step(
     make_store, engine, objects, monkeypatch
 ) -> None:
-    """A generation 1 retry of a landed step fails when another store applies its pack after a bump."""
+    """A generation 1 retry of a landed step fails when another store applies its pack after a bump.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     recovering = make_store()
     step_id = _commit(store)
@@ -521,7 +609,12 @@ def test_a_pack_that_another_store_applied_fences_a_stale_retry_of_a_landed_step
 
 
 def test_durable_keeps_the_fence_verdict_when_the_step_is_committed_again(make_store, engine) -> None:
-    """A retry of a fenced step between the flush and ``durable``'s verdict read does not make ``durable`` succeed."""
+    """A retry of a fenced step between the flush and ``durable``'s verdict read does not make ``durable`` succeed.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     step_id = _commit(store)
     waiter = store._waiters[(step_id, 1)]
@@ -557,7 +650,12 @@ def test_durable_keeps_the_fence_verdict_when_the_step_is_committed_again(make_s
 
 
 def test_the_next_commit_of_a_fenced_agent_raises_the_fence_error_one_time(make_store, engine) -> None:
-    """After a fenced flush the agent's next commit raises; a commit after that is buffered and fenced at its flush."""
+    """After a fenced flush the agent's next commit raises; a commit after that is buffered and fenced at its flush.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     _commit(store)
     _set_generation(engine, 2)
@@ -576,7 +674,13 @@ def test_the_next_commit_of_a_fenced_agent_raises_the_fence_error_one_time(make_
 
 
 def test_the_store_keeps_only_the_newest_fence_verdicts(make_store, engine, monkeypatch) -> None:
-    """Above the cap the oldest verdicts leave: ``durable`` then asks the database, and a new commit is buffered."""
+    """Above the cap the oldest verdicts leave: ``durable`` then asks the database, and a new commit is buffered.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
     store = make_store()
     steps = [_commit(store, agent_id=f"agent-{number}") for number in range(4)]
@@ -597,7 +701,13 @@ def test_the_store_keeps_only_the_newest_fence_verdicts(make_store, engine, monk
 
 
 def test_a_flush_that_fences_more_steps_than_the_cap_fails_each_waiter(make_store, engine, monkeypatch) -> None:
-    """Each waiter of a flush gets its fence verdict, also when the flush fences more steps than the store keeps."""
+    """Each waiter of a flush gets its fence verdict, also when the flush fences more steps than the store keeps.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
     store = make_store()
     steps = [_commit(store, seq=seq) for seq in range(1, 6)]
@@ -610,7 +720,12 @@ def test_a_flush_that_fences_more_steps_than_the_cap_fails_each_waiter(make_stor
 
 
 def test_durable_raises_a_new_fence_error_each_time_and_keeps_no_caller_frame(make_store, engine) -> None:
-    """The store keeps a step id as the verdict, so an error that ``durable`` raised keeps no frame alive in the store."""
+    """The store keeps a step id as the verdict, so an error that ``durable`` raised keeps no frame alive in the store.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     step_id = _commit(store)
     _set_generation(engine, 2)
@@ -642,7 +757,13 @@ def test_durable_raises_a_new_fence_error_each_time_and_keeps_no_caller_frame(ma
 
 
 def test_durable_that_waits_for_the_flush_raises_a_new_fence_error(make_store, engine, objects) -> None:
-    """A ``durable`` call that waits on the step's waiter raises its own error, not an object that the store keeps."""
+    """A ``durable`` call that waits on the step's waiter raises its own error, not an object that the store keeps.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     store = make_store()
     step_id = _commit(store)
     waiter = store._waiters[(step_id, 1)]
@@ -694,7 +815,12 @@ def test_durable_that_waits_for_the_flush_raises_a_new_fence_error(make_store, e
 
 
 def test_commit_raises_a_new_fence_error_and_keeps_no_caller_frame(make_store, engine) -> None:
-    """The fence error of an agent's next commit keeps no frame alive, while the step's verdict stays in the store."""
+    """The fence error of an agent's next commit keeps no frame alive, while the step's verdict stays in the store.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     step_id = _commit(store)
     _set_generation(engine, 2)
@@ -726,7 +852,14 @@ def test_commit_raises_a_new_fence_error_and_keeps_no_caller_frame(make_store, e
 
 
 def test_a_new_fence_verdict_of_a_kept_agent_becomes_the_newest(make_store, engine, objects, monkeypatch) -> None:
-    """An agent that a later flush fences again moves to the newest place, so the cap removes another agent first."""
+    """An agent that a later flush fences again moves to the newest place, so the cap removes another agent first.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr("core.storage.step_log_store.FENCE_VERDICT_MAX", 2)
     store = make_store()
     _commit(store, agent_id="agent-0")
@@ -755,7 +888,12 @@ def test_a_new_fence_verdict_of_a_kept_agent_becomes_the_newest(make_store, engi
 
 
 def test_tree_objects_are_inserted_in_sorted_key_order(make_store, engine) -> None:
-    """Objects put in reverse id order reach the ``tree_objects`` insert sorted, so every flush locks them in one order."""
+    """Objects put in reverse id order reach the ``tree_objects`` insert sorted, so every flush locks them in one order.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     ids = [letter * 64 for letter in "fedcb"]
     inserted: list[list[str]] = []
 
@@ -786,7 +924,14 @@ def test_tree_objects_are_inserted_in_sorted_key_order(make_store, engine) -> No
 
 
 def test_recover_counts_only_the_packs_it_applied(make_store, engine, objects, monkeypatch) -> None:
-    """A pack that another store of the same worker applies while recovery reads it is not counted."""
+    """A pack that another store of the same worker applies while recovery reads it is not counted.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     recovering = make_store()
     other = make_store()
@@ -828,7 +973,13 @@ def test_recover_counts_only_the_packs_it_applied(make_store, engine, objects, m
 
 
 def test_a_failed_database_write_puts_no_new_pack_while_the_written_pack_waits(make_store, engine, objects) -> None:
-    """New commits after a failed database write do not PUT a new pack while the written pack waits for its retry."""
+    """New commits after a failed database write do not PUT a new pack while the written pack waits for its retry.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     database_down = threading.Event()
     database_down.set()
 
@@ -895,7 +1046,14 @@ def _fail_the_next_apply(store: StepLogStore, monkeypatch: pytest.MonkeyPatch) -
 def test_a_failed_database_write_keeps_the_written_pack_for_the_next_flush(
     make_store, engine, objects, monkeypatch
 ) -> None:
-    """After the PUT and a failed transaction, the next flush records that pack and does not PUT its steps again."""
+    """After the PUT and a failed transaction, the next flush records that pack and does not PUT its steps again.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     _fail_the_next_apply(store, monkeypatch)
     first = _commit(store)
@@ -917,7 +1075,14 @@ def test_a_failed_database_write_keeps_the_written_pack_for_the_next_flush(
 
 
 def test_durable_returns_when_the_flusher_records_the_kept_pack(make_store, engine, objects, monkeypatch) -> None:
-    """With no new commit, the flusher records the kept pack after the window, and ``durable`` returns."""
+    """With no new commit, the flusher records the kept pack after the window, and ``durable`` returns.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store(flush_window_seconds=0.2)
     _fail_the_next_apply(store, monkeypatch)
     step_id = _commit(store)
@@ -928,8 +1093,327 @@ def test_durable_returns_when_the_flusher_records_the_kept_pack(make_store, engi
     assert _step_rows(engine) == 1
 
 
+def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine, objects, monkeypatch) -> None:
+    """A retry that finds the sweep's claim row opens its waiters with an error and does not report the step as landed.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    store = make_store()
+    apply = store._apply
+
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
+        """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
+
+        The claim goes in before the failure: the flusher retries a kept pack at once.
+
+        Args:
+            shard: The shard name.
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        # The row that TreeCompactor._claim_flush_packs inserts for a flush pack older than its age limit.
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    step_id = _commit(store)
+    # The waiter must be open before the retry settles it: the flusher may retry first.
+    waiter = store._waiters[(step_id, 1)]
+    waiting = threading.Event()
+    wait = waiter.wait
+
+    def note_wait(timeout: float | None = None) -> bool:
+        """Mark that ``durable`` waits on the waiter, then wait.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            Whether the waiter opened.
+        """
+        waiting.set()
+        return wait(timeout)
+
+    waiter.wait = note_wait
+    errors: list[Exception] = []
+
+    def wait_for_step() -> None:
+        """Wait for the step and keep the error."""
+        try:
+            store.durable(step_id, 1, timeout=10)
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=wait_for_step)
+    thread.start()
+    assert waiting.wait(5)
+    with pytest.raises(OperationalError):
+        store.flush()
+
+    store.flush()
+    thread.join(10)
+
+    assert len(errors) == 1
+    assert type(errors[0]) is RuntimeError
+    assert "was deleted before it was recorded" in str(errors[0])
+    assert _step_rows(engine) == 0
+
+
+def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, objects, monkeypatch) -> None:
+    """The sweep claims a kept pack: the agent's pending step does not land, and its next commit raises.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    store = make_store()
+    apply = store._apply
+    later: list[str] = []
+
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
+        """Commit the agent's next step, insert the sweep's claim row, restore the real write, then fail this call.
+
+        The next step goes in while the pack is kept, so it waits in the pending batch of the retry.
+
+        Args:
+            shard: The shard name.
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        later.append(_commit(store, seq=2))
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    other = _commit(store, agent_id="agent-b")
+    _commit(store)
+    # The flusher can retry the kept pack before this test does; the second flush waits for that one.
+    with pytest.raises(OperationalError):
+        store.flush()
+    _commit(store, seq=1, agent_id="agent-b", run_id="job-2")
+    store.flush()
+
+    assert _step_rows(engine) == 1
+    with pytest.raises(StepFenceError):
+        store.durable(later[0], 1, timeout=0)
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=3)
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=1, agent_id="agent-b")
+    with pytest.raises(KeyError):
+        store.durable(other, 1, timeout=0)
+
+
+def test_a_caller_that_waits_on_a_dropped_step_gets_the_fence_error(make_store, engine, monkeypatch) -> None:
+    """A caller already blocked in ``durable`` on a later step of a lost agent gets the fence error, not the lost error.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    store = make_store()
+    apply = store._apply
+    later: list[str] = []
+    waiting = threading.Event()
+
+    def apply_once_waiting(*args: Any) -> Any:
+        """Wait until the caller waits on the later step, then run the real write.
+
+        Args:
+            *args: The shard, pack key, size and manifest.
+
+        Returns:
+            The real write's result.
+        """
+        waiting.wait(5)
+        return apply(*args)
+
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
+        """Commit the agent's next step, mark the wait on it, insert the sweep's claim row, then fail this call.
+
+        Args:
+            shard: The shard name.
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        later.append(_commit(store, seq=2))
+        waiter = store._waiters[(later[0], 1)]
+        wait = waiter.wait
+
+        def note_wait(timeout: float | None = None) -> bool:
+            """Mark that ``durable`` waits on the waiter, then wait.
+
+            Args:
+                timeout: The most seconds to wait.
+
+            Returns:
+                Whether the waiter opened.
+            """
+            waiting.set()
+            return wait(timeout)
+
+        waiter.wait = note_wait
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        # The flusher can retry first; the retry waits until the caller waits, so the waiter settles it.
+        monkeypatch.setattr(store, "_apply", apply_once_waiting)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    _commit(store)
+    with pytest.raises(OperationalError):
+        store.flush()
+    errors: list[Exception] = []
+
+    def wait_for_step() -> None:
+        """Wait for the later step and keep the error."""
+        try:
+            store.durable(later[0], 1, timeout=10)
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=wait_for_step)
+    thread.start()
+    assert waiting.wait(5)
+    store.flush()
+    thread.join(10)
+
+    assert len(errors) == 1
+    assert type(errors[0]) is StepFenceError
+    assert _step_rows(engine) == 0
+
+
+@pytest.mark.parametrize("put_again", [False, True])
+def test_the_objects_of_a_lost_pack_go_into_the_next_pack(make_store, engine, monkeypatch, put_again) -> None:
+    """A later step of another agent names an object of the lost pack: the next pack records the object too.
+
+    With ``put_again``, the other agent puts the object while the lost pack is in flight, and the put is skipped.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+        put_again: Whether the other agent puts the object again while the lost pack is in flight.
+    """
+    store = make_store()
+    apply = store._apply
+    object_id = "e" * 64
+    data = b"blob\0lost"
+    later: list[str] = []
+
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
+        """Commit a step that names the object, insert the sweep's claim row, restore the real write, then fail.
+
+        Args:
+            shard: The shard name.
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        if put_again:
+            store.put_object("job-1", object_id, data)
+        later.append(_commit(store, agent_id="agent-b", tree_id=object_id))
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    store.put_object("job-1", object_id, data)
+    with pytest.raises(OperationalError):
+        store.flush()
+    store.flush()
+
+    store.durable(later[0], 1, timeout=5)
+    assert _step_rows(engine) == 1
+    assert store._tree_objects == {}
+    assert store.get_object("job-1", object_id) == data
+
+
+def test_the_object_of_a_lost_pack_stays_readable_when_the_next_put_fails(
+    make_store, engine, objects, monkeypatch
+) -> None:
+    """The flush after the lost pack fails at the PUT: the object stays readable and a second put adds no entry.
+
+    Args:
+        make_store: Builds a step log store.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    store = make_store()
+    apply = store._apply
+    put = objects.put
+    object_id = "f" * 64
+    data = b"blob\0kept"
+
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
+        """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
+
+        Args:
+            shard: The shard name.
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    store.put_object("job-1", object_id, data)
+    with pytest.raises(OperationalError):
+        store.flush()
+    monkeypatch.setattr(objects, "put", lambda key, data: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        store.flush()
+    monkeypatch.setattr(objects, "put", put)
+
+    assert store.get_object("job-1", object_id) == data
+    pending = len(store._pending)
+    store.put_object("job-1", object_id, data)
+    assert len(store._pending) == pending == 1
+
+
 def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
-    """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
+    """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     _fail_the_next_apply(store, monkeypatch)
     step_id = _commit(store)
@@ -945,7 +1429,11 @@ def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store,
 
 
 def test_run_agent_and_seq_are_unique_in_the_database(engine) -> None:
-    """The schema refuses a second step at the same run, agent and position, but not in another run."""
+    """The schema refuses a second step at the same run, agent and position, but not in another run.
+
+    Args:
+        engine: The test engine.
+    """
     row = {
         "run_id": "job-1",
         "agent_id": "agent-a",
@@ -967,7 +1455,12 @@ def test_run_agent_and_seq_are_unique_in_the_database(engine) -> None:
 
 
 def test_two_runs_with_the_same_agent_and_seq_keep_their_own_steps(make_store, engine) -> None:
-    """In one buffer, the same agent and seq in two runs give two ids, two rows and two bodies."""
+    """In one buffer, the same agent and seq in two runs give two ids, two rows and two bodies.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     first = _commit(store, body={"command": "first", "output": ""})
     second = _commit(store, run_id="job-2", body={"command": "second", "output": ""})
@@ -982,7 +1475,12 @@ def test_two_runs_with_the_same_agent_and_seq_keep_their_own_steps(make_store, e
 
 
 def test_after_a_restart_another_run_with_the_same_agent_and_seq_lands(make_store, engine) -> None:
-    """A new store with an empty buffer commits the same agent and seq for another run, and the row lands."""
+    """A new store with an empty buffer commits the same agent and seq for another run, and the row lands.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     _commit(store, body={"command": "first", "output": ""})
     store.flush()
@@ -998,7 +1496,12 @@ def test_after_a_restart_another_run_with_the_same_agent_and_seq_lands(make_stor
 
 
 def test_a_fence_failure_in_one_run_does_not_fail_the_same_agent_id_in_another_run(make_store, engine) -> None:
-    """The failure an agent sees on its next commit belongs to its own run only."""
+    """The failure an agent sees on its next commit belongs to its own run only.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store()
     stale = _commit(store, run_id="job-2")
     with Session(engine) as session:
@@ -1012,7 +1515,11 @@ def test_a_fence_failure_in_one_run_does_not_fail_the_same_agent_id_in_another_r
 
 
 def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
-    """A run id that names no job reads no object, before or after the flush."""
+    """A run id that names no job reads no object, before or after the flush.
+
+    Args:
+        make_store: The factory of step log stores.
+    """
     store = make_store()
     store.put_object("job-1", "c" * 64, b"blob\0hello")
 
@@ -1045,7 +1552,13 @@ def test_an_object_read_with_an_unknown_run_is_none(make_store) -> None:
     ],
 )
 def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, objects, overrides: dict[str, Any]) -> None:
-    """An id, seq or generation that the database or the step id would refuse is refused before the buffer."""
+    """An id, seq or generation that the database or the step id would refuse is refused before the buffer.
+
+    Args:
+        make_store: The factory of step log stores.
+        objects: The counting object store.
+        overrides: The commit fields that are out of bounds.
+    """
     store = make_store()
 
     with pytest.raises(ValueError):
@@ -1068,7 +1581,14 @@ def test_a_commit_outside_the_step_id_bounds_is_refused(make_store, objects, ove
     ],
 )
 def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, objects, run_id, object_id) -> None:
-    """A bad object id or run id is refused at the call, and nothing reaches a pack."""
+    """A bad object id or run id is refused at the call, and nothing reaches a pack.
+
+    Args:
+        make_store: The factory of step log stores.
+        objects: The counting object store.
+        run_id: The run id of the object.
+        object_id: The object id.
+    """
     store = make_store()
 
     with pytest.raises(ValueError):
@@ -1082,7 +1602,13 @@ def test_a_put_object_with_an_id_the_database_refuses_is_refused(make_store, obj
     [None, 7, "blob\0x", [b"blob\0x"], bytearray(b"blob\0x"), memoryview(b"blob\0x")],
 )
 def test_a_put_object_with_data_that_is_not_bytes_is_refused(make_store, engine, data: Any) -> None:
-    """Data that is not ``bytes`` is refused at the call; the same object id and a step land after it."""
+    """Data that is not ``bytes`` is refused at the call; the same object id and a step land after it.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        data: The object data that is not ``bytes``.
+    """
     store = make_store()
 
     with pytest.raises(TypeError, match="data is not bytes"):
@@ -1097,7 +1623,12 @@ def test_a_put_object_with_data_that_is_not_bytes_is_refused(make_store, engine,
 
 @pytest.mark.parametrize("worker_id", ["", "w" * 65, "w/1", "w\x00", "w-é", ".", ".."])
 def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
-    """An empty, too long or not printable ASCII worker id, or one that changes the pack folder, is refused."""
+    """An empty, too long or not printable ASCII worker id, or one that changes the pack folder, is refused.
+
+    Args:
+        make_store: The factory of step log stores.
+        worker_id: The bad worker id.
+    """
     with pytest.raises(ValueError, match="bad worker id"):
         make_store(worker_id)
 
@@ -1114,13 +1645,23 @@ def test_a_bad_worker_id_is_refused(make_store, worker_id: str) -> None:
     ],
 )
 def test_a_flush_window_or_size_cap_outside_its_bounds_is_refused(make_store, options: dict[str, float]) -> None:
-    """A window that is not above 0 or that no thread can wait, or a size cap below 1, fails at construction."""
+    """A window that is not above 0 or that no thread can wait, or a size cap below 1, fails at construction.
+
+    Args:
+        make_store: The factory of step log stores.
+        options: The store options that are out of bounds.
+    """
     with pytest.raises(ValueError, match="bad flush window or size cap"):
         make_store(**options)
 
 
 def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
-    """With no explicit flush, the step is durable after the window."""
+    """With no explicit flush, the step is durable after the window.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store(flush_window_seconds=0.2)
     started = time.monotonic()
     step_id = _commit(store)
@@ -1132,7 +1673,12 @@ def test_the_buffer_flushes_when_the_window_ends(make_store, engine) -> None:
 
 
 def test_the_buffer_flushes_at_the_size_cap_before_the_window(make_store, engine) -> None:
-    """A batch over the size cap flushes at once, long before a 60 second window."""
+    """A batch over the size cap flushes at once, long before a 60 second window.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+    """
     store = make_store(flush_window_seconds=60.0, flush_max_bytes=100)
     step_id = _commit(store, body={"command": "cat big", "output": "x" * 200})
 
@@ -1142,7 +1688,13 @@ def test_the_buffer_flushes_at_the_size_cap_before_the_window(make_store, engine
 
 
 def test_one_flush_is_one_put_and_one_transaction(make_store, engine, objects) -> None:
-    """Steps of two agents in two runs, plus a tree object, go out in one PUT and one commit."""
+    """Steps of two agents in two runs, plus a tree object, go out in one PUT and one commit.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     commits: list[object] = []
 
     def count_commit(connection: Any) -> None:
@@ -1249,7 +1801,12 @@ def test_each_flush_statement_splits_into_chunks_under_the_bind_limit(make_store
 
 
 def test_a_read_before_the_flush_returns_the_buffered_bytes(make_store, objects) -> None:
-    """Before the flush the step and object come from the buffer; after it, from the pack."""
+    """Before the flush the step and object come from the buffer; after it, from the pack.
+
+    Args:
+        make_store: The factory of step log stores.
+        objects: The counting object store.
+    """
     store = make_store()
     step_id = _commit(store, body={"command": "pwd", "output": "/w\n"})
     store.put_object("job-1", "c" * 64, b"blob\0hello")
@@ -1269,7 +1826,14 @@ def test_a_read_before_the_flush_returns_the_buffered_bytes(make_store, objects)
 
 
 def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
-    """A PUT error loses nothing: the next flush writes the same steps once."""
+    """A PUT error loses nothing: the next flush writes the same steps once.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     step_id = _commit(store)
     monkeypatch.setattr(objects, "put", lambda key, data: (_ for _ in ()).throw(OSError("disk full")))
@@ -1284,7 +1848,13 @@ def test_a_failed_put_keeps_the_batch_for_the_next_flush(make_store, engine, obj
 
 
 def test_new_commits_after_a_failed_put_do_not_start_a_retry_early(make_store, objects, monkeypatch) -> None:
-    """After a failed PUT, the flusher waits one window: the commits in that window do not each PUT the batch again."""
+    """After a failed PUT, the flusher waits one window: the commits in that window do not each PUT the batch again.
+
+    Args:
+        make_store: The factory of step log stores.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     attempts: list[str] = []
 
     def failing_put(key: str, data: bytes) -> None:
@@ -1318,7 +1888,14 @@ def test_new_commits_after_a_failed_put_do_not_start_a_retry_early(make_store, o
 
 
 def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, monkeypatch) -> None:
-    """A batch that a failed outside ``flush`` puts back lands with no new commit to wake the flusher."""
+    """A batch that a failed outside ``flush`` puts back lands with no new commit to wake the flusher.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store(flush_window_seconds=0.1)
     step_id = _commit(store)
     put = objects.put
@@ -1488,7 +2065,11 @@ def test_a_flush_that_fails_with_a_new_driver_error_logs_the_full_error_again(ma
 
 
 def test_a_closed_store_refuses_new_steps_and_objects(make_store) -> None:
-    """After ``close``, no flusher is left, so a new step or object fails at once instead of waiting forever."""
+    """After ``close``, no flusher is left, so a new step or object fails at once instead of waiting forever.
+
+    Args:
+        make_store: The factory of step log stores.
+    """
     store = make_store()
     store.close()
 
@@ -1499,10 +2080,16 @@ def test_a_closed_store_refuses_new_steps_and_objects(make_store) -> None:
 
 
 def test_a_failed_flush_at_close_opens_the_waiters_with_an_error(make_store, objects, monkeypatch) -> None:
-    """A waiter with no time limit does not block forever when the last flush of ``close`` fails."""
+    """A waiter with no time limit does not block forever when the last flush of ``close`` fails.
+
+    Args:
+        make_store: The factory of step log stores.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     step_id = _commit(store)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def wait() -> None:
         """Wait for the step without a time limit and keep the error."""
@@ -1534,7 +2121,11 @@ def test_the_flush_window_defaults_to_half_a_second() -> None:
 
 
 def test_the_local_object_store_reads_ranges_and_lists_by_prefix(tmp_path) -> None:
-    """The local store reads a byte range, lists keys by prefix and refuses keys outside its root."""
+    """The local store reads a byte range, lists keys by prefix and refuses keys outside its root.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     store = LocalObjectStore(tmp_path)
     store.put("packs/w1/a.pack", b"0123456789")
     store.put("other/b", b"x")
@@ -1549,7 +2140,11 @@ def test_the_local_object_store_reads_ranges_and_lists_by_prefix(tmp_path) -> No
 
 
 def test_the_local_object_store_does_not_list_a_half_written_file(tmp_path) -> None:
-    """A temporary file that a crash left during ``put`` is not a key, so recovery never reads it as a pack."""
+    """A temporary file that a crash left during ``put`` is not a key, so recovery never reads it as a pack.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     store = LocalObjectStore(tmp_path)
     store.put("packs/w1/a.pack", b"0123456789")
     (tmp_path / "packs" / "w1" / ".put-abc123").write_bytes(b"half")
@@ -1666,7 +2261,11 @@ def test_the_s3_store_reads_ranges_and_lists_every_page() -> None:
 
 
 def test_the_s3_store_reads_its_bucket_from_the_setting(monkeypatch) -> None:
-    """The S3 store writes to the ``SKYNET_TREE_BUCKET`` bucket, and refuses to start without one."""
+    """The S3 store writes to the ``SKYNET_TREE_BUCKET`` bucket, and refuses to start without one.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     client = _FakeS3()
     monkeypatch.setattr(settings, "tree_bucket", "trees-test")
 
@@ -1718,7 +2317,12 @@ def postgres_engine() -> Iterator[Engine]:
 
 @needs_postgres
 def test_postgres_flush_fences_and_dedupes(postgres_engine, tmp_path) -> None:
-    """On Postgres, one flush keeps the fresh step, fails the stale one, and a retry adds no row."""
+    """On Postgres, one flush keeps the fresh step, fails the stale one, and a retry adds no row.
+
+    Args:
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        tmp_path: Pytest's temporary folder.
+    """
     store = StepLogStore(postgres_engine, LocalObjectStore(tmp_path), "w1", flush_window_seconds=60.0)
     try:
         fresh = _commit(store, agent_id="agent-a")

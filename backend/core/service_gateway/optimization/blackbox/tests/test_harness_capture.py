@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
-from core.storage.tree_store import TreeStore
+from core.storage.tree_store import TreeStore, object_id_of
 
 from .. import exec_shim, harness_bridge, harness_capture
 from ..harness_bridge import SESSIONS_DIR, install_shim
@@ -1285,6 +1285,64 @@ def test_restore_deletes_what_the_tree_does_not_name_without_following_links(ste
     assert sorted(path.relative_to(fresh).as_posix() for path in fresh.rglob("*")) == ["src", "src/a.py"]
     assert (outside / "keep").is_dir()
     assert (home / SESSIONS_DIR / "other").is_dir()
+
+
+def test_a_snapshot_leaves_out_git_folders_in_any_letter_case(step_log, tmp_path) -> None:
+    """A workspace with ``git init`` or a checkout snapshots, with no ``.git`` part in the tree (SKY-810)."""
+    workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
+    (workspace / ".git").mkdir(parents=True)
+    (workspace / "sub" / ".GIT").mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (workspace / ".git" / "config").write_text("[core]\n")
+    (workspace / "sub" / ".GIT" / "x").write_text("x")
+    (workspace / "sub" / "b.py").write_text("b = 1\n")
+    (workspace / ".gitignore").write_text("*.pyc\n")
+    (session_dir / ".Git").write_text("g")
+    trees = TreeStore(step_log)
+
+    snapshot = _snapshot(trees, workspace, session_dir)
+
+    assert sorted(_tree_files(trees, snapshot.tree_id)) == [".gitignore", "sub/b.py"]
+    assert snapshot.skipped_count == 0
+
+
+def _put_raw_tree(step_log: StepLogStore, rows: list[list[str]]) -> str:
+    """Store a tree object without ``encode_tree``, as a tree stored before SKY-810 can be.
+
+    Args:
+        step_log: The step log that carries the object.
+        rows: The ``[name, mode, object_id]`` entries, unchecked.
+
+    Returns:
+        The tree's object id.
+    """
+    stored = b"tree\0" + json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    object_id = object_id_of(stored)
+    step_log.put_object(RUN, object_id, stored)
+    return object_id
+
+
+def test_a_restore_of_an_old_tree_writes_and_deletes_no_git_part(step_log, tmp_path) -> None:
+    """A stored ``.git`` entry is not written out, and the box's own ``.git`` is not pruned (SKY-810)."""
+    trees = TreeStore(step_log)
+    blob = trees.put_blob(RUN, b"x\n")
+    git = _put_raw_tree(step_log, [["config", "file", blob]])
+    sub = _put_raw_tree(step_log, [[".GIT", "tree", git], ["b.py", "file", blob]])
+    root = _put_raw_tree(step_log, [[".Git", "file", blob], ["a.py", "file", blob], ["sub", "tree", sub]])
+    fresh, home = tmp_path / "fresh", tmp_path / "home"
+    (fresh / ".git").mkdir(parents=True)
+    (fresh / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    restore_session(trees, RUN, root, fresh, home)
+
+    assert sorted(path.relative_to(fresh).as_posix() for path in fresh.rglob("*")) == [
+        ".git",
+        ".git/HEAD",
+        "a.py",
+        "sub",
+        "sub/b.py",
+    ]
+    assert (fresh / ".git" / "HEAD").read_text() == "ref: refs/heads/main\n"
 
 
 @pytest.mark.parametrize("inside", [False, True])

@@ -72,6 +72,7 @@ _BUILT_INS = (
 # in config.toml and again as -c overrides on the command line.
 # SKY-595 changed every protected digest: the relay rewrite reads and writes
 # the config as UTF-8.
+# SKY-753 changed every custom digest: a custom command also gets ASCENT_TASK.
 _GOLDEN = {
     "pi-gw-None-open-plain": "37ff876cbbb6c7256a95ba4d71735b7ae60ff970971ecc1f7dd6adf35a9c9486",
     "pi-gw-None-open-override": "198c0226157dc5123d4ed7e9750eeb14ca6f3113f668f445109bef3655f4bd33",
@@ -217,14 +218,14 @@ _GOLDEN = {
     "pi_editor-or-none-protected": "0192ae51f1b0ea9a0fa0bc68448ea52f80c6b474f25df462b37f99e827eb4f19",
     "pi_editor-or-max-open": "ccdf57dba472c72a2592ea078085031bc621e057d4faa39a69d3e1fb672e6ed4",
     "pi_editor-or-max-protected": "58b18445a6686c654a36cb277c44ad3f3cc8c93dee252faac3ab1c282175f2b4",
-    "custom-None-open": "4664eeaf1f92b1d21ee528a93171dc3448bb108570531206d4f1798fa7784b70",
-    "custom-None-protected": "281061ded5187d8ea1d4a0a0d024671d7c0231efcc2ba17332e440c816b48f49",
-    "custom-high-open": "99500c5d07e0d46ac0625b7fffdc71dd67d0c0b7fa80e669d9bb54d0e0808f0a",
-    "custom-high-protected": "9faf42a9c2ac75ef0f28af116dbeb76b9f9113bc141372aabca2e12eb0143a4d",
-    "custom-none-open": "ef85cd97ff854aeb75415d0e82708f7fe0b4a9c6f9510d427e11d5dec1800434",
-    "custom-none-protected": "9fac32d3f2b47f3326cdb979bf8b763a764780c4b8f9eeecfeb141c6e4762633",
-    "custom-max-open": "35d123de0ff154907264054fe4876ea5f20ad78ec1ee2797b6c6b06c515c6293",
-    "custom-max-protected": "c556adb1e023cc1ed31a7f8065c2c91ef40885e88172e85e421529d44b133cdc",
+    "custom-None-open": "42149c05f60bc2c0bb8f3a203e7e21968ed6731c4c83d2f26aecf8d0e38320a4",
+    "custom-None-protected": "ac5efd7f42cc984062a4660b8faa2dd3762b2131655184c001d6312f397f2545",
+    "custom-high-open": "5108885ae312783ee8f2e8bcef78af209e8940db569e8aba0070fa80bc38f11d",
+    "custom-high-protected": "c1b6186fab242c37d5963d644896e75931fe0f37f5fdf4be46c6587159d5b6d3",
+    "custom-none-open": "6c2449030a5f778819bf66b00102b7742b3c02e9fc72038036a46c69f962f8dc",
+    "custom-none-protected": "e490629fd6f2343d9b513dd91ab6ce0c5919a69804c44f03db9740fbbb0f0f41",
+    "custom-max-open": "9f7f56331756601e3a8f15ce2e93cd16683169ad4a560670c38559471ca87a71",
+    "custom-max-protected": "e793c93fd3563460ad3bacf2379712445514d8b9bd832750d54e50f5aa29bb81",
 }
 
 

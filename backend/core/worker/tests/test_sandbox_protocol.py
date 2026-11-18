@@ -37,6 +37,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     16: {"blackbox": "05f352755db27ac1"},
     # target.repo.contract_source: where the run's optimize.toml comes from (SKY-693).
     17: {"blackbox": "f9cc6701c073a012"},
+    # proposer.host_cli_auto: a host_cli that local mode filled in (SKY-753).
+    18: {"blackbox": "21df1d4329719130"},
 }
 
 

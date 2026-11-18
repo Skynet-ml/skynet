@@ -43,6 +43,9 @@ from .service import StripeBillingService, account_committed_cents, free_grant_c
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
+# Admission that a user's cancel or pause closed. Only the user's own resume
+# reopens it; a recovery sweep that races the cancel never does (SKY-814).
+USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
@@ -1585,11 +1588,21 @@ class BudgetService:
             session: Optional caller transaction for atomic lifecycle publication.
 
         Returns:
-            Closed authority with pending usage and holds retained.
+            Closed authority with pending usage and holds retained. A user's
+            cancel or pause keeps its reason against any later non-user reason.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.state == "blocked":
+                return self._snapshot(session, budget, wallet)
+            # A later budget_reached from a stale worker, or a sweep's job_failed,
+            # must not hide the user's stop: an automatic resume would then reopen
+            # it (SKY-814).
+            if (
+                budget.state == "closed"
+                and budget.blocked_reason in USER_STOP_REASONS
+                and reason not in USER_STOP_REASONS
+            ):
                 return self._snapshot(session, budget, wallet)
             budget.state = "closed"
             budget.blocked_reason = _identifier(reason)
@@ -1711,7 +1724,9 @@ class BudgetService:
             budget.updated_at = now
             return self._snapshot(session, budget, wallet)
 
-    def resume_admission(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def resume_admission(
+        self, budget_id: str, username: str, *, expected_generation: int, automatic: bool = False
+    ) -> BudgetSnapshot:
         """Reopen an explicitly resumed attached job after obligations are reconciled.
 
         The lifecycle coordinator must first verify the same job's checkpoint
@@ -1721,9 +1736,11 @@ class BudgetService:
             budget_id: Closed execution envelope bound to the resumed root job.
             username: Authenticated owner.
             expected_generation: Epoch authorized by the recovery coordinator.
+            automatic: Whether the orphan sweep, not the user, resumes the job.
 
         Returns:
-            Attached authority ready for new per-operation admission.
+            Attached authority ready for new per-operation admission, or the
+            unchanged closed budget when ``automatic`` and a user action closed it.
 
         Raises:
             BudgetUnreconciledError: When prior work still owns a reservation.
@@ -1733,6 +1750,10 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.generation != expected_generation:
                 raise BudgetFencedError("The execution generation is obsolete.")
+            # The budget row lock orders this check with the cancel's stop_admission,
+            # so a user's cancel or pause that lands first always wins over a sweep.
+            if automatic and budget.state == "closed" and budget.blocked_reason in USER_STOP_REASONS:
+                return self._snapshot(session, budget, wallet)
             if budget.job_id is None or budget.state not in {"closed", "attached"}:
                 raise BudgetConflictError("Only an attached, reconciled job can resume admission.")
             active = session.scalar(
