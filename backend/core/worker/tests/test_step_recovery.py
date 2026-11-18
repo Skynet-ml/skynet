@@ -18,14 +18,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from gepa.core.state import GEPAState, ValsetEvaluation
 from sqlalchemy import create_engine, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.storage.remote as remote_mod
+from core.api.auth import AuthenticatedUser, get_authenticated_user
+from core.api.routers.optimizations import create_optimizations_router
 from core.billing.budgets import BudgetService
-from core.config import app_env
+from core.config import app_env, settings
 from core.constants import WORKER_RESTART_CAUSE
 from core.storage.models import Base, BillingCustomerModel, GepaCheckpointModel, JobModel
 from core.storage.object_store import LocalObjectStore
@@ -892,6 +896,46 @@ def test_manual_resumes_do_not_use_up_the_automatic_resume_cap(
     assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
 
 
+def test_automatic_resumes_use_up_the_manual_attempt_limit(store: StepJobStore, step_logs: Any) -> None:
+    """With default settings, automatic resumes count in attempts and use up the manual limit, not the reverse."""
+    assert settings.job_max_attempts == 3, "the flow below assumes the default job_max_attempts"
+    _funded_run(store)
+    generation = _claim(store, "pod-0")
+    log = step_logs("pod-0")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    _claim(store, "pod-1")
+    _manual_resume(store)
+    _claim(store, "pod-2")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["attempts"] == settings.job_max_attempts
+    assert _automatic_resumes(store) == 2
+
+    # The automatic cap counts only automatic resumes, so it still allows two more.
+    for resume in (3, MAX_AUTOMATIC_RESUMES):
+        _claim(store, f"pod-{resume}")
+        _kill(store)
+        assert store.recover_orphaned_jobs() == 1
+        assert store.get_job(RUN)["status"] == "pending"
+        assert _automatic_resumes(store) == resume
+
+    _claim(store, "pod-last")
+    # A crash stop with no worker restart cause counts against the manual limit.
+    _set_job(store, status="failed", recovery={"state": "interrupted", "interrupted_budget_generation": 0})
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    # The run's payload names no owner, so only an admin reaches it, as in the API tests.
+    admin = AuthenticatedUser(username="alice", role="admin", groups=("skynet-admins",))
+    app.dependency_overrides[get_authenticated_user] = lambda: admin
+    response = TestClient(app, raise_server_exceptions=False).post(f"/optimizations/{RUN}/resume")
+    assert response.status_code == 409
+    assert "maximum attempts" in response.json()["detail"]
+    assert store.get_job(RUN)["status"] == "failed"
+
+
 def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
     """A rerun from scratch starts the run with no automatic resumes used."""
     # The step store creates no vector tables, so the rerun must not delete embeddings.
@@ -908,7 +952,7 @@ def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore, monkeypa
 def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
     store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
 ) -> None:
-    """A sweep whose read of the count is stale does not resume the run when another sweep used the last resume."""
+    """A sweep whose read of the count is stale fails the run with the cap error when another sweep used the last resume."""
     if "postgres" in request.node.callspec.id:
         pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
     _funded_run(store)
@@ -933,7 +977,11 @@ def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
         return listed(optimization_id)
 
     store._checkpoints.list_for_optimization = other_sweep_first  # type: ignore[method-assign]
-    budgets = BudgetService(engine=store.engine)
-    assert store.requeue_for_resume(RUN, automatic=True, expected_generation=generation, budget_service=budgets) is None
-    assert store.get_job(RUN)["status"] == "running"
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
     assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+    assert store.take_ended_orphans() == [(RUN, job["execution_generation"])]

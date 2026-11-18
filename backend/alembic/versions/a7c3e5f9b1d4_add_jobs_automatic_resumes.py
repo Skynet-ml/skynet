@@ -7,6 +7,10 @@ Revises: e8b2d4f6a9c1
 manual resume no longer uses up the step log run's cap of automatic resumes.
 Existing rows start at 0: the old count mixed manual and automatic resumes,
 so a copy of ``attempts`` would keep the bug for runs already in flight.
+
+During a rolling deploy, an old pod's rerun resets ``attempts`` but not this
+column, and an old pod's sweep does not add 1 to it. The window is short; the
+worst case is one run that fails its first automatic resume after such a rerun.
 """
 
 from __future__ import annotations

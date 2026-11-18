@@ -1743,7 +1743,8 @@ class RemoteDBJobStore:
 
         Returns:
             The new attempt count, or ``None`` when the job row is missing, was
-            changed concurrently, waits for in-flight usage, or hit its budget.
+            changed concurrently, waits for in-flight usage, hit its budget, or
+            lost the last automatic resume to another sweep.
         """
         session = self._get_session()
         try:
@@ -1806,6 +1807,9 @@ class RemoteDBJobStore:
                     "This run has no verified cumulative execution budget; authorize a new run instead."
                 )
             current_attempt = int(job.attempts or 0)
+            # attempts counts automatic resumes too, so they use up the manual limit
+            # of job_max_attempts; SKY-801 keeps this, and only the automatic cap
+            # ignores manual resumes.
             step_capped = automatic and step_resume_at is not None
             if step_capped:
                 if bump_attempts and int(job.automatic_resumes or 0) >= MAX_AUTOMATIC_RESUMES:
@@ -1975,8 +1979,8 @@ class RemoteDBJobStore:
             else:
                 job.message = "Resuming"  # type: ignore[assignment]
             if automatic and bump_attempts:
-                # One UPDATE adds 1 and checks the cap, so two sweeps that read the
-                # same count cannot both resume the run past MAX_AUTOMATIC_RESUMES.
+                # On PostgreSQL the row lock above serializes two sweeps. The cap in
+                # this UPDATE keeps MAX_AUTOMATIC_RESUMES where there is no row lock.
                 counted = (
                     session.query(JobModel)
                     .filter(
@@ -1990,6 +1994,23 @@ class RemoteDBJobStore:
                 )
                 if not counted:
                     session.rollback()
+                    # The fence above already moved the generation, so the sweep's own
+                    # failure write would miss the row and leave the run running with
+                    # no kept error. End the run here, as the sweep would.
+                    job.status = "failed"  # type: ignore[assignment]
+                    job.stop_reason = "interrupted"
+                    job.completed_at = datetime.now(UTC)  # type: ignore[assignment]
+                    job.message = (  # type: ignore[assignment]
+                        f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
+                        f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
+                    )
+                    job.recovery = None
+                    job.claimed_by = None  # type: ignore[assignment]
+                    job.claimed_at = None  # type: ignore[assignment]
+                    job.lease_expires_at = None  # type: ignore[assignment]
+                    ended_generation = int(job.execution_generation or 0)
+                    session.commit()
+                    self._note_ended_orphan(optimization_id, ended_generation)
                     return None
             session.commit()
             return next_attempt
