@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -102,6 +103,14 @@ _REPO_ASSETS = "repo/"
 # Mirrors protocol.RUN_FAILED_STATUS: this file imports no app code. The status
 # marks a case whose [run] entry failed (SKY-751).
 _RUN_FAILED_STATUS = "run_failed"
+# Upstream AutoSaddler 0.2.0 ends the run when a training case has no valid
+# score, and a valid score must be finite. So a case with no score gets this
+# floor, in upstream's view only: it always loses, and the app never reports
+# it. It is not -sys.float_info.max because upstream sums the case scores
+# before it divides, and that sum must stay finite (up to 1.7e8 cases).
+# SKY-750 (metric direction): the floor assumes that a higher score is
+# better. A minimize run must flip it to +1e300.
+_NO_SCORE_FLOOR = -1e300
 
 
 class EvaluationStopped(BaseException):
@@ -169,8 +178,8 @@ class EvaluatorMailbox:
                 with self._write_lock:
                     self.total_evals += 1
                 # The parent sends null for a case with no score (a metric
-                # error or a failed [run] entry); the evaluator keeps any
-                # non-finite score out of upstream's averages (SKY-751).
+                # error or a failed [run] entry); the evaluator gives any
+                # non-finite score the no-score floor (SKY-751).
                 score = response.get("score")
                 return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
@@ -501,6 +510,9 @@ class AppEvaluator:
         self.fingerprint = fingerprint
         self.components: dict[str, dict[str, str]] = {}
         self.best_development: dict[str, Any] | None = None
+        # Development candidates with a case that has no score. Their
+        # upstream aggregate holds the floor, so the app reports no score.
+        self.no_score_candidates: set[str] = set()
         # The run view orders versions numerically, so each candidate that
         # reaches development gets the next version number in arrival order.
         self.versions: dict[str, int] = {}
@@ -623,14 +635,9 @@ class AppEvaluator:
             cost = as_domain.Cost(rollouts=1, wall_seconds=time.monotonic() - started)
             # Upstream only diagnoses an iteration that has failing training
             # cases, so anything short of a full score must read as a task
-            # failure; a non-numeric score is the scorer breaking, not the
-            # candidate failing, which upstream keeps out of the averages.
-            if not math.isfinite(score):
-                disposition: Any = "execution_error"
-            elif score >= 1.0:
-                disposition = "success"
-            else:
-                disposition = "task_failure"
+            # failure. A case with no score is a valid task failure at the
+            # floor: an invalid case ends the upstream run (SKY-751).
+            disposition: Any = "success" if math.isfinite(score) and score >= 1.0 else "task_failure"
             # Repetitions re-score the same case, so only the first fills the
             # version's case in the run view; the aggregate averages them.
             if context.purpose == "development" and repetition == 0 and math.isfinite(score):
@@ -650,7 +657,7 @@ class AppEvaluator:
                 split=context.split,
                 repetition=repetition,
                 disposition=disposition,
-                score=score if math.isfinite(score) else None,
+                score=score if math.isfinite(score) else _NO_SCORE_FLOOR,
                 evaluator_fingerprint=self.fingerprint,
                 cost=cost,
                 metadata={"scorer_feedback": as_domain.to_json_value(_json_finite(info))},
@@ -672,11 +679,11 @@ class AppEvaluator:
         Raises:
             TargetReached: When the aggregate meets the stop target.
         """
-        if score is None or not math.isfinite(score):
-            return
-        # A version with a crashed case has a filled mean (SKY-367). Final
-        # selection drops it, so it must not become best or stop the run.
-        if any(observation.score is None for observation in observations):
+        # A version with a case that has no score has the floor in its mean
+        # (SKY-751). Final selection drops it, so it must not become best,
+        # show a score or stop the run.
+        if score is None or not math.isfinite(score) or any(_no_score(item) for item in observations):
+            self.no_score_candidates.add(candidate_id)
             return
         if self.best_development is None or score > self.best_development["best_score"]:
             self.best_development = {"best_candidate": value, "best_score": score, "candidate_id": candidate_id}
@@ -700,6 +707,42 @@ class AppEvaluator:
             raise TargetReached(f"Development score {score} reached the target {self.stop_at_score}.")
 
 
+def _no_score(observation: Any) -> bool:
+    """Tell whether an upstream observation has no score from the parent scorer.
+
+    Args:
+        observation: Upstream observation.
+
+    Returns:
+        Whether its score is missing, not finite or the no-score floor.
+    """
+    score = observation.score
+    return score is None or not math.isfinite(score) or score == _NO_SCORE_FLOOR
+
+
+def _scored_view(evaluation: Any) -> Any:
+    """Return the evaluation with each floor observation made invalid again.
+
+    Upstream acceptance then compares only the cases both versions scored,
+    and its recorded means never hold the floor.
+
+    Args:
+        evaluation: Upstream evaluation.
+
+    Returns:
+        The evaluation itself when it holds no floor, else a copy.
+    """
+    if not any(observation.score == _NO_SCORE_FLOOR for observation in evaluation.observations):
+        return evaluation
+    observations = tuple(
+        dataclasses.replace(observation, disposition="execution_error", score=None)
+        if observation.score == _NO_SCORE_FLOOR
+        else observation
+        for observation in evaluation.observations
+    )
+    return dataclasses.replace(evaluation, observations=observations)
+
+
 def _run_failed(evaluation: Any) -> bool:
     """Tell whether any case of an upstream evaluation had a failed ``[run]`` entry.
 
@@ -715,7 +758,7 @@ def _run_failed(evaluation: Any) -> bool:
         feedback = observation.metadata.get("scorer_feedback")
         if not (isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS):
             continue
-        if observation.score is None or not math.isfinite(observation.score):
+        if _no_score(observation):
             return True
     return False
 
@@ -774,8 +817,9 @@ class NoScoreRejectedAcceptance:
         Returns:
             Upstream's patch verdict.
         """
-        keys, matched = _compared_keys(parent, child)
         parent_failed, child_failed = _run_failed(parent), _run_failed(child)
+        parent, child = _scored_view(parent), _scored_view(child)
+        keys, matched = _compared_keys(parent, child)
         if parent_failed == child_failed and matched:
             return self.inner.compare(parent, child)
         # Upstream raises when no case is valid on both sides, which would end
@@ -798,35 +842,33 @@ class NoScoreRejectedAcceptance:
 
 
 class NoScoreLastRanking:
-    """Ranking that puts every version with a failed ``[run]`` entry last (SKY-751).
+    """Ranking that never selects a version with a case that has no score (SKY-751).
 
-    Upstream ranks by the mean of the valid cases, which leaves a crashed case
-    out, so a version that crashed on one case could win the final selection.
+    Such a case holds the floor in upstream's mean. The app reports no score
+    for that version, so it must not win the final selection.
     """
 
     def __init__(self, inner: Any) -> None:
         """Wrap upstream's ranking policy.
 
         Args:
-            inner: Upstream ranking, used on the versions with no failed entry.
+            inner: Upstream ranking, used on the versions that scored every case.
         """
         self.inner = inner
 
     def select(self, candidates: Sequence[tuple[Any, Any]]) -> tuple[Any, Any]:
-        """Select the best fully scored version, or the best version with a valid mean when every version failed.
+        """Select the best fully scored version, or the seed when no version scored every case.
 
         Args:
             candidates: ``(candidate, development evaluation)`` pairs, the seed first.
 
         Returns:
-            The selected pair. When no version has a valid mean, the seed.
+            The selected pair.
         """
-        scored = [item for item in candidates if not _run_failed(item[1])]
-        if scored:
-            return self.inner.select(scored)
-        # Upstream raises on a version with no valid mean, which would end the run.
-        valid = [item for item in candidates if item[1].aggregate_score is not None]
-        return self.inner.select(valid) if valid else candidates[0]
+        scored = [item for item in candidates if not any(_no_score(case) for case in item[1].observations)]
+        # The app reports no score for the seed then, which finishes the run
+        # with no score; any other unscored version would fail the run.
+        return self.inner.select(scored) if scored else candidates[0]
 
 
 class AppEvidenceBuilder:
@@ -868,7 +910,7 @@ class AppEvidenceBuilder:
                         {
                             "repetition": item.repetition,
                             "disposition": item.disposition,
-                            "score": item.score,
+                            "score": None if _no_score(item) else item.score,
                             "scorer_feedback": item.metadata.get("scorer_feedback"),
                         }
                         for item in observations
@@ -1645,10 +1687,14 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             result = engine.run()
             selected = store.read_json("result.json")
+            no_score = result.selected_candidate_id in evaluator.no_score_candidates
+            if no_score and isinstance(selected, dict):
+                selected = {**selected, "development_score": None}
             document.update(
                 {
                     "best_candidate": evaluator.value_of(_candidate(store, result.selected_candidate_id)),
-                    "best_score": result.development_score,
+                    # Upstream's score for that version holds the no-score floor (SKY-751).
+                    "best_score": None if no_score else result.development_score,
                     "total_evals": mailbox.total_evals,
                     "metadata": {
                         "autosaddler_run_id": result.run_id,

@@ -15,6 +15,7 @@ import sys
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,7 @@ _LEGACY_PYTHON_ENV = "SKYNET_AUTOSADDLER_PYTHON"
 _WRAPPER = '''
 import importlib.util, json, sys, traceback
 from pathlib import Path
+from types import SimpleNamespace
 from autosaddler.v2.core.domain import Cost, canonical_json
 from autosaddler.v2.prompting.models import SessionResult, Usage
 
@@ -81,7 +83,7 @@ class ScriptedProvider:
         )
 
 
-runner.ClaudeAgentProvider = ScriptedProvider
+runner.harness_provider = lambda proposer, model, on_refusal=None: ScriptedProvider(SimpleNamespace(model=model))
 original_execute = runner.execute
 
 
@@ -131,14 +133,18 @@ def _vowel_fraction(text: str) -> float:
     return sum(ch in "aeiou" for ch in text) / max(1, len(text))
 
 
-def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
-    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts."""
-    python = _upstream_python()
-    if python is None:
-        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
-    (tmp_path / "rpc").mkdir()
-    (tmp_path / "wrapper.py").write_text(_WRAPPER)
-    payload = {
+def _scripted_payload(seed: str, train_set: list[dict[str, str]], val_set: list[dict[str, str]]) -> dict[str, Any]:
+    """Build a runner payload whose proposer the wrapper replaces with the scripted provider.
+
+    Args:
+        seed: Seed candidate text.
+        train_set: Training examples.
+        val_set: Validation examples.
+
+    Returns:
+        The payload.
+    """
+    return {
         "nonce": "testnonce",
         "engine_id": "autosaddler",
         "model": "claude-test",
@@ -149,14 +155,33 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         "max_iterations": 2,
         "timeout_seconds": 60,
         "source": native_runtime.AUTOSADDLER_REVISION,
+        "proposer": {"harness": "custom"},
         "task": {
             "name": "test",
-            "seed_candidate": "bcd",
+            "seed_candidate": seed,
             "objective": "maximize vowel density",
-            "train_set": [{"id": "a"}, {"id": "b"}],
-            "val_set": [{"id": "c"}],
+            "train_set": train_set,
+            "val_set": val_set,
         },
     }
+
+
+def _run_scripted(
+    tmp_path: Path, python: str, payload: dict[str, Any], respond: Callable[[str, str], dict[str, Any]]
+) -> tuple[dict[str, Any], list[tuple[str, str]], list[dict[str, Any]]]:
+    """Run the runner under the scripted wrapper and answer each scorer request as the parent does.
+
+    Args:
+        tmp_path: Working folder of the run.
+        python: Interpreter with the pinned upstream package.
+        payload: Runner payload.
+        respond: Builds the parent's response from the candidate and the example id.
+
+    Returns:
+        The runner result, each scored ``(candidate, example id)`` pair, and the progress events.
+    """
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "wrapper.py").write_text(_WRAPPER)
     (tmp_path / "input.json").write_text(json.dumps(payload))
     env = {
         "PATH": "/usr/bin:/bin",
@@ -182,7 +207,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
                 continue
             request = json.loads(line.split(" ", 2)[2])
             scored.append((request["candidate"], request["example"]["id"]))
-            response = {"score": _vowel_fraction(request["candidate"]), "info": {"feedback": "counted"}}
+            response = respond(request["candidate"], request["example"]["id"])
             (tmp_path / "rpc" / f"{request['id']}.json").write_text(json.dumps(response))
         stderr = process.stderr.read()
         result_file = tmp_path / "native_result.json"
@@ -191,13 +216,29 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         if process.poll() is None:
             process.kill()
             process.wait()
-
     result = json.loads((tmp_path / "native_result.json").read_text())
     assert "error" not in result, result
+    return result, scored, progress
+
+
+def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
+    """Run the pinned upstream loop end to end: sessions, parent scoring, acceptance and artifacts."""
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    payload = _scripted_payload("bcd", [{"id": "a"}, {"id": "b"}], [{"id": "c"}])
+
+    result, scored, progress = _run_scripted(
+        tmp_path,
+        python,
+        payload,
+        lambda candidate, _example: {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}},
+    )
+
     assert result["best_candidate"] == "bcdaaaaaa"
     assert result["best_score"] == pytest.approx(_vowel_fraction("bcdaaaaaa"))
     assert result["total_evals"] == len(scored)
-    assert {example for _, example in scored} == {"a", "b", "c"}
+    assert {example for _, example in scored} == {"a", "b"}
     assert result["metadata"]["iterations"] == 2
     sessions = (tmp_path / "sessions.log").read_text().split()
     assert sessions.count("diagnose_patch") == 2
@@ -212,6 +253,54 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
     assert all(len(event["per_example"]) == cases[0]["total"] for event in versions)
     assert {event["candidate_id"] for event in cases} == set(range(len(versions)))
     assert all(event["example_id"].isdigit() and event["total"] >= 1 for event in cases)
+
+
+@pytest.mark.parametrize(
+    ("seed_crashes", "crashed_cases"),
+    [(False, {"b"}), (True, {"b"}), (True, {"a", "b"})],
+    ids=["child-crashes", "every-version-crashes", "every-case-crashes"],
+)
+def test_upstream_run_finishes_when_a_train_case_crashes(
+    tmp_path: Path, seed_crashes: bool, crashed_cases: set[str]
+) -> None:
+    """A crashed case gets upstream's floor: the run finishes, keeps the scored seed and never shows the floor (SKY-751).
+
+    Args:
+        tmp_path: Working folder of the run.
+        seed_crashes: Whether the seed also crashes, so no version scores every case.
+        crashed_cases: Cases that crash. On every case, upstream sums several floors.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    seed = "bcde"
+
+    def respond(candidate: str, example: str) -> dict[str, Any]:
+        """Crash every child, and the seed when asked, on the crashed cases; score the rest by vowel density.
+
+        Args:
+            candidate: Candidate text.
+            example: Example id.
+
+        Returns:
+            The parent's response.
+        """
+        if example in crashed_cases and (candidate != seed or seed_crashes):
+            return {"score": None, "info": {"feedback": "Run failed: boom", "status": "run_failed"}}
+        return {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}}
+
+    result, scored, progress = _run_scripted(
+        tmp_path, python, _scripted_payload(seed, [{"id": "a"}, {"id": "b"}], []), respond
+    )
+
+    assert any(candidate != seed and example in crashed_cases for candidate, example in scored)
+    assert result["best_candidate"] == seed
+    expected = None if seed_crashes else pytest.approx(_vowel_fraction(seed))
+    assert result["best_score"] == expected
+    assert result["metadata"]["selection"]["development_score"] == expected
+    shown = [event["score"] for event in progress if "score" in event]
+    shown += [score for event in progress for _, score in event.get("per_example", [])]
+    assert all(0.0 <= score <= 1.0 for score in shown)
 
 
 def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> None:
@@ -507,21 +596,24 @@ def test_an_unconstrained_repository_block_keeps_naming_the_paths(
 
 
 def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> None:
-    """A filled mean with a crashed case is not best and does not stop the run (SKY-367)."""
+    """A mean with a crashed case is not best, shows no score and does not stop the run (SKY-367, SKY-751)."""
     emitted: list[Any] = []
     evaluator = SimpleNamespace(
         best_development=None,
+        no_score_candidates=set(),
         stop_at_score=0.5,
         versions={"c1": 1, "c2": 2},
         case_ids={"a": "0", "b": "1"},
         mailbox=SimpleNamespace(total_evals=2, emit=lambda *args: emitted.append(args)),
     )
-    crashed = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=None)]
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    crashed = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=floor)]
 
-    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", 0.9, crashed)
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", (0.9 + floor) / 2, crashed)
 
     assert evaluator.best_development is None
     assert emitted == []
+    assert evaluator.no_score_candidates == {"c1"}
     scored = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=0.7)]
     with pytest.raises(autosaddler_runner.TargetReached):
         autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
@@ -818,14 +910,35 @@ def test_ranking_never_selects_a_version_with_a_failed_run_case() -> None:
     assert ranking.select([("crashed", _three(0.9, True)), ("low", _three(0.1, True))])[0] == "crashed"
 
 
-def test_ranking_finishes_when_every_version_failed() -> None:
-    """With every version failed, ranking skips a version with no valid mean, or returns the seed (SKY-751)."""
+def test_ranking_returns_the_seed_when_no_version_scored_every_case() -> None:
+    """With no fully scored version, ranking returns the seed, which the app reports with no score (SKY-751)."""
     ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
     nothing = _evaluation({"a": None}, frozenset({"a"}), "development")
     partial = _evaluation({"a": 0.4, "b": None}, frozenset({"b"}), "development")
+    metric_error = _evaluation({"a": 0.9, "b": None}, split="development")
 
-    assert ranking.select([("seed", nothing), ("child", partial)])[0] == "child"
+    assert ranking.select([("seed", nothing), ("child", partial)])[0] == "seed"
     assert ranking.select([("seed", nothing), ("child", nothing)])[0] == "seed"
+    assert ranking.select([("seed", metric_error), ("child", partial)])[0] == "seed"
+    assert ranking.select([("seed", _three(0.1, False, "development")), ("child", metric_error)])[0] == "seed"
+
+
+def test_training_evidence_never_shows_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent's evidence shows no score for a crashed case, never upstream's floor (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module.
+    """
+    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(sha256_digest=lambda text: "sha256:" + text))
+    store = SimpleNamespace(write_json=lambda path, document, kind: document)
+    evaluation = _evaluation({"a": 0.5, "b": autosaddler_runner._NO_SCORE_FLOOR}, frozenset({"b"}))
+    evaluation.evaluation_id, evaluation.candidate_id, evaluation.purpose = "e", "c", "train_before"
+    for observation in evaluation.observations:
+        observation.disposition = "task_failure"
+
+    document = autosaddler_runner.AppEvidenceBuilder(store, {}).build(evaluation)
+
+    assert [record["per_repetition"][0]["score"] for record in document["case_records"]] == [0.5, None]
 
 
 def test_a_scorer_run_failed_status_with_a_score_is_not_a_failed_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -929,7 +1042,7 @@ def evaluation(name, scores, split):
     observations = tuple(
         d.Observation.create(
             candidate_id=d.sha256_digest(name), case_id=case, split=split, repetition=0,
-            disposition="execution_error" if score is None else "task_failure", score=score,
+            disposition="task_failure", score=runner._NO_SCORE_FLOOR if score is None else score,
             evaluator_fingerprint="f", cost=d.Cost(rollouts=1),
             metadata={"scorer_feedback": {"status": "run_failed"} if score is None else {}},
         )
@@ -948,16 +1061,25 @@ one = acceptance.compare(evaluation("s", [("a", None)], "train"), evaluation("c"
 two = acceptance.compare(
     evaluation("s", [("a", None), ("b", 0.5)], "train"), evaluation("c", [("a", 0.5), ("b", None)], "train")
 )
+better = acceptance.compare(
+    evaluation("s", [("a", None), ("b", 0.2)], "train"), evaluation("c", [("a", None), ("b", 0.5)], "train")
+)
+crashed = acceptance.compare(
+    evaluation("s", [("a", 0.2), ("b", 0.2)], "train"), evaluation("c", [("a", None), ("b", 0.9)], "train")
+)
 ranking = runner.NoScoreLastRanking(p.MeanDevelopmentRanking())
 seed = evaluation("s", [("a", None)], "development")
 print(one.accepted, one.compared_case_ids, two.accepted, two.compared_case_ids)
+print(better.accepted, better.before_score, better.after_score, crashed.accepted, crashed.reason)
 print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", None)], "development"))])[0])
 print(ranking.select([("seed", seed), ("child", evaluation("c", [("a", 0.4), ("b", None)], "development"))])[0])
+scored_seed = evaluation("s", [("a", 0.2), ("b", 0.2)], "development")
+print(ranking.select([("seed", scored_seed), ("child", evaluation("c", [("a", 0.9), ("b", None)], "development"))])[0])
 """
 
 
-def test_upstream_policies_finish_when_every_case_failed(tmp_path: Path) -> None:
-    """With upstream's own policies, an all-failed comparison is a reject and an all-failed ranking picks a version (SKY-751).
+def test_upstream_policies_handle_the_no_score_floor(tmp_path: Path) -> None:
+    """With upstream's own policies and the floor, crashed versions never win and the search still compares scores (SKY-751).
 
     Args:
         tmp_path: Folder with the runner files and the probe script.
@@ -973,4 +1095,10 @@ def test_upstream_policies_finish_when_every_case_failed(tmp_path: Path) -> None
     run = subprocess.run([python, "probe.py"], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
 
     assert run.returncode == 0, run.stderr
-    assert run.stdout.splitlines() == ["False ('a',) False ('a', 'b')", "seed", "child"]
+    assert run.stdout.splitlines() == [
+        "False ('a',) False ('a', 'b')",
+        "True 0.2 0.5 False the child has a failed [run] entry",
+        "seed",
+        "seed",
+        "seed",
+    ]
