@@ -362,6 +362,7 @@ def test_the_fifth_automatic_resume_fails_the_run(store: StepJobStore, step_logs
         job = store.get_job(RUN)
         assert job["status"] == "pending"
         assert job["attempts"] == resume
+        assert _automatic_resumes(store) == resume
         _claim(store, f"pod-{resume}")
 
     _kill(store)
@@ -481,6 +482,30 @@ def _bill(store: StepJobStore, key: str, cents: int) -> None:
     time.sleep(0.02)
 
 
+def _automatic_resumes(store: StepJobStore) -> int:
+    """Read the run's automatic resume count from its row.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The ``automatic_resumes`` column of the run.
+    """
+    with Session(store.engine) as session:
+        return int(session.query(JobModel.automatic_resumes).filter(JobModel.optimization_id == RUN).one()[0])
+
+
+def _manual_resume(store: StepJobStore) -> None:
+    """End the run as failed and resume it by hand, as the user's resume does.
+
+    Args:
+        store: The job store.
+    """
+    _set_job(store, status="failed")
+    assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) is not None
+    assert store.get_job(RUN)["status"] == "pending"
+
+
 def _set_job(store: StepJobStore, **values: Any) -> None:
     """Write job columns directly, as another worker or a race would.
 
@@ -588,6 +613,7 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     _set_job(
         store,
         attempts=MAX_AUTOMATIC_RESUMES,
+        automatic_resumes=MAX_AUTOMATIC_RESUMES,
         recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
     )
     _kill(store)
@@ -597,6 +623,7 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     job = store.get_job(RUN)
     assert job["status"] == "pending"
     assert job["attempts"] == MAX_AUTOMATIC_RESUMES
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
 
 
 def test_the_wake_skips_a_run_that_changed_after_the_read(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -829,3 +856,84 @@ def test_a_failed_wake_does_not_stop_the_orphan_recovery(
 
     assert store.recover_orphaned_jobs() == 1
     assert store.get_job(RUN)["status"] == "pending"
+
+
+def test_manual_resumes_do_not_use_up_the_automatic_resume_cap(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With manual resumes mixed in, the run still gets four automatic resumes, and the fifth crash fails it."""
+    monkeypatch.setattr(remote_mod.settings, "job_max_attempts", 10)
+    _funded_run(store)
+    generation = _claim(store, "pod-0")
+    log = step_logs("pod-0")
+    _commit(log, 0, generation)
+    log.flush()
+
+    _manual_resume(store)
+    assert _automatic_resumes(store) == 0
+    for resume in range(1, MAX_AUTOMATIC_RESUMES + 1):
+        _claim(store, f"pod-{resume}")
+        if resume == 3:
+            _manual_resume(store)
+            _claim(store, f"pod-{resume}-manual")
+        _kill(store)
+        assert store.recover_orphaned_jobs() == 1
+        assert store.get_job(RUN)["status"] == "pending"
+        assert _automatic_resumes(store) == resume
+
+    job = store.get_job(RUN)
+    assert job["attempts"] == MAX_AUTOMATIC_RESUMES + 2
+    _claim(store, "pod-last")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+
+
+def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rerun from scratch starts the run with no automatic resumes used."""
+    # The step store creates no vector tables, so the rerun must not delete embeddings.
+    monkeypatch.setattr(remote_mod.settings, "embeddings_enabled", False)
+    _funded_run(store)
+    _set_job(store, status="failed", attempts=MAX_AUTOMATIC_RESUMES, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+
+    assert store.requeue_for_rerun(RUN)
+
+    assert store.get_job(RUN)["attempts"] == 0
+    assert _automatic_resumes(store) == 0
+
+
+def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
+) -> None:
+    """A sweep whose read of the count is stale does not resume the run when another sweep used the last resume."""
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    listed = store._checkpoints.list_for_optimization
+
+    def other_sweep_first(optimization_id: str) -> Any:
+        """Let another sweep use the last automatic resume after this sweep read the row.
+
+        Args:
+            optimization_id: The run whose checkpoints the requeue lists.
+
+        Returns:
+            The run's checkpoints.
+        """
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return listed(optimization_id)
+
+    store._checkpoints.list_for_optimization = other_sweep_first  # type: ignore[method-assign]
+    budgets = BudgetService(engine=store.engine)
+    assert store.requeue_for_resume(RUN, automatic=True, expected_generation=generation, budget_service=budgets) is None
+    assert store.get_job(RUN)["status"] == "running"
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES

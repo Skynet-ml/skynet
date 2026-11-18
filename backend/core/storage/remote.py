@@ -1731,6 +1731,8 @@ class RemoteDBJobStore:
         without a checkpoint (SKY-711). Its automatic resumes count against
         ``MAX_AUTOMATIC_RESUMES`` instead of ``job_max_attempts``; 4 is above
         the default ``job_max_attempts`` of 3, so a step log run gets more tries.
+        Only an automatic requeue adds 1 to ``automatic_resumes``, so a manual
+        resume does not use up the cap (SKY-801). ``attempts`` counts both.
 
         Args:
             optimization_id: The job to resume.
@@ -1804,8 +1806,9 @@ class RemoteDBJobStore:
                     "This run has no verified cumulative execution budget; authorize a new run instead."
                 )
             current_attempt = int(job.attempts or 0)
-            if automatic and step_resume_at is not None:
-                if bump_attempts and current_attempt >= MAX_AUTOMATIC_RESUMES:
+            step_capped = automatic and step_resume_at is not None
+            if step_capped:
+                if bump_attempts and int(job.automatic_resumes or 0) >= MAX_AUTOMATIC_RESUMES:
                     raise CheckpointCompatibilityError(
                         f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
                     )
@@ -1971,6 +1974,23 @@ class RemoteDBJobStore:
                 job.message = "Resuming after a worker restart"  # type: ignore[assignment]
             else:
                 job.message = "Resuming"  # type: ignore[assignment]
+            if automatic and bump_attempts:
+                # One UPDATE adds 1 and checks the cap, so two sweeps that read the
+                # same count cannot both resume the run past MAX_AUTOMATIC_RESUMES.
+                counted = (
+                    session.query(JobModel)
+                    .filter(
+                        JobModel.optimization_id == optimization_id,
+                        *([JobModel.automatic_resumes < MAX_AUTOMATIC_RESUMES] if step_capped else []),
+                    )
+                    .update(
+                        {JobModel.automatic_resumes: JobModel.automatic_resumes + 1},
+                        synchronize_session=False,
+                    )
+                )
+                if not counted:
+                    session.rollback()
+                    return None
             session.commit()
             return next_attempt
         finally:
@@ -2048,6 +2068,7 @@ class RemoteDBJobStore:
             job.latest_metrics = {}  # type: ignore[assignment]
             job.result = None  # type: ignore[assignment]
             job.attempts = 0  # type: ignore[assignment]
+            job.automatic_resumes = 0  # type: ignore[assignment]
             job.sandbox_image = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]
