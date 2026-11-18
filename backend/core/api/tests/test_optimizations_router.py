@@ -764,6 +764,37 @@ def test_bulk_delete_mixed_batch_reports_partial_results(opt_client: TestClient,
     assert skip_reasons["missing"] == "not_found"
 
 
+def test_bulk_delete_reports_a_failed_tree_purge_with_the_fixed_message(
+    opt_client: TestClient, store: _ExtendedFakeJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed tree purge skips every run with the i18n message, never the raw shard error text (SKY-733)."""
+    store.seed_job("a", status="success")
+    store.seed_job("b", status="failed")
+    shard_text = "could not purge the tree rows on step log shard 's2': connection to db.internal:5432 failed"
+
+    def fail(optimization_ids: list[str]) -> None:
+        """Raise the error that the job store raises when a step log shard fails.
+
+        Args:
+            optimization_ids: The runs to delete.
+        """
+        raise TreePurgeError(shard_text)
+
+    monkeypatch.setattr(store, "delete_jobs", fail)
+
+    resp = opt_client.post("/optimizations/bulk-delete", json={"optimization_ids": ["a", "b"]})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] == []
+    reason = t_en("optimization.deletion_storage_unavailable")
+    assert body["skipped"] == [{"optimization_id": "a", "reason": reason}, {"optimization_id": "b", "reason": reason}]
+    assert "db.internal" not in resp.text
+    assert "s2" not in resp.text
+    assert store.job_exists("a")
+    assert store.job_exists("b")
+
+
 def test_counts_empty_store_returns_all_zeros(opt_client: TestClient) -> None:
     """An empty store returns zero counts across every status bucket."""
     resp = opt_client.get("/optimizations/counts")

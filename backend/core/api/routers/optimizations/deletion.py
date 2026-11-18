@@ -14,6 +14,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from ....i18n_en import t_en
 from ....models import (
     BulkDeleteRequest,
     BulkDeleteResponse,
@@ -149,6 +150,15 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
         if deletable:
             try:
                 job_store.delete_jobs(deletable)
+            except TreePurgeError:
+                # The purge error names shard hosts and SQL, so the reason is the fixed message.
+                logger.exception(
+                    "Bulk delete of %d ids not done: their stored tree data was not deleted", len(deletable)
+                )
+                reason = t_en("optimization.deletion_storage_unavailable")
+                skipped.extend(
+                    BulkDeleteSkipped(optimization_id=optimization_id, reason=reason) for optimization_id in deletable
+                )
             except Exception as exc:
                 # Batch DB failure is reported as per-id skip reason instead of 500.
                 logger.exception("Bulk delete failed for %d ids", len(deletable))
