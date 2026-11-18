@@ -68,6 +68,10 @@ needs_postgres = pytest.mark.skipif(
 SHARD_TABLES = [AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
 # job-1 stays on the main database; job-2 and job-3 are on shard s2 (SKY-811).
 SHARD_OF_RUN = {"job-1": MAIN, "job-2": "s2", "job-3": "s2"}
+UNKNOWN_SHARD_ERROR = (
+    "Jobs record step log shards s9, which this map does not have; their packs are not compacted "
+    "and the sweep of the packs with no row skips"
+)
 
 
 class FlakyObjectStore(LocalObjectStore):
@@ -3086,7 +3090,7 @@ def test_a_shard_that_a_job_records_and_the_map_lacks_is_logged_as_an_error(
         assert compactor.run_once() == (0, 0)
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert errors == ["Jobs record step log shards s9, which this map does not have; their packs are not compacted"] * 2
+    assert errors == [UNKNOWN_SHARD_ERROR] * 2
     _assert_all_readable(shard_store, written)
 
 
@@ -3110,6 +3114,78 @@ def test_a_map_with_every_recorded_shard_logs_no_error(
         assert make_compactor(shards=shards).run_once() == (6, 0)
 
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def _add_job_on_unknown_shard(engine: Engine) -> None:
+    """Add a job on the main database that records shard ``s9``, which no test map has.
+
+    Args:
+        engine: The main database.
+    """
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id="job-9", username="ada", execution_generation=1, step_log_shard="s9"))
+        session.commit()
+
+
+def test_a_pass_with_the_sweep_reads_and_logs_an_unknown_shard_once(
+    engine, shard, objects, shard_store, shards, make_compactor, caplog
+) -> None:
+    """A pass that also sweeps reads the jobs' shards once and logs one error; the sweep still deletes nothing.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    written = _fill(shard_store)
+    _add_job_on_unknown_shard(engine)
+    orphan = f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack"
+    objects.put(orphan, b"x")
+    statements = _record_statements(engine)
+
+    with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
+        assert make_compactor(shards=shards).run_once() == (6, 0)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [UNKNOWN_SHARD_ERROR]
+    (query,) = [statement for statement, _ in statements if "DISTINCT jobs.step_log_shard" in statement]
+    # The filter on main lets PostgreSQL read the partial index ix_jobs_step_log_shard.
+    assert "jobs.step_log_shard != ?" in query
+    assert orphan in objects.list(f"{COMPACTED_PREFIX}/")
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_missing_pack_on_a_shard_is_marked_broken_on_that_shard(
+    engine, shard, objects, shard_store, shards, make_compactor, monkeypatch
+) -> None:
+    """The oldest s2 pack has no object; s2 marks it broken, and the next pass merges the other two s2 packs.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    _fill(shard_store)
+    missing = min(_pack_rows(shard))
+    objects._path(missing).unlink()
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+
+    assert make_compactor(shards=shards).merge(shard) == 0
+    with Session(shard) as session:
+        assert session.get(StoragePackModel, missing).byte_size == BROKEN_BYTE_SIZE
+    assert make_compactor(shards=shards).merge(shard) == 2
+
+    with Session(shard) as session:
+        assert session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.pack_key == missing)).all()
+    assert len(_pack_keys_of_rows(shard)) == 2
 
 
 @pytest.fixture
@@ -3219,3 +3295,59 @@ def test_postgres_a_shard_merge_does_not_wait_for_a_job_locked_on_main(
         _assert_all_readable(store, written)
     finally:
         store.close()
+
+
+@needs_postgres
+def test_postgres_the_unknown_shard_check_reads_the_partial_index(
+    tmp_path, postgres_engine, objects, postgres_shard
+) -> None:
+    """On PostgreSQL the pass's check of the jobs' shards reads the partial index, not every ``jobs`` row.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the main schema.
+        objects: The test object store.
+        postgres_shard: The map of the main schema and shard ``s2``.
+    """
+    rows = [
+        {
+            "optimization_id": f"plan-{index}",
+            "username": "ada",
+            "execution_generation": 1,
+            "step_log_shard": MAIN if index % 10 else None,
+        }
+        for index in range(20000)
+    ]
+    with postgres_engine.begin() as connection:
+        connection.execute(JobModel.__table__.insert(), rows)
+        connection.execute(text("ANALYZE jobs"))
+    queries: list[tuple[str, Any]] = []
+
+    def keep_query(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Keep the SQL and parameters of each read of the jobs' shards.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+        """
+        if "DISTINCT jobs.step_log_shard" in statement:
+            queries.append((statement, parameters))
+
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), shards=postgres_shard)
+    event.listen(postgres_engine, "before_cursor_execute", keep_query)
+    try:
+        assert compactor.run_once() == (0, 0)
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", keep_query)
+
+    (query,) = queries
+    with postgres_engine.connect() as connection:
+        plan = "\n".join(row[0] for row in connection.exec_driver_sql(f"EXPLAIN {query[0]}", query[1]))
+    assert "ix_jobs_step_log_shard" in plan
+    assert "Seq Scan" not in plan

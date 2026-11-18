@@ -263,6 +263,7 @@ class TreeCompactor:
         self._interval_seconds = interval_seconds
         self._sweep_interval_seconds = sweep_interval_seconds
         self._next_sweep = 0.0
+        self._shards_checked = False
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -274,7 +275,7 @@ class TreeCompactor:
         Returns:
             The number of packs merged and the number of packs deleted.
         """
-        self._attempt(self._report_unknown_shards, "check of the step log shards")
+        self._shards_checked = False
         shards = [(name, self._shards.engine(name)) for name in self._shards.names()]
         removed = sum(
             self._attempt(partial(self.remove_retired, engine), f"remove_retired on shard {name}")
@@ -284,22 +285,28 @@ class TreeCompactor:
             # Set before the sweep, so a failed sweep also waits the interval and does not LIST each pass.
             self._next_sweep = time.monotonic() + self._sweep_interval_seconds
             removed += self._attempt(self.remove_unrecorded, "remove_unrecorded")
+        # A sweep that read the shards already logged them, so a pass queries and logs them only once.
+        if not self._shards_checked:
+            self._attempt(self._report_unknown_shards, "check of the step log shards")
         merged = sum(self._attempt(partial(self.merge, engine), f"merge on shard {name}") for name, engine in shards)
         return merged, removed
 
     def _report_unknown_shards(self) -> int:
-        """Log an error for each step log shard that jobs record and this map does not have.
+        """Log one error that lists the step log shards that jobs record and this map does not have.
 
         The packs of such a shard are in a database that this pass cannot reach, so they stay uncompacted
-        until every pod has the same ``STEP_LOG_SHARDS``.
+        until every pod has the same ``STEP_LOG_SHARDS``. The sweep of the packs with no row also skips,
+        because the rows of those packs are not read.
 
         Returns:
             The number of unknown shards.
         """
         unknown = self._unknown_shards()
+        self._shards_checked = True
         if unknown:
             logger.error(
-                "Jobs record step log shards %s, which this map does not have; their packs are not compacted",
+                "Jobs record step log shards %s, which this map does not have; their packs are not compacted "
+                "and the sweep of the packs with no row skips",
                 ", ".join(unknown),
             )
         return len(unknown)
@@ -717,14 +724,9 @@ class TreeCompactor:
                     old[prefix].append(key)
         if not old[COMPACTED_PREFIX] and not old[PACK_PREFIX]:
             return 0
-        unknown = self._unknown_shards()
-        if unknown:
-            # The rows of those shards are not read here, so their live packs would look unrecorded.
-            logger.error(
-                "Jobs record step log shards %s, which this map does not have; the sweep of the packs with "
-                "no row skips until every pod has the same STEP_LOG_SHARDS",
-                ", ".join(unknown),
-            )
+        # The rows of an unknown shard are not read here, so its live packs would look unrecorded. The check
+        # runs after the LIST, so a run that records a new shard later writes only packs newer than the LIST.
+        if self._report_unknown_shards():
             return 0
         # A pack's row can be on any shard, so a pack goes only when no shard records it. A shard that does
         # not answer raises here, before any delete.
@@ -754,14 +756,16 @@ class TreeCompactor:
     def _unknown_shards(self) -> list[str]:
         """Return the step log shards that jobs on the main database record and this map does not have.
 
-        It runs after the LIST, so a run that records a new shard later writes only packs newer than the LIST.
-
         Returns:
             The shard names, sorted.
         """
         with Session(self._engine) as session:
             recorded = set(
-                session.scalars(select(JobModel.step_log_shard).where(JobModel.step_log_shard.is_not(None)).distinct())
+                session.scalars(
+                    select(JobModel.step_log_shard)
+                    .where(JobModel.step_log_shard.is_not(None), JobModel.step_log_shard != MAIN)
+                    .distinct()
+                )
             )
         return sorted(recorded - set(self._shards.names()))
 
