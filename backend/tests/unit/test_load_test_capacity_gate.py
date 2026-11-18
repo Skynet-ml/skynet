@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from core.service_gateway.optimization.blackbox.sandbox_runtime import LocalSubprocessRuntime
@@ -265,7 +266,7 @@ def test_swarm_gate_fails_a_short_steady_part(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.parametrize(
     ("sharded", "text"),
     [
-        ({"commits_per_second": 5_000.0}, "steady commit rate"),
+        ({"commits_per_second": 5_000.0}, "steady commit rate 5000.0/s over 60000 steady steps"),
         ({"step_wait_ms": {"mean": 900.0, "p50": 900.0, "p99": 1_200.0, "max": 1_300.0}}, "step wait p99"),
         ({"commit_call_ms": {"p50": 400.0, "p99": 500.0, "max": 510.0}}, "commit call p99"),
         ({"digest": "other"}, "different step logs"),
@@ -1361,7 +1362,13 @@ def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(
     assert figures["commits_per_second_with_drain"] == 0.0
 
 
-def _named_sqlite(path: Path, name: str, lock_free: bool = True, unlocks: list[int] | None = None) -> Engine:
+def _named_sqlite(
+    path: Path,
+    name: str,
+    lock_free: bool = True,
+    unlocks: list[int] | None = None,
+    fails: str | None = None,
+) -> Engine:
     """Return a SQLite engine that answers ``current_database()`` and the advisory lock calls, as Postgres does.
 
     Args:
@@ -1369,6 +1376,7 @@ def _named_sqlite(path: Path, name: str, lock_free: bool = True, unlocks: list[i
         name: The database name.
         lock_free: What ``pg_try_advisory_lock`` answers: ``False`` when another pass holds the lock.
         unlocks: Gets the key of each ``pg_advisory_unlock`` call, or ``None``.
+        fails: The name of the lock function that raises, or ``None``.
 
     Returns:
         The engine.
@@ -1386,7 +1394,25 @@ def _named_sqlite(path: Path, name: str, lock_free: bool = True, unlocks: list[i
         """
         if unlocks is not None:
             unlocks.append(key)
+        if fails == "pg_advisory_unlock":
+            raise OSError("unlock failed")
         return True
+
+    def lock(key: int) -> bool:
+        """Answer one lock call.
+
+        Args:
+            key: Not used.
+
+        Returns:
+            ``lock_free``.
+
+        Raises:
+            OSError: When ``fails`` names this function.
+        """
+        if fails == "pg_try_advisory_lock":
+            raise OSError("lock failed")
+        return lock_free
 
     def on_connect(connection: Any, record: Any) -> None:
         """Add the Postgres functions that the swarm calls to a new SQLite connection.
@@ -1396,7 +1422,7 @@ def _named_sqlite(path: Path, name: str, lock_free: bool = True, unlocks: list[i
             record: Not used.
         """
         connection.create_function("current_database", 0, lambda: name)
-        connection.create_function("pg_try_advisory_lock", 1, lambda key: lock_free)
+        connection.create_function("pg_try_advisory_lock", 1, lock)
         connection.create_function("pg_advisory_unlock", 1, unlock)
 
     event.listen(engine, "connect", on_connect)
@@ -1813,6 +1839,100 @@ def test_swarm_pass_frees_its_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert unlocks == [swarm_10k.SWARM_LOCK_KEY]
 
 
+@pytest.mark.parametrize("cleanup", ["_delete_swarm_rows", "_delete_packs"])
+def test_swarm_pass_frees_its_lock_when_its_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cleanup: str
+) -> None:
+    """Check that a pass frees its advisory lock when its row or pack cleanup fails, and raises the cleanup error.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes, the step log read and one cleanup step.
+        tmp_path: The pass folder.
+        cleanup: The cleanup step that fails.
+    """
+    unlocks: list[int] = []
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", unlocks=unlocks)
+    _postgres_pass(monkeypatch, engine)
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+
+    def fail(*args: Any) -> None:
+        """Fail the cleanup step.
+
+        Args:
+            *args: Not used.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(swarm_10k, cleanup, fail)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(OSError, match="cleanup failed"):
+        swarm_10k.run_pass(config, 1, tmp_path / "pass")
+    assert unlocks == [swarm_10k.SWARM_LOCK_KEY]
+
+
+def test_swarm_pass_that_fails_to_unlock_raises_and_disposes_every_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that a failed unlock becomes the pass's cleanup error, and that every shard engine still gets disposed.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes, the step log read and the engine's dispose.
+        tmp_path: The pass folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", fails="pg_advisory_unlock")
+    _postgres_pass(monkeypatch, engine)
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+    disposes: list[Engine] = []
+    dispose = engine.dispose
+
+    def record_dispose() -> None:
+        """Record one dispose, then dispose the engine."""
+        disposes.append(engine)
+        dispose()
+
+    monkeypatch.setattr(engine, "dispose", record_dispose)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(OperationalError, match="pg_advisory_unlock"):
+        swarm_10k.run_pass(config, 2, tmp_path / "pass")
+    # Both shards of the pass get the one engine, so each of its 2 places in the pass's list gets a dispose.
+    assert len(disposes) == 2
+    assert engine.pool.checkedin() == 0
+
+
+def test_swarm_lock_that_fails_closes_its_connection(tmp_path: Path) -> None:
+    """Check that a lock call that fails gives its connection back and raises the error.
+
+    Args:
+        tmp_path: The database folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", fails="pg_try_advisory_lock")
+    with pytest.raises(OperationalError, match="pg_try_advisory_lock"):
+        swarm_10k._lock_database(engine)
+    assert engine.pool.checkedout() == 0
+    engine.dispose()
+
+
+def test_swarm_worker_ids_of_two_passes_do_not_overlap() -> None:
+    """Check that the 1-shard and the 2-shard passes of one invocation get different worker ids."""
+    config = _swarm_config()
+    single = {swarm_10k.worker_id_for(config.stamp, 1, index) for index in range(1)}
+    sharded = {swarm_10k.worker_id_for(config.stamp, 2, index) for index in range(2)}
+    assert not single & sharded
+
+
+def test_swarm_steady_bounds_take_the_latest_first_step_and_the_earliest_last_step() -> None:
+    """Check that one shard's steady part starts at its latest first step and ends at its earliest last step."""
+    done = [
+        [(0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0, 5.0)],
+        [(0.0, 0.0, 0.0, 2.0), (0.0, 0.0, 0.0, 4.0)],
+        [(0.0, 0.0, 0.0, 1.5), (0.0, 0.0, 0.0, 6.0)],
+    ]
+    assert swarm_10k.steady_bounds(done) == {"first_round_durable": 2.0, "first_agent_done": 4.0}
+
+
 def _shard_report(times: list[float], first_round_durable: float, first_agent_done: float) -> dict[str, Any]:
     """Return a made-up shard report.
 
@@ -1862,6 +1982,8 @@ def test_swarm_steady_part_runs_from_the_last_first_round_to_the_first_done_agen
     assert figures["steady_steps"] == 4
     assert figures["steady_seconds"] == 2.0
     assert figures["commits_per_second"] == 2.0
+    keys = list(figures)
+    assert keys.index("commits_per_second") == keys.index("steady_steps") + 1
 
 
 def test_swarm_digest_hashes_each_step_body(tmp_path: Path) -> None:
