@@ -1616,7 +1616,8 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
             missing, too large, empty, or has a line that is not one case,
             or when the ``[sandbox] compose`` file is missing or not a
             compose file the box can run, or when a ``[proposer] entry`` or
-            ``setup`` argument names a symbolic link or a path inside one.
+            ``setup`` argument names a symbolic link, a path inside one, or a
+            folder that holds one.
     """
     raw = read_constraints_file(archive)
     if raw is None:
@@ -1645,7 +1646,8 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
 
     Raises:
         ConstraintsError: When an argument names a symbolic link of the
-            snapshot or a path inside a linked folder.
+            snapshot, a path inside a linked folder, or a folder that holds a
+            symbolic link at any depth.
     """
     if constraints.proposer_entry is None:
         return constraints
@@ -1667,6 +1669,16 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
                 raise ConstraintsError(
                     f"{CONSTRAINTS_FILE}: [proposer] {key} names '{part}', which goes through the symbolic"
                     f" link '{link}'. Name the real path, so that no version can change the proposer.",
+                    section="proposer",
+                    key=key,
+                )
+            # A named folder protects its paths, not the files that its links
+            # point at, so a link anywhere inside it is refused too.
+            inner = next((name for name in sorted(links) if name.startswith(f"{path}/")), None)
+            if inner is not None:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: [proposer] {key} names the folder '{part}', which holds the symbolic"
+                    f" link '{inner}'. Remove the link from the folder, so that no version can change the proposer.",
                     section="proposer",
                     key=key,
                 )

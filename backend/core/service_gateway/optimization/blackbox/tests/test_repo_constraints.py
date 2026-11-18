@@ -289,6 +289,46 @@ def test_a_command_path_through_a_tracked_link_is_refused(
     assert (caught.value.section, caught.value.key) == ("proposer", key)
 
 
+@pytest.mark.parametrize(
+    ("key", "link_name"), [("entry", "agent/lib.js"), ("setup", "agent/lib/deep/util.js")], ids=["top", "nested"]
+)
+def test_a_named_folder_that_holds_a_tracked_link_is_refused(tmp_path: Path, key: str, link_name: str) -> None:
+    """A link inside a named folder would leave the file it points at open to a version (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that names the folder.
+        link_name: The path of the link inside the folder.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["npm", "start", "--prefix", "agent"]\n'.encode()
+    files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib", "main.js": b"//"}
+    archive = _archive(tmp_path, files, link="../src/lib.js", link_name=link_name)
+
+    with pytest.raises(
+        ConstraintsError, match=f"folder 'agent', which holds the symbolic link '{link_name}'"
+    ) as caught:
+        read_constraints(archive)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+def test_a_link_outside_the_named_folder_is_allowed(tmp_path: Path) -> None:
+    """Only links inside the named folder matter; ``agent-tools`` is not inside ``agent`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    raw = b'version = 1\n[proposer]\nentry = ["npm", "start", "--prefix", "agent"]\n'
+    files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib"}
+    archive = _archive(tmp_path, files, link="../src/lib.js", link_name="agent-tools/lib.js")
+
+    constraints = read_constraints(archive)
+
+    assert constraints is not None
+    assert constraints.proposer_command_files == ("agent",)
+
+
 def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_path: Path) -> None:
     """``npm ci --prefix agent`` protects the agent folder, but never the checkout root or a path outside (SKY-753).
 
