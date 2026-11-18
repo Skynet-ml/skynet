@@ -2090,6 +2090,56 @@ def test_progress_trim_hard_cap_deletes_oldest_keyed_events(
     assert [e["metrics"][key] for e in events] == [f"step:{i}" for i in range(3, hard_cap + 3)]
 
 
+def test_progress_trim_does_not_count_a_keyed_structural_row_as_cover(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyed structural row cannot cover the excess, so the trim deletes the oldest unkeyed structural row."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-keyed-structural")
+    store.record_progress("evict-keyed-structural", PROGRESS_BASELINE, {PROGRESS_EVENT_KEY: "b"})
+    store.record_progress("evict-keyed-structural", PROGRESS_OPTIMIZED, {})
+    store.record_progress("evict-keyed-structural", PROGRESS_LANE_STARTED, {})
+
+    events = store.get_progress_events("evict-keyed-structural")
+    assert [e["event"] for e in events] == [PROGRESS_BASELINE, PROGRESS_LANE_STARTED]
+
+
+def test_progress_trim_hard_pass_deletes_non_structural_keyed_rows_first(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hard pass deletes the oldest non-structural keyed row before an older keyed structural row (SKY-808)."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 1)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    key = PROGRESS_EVENT_KEY
+    store.create_job("evict-hard-order")
+    store.record_progress("evict-hard-order", PROGRESS_BASELINE, {key: "b"})
+    store.record_progress("evict-hard-order", "step", {key: "s1"})
+    store.record_progress("evict-hard-order", "step", {key: "s2"})
+
+    events = store.get_progress_events("evict-hard-order")
+    assert [e["metrics"][key] for e in events] == ["b", "s2"]
+
+
+def test_progress_trim_hard_pass_counts_the_rows_the_structural_pass_deleted(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hard pass subtracts the structural deletes, so it deletes no more keyed rows than the hard excess."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 1)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 10**9)
+    key = PROGRESS_EVENT_KEY
+    store.create_job("evict-hard-count")
+    store.record_progress("evict-hard-count", PROGRESS_OPTIMIZED, {})
+    store.record_progress("evict-hard-count", PROGRESS_LANE_STARTED, {})
+    for i in range(3):
+        store.record_progress("evict-hard-count", "step", {key: f"s{i}"})
+
+    store._trim_progress_events("evict-hard-count")
+
+    events = store.get_progress_events("evict-hard-count")
+    assert [e["metrics"].get(key) for e in events] == [None, "s2"]
+
+
 def test_record_progress_treats_an_empty_or_over_long_key_as_no_key(store: SQLiteJobStore) -> None:
     """A key that is empty or longer than the limit adds a row each time, like an unkeyed event."""
     key = PROGRESS_EVENT_KEY
