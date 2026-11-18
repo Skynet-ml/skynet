@@ -436,6 +436,41 @@ def test_repository_versions_reach_the_scorer_as_patches(tmp_path: Path) -> None
     assert "not a path inside the repository" in scorer.score_program(str(program))["error"]
 
 
+def test_a_case_with_no_score_fails_the_program_with_its_run_failure(tmp_path: Path, monkeypatch: Any) -> None:
+    """A null parent score fails the program, and its "Run failed" text reaches the proposer (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    monkeypatch.chdir(tmp_path)
+    ids = iter(["r0", "r1"])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": 0.5, "info": {"feedback": "fine"}}))
+    failure = {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps({"score": None, "info": failure}))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[{"id": "a"}, {"id": "b"}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+
+    answer = scorer.score_program(str(program))
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 2 case(s) have no score."
+    assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: Traceback: boom"
+    assert scorer.best is None
+    assert scorer.scored == {}
+
+
 def test_repository_mode_swaps_prompts_edits_and_novelty_input(tmp_path: Path, monkeypatch: Any) -> None:
     """Route upstream's prompt sampling, patch application and embeddings through the bundle.
 

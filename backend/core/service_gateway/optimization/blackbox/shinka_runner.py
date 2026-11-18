@@ -211,7 +211,7 @@ class EvaluatorMailbox:
             candidate_id: Version number the parent files the scorer's logs under.
 
         Returns:
-            Parent score and feedback.
+            Parent score, negative infinity when the case has no score, and feedback.
 
         Raises:
             EvaluationStopped: When the parent rejects evaluation or does not reply.
@@ -240,7 +240,11 @@ class EvaluatorMailbox:
                     raise self.error
                 with self._write_lock:
                     self.total_evals += 1
-                return float(response["score"]), dict(response.get("info") or {})
+                score = response.get("score")
+                # SKY-751: the parent sends null for a case with no score (a
+                # failed [run] entry or a metric error); ``score_program``
+                # reports such a program as failed, with the case's feedback.
+                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply
@@ -1491,8 +1495,24 @@ class ProgramScorer:
                         "total": len(self.examples),
                     },
                 )
-        if not all(math.isfinite(score) for score, _ in results):
-            return {"correct": False, "error": "The scorer returned a non-numeric score.", "metrics": {}}
+        failed = [(index, info) for index, (score, info) in enumerate(results) if not math.isfinite(score)]
+        if failed:
+            # Upstream shows an incorrect program's text feedback to the agent
+            # that fixes it, so the failure text (for example "Run failed:
+            # <traceback>") reaches the proposer (SKY-751).
+            texts = []
+            for index, info in failed:
+                text = _feedback_text(info)
+                label = f"Case {index}" if len(results) > 1 else "Result"
+                texts.append(f"{label} has no score" + (f":\n{text}" if text else "."))
+            feedback = "\n\n".join(texts)
+            if len(feedback) > _FEEDBACK_CHARS:
+                feedback = feedback[:_FEEDBACK_CHARS] + "\n[feedback truncated]"
+            return {
+                "correct": False,
+                "error": f"{len(failed)} of {len(results)} case(s) have no score.",
+                "metrics": {"combined_score": 0.0, "text_feedback": feedback},
+            }
         metrics = summarize_scores(results)
         with self._lock:
             self.scored[generation] = {
