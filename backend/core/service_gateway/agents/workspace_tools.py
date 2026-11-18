@@ -97,9 +97,11 @@ How to write the run's files:
   whole file), or change part of one with ``{EDIT_FILE_TOOL}``. Each write goes into the editor at once. The run
   uses your repository files in place of the repository's own; the user's repository stays unchanged. Change
   other repository files only when the run needs it, and tell the user which files you changed.
-* Every run optimizes a repository. The run has no run.py. ``metric.py`` defines ``score(repo_path)``, or
-  ``score(repo_path, case)`` when the run has data, and scores the output of the ``[run]`` entry or of the
-  ``[target.<name>]`` stages. The metric box holds no repository files. It returns
+* Every run optimizes a repository. The run has no run.py. With a ``[run]`` entry, ``metric.py`` defines
+  ``score(repo_path, case, output=None)`` and scores ``output``; a metric with fewer arguments never gets the
+  output. Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define
+  ``score(repo_path)`` or ``score(repo_path, case)``, and that metric calls its stages with
+  ``from skynet import call``. The metric box holds no repository files. It returns
   ``(score, feedback)`` or ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
   {APP_NAME} starts the candidate, never the metric. Write a ``[run]`` section (or a ``[target.<name>]`` stage)
   in optimize.toml. Set the ``[run]`` ``entry`` to ``"path/to/file.py:function"`` or a command list,

@@ -780,6 +780,16 @@ def test_guide_has_the_run_entry_write_the_metric_reads_output() -> None:
     assert "score(repo_path, case, output=None)" in prompt
     assert "and ``None`` when nothing ran, so always give it the ``None`` default" in prompt
     assert "never imports or calls the candidate's code" in prompt
+    # The runner passes output only to a scorer with three positional
+    # arguments, so a two-argument metric with a [run] entry scores every
+    # version alike (SKY-761).
+    assert (
+        "With a ``[run]`` entry, ``metric.py`` defines ``score(repo_path, case, output=None)`` and scores"
+        " ``output``; a metric with fewer arguments never gets the output." in prompt
+    )
+    assert "Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define" in prompt
+    assert "``from skynet import call``" in prompt
+    assert "``score(repo_path)``, or ``score(repo_path, case)`` when the run has data" not in prompt
 
 
 def test_guide_puts_the_test_command_in_the_run_entry() -> None:
