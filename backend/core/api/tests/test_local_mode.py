@@ -1018,7 +1018,8 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     checked = response.json()
     assert checked["status"] == "succeeded", checked
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
-    proposer = {**payload.get("proposer", {}), "host_cli": checked.get("proposer_host_cli")}
+    # The mark keeps the CLI filled in, so a repository's [proposer] entry applies as in the check (SKY-753).
+    proposer = {**payload.get("proposer", {}), "host_cli": checked.get("proposer_host_cli"), HOST_CLI_AUTO_KEY: True}
 
     submitted = harness.client.post(
         "/blackbox/run",
@@ -1034,6 +1035,52 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     assert submitted.status_code == 201, submitted.text
     job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
     assert job["payload"]["proposer"]["host_cli"] == "codex"
+    assert job["payload"]["proposer"][HOST_CLI_AUTO_KEY] is True
+
+
+def test_a_check_on_a_filled_in_cli_is_not_evidence_for_the_same_cli_picked(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A picked CLI replaces ``[proposer] entry`` and a filled-in one does not, so the check must run again (SKY-753).
+
+    Args:
+        harness: Real setup, wallet, and job services.
+        monkeypatch: Pytest fixture used to set local mode and the probe.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="picked")
+    payload = {
+        **_run_payload(**_SUBSCRIPTION_RUN),
+        "execution_budget_id": budget.id,
+        "execution_budget_revision": budget.revision,
+    }
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "succeeded", checked
+
+    submitted = harness.client.post(
+        "/blackbox/run",
+        json={
+            **payload,
+            "proposer": {**payload.get("proposer", {}), "host_cli": checked["proposer_host_cli"]},
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert submitted.status_code == 409, submitted.text
 
 
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])

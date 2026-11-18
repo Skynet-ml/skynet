@@ -125,8 +125,14 @@ def fill_proposer_host_cli(job_store: object | None, username: str, payload: Any
     proposer = getattr(payload, "proposer", None) or getattr(getattr(payload, "optimizer", None), "proposer", None)
     # An explicit pick wins, including an explicit null for the sandbox
     # proposer. A custom harness is the user's own command, which a host CLI
-    # would replace.
-    if proposer is None or "host_cli" in proposer.model_fields_set or proposer.harness == BLACKBOX_HARNESS_CUSTOM:
+    # would replace. A filled-in CLI that a submit sends back with its mark
+    # keeps the check's CLI, and stays filled in (SKY-753).
+    if (
+        proposer is None
+        or "host_cli" in proposer.model_fields_set
+        or proposer.host_cli is not None
+        or proposer.harness == BLACKBOX_HARNESS_CUSTOM
+    ):
         return
     engine = _turn_engine(job_store, username)
     if engine is not None and engine != OPENROUTER_ENGINE:

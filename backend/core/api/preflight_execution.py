@@ -118,6 +118,8 @@ class WizardPreflightResponse(BaseModel):
     environment: dict[str, Any] | None = None
     # The proposer CLI this check ran on. A submit sends it back so the server
     # does not pick another CLI from changed readiness and refuse the evidence.
+    # It sends it with ``host_cli_auto: true``: without the mark it is a picked
+    # CLI, which replaces a repository's [proposer] entry (SKY-753).
     proposer_host_cli: Literal["codex", "claude"] | None = None
 
     @model_serializer(mode="wrap")
