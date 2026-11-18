@@ -304,8 +304,8 @@ A manual hold on a change or on a promotion still stops it.
   Merge the batch PR with a command that requires its reviewed head commit
   (`gh pr merge <n> --merge --match-head-commit <sha>`). Never bypass
   branch protection or queue an unchecked future merge.
-- **Among agents, only the orchestrator merges** (through the batch, in the
-  daily merge window below). Gilad can also merge.
+- **Among agents, only the orchestrator merges** (through the batch, see
+  "Merging into staging" below). Gilad can also merge.
   Implementation and review agents leave the final action to the orchestrator.
 
 ### Linear revisions and holds (2026-10-19, 2026-11-11)
@@ -369,21 +369,21 @@ A manual hold on a change or on a promotion still stops it.
   Dispatch `ci` and `i18n` on its own branch (`gh workflow run ci.yml --ref
   <branch>`), wait for both runs to pass, then merge the PR.
 
-### Daily merge window (2026-10-20, batch flow 2026-11-10)
+### Merging into staging (batch flow 2026-11-10, no window 2026-11-18)
 
-- Merges into `staging` happen only in the daily window at 03:00
-  America/Los_Angeles, or when Gilad asks for a merge.
-- After an approval, the orchestrator does not merge. It moves the issue to
-  **Ready to Merge**, adds the `ready-to-merge` label, a PR comment and the
-  `agent-review/ready-to-merge` status on the approved head.
+- There is no fixed merge window (Gilad, 2026-11-18). The orchestrator
+  merges a batch into `staging` as soon as the batch passes its gates.
+- After an approval, the orchestrator does not merge the PR alone. It
+  moves the issue to **Ready to Merge**, adds the `ready-to-merge` label,
+  a PR comment and the `agent-review/ready-to-merge` status on the approved
+  head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
-- The orchestrator's cloud merger routine runs the window. It builds one
-  batch from every PR in **Ready to Merge** (see "PR tests and batch CI"). A
-  PR branch does not need a merge from `staging`, because the batch starts
-  from current `staging`.
+- The orchestrator builds one batch from every PR in **Ready to Merge**
+  (see "PR tests and batch CI"). A PR branch does not need a merge from
+  `staging`, because the batch starts from current `staging`.
 - A PR that the batch cannot take (a conflict it cannot resolve, a CI
-  failure) leaves the batch. It waits for the next window, with the reason
+  failure) leaves the batch. It waits for the next batch, with the reason
   in the PR and in Linear.
 - After GitHub confirms the batch merge, move each included issue to Done
   and attach the batch merge commit. The merger never merges into `main` or
