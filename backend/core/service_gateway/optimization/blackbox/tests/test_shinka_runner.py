@@ -1805,6 +1805,19 @@ def test_the_patch_check_reads_the_whole_patch_from_inside_a_repository_subfolde
         shinka_runner.refuse_unsafe_patch(_symlink_patch("/etc"))
 
 
+def test_git_summary_of_a_mode_change_to_a_symlink_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the new mode from git's ``mode change OLD => NEW`` summary line.
+
+    Args:
+        monkeypatch: Turns off the text check, so only git's summary can see the mode.
+    """
+    monkeypatch.setattr(shinka_runner, "_PATCH_MODE", re.compile(r"(?!)"))
+    patch = "diff --git a/f b/f\nold mode 100644\nnew mode 120000\n"
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.refuse_unsafe_patch(patch)
+
+
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

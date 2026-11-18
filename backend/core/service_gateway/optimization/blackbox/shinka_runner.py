@@ -1061,7 +1061,7 @@ _FILE_MODES = frozenset({"100644", "100755"})
 # Tolerant of any blank between the words and the mode, so an odd separator
 # cannot hide a mode that git still reads.
 _PATCH_MODE = re.compile(r"^[ \t]*(?:new file mode|new mode|index[ \t]+\S+)[ \t]+(\d+)[ \t]*$", re.MULTILINE)
-_SUMMARY_MODE = re.compile(r"\bmode (?:\d+ => )?(\d+)\b")
+_SUMMARY_MODE = re.compile(r"\bmode (?:change \d+ => )?(\d+)\b")
 
 
 def refuse_unsafe_tree(chunks: Sequence[str]) -> dict[str, str]:
