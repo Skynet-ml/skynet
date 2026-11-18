@@ -1808,6 +1808,56 @@ def test_an_over_cap_candidate_file_never_loads_and_is_refused_by_size(
     assert worker._validate({"name": "c0", "file": "agents/big.txt"}) == native_engines.CANDIDATE_TOO_LARGE
 
 
+def test_an_over_cap_pending_file_never_loads_and_gives_no_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """``_pull`` reads an over-cap ``pending_eval.json``'s size and never its bytes, and gives no candidate.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    pending = _pending("agents/a.txt")
+    monkeypatch.setattr(native_engines, "MAX_PENDING_BYTES", len(pending) - 1)
+    tree = loop.put_files({"logs/run/pending_eval.json": pending, "agents/a.txt": b"a"})
+    loaded: list[bytes | None] = []
+    get_blob = trees.get_blob
+
+    def spy(run_id: str, object_id: str) -> bytes | None:
+        """Record each blob that the tree store loads.
+
+        Args:
+            run_id: The job that reads the blob.
+            object_id: The blob.
+
+        Returns:
+            The blob's file bytes.
+        """
+        data = get_blob(run_id, object_id)
+        loaded.append(data)
+        return data
+
+    monkeypatch.setattr(trees, "get_blob", spy)
+
+    worker._pull(tree)
+
+    assert pending not in loaded
+    assert (worker.logs_dir / "pending_eval.json").read_bytes() == b""
+    assert worker._read_pending(worker.logs_dir / "pending_eval.json") == []
+    assert not (worker.work_dir / "agents" / "a.txt").exists()
+
+
 def test_a_later_session_sees_the_tree_and_not_the_pulled_copies(
     monkeypatch: pytest.MonkeyPatch,
     owner: tuple[User, int],
