@@ -244,7 +244,7 @@ class AutoSaddlerEngine:
                     _progress(task, server, ctx, event)
                     reply = {}
                 elif op == "log":
-                    sandbox_log.forward(request.get("record"), owner=None, scrub=sandbox_log.Scrubber(()))
+                    sandbox_log.forward(request.get("record"), owner=ctx.log_owner, scrub=sandbox_log.Scrubber(()))
                     reply = {}
                 else:
                     raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")

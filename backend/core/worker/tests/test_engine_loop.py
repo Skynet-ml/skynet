@@ -522,6 +522,15 @@ def test_a_model_call_has_no_box_open_and_each_call_commits_one_step(
     assert [seq for seq, _, _ in _steps(engine)] == list(range(len(_KINDS)))
 
 
+def test_the_context_names_the_job_as_its_log_owner(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The context's log owner is the job id, so the worker's log router keeps the engine's forwarded records."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    assert loop.context().log_owner == RUN_ID
+
+
 def test_a_resumed_loop_continues_from_its_last_step_and_repeats_no_model_call(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

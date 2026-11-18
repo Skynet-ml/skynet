@@ -846,6 +846,41 @@ def test_a_nan_in_a_reply_reaches_the_child_as_null(tmp_path: Path) -> None:
     assert evaluation == {"score": 1.0, "info": {"note": None, "list": [None, 2.0]}}
 
 
+def test_a_log_record_reaches_the_run_log_with_the_context_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child's log record goes to ``sandbox_log.forward`` with the job id that the worker's router keeps.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the forwarded records.
+    """
+    forwarded: list[tuple[Any, str | None]] = []
+    monkeypatch.setattr(
+        autosaddler.sandbox_log, "forward", lambda record, *, owner, scrub: forwarded.append((record, owner))
+    )
+    record = {"event": "rule.block", "message": "blocked"}
+    script = (
+        "import json, sys\nsys.stdin.readline()\n"
+        f"print({json.dumps({'op': 'log', 'record': record})!r}, flush=True)\nsys.stdin.readline()\n"
+        'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": {}}\n'
+        'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
+    )
+    ctx = make_ctx(
+        str(tmp_path),
+        call_model=lambda *_: None,
+        run_command=lambda *_: None,
+        put_files=lambda *_: None,
+        read_file=lambda *_: None,
+        list_files=lambda *_: None,
+        log_owner=RUN_ID,
+    )
+
+    _runner(tmp_path, script).run(Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), ctx)
+
+    assert forwarded == [(record, RUN_ID)]
+
+
 def test_a_candidate_with_the_wrong_shape_is_never_scored(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

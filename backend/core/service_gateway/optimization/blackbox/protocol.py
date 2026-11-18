@@ -436,6 +436,9 @@ class EngineContext:
     read_file: Callable[[str, str], bytes | None] | None = None
     list_files: ListFiles | None = None
     repo_seed: RepoSeed | None = None
+    # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
+    # keeps only its own job's records.
+    log_owner: str | None = None
 
 
 class Engine(Protocol):
