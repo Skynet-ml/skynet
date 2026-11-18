@@ -1934,3 +1934,76 @@ def test_a_candidate_path_that_is_not_relative_under_agents_is_refused(
     assert stale.read_text() == "stale"
     assert worker._validate({"name": "c1", "file": file}) == meta_mod.CANDIDATE_OUTSIDE_AGENTS
     assert worker._validate({"name": "c1", "file": "agents/c1.txt"}) is None
+
+
+def test_a_session_that_writes_no_pending_file_adds_no_rows(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A session that writes no ``pending_eval.json`` gets no candidate, not the last session's candidates again.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+
+    def second_writes_nothing(prompt: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+        """Answer as the scripted agent, but run ``true`` in the second session.
+
+        Args:
+            prompt: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            The model's reply.
+        """
+        user = next(message["content"] for message in prompt if message["role"] == "user")
+        if "Run iteration 2" in user and prompt[-1]["role"] != "tool":
+            return ModelReply("", Decimal(1), [{"id": "t", "name": "bash", "arguments": {"command": "true"}}])
+        return model(prompt, tools)
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, second_writes_nothing, generation=1)
+
+    result = _run(loop)
+
+    rows = [
+        json.loads(line)
+        for summary in tmp_path.rglob("evolution_summary.jsonl")
+        for line in summary.read_text().splitlines()
+    ]
+    assert [row["iteration"] for row in rows] == [1]
+    assert not rows[0]["outcome"].startswith("failed")
+    assert result.best_candidate == "seedx"
+
+
+def test_a_file_over_its_cap_in_one_pull_is_missing_in_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Each pull starts a new over-cap set, so a file that left the tree gets the missing reason, not the size one.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 10)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    pending = _pending("agents/big.txt")
+    worker._pull(loop.put_files({"logs/run/pending_eval.json": pending, "agents/big.txt": b"x" * 11}))
+    assert worker._validate({"name": "c0", "file": "agents/big.txt"}) == native_engines.CANDIDATE_TOO_LARGE
+
+    worker._pull(loop.put_files({"logs/run/pending_eval.json": pending}))
+
+    assert worker._validate({"name": "c0", "file": "agents/big.txt"}) == native_engines.CANDIDATE_MISSING
