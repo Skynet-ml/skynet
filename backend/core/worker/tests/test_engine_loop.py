@@ -1523,7 +1523,7 @@ def test_a_reply_with_lone_surrogates_commits_and_the_run_goes_on_and_a_resume_r
             "role": "assistant",
             "content": None,
             "tool_calls": [
-                {"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": '{"text": "\\ud800"}'}},
+                {"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": '{"text":"\\ud800"}'}},
                 {"id": "call_b", "type": "function", "function": {"name": "ed\udfffit", "arguments": "{}"}},
             ],
         }
@@ -1552,7 +1552,7 @@ def test_a_reply_with_lone_surrogates_commits_and_the_run_goes_on_and_a_resume_r
         "bad \\ud800 text",
         Decimal(1),
         [
-            {"id": "call_a", "name": "edit", "arguments": '{"text": "\\ud800"}'},
+            {"id": "call_a", "name": "edit", "arguments": '{"text":"\\ud800"}'},
             {"id": "call_b", "name": "ed\\udfffit", "arguments": {}},
             {"id": "call_c", "name": "edit", "arguments": '{"k\\ud83d": ["\\udc00"]}'},
         ],
