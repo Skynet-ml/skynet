@@ -142,7 +142,7 @@ INTERVAL_SECONDS = 60.0
 # Each sweep of the packs with no row lists all of packs/ and compacted/; the LIST cost must not grow with
 # the pass interval or the replica count.
 SWEEP_INTERVAL_SECONDS = 3600.0
-# A stable fleet-wide pg_try_advisory_xact_lock key; the 742137000001-8 keys are in use elsewhere.
+# A stable fleet-wide pg_try_advisory_lock key; the 742137000001-8 keys are in use elsewhere.
 SWEEP_LOCK_KEY = 742137000009
 
 # A pack is in use while a row points at it. A pack and its rows are on one step log shard, so each shard checks
@@ -648,12 +648,22 @@ class TreeCompactor:
         """
         if self._engine.dialect.name != "postgresql":
             return self._sweep_unrecorded()
-        # The transaction-level lock goes with the connection's transaction, also when the sweep raises.
-        with self._engine.connect() as connection, connection.begin():
-            if not connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": SWEEP_LOCK_KEY}):
+        # A session lock on an autocommit connection: a transaction left idle for the whole sweep could hit
+        # idle_in_transaction_session_timeout, which ends the session and drops the lock mid-sweep.
+        with self._engine.connect() as connection:
+            connection.execution_options(isolation_level="AUTOCOMMIT")
+            if not connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": SWEEP_LOCK_KEY}):
                 logger.info("Another replica sweeps the tree packs with no row; this pass skips the sweep")
                 return 0
-            return self._sweep_unrecorded()
+            try:
+                return self._sweep_unrecorded()
+            finally:
+                try:
+                    connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": SWEEP_LOCK_KEY})
+                except Exception:
+                    # A pooled connection must not keep the lock: closing the session frees it.
+                    logger.warning("Could not free the tree pack sweep lock; closing its connection", exc_info=True)
+                    connection.invalidate()
 
     def _sweep_unrecorded(self) -> int:
         """List both pack prefixes and delete the old packs with no row.

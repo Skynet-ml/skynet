@@ -2682,3 +2682,161 @@ def test_postgres_only_one_replica_sweeps_the_packs_with_no_row(tmp_path, postgr
     assert objects.list(f"{PACK_PREFIX}/") == []
     with Session(postgres_engine) as session:
         assert session.get(StoragePackModel, orphan).worker_id == "gone-pod"
+
+
+def _sweep_lock_free(engine: Engine) -> bool:
+    """Return whether a new session can take the sweep lock; free it again when it can.
+
+    Args:
+        engine: The PostgreSQL engine.
+
+    Returns:
+        Whether the lock was free.
+    """
+    with engine.connect() as connection:
+        free = connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+        if free:
+            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+        connection.commit()
+        return bool(free)
+
+
+def _sweep_lock_holder_states(engine: Engine) -> list[str]:
+    """Return the ``pg_stat_activity`` state of each session that holds the sweep lock.
+
+    Args:
+        engine: The PostgreSQL engine.
+
+    Returns:
+        The states, one for each holder.
+    """
+    with engine.connect() as connection:
+        states = list(
+            connection.scalars(
+                text(
+                    "SELECT a.state FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 "
+                    "AND (l.classid::bigint << 32) | l.objid::bigint = :key"
+                ),
+                {"key": tree_compactor.SWEEP_LOCK_KEY},
+            )
+        )
+        connection.commit()
+        return states
+
+
+@needs_postgres
+def test_postgres_the_sweep_holds_a_session_lock_with_no_open_transaction(
+    tmp_path, postgres_engine, objects, monkeypatch
+) -> None:
+    """During the sweep, the lock holder is idle and not in a transaction, and a second sweep skips.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    other = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    seen: list[tuple[list[str], int]] = []
+    real_list = objects.list
+
+    def list_and_check(prefix: str) -> list[str]:
+        """Record the lock holders' states and a second sweep's result at the first list, then list.
+
+        Args:
+            prefix: The key prefix.
+
+        Returns:
+            The listed keys.
+        """
+        if not seen:
+            seen.append((_sweep_lock_holder_states(postgres_engine), other.remove_unrecorded()))
+        return real_list(prefix)
+
+    monkeypatch.setattr(objects, "list", list_and_check)
+
+    assert compactor.remove_unrecorded() == 1
+    assert seen == [(["idle"], 0)]
+    assert _sweep_lock_free(postgres_engine)
+
+
+@needs_postgres
+def test_postgres_a_sweep_that_raises_frees_the_lock(tmp_path, postgres_engine, objects, monkeypatch) -> None:
+    """A sweep whose object list fails raises, and the next session can take the sweep lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+
+    def fail(prefix: str) -> list[str]:
+        """Fail as an S3 LIST that does not answer.
+
+        Args:
+            prefix: The key prefix.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("list failed")
+
+    monkeypatch.setattr(objects, "list", fail)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+
+    with pytest.raises(RuntimeError, match="list failed"):
+        compactor.remove_unrecorded()
+    assert _sweep_lock_free(postgres_engine)
+
+
+@needs_postgres
+def test_postgres_a_failed_unlock_closes_the_connection_and_frees_the_lock(
+    tmp_path, postgres_engine, objects, caplog
+) -> None:
+    """When the unlock fails, the sweep closes its connection, so no pooled connection keeps the lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        caplog: Pytest's log capture fixture.
+    """
+    caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+
+    def fail_unlock(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Fail the unlock statement.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+
+        Raises:
+            RuntimeError: For the unlock statement.
+        """
+        if "pg_advisory_unlock" in statement:
+            raise RuntimeError("unlock failed")
+
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    event.listen(postgres_engine, "before_cursor_execute", fail_unlock)
+    try:
+        assert compactor.remove_unrecorded() == 1
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", fail_unlock)
+
+    assert [r.getMessage() for r in caplog.records] == [
+        "Could not free the tree pack sweep lock; closing its connection"
+    ]
+    assert _sweep_lock_free(postgres_engine)
