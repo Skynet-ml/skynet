@@ -96,6 +96,7 @@ class _Proposer:
         fail_at: frozenset[int] = frozenset(),
         billed_at: frozenset[int] = frozenset(),
         output_chars: int = 0,
+        output_letter: str = "y",
     ) -> None:
         """Set the script.
 
@@ -105,7 +106,8 @@ class _Proposer:
             call: A tool call to send in place of the scripted command.
             fail_at: The indexes of the attempts, failed ones included, that fail as a rate limit does.
             billed_at: The indexes of the attempts that fail after the provider billed one cent.
-            output_chars: The length of the extra stdout that the scripted command prints.
+            output_chars: The length of the extra stdout and stderr that the scripted command prints.
+            output_letter: The letter of that output, as Python source text.
         """
         self.die_at = die_at
         self.fail_at = fail_at
@@ -114,6 +116,7 @@ class _Proposer:
         self.cost = Decimal(cost)
         self.call = call
         self.output_chars = output_chars
+        self.output_letter = output_letter
         self.calls: list[list[dict[str, Any]]] = []
         self.tools: list[list[dict[str, Any]] | None] = []
 
@@ -150,9 +153,14 @@ class _Proposer:
         iteration = int(re.search(r"Run iteration (\d+)", user).group(1))
         name = f"c{iteration}"
         pending = json.dumps({"candidates": [{"name": name, "file": f"agents/{name}.txt"}]})
-        command = f"printf %s {'seed' + 'x' * iteration} > agents/{name}.txt && printf '%s' '{pending}' > logs/run/pending_eval.json"
+        command = (
+            f"printf %s {'seed' + 'x' * iteration} > agents/{name}.txt"
+            f" && printf '%s' '{pending}' > logs/run/pending_eval.json"
+        )
         if self.output_chars:
-            command += f" && python3 -c \"print('y' * {self.output_chars})\""
+            # Bytes, so a Hebrew letter does not depend on the box's locale.
+            text = f"('{self.output_letter}' * {self.output_chars}).encode()"
+            command += f' && python3 -c "import sys; sys.stdout.buffer.write({text}); sys.stderr.buffer.write({text})"'
         return ModelReply(
             "", self.cost, [{"id": f"call-{iteration}", "name": "bash", "arguments": {"command": command}}]
         )
@@ -881,7 +889,9 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
 def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The prompt cap counts each Hebrew letter of a tool result once, so two clipped outputs fit under it.
+    """The prompt cap counts a Hebrew letter of a tool result as its two UTF-8 bytes, not as a six-character escape.
+
+    The two outputs are under ``MAX_PROMPT_BYTES`` as bytes and past it when escaped, so the session goes on.
 
     Args:
         owner: Alice and her budget generation.
@@ -890,7 +900,8 @@ def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    text = "('\\u05d0' * 30000).encode()"
+    letters = 20_000
+    text = f"('\\u05d0' * {letters}).encode()"
     script = f"import sys; sys.stdout.buffer.write({text}); sys.stderr.buffer.write({text})"
     model = _Proposer(call={"id": "h", "name": "bash", "arguments": {"command": f'python3 -c "{script}"'}})
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
@@ -900,8 +911,9 @@ def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
     assert len(model.calls) >= 2
     result = model.calls[1][-1]
     assert result["role"] == "tool"
-    assert json.loads(result["content"])["stdout"] == "א" * OUTPUT_CHARS
-    assert "א" in result["content"]
+    assert json.loads(result["content"])["stdout"] == "א" * letters
+    assert len(json.dumps(model.calls[1], ensure_ascii=False).encode()) < meta_mod.MAX_PROMPT_BYTES
+    assert len(json.dumps(model.calls[1])) > meta_mod.MAX_PROMPT_BYTES
 
 
 def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
@@ -1017,7 +1029,7 @@ def test_no_wait_follows_the_last_failed_attempt(
 
 
 @pytest.mark.parametrize(
-    ("cap", "value", "output_chars"), [("max_tool_calls", 1, 0), ("MAX_PROMPT_CHARS", 20_000, 25_000)]
+    ("cap", "value", "output_chars"), [("max_tool_calls", 1, 0), ("MAX_PROMPT_BYTES", 20_000, 25_000)]
 )
 def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     cap: str,
@@ -1035,7 +1047,7 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     Args:
         cap: The cap that the case sets.
         value: The cap's value.
-        output_chars: The length of the extra stdout that the scripted command prints.
+        output_chars: The length of the extra stdout and stderr that the scripted command prints.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -1056,6 +1068,65 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
     assert len(model.calls) == 2
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 2
+
+
+def test_a_hebrew_transcript_past_the_byte_cap_ends_the_session_and_the_run_goes_on(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt cap counts UTF-8 bytes, so Hebrew output under the cap in characters still ends the session.
+
+    Each session writes its candidate and prints 60,000 Hebrew letters: under the cap as characters, past it as
+    bytes. The session asks the model no more, and its candidate still runs.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(meta_mod, "MAX_PROMPT_BYTES", 100_000)
+    model = _Proposer(output_chars=OUTPUT_CHARS, output_letter="\\u05d0")
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 2
+    assert all(message["role"] != "tool" for call in model.calls for message in call)
+
+
+def test_a_model_call_that_fails_after_a_command_ends_the_session_and_the_run_goes_on(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A call that fails on every attempt after the session ran a command ends it out of budget, not as an error.
+
+    The failures are billed, so the proposer cost still counts them.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer(billed_at=frozenset({1, 2, 3}))
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    # The first session's reply, its command and three failed attempts; then the second session in full.
+    first = ["model", "command", "model", "model", "model"]
+    assert [kind for _, kind, _ in _steps(engine)] == [*first, "model", "command", "model"]
+    # Three replies and the three billed failures, one cent each.
+    assert result.metadata["proposer_cost_usd"] == 0.06
 
 
 @pytest.mark.parametrize("bad", [math.inf, math.nan])
@@ -1382,7 +1453,10 @@ def test_a_budget_too_small_for_a_full_sweep_stops_before_it(
     pending = json.dumps(
         {"candidates": [{"name": "c1", "file": "agents/c1.txt"}, {"name": "c2", "file": "agents/c2.txt"}]}
     )
-    command = f"printf seedx > agents/c1.txt && printf seedxx > agents/c2.txt && printf '%s' '{pending}' > logs/run/pending_eval.json"
+    command = (
+        "printf seedx > agents/c1.txt && printf seedxx > agents/c2.txt"
+        f" && printf '%s' '{pending}' > logs/run/pending_eval.json"
+    )
     model = _Proposer(call={"id": "x", "name": "bash", "arguments": {"command": command}})
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 

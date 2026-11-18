@@ -102,8 +102,11 @@ MODEL_ATTEMPTS = 3
 MODEL_RETRY_WAIT_SECONDS = 10.0
 # Every turn sends the whole transcript again, and each command can add up to two clipped outputs. This cap, and
 # the proposer's ``max_tool_calls``, keep the prompt inside the model's context: a session at a cap ends as out of
-# budget, so its iteration still reads ``pending_eval.json``, and the run does not stop.
-MAX_PROMPT_CHARS = 400_000
+# budget, so its iteration still reads ``pending_eval.json``, and the run does not stop. A byte-level token holds
+# at least one byte, so UTF-8 bytes bound the tokens of any output (Hebrew, base64 or binary-ish text can be about
+# one token a character). A 200k-token context, less 64k tokens of answer and 8k for the tool and message framing,
+# leaves 128k.
+MAX_PROMPT_BYTES = 128_000
 
 CANDIDATE_OUTSIDE_AGENTS = "candidate file must be a relative path under agents/"
 
@@ -125,8 +128,9 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     arguments = call.get("arguments")
-    # ``_exec`` refuses arguments past the depth or length bound, so the transcript holds an empty object in their
-    # place. A lone surrogate cannot get here: the step commit refuses it first (SKY-821).
+    # ``_exec`` refuses these arguments, so the transcript holds an empty object in their place: an over-long text,
+    # or a mapping past the depth or length bound. A shorter text stays as it is, also when its JSON is too deep.
+    # A lone surrogate cannot get here: the step commit refuses it first (SKY-821).
     if isinstance(arguments, str):
         if len(arguments) > MAX_ARGUMENT_CHARS:
             arguments = _REFUSED_ARGUMENTS
@@ -429,8 +433,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         """Run one proposer session as a tool loop: one step per model reply and per command.
 
         The proposer cap counts only committed costs, so a resume makes the same choices. The session also ends
-        as out of budget after the proposer's ``max_tool_calls`` commands or at a prompt over ``MAX_PROMPT_CHARS``;
-        both depend only on the committed replies and results, so a resume ends it at the same place.
+        as out of budget after the proposer's ``max_tool_calls`` commands, at a prompt over ``MAX_PROMPT_BYTES``, or
+        at a model call that fails after the session ran a command; all depend only on the committed replies,
+        results and failures, so a resume ends it at the same place.
 
         Args:
             iteration: One-based iteration number.
@@ -474,7 +479,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 exhausted = True
                 break
             # A reply with tool calls runs at least one command, so the command cap also bounds the turns.
-            if commands >= self._max_tool_calls or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
+            # ``surrogatepass`` keeps the measure from raising on any text that a command printed.
+            size = len(json.dumps(messages, ensure_ascii=False).encode("utf-8", "surrogatepass"))
+            if commands >= self._max_tool_calls or size > MAX_PROMPT_BYTES:
                 exhausted = True
                 break
             reply, failed_cents = self._call_model(messages, spent, remaining_cost)
@@ -483,7 +490,11 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 exhausted = True
                 break
             if isinstance(reply, ModelCallFailedError):
-                failed = True
+                # Untrusted output can still push the prompt past the model's context. After a command, the
+                # session may have written candidates, so it ends as out of budget and the run goes on. A failure
+                # before any command cannot come from command output, so it stops the run.
+                exhausted = commands > 0
+                failed = not exhausted
                 text = str(reply)
                 break
             spent += reply.cost_cents
@@ -595,7 +606,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             "stderr": _clip(result.stderr),
             "timed_out": result.timed_out,
         }
-        # ``_propose`` measures the prompt with no escapes, so an escape here counts each Hebrew letter seven times.
+        # ``_propose`` measures the prompt with no escapes, so an escape here counts each Hebrew letter three times.
         return json.dumps(output, ensure_ascii=False), tree
 
     @staticmethod
