@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import re
 from collections.abc import Mapping
 from decimal import Decimal
@@ -26,6 +27,7 @@ from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MI
 from core.exceptions import ServiceError
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
+from core.service_gateway.optimization.blackbox import native_engines
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_CHARS, MetaHarnessEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
@@ -60,6 +62,21 @@ owner = loop_tests.owner
 _CASES = [{"id": "a"}, {"id": "b"}]
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the retry waits in place of sleeping, so no test waits.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+
+    Returns:
+        The waits, in seconds, in order.
+    """
+    waits: list[float] = []
+    monkeypatch.setattr(meta_mod, "_sleep", waits.append)
+    return waits
+
+
 class _Proposer:
     """A scripted coding agent: one command that writes a longer candidate, then a final reply."""
 
@@ -70,6 +87,7 @@ class _Proposer:
         cost: str = "1",
         call: dict[str, Any] | None = None,
         fail_at: frozenset[int] = frozenset(),
+        output_chars: int = 0,
     ) -> None:
         """Set the script.
 
@@ -78,12 +96,14 @@ class _Proposer:
             cost: The cost of each reply, in cents.
             call: A tool call to send in place of the scripted command.
             fail_at: The indexes of the attempts, failed ones included, that fail as a rate limit does.
+            output_chars: The length of the extra stdout that the scripted command prints.
         """
         self.die_at = die_at
         self.fail_at = fail_at
         self.attempts = 0
         self.cost = Decimal(cost)
         self.call = call
+        self.output_chars = output_chars
         self.calls: list[list[dict[str, Any]]] = []
         self.tools: list[list[dict[str, Any]] | None] = []
 
@@ -118,6 +138,8 @@ class _Proposer:
         name = f"c{iteration}"
         pending = json.dumps({"candidates": [{"name": name, "file": f"agents/{name}.txt"}]})
         command = f"printf %s {'seed' + 'x' * iteration} > agents/{name}.txt && printf '%s' '{pending}' > logs/run/pending_eval.json"
+        if self.output_chars:
+            command += f" && python3 -c \"print('y' * {self.output_chars})\""
         return ModelReply(
             "", self.cost, [{"id": f"call-{iteration}", "name": "bash", "arguments": {"command": command}}]
         )
@@ -644,3 +666,126 @@ def test_a_model_call_that_fails_on_every_attempt_ends_the_session_as_an_error(
     assert model.attempts == meta_mod.MODEL_ATTEMPTS
     assert [kind for _, kind, _ in _steps(engine)] == ["model"] * meta_mod.MODEL_ATTEMPTS
     assert boxes.opened == 0
+
+
+def test_a_live_failure_waits_before_its_retry_and_a_replayed_one_does_not(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    sleeps: list[float],
+) -> None:
+    """A live failed call waits before its retry; its replay made no call, so it waits for nothing."""
+    first, _ = _loop(
+        owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0}), die_at=2), generation=1
+    )
+    with pytest.raises(_WorkerDiedError):
+        _run(first)
+    assert sleeps == [meta_mod.MODEL_RETRY_WAIT_SECONDS]
+
+    sleeps.clear()
+    _new_generation(engine)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=2)
+    _run(loop)
+
+    assert sleeps == []
+
+
+def test_no_wait_follows_the_last_failed_attempt(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    sleeps: list[float],
+) -> None:
+    """The session waits only between attempts, so three failures wait twice."""
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0, 1, 2})), generation=1)
+
+    with pytest.raises(ProposerFailedError):
+        _run(loop)
+    assert sleeps == [meta_mod.MODEL_RETRY_WAIT_SECONDS] * (meta_mod.MODEL_ATTEMPTS - 1)
+
+
+@pytest.mark.parametrize(
+    ("cap", "value", "output_chars"), [("MAX_SESSION_TURNS", 1, 0), ("MAX_PROMPT_CHARS", 20_000, 25_000)]
+)
+def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
+    cap: str,
+    value: int,
+    output_chars: int,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the turn cap or the prompt cap, the session asks the model no more; its pending candidate still runs."""
+    monkeypatch.setattr(meta_mod, cap, value)
+    model = _Proposer(output_chars=output_chars)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert len(model.calls) == 2
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 2
+
+
+def test_a_non_finite_score_sends_no_case_event_and_no_per_case_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """As in the native runner, a NaN or infinite score is no score in the climb view."""
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case as infinite, and the second by length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        del loop
+        return (math.inf if case == _CASES[0] else float(len(str(candidate)))), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+    ctx = loop.context(progress_callback=lambda kind, data: events.append((kind, data)))
+    adapter = meta_mod._UpstreamServer(loop.server(score, max_evals=20), list(_CASES), ctx)
+
+    adapter.evaluate_examples("seed")
+    adapter.log_progress(4.0, "seed")
+
+    cases = [(data["example_id"], data["score"]) for kind, data in events if kind == PROGRESS_CASE_SCORED]
+    assert cases == [("1", 4.0)]
+    candidates = [data["per_example"] for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert candidates == [[{"id": "1", "score": 4.0}]]
+
+
+def test_a_full_sweep_logs_its_start_as_the_native_runner_does(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each sweep of every case logs ``candidate.eval.start`` once, with the native payload; a partial one does not."""
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    adapter = meta_mod._UpstreamServer(loop.server(_score, max_evals=20), list(_CASES), loop.context())
+
+    with caplog.at_level(logging.INFO, logger=native_engines.run_log.name):
+        adapter.evaluate_examples("seed")
+        adapter.evaluate_examples("seed", ["0"])
+
+    starts = [
+        (record.getMessage(), record.run_log["candidate"], record.run_log["fields"])
+        for record in caplog.records
+        if record.name == native_engines.run_log.name and record.run_log["event"] == "candidate.eval.start"
+    ]
+    assert starts == [("Evaluating candidate 0 on 2 cases", "0", {"cases": 2})]

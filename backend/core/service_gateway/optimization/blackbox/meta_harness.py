@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import posixpath
+import time
 from collections.abc import Iterator
 from decimal import Decimal
 from typing import Any
@@ -78,6 +79,16 @@ OUTPUT_CHARS = 30_000
 # A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
 # the same calls in the same order.
 MODEL_ATTEMPTS = 3
+# A rate limit (429) often clears in seconds, so a wait between attempts keeps a short burst from failing all of them.
+MODEL_RETRY_WAIT_SECONDS = 10.0
+# Every turn sends the whole transcript again, and each command can add up to two clipped outputs. These caps keep
+# the prompt inside the model's context: a session at a cap ends as out of budget, so its iteration still reads
+# ``pending_eval.json``, and the run does not stop.
+MAX_SESSION_TURNS = 100
+MAX_PROMPT_CHARS = 400_000
+
+# Tests replace this, so a retry test does not wait.
+_sleep = time.sleep
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +189,14 @@ class _UpstreamServer:
         if self.budget.remaining < len(pairs):
             raise BudgetExhausted(f"Not enough budget to evaluate all examples: {self.budget.remaining} remaining")
         trial = self._register(candidate)
+        if set(ids) == set(self._cases):
+            # The native runner logs this before each full sweep, so the run log reads the same on both paths.
+            native_engines.log_event(
+                "candidate.eval.start",
+                f"Evaluating candidate {trial} on {len(ids)} cases",
+                candidate=trial,
+                cases=len(ids),
+            )
         scores: list[float | None] = []
         infos: dict[str, Any] = {}
         for eid, case in pairs:
@@ -199,7 +218,8 @@ class _UpstreamServer:
                     side_info=info,
                     candidate_id=str(trial),
                 )
-            if score is not None and case is not None:
+            # As in the native runner, a NaN or infinite score is no score for the climb view.
+            if score is not None and math.isfinite(score) and case is not None:
                 logger.info(
                     "Candidate %s scored %.4f on case %s",
                     trial,
@@ -217,7 +237,7 @@ class _UpstreamServer:
         filled = fill_unscored([candidate] * len(scores), scores)
         names = [eid for eid, _ in pairs]
         self._sweeps[candidate_key(candidate)] = [
-            (eid, score) for eid, score in zip(names, scores, strict=True) if score is not None
+            (eid, score) for eid, score in zip(names, scores, strict=True) if score is not None and math.isfinite(score)
         ]
         return sum(filled) / len(filled), {
             "scores": dict(zip(names, filled, strict=True)),
@@ -308,7 +328,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
     def _propose(self, iteration: int, remaining_cost: float | None) -> native_engines.ProposerOutcome:
         """Run one proposer session as a tool loop: one step per model reply and per command.
 
-        The proposer cap counts only committed costs, so a resume makes the same choices.
+        The proposer cap counts only committed costs, so a resume makes the same choices. The session also ends
+        as out of budget at ``MAX_SESSION_TURNS`` replies or at a prompt over ``MAX_PROMPT_CHARS``; both depend
+        only on the committed replies and results, so a resume ends it at the same place.
 
         Args:
             iteration: One-based iteration number.
@@ -337,8 +359,12 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         text = ""
         exhausted = False
         failed = False
+        turns = 0
         while True:
             if remaining_cost is not None and float(spent) / 100 >= remaining_cost:
+                exhausted = True
+                break
+            if turns >= MAX_SESSION_TURNS or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
                 exhausted = True
                 break
             reply = self._call_model(messages)
@@ -346,6 +372,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 failed = True
                 text = str(reply)
                 break
+            turns += 1
             spent += reply.cost_cents
             text = reply.text
             messages.append(
@@ -374,7 +401,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
     def _call_model(self, messages: list[dict[str, Any]]) -> ModelReply | ModelCallFailedError:
         """Call the model with the bash tool, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
 
-        Each attempt is one ``model`` step, so a resume replays the same failures and the same retries.
+        Each attempt is one ``model`` step, so a resume replays the same failures and the same retries. A live
+        failure waits ``MODEL_RETRY_WAIT_SECONDS`` before the next attempt; a replayed failure made no call, so it
+        does not wait.
 
         Args:
             messages: The session's messages.
@@ -384,11 +413,14 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         """
         assert self._ctx.call_model is not None
         failure = ModelCallFailedError("unknown")
-        for _ in range(MODEL_ATTEMPTS):
+        for attempt in range(MODEL_ATTEMPTS):
             try:
                 return self._ctx.call_model(messages, [BASH_TOOL])
             except ModelCallFailedError as error:
                 failure = error
+            # The loop raises a live failure from the model's own error, and a replayed failure with no cause.
+            if failure.__cause__ is not None and attempt < MODEL_ATTEMPTS - 1:
+                _sleep(MODEL_RETRY_WAIT_SECONDS)
         return failure
 
     def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
