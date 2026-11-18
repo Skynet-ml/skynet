@@ -585,7 +585,7 @@ class _NoProgramRunner:
 
 
 class _FailedProgramRunner(_NoProgramRunner):
-    """Stand in for upstream's runner: it submits the seed, whose [run] entry fails."""
+    """Stand in for upstream's runner: it submits the seed and waits for the scorer's answer."""
 
     def run(self) -> None:
         """Queue the seed as generation 0 and wait for the scorer's answer, as ``evaluate.py`` does."""
