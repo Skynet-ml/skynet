@@ -8,6 +8,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -1141,9 +1142,13 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
 
     mailbox, sent = _connected_mailbox(reply)
     send = mailbox.emit
+    last_case_started = threading.Event()
 
     def slow_last_case(prefix: str, payload: dict[str, Any]) -> None:
         """Delay the request of the last case, as a slow thread would.
+
+        With cases in parallel, the crash waits until the last case started,
+        so that case is one the scorer must wait for, not one it skips.
 
         Args:
             prefix: The event family.
@@ -1151,8 +1156,12 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
         """
         if prefix != "APP_NATIVE_RPC ":
             return
-        if payload["kind"] == "evaluate" and payload["example"]["id"] == 2:
+        case = payload["example"]["id"] if payload["kind"] == "evaluate" else None
+        if case == 2:
+            last_case_started.set()
             time.sleep(0.3)
+        if case == 1 and max_concurrency > 1:
+            assert last_case_started.wait(5)
         send(prefix, payload)
 
     mailbox.emit = slow_last_case  # type: ignore[method-assign]

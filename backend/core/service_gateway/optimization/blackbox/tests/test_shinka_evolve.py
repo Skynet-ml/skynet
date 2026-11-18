@@ -1001,13 +1001,15 @@ def test_a_stopped_run_also_kills_the_evaluation_jobs_its_child_started(
         tmp_path,
         f"""
         job = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+            [sys.executable, "-c", "import time; time.sleep(600)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         open({str(job_pid)!r}, "w").write(str(job.pid))
         emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0"}})
-        time.sleep(60)
+        # Shorter than the job's sleep: a job that survives the stop is still
+        # alive when this child ends on its own.
+        time.sleep(5)
         """,
     )
     monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(LoopStoppedError("lease lost")))
