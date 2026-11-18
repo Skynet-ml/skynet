@@ -3037,7 +3037,10 @@ def test_a_marked_pack_on_a_shard_over_the_row_cap_moves_in_parts(
 def test_a_shard_that_cannot_connect_does_not_stop_the_others(
     tmp_path, engine, shard, objects, shard_store, make_compactor, caplog
 ) -> None:
-    """A shard whose database cannot open is logged on each step; the main database and s2 still compact.
+    """A shard whose database cannot open fails each step and stops the sweep; main and s2 still merge.
+
+    The down shard may record any old pack, so the sweep deletes neither the old pack with no row it can read
+    nor the old pack that only s2 records.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -3049,6 +3052,13 @@ def test_a_shard_that_cannot_connect_does_not_stop_the_others(
         caplog: Pytest's log capture fixture.
     """
     written = _fill(shard_store)
+    unrecorded = f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack"
+    on_s2 = f"{COMPACTED_PREFIX}/{1:020d}-on-s2.pack"
+    for key in (unrecorded, on_s2):
+        objects.put(key, b"x")
+    with Session(shard) as session:
+        session.add(StoragePackModel(pack_key=on_s2, worker_id="w1", byte_size=1))
+        session.commit()
     down = create_engine(f"sqlite:///{tmp_path / 'missing' / 'down.sqlite'}")
     shards = ShardMap(engine, {"down": down, "s2": shard})
     assert shards.names() == ("down", "main", "s2")
@@ -3059,8 +3069,10 @@ def test_a_shard_that_cannot_connect_does_not_stop_the_others(
     failed = [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
     assert failed == [
         "Tree compaction step remove_retired on shard down failed; the next pass tries again",
+        "Tree compaction step remove_unrecorded failed; the next pass tries again",
         "Tree compaction step merge on shard down failed; the next pass tries again",
     ]
+    assert {unrecorded, on_s2} <= set(objects.list(f"{COMPACTED_PREFIX}/"))
     assert len(_pack_keys_of_rows(engine)) == len(_pack_keys_of_rows(shard)) == 1
     _assert_all_readable(shard_store, written)
 
@@ -3080,9 +3092,7 @@ def test_a_shard_that_a_job_records_and_the_map_lacks_is_logged_as_an_error(
         caplog: Pytest's log capture fixture.
     """
     written = _fill(shard_store)
-    with Session(engine) as session:
-        session.add(JobModel(optimization_id="job-9", username="ada", execution_generation=1, step_log_shard="s9"))
-        session.commit()
+    _add_job_on_unknown_shard(engine)
     compactor = make_compactor(shards=shards)
 
     with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
@@ -3155,6 +3165,54 @@ def test_a_pass_with_the_sweep_reads_and_logs_an_unknown_shard_once(
     (query,) = [statement for statement, _ in statements if "DISTINCT jobs.step_log_shard" in statement]
     # The filter on main lets PostgreSQL read the partial index ix_jobs_step_log_shard.
     assert "jobs.step_log_shard != ?" in query
+    assert orphan in objects.list(f"{COMPACTED_PREFIX}/")
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_failed_unknown_shard_query_in_the_sweep_runs_again_in_the_same_pass(
+    engine, shard, objects, shard_store, shards, make_compactor, caplog
+) -> None:
+    """When the sweep's read of the jobs' shards fails, the pass reads them again and logs the unknown shard.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    written = _fill(shard_store)
+    _add_job_on_unknown_shard(engine)
+    orphan = f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack"
+    objects.put(orphan, b"x")
+    compactor = make_compactor(shards=shards)
+    read = compactor._unknown_shards
+    calls: list[int] = []
+
+    def fail_once() -> list[str]:
+        """Raise on the first read of the jobs' shards, then read them.
+
+        Returns:
+            The unknown shards.
+
+        Raises:
+            OperationalError: On the first call.
+        """
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("SELECT", {}, Exception("connection reset"))
+        return read()
+
+    compactor._unknown_shards = fail_once
+
+    with caplog.at_level(logging.WARNING, logger=tree_compactor.__name__):
+        assert compactor.run_once() == (6, 0)
+
+    assert len(calls) == 2
+    assert "Tree compaction step remove_unrecorded failed; the next pass tries again" in caplog.messages
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [UNKNOWN_SHARD_ERROR]
     assert orphan in objects.list(f"{COMPACTED_PREFIX}/")
     _assert_all_readable(shard_store, written)
 
