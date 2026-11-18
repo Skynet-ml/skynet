@@ -18,9 +18,11 @@ unaffected.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import pickle
 import random
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -47,6 +49,8 @@ from core.worker.checkpoint_compat import checkpoint_manifest
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[3]
+# Shared by every module that migrates APP_TEST_DB_URL, so their xdist workers migrate one at a time.
+_MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-migrate.lock"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -115,6 +119,21 @@ def _upgrade_to_head(db_url: str) -> None:
         command.upgrade(alembic_cfg, "head")
 
 
+def migrate_test_db(db_url: str) -> None:
+    """Reset a legacy schema in ``db_url`` and upgrade it to Alembic head, one xdist worker at a time.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+    """
+    # Each xdist worker migrates the same empty database from its own module fixture, and concurrent
+    # CREATE TABLE races in pg_type. A Postgres advisory lock would deadlock with CREATE INDEX CONCURRENTLY,
+    # which waits for the lock holder's open transaction, so a file lock lets one worker migrate at a time.
+    with _MIGRATE_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _reset_legacy_schema(db_url)
+        _upgrade_to_head(db_url)
+
+
 @pytest.fixture(scope="module")
 def store() -> Iterator[RemoteDBJobStore]:
     """Yield a single store backed by the real Postgres for the whole module.
@@ -123,8 +142,7 @@ def store() -> Iterator[RemoteDBJobStore]:
     such as new indexed columns are present before rows are inserted.
     The store is reused across tests to avoid repeating that setup work.
     """
-    _reset_legacy_schema(TEST_DB_URL or "")
-    _upgrade_to_head(TEST_DB_URL or "")
+    migrate_test_db(TEST_DB_URL or "")
 
     s = RemoteDBJobStore(TEST_DB_URL)
     try:

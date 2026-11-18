@@ -15,16 +15,13 @@ Without that env var the module is skipped.
 
 from __future__ import annotations
 
-import fcntl
 import os
-import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, delete, make_url, select
@@ -37,11 +34,9 @@ from core.notifications.dispatch import notify, release_held
 from core.notifications.native import CLAIM_BATCH, CLAIM_LEASE, EXPIRE_BATCH, claim_native, confirm_native
 from core.notifications.preferences import configure_notification_preferences
 from core.storage.models import NotificationModel, NotificationPreferenceModel
-from core.storage.tests.test_remote_jobstore_postgres import _reset_legacy_schema, _upgrade_to_head
+from core.storage.tests.test_remote_jobstore_postgres import migrate_test_db
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
-# Shared by both notification Postgres modules, so their xdist workers migrate one at a time.
-_MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-notification-postgres-tests.lock"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -60,13 +55,7 @@ def _migrated_engine(db_url: str) -> Engine:
     Returns:
         The engine. The caller disposes it.
     """
-    # Each xdist worker migrates the same empty database from its own module fixture, and concurrent
-    # CREATE TABLE races in pg_type. A Postgres advisory lock would deadlock with CREATE INDEX CONCURRENTLY,
-    # which waits for the lock holder's open transaction, so a file lock lets one worker migrate at a time.
-    with _MIGRATE_LOCK.open("w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        _reset_legacy_schema(db_url)
-        _upgrade_to_head(db_url)
+    migrate_test_db(db_url)
     return create_engine(db_url, pool_size=12)
 
 
