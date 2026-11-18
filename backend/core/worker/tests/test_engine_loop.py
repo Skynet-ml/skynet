@@ -2243,6 +2243,59 @@ def test_tree_calls_after_a_stop_raise_the_kept_stop_and_touch_no_tree(
     assert touched == []
 
 
+@pytest.mark.parametrize("stop", ["close", "divergence"])
+def test_a_context_after_a_stop_raises_the_kept_stop_and_writes_no_tree(
+    stop: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context after a close or a divergence raises the kept stop, with its type, and writes no visible seed."""
+    hidden = hidden_hashes(["metric.py"])
+    raw = _store(trees, {"README": b"seed", "metric.py": b"secret"})
+    if stop == "close":
+        loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+        loop.close()
+        kept: type[LoopStoppedError] = LoopStoppedError
+    else:
+        first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+        assert first.model("improve seed") == "seedx"
+        _new_generation(engine)
+        loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden)
+        with pytest.raises(StepDivergedError):
+            loop.model("improve other")
+        kept = StepDivergedError
+    writes: list[str] = []
+    for name in ("put_tree", "put_blob"):
+        real = getattr(trees, name)
+
+        def spy(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
+            """Record a tree-store write, then make it.
+
+            Args:
+                *args: The write's arguments.
+                _name: The method name.
+                _real: The real method.
+                **kwargs: The write's keyword arguments.
+
+            Returns:
+                What the real write returns.
+            """
+            writes.append(_name)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(trees, name, spy)
+
+    for call in (lambda: loop.context(repo_seed=RepoSeed(raw, hidden_hashes=hidden)), loop.context):
+        with pytest.raises(LoopStoppedError) as stopped:
+            call()
+        assert type(stopped.value) is kept
+    assert writes == []
+
+
 def test_a_prompt_that_is_no_json_is_a_kept_stop_and_a_stop_comes_before_the_hash(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

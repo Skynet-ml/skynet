@@ -326,30 +326,34 @@ class EngineLoop:
 
         Raises:
             ValueError: When the ``repo_seed`` hides other paths than the loop does.
-            LoopStoppedError: When a symlink of the seed tree could show a hidden path, as in :meth:`read_file`;
-                the loop keeps it, so a bad seed stops the loop before the engine starts.
+            LoopStoppedError: The kept stop, with its own type, when the loop stopped or was closed; or a new one
+                when a symlink of the seed tree could show a hidden path, as in :meth:`read_file`, or the tree
+                store fails with a stop error. The loop keeps it, so a bad seed stops the loop before the engine
+                starts.
             LookupError: When the run cannot see the seed tree or one of its folders.
         """
-        seed = fields.get("repo_seed")
-        # One set of hidden paths for the whole loop: a seed with other hashes would make the context and the
-        # scorer of server() disagree on what a candidate box can read.
-        if seed is not None and dict(seed.hidden_hashes) != self._seed_hidden:
-            raise ValueError("the repo_seed hides other paths than the engine loop")
-        if seed is not None:
-            # The raw id is a content hash of the hidden files too, so an engine could test a guess against it.
-            fields["repo_seed"] = replace(seed, tree_id=self._visible_tree(self._check_links(seed.tree_id)))
-        return EngineContext(
-            reflection_lm=self.model,
-            run_dir=str(self.run_dir),
-            concurrency=1,
-            remaining_cost_usd=self.remaining_cost_usd,
-            call_model=self.call_model,
-            run_command=self.run,
-            put_files=self.put_files,
-            read_file=self.read_file,
-            list_files=self.list_files,
-            **fields,
-        )
+        # The seed's visible tree is a tree write, so a stopped or closed loop must not make it.
+        with self._stops():
+            seed = fields.get("repo_seed")
+            # One set of hidden paths for the whole loop: a seed with other hashes would make the context and the
+            # scorer of server() disagree on what a candidate box can read.
+            if seed is not None and dict(seed.hidden_hashes) != self._seed_hidden:
+                raise ValueError("the repo_seed hides other paths than the engine loop")
+            if seed is not None:
+                # The raw id is a content hash of the hidden files too, so an engine could test a guess against it.
+                fields["repo_seed"] = replace(seed, tree_id=self._visible_tree(self._check_links(seed.tree_id)))
+            return EngineContext(
+                reflection_lm=self.model,
+                run_dir=str(self.run_dir),
+                concurrency=1,
+                remaining_cost_usd=self.remaining_cost_usd,
+                call_model=self.call_model,
+                run_command=self.run,
+                put_files=self.put_files,
+                read_file=self.read_file,
+                list_files=self.list_files,
+                **fields,
+            )
 
     def server(self, scorer: StepScorer, max_evals: int) -> EvalServer:
         """Return an eval server whose scorer runs its work through :meth:`run` and :meth:`score`.
@@ -873,8 +877,8 @@ class EngineLoop:
         of them. So does a link that names an absolute path, or a path that leaves the tree, also one that comes
         back in: the loop does not know where a box puts the tree, so it cannot tell what such a link reaches.
         When the run hides no path of its own, a link loop, a link that leaves the tree and the limit stop the
-        loop only in a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over one, holds
-        no hidden content, so the loop does not walk it.
+        loop only in a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over
+        one, holds no hidden content, so the loop does not walk it.
 
         Args:
             tree_id: The tree.
