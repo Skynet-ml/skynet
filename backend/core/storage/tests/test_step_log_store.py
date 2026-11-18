@@ -996,6 +996,51 @@ def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine
     assert _step_rows(engine) == 0
 
 
+def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, objects, monkeypatch) -> None:
+    """The sweep claims a kept pack: the agent's pending step does not land, and its next commit raises."""
+    store = make_store()
+    apply = store._apply
+    later: list[str] = []
+
+    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+        """Commit the agent's next step, insert the sweep's claim row, restore the real write, then fail this call.
+
+        The next step goes in while the pack is kept, so it waits in the pending batch of the retry.
+
+        Args:
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        later.append(_commit(store, seq=2))
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    other = _commit(store, agent_id="agent-b")
+    _commit(store)
+    # The flusher can retry the kept pack before this test does; the second flush waits for that one.
+    with pytest.raises(OperationalError):
+        store.flush()
+    _commit(store, seq=1, agent_id="agent-b", run_id="job-2")
+    store.flush()
+
+    assert _step_rows(engine) == 1
+    with pytest.raises(StepFenceError):
+        store.durable(later[0], 1, timeout=0)
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=3)
+    with pytest.raises(StepFenceError):
+        _commit(store, seq=1, agent_id="agent-b")
+    with pytest.raises(KeyError):
+        store.durable(other, 1, timeout=0)
+
+
 def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
     """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
     store = make_store()

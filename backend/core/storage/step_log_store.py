@@ -60,6 +60,13 @@ PACK_PREFIX = "packs"
 # The byte_size of the row that the compactor's sweep inserts to claim an old flush pack with no row.
 # An applied pack is never empty: it always holds its manifest.
 CLAIM_BYTE_SIZE = 0
+# A flush pack with no row is deleted only after this age. A flush keeps retrying the apply of its
+# written pack while its pod lives, a job lease is 60 seconds, and a pod that restarts under its name
+# applies its own packs at start. Seven days is far past all of them, so no apply is still in flight.
+# A pod that comes back under a new name never applies its packs, so without this sweep their bytes,
+# also those of a deleted account, would stay forever (SKY-733). An apply refuses a pack of this age
+# itself: the sweep's claim row goes after the grace time, so it cannot keep a later apply out alone.
+UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
 _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
@@ -96,7 +103,10 @@ class StepFenceError(RuntimeError):
 
 
 class PackClaimedError(RuntimeError):
-    """The compactor's sweep claimed a flush pack before any store recorded it, so none of its steps landed."""
+    """The compactor's sweep claimed a flush pack, or may delete it, before any store recorded it.
+
+    None of the pack's steps landed.
+    """
 
     def __init__(self, pack_key: str) -> None:
         """Name the claimed pack in the error.
@@ -104,7 +114,10 @@ class PackClaimedError(RuntimeError):
         Args:
             pack_key: The key of the claimed pack.
         """
-        super().__init__(f"pack {pack_key} was claimed by the sweep before it was recorded; none of its steps landed")
+        super().__init__(
+            f"pack {pack_key} was claimed by the sweep, or is past its age, before it was recorded;"
+            " none of its steps landed"
+        )
         self.pack_key = pack_key
 
 
@@ -151,6 +164,22 @@ def _check_run_id(run_id: str) -> None:
     # With no ``:`` in the run id and only digits in seq, the first and last ``:`` split every step id one way.
     if ":" in run_id:
         raise ValueError(f"run_id must not hold a ':': {run_id!r}")
+
+
+def _past_sweep_age(pack_key: str) -> bool:
+    """Return whether a flush pack's key time is older than ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
+
+    Args:
+        pack_key: The pack key, ``packs/<worker>/<time>-<id>.pack``.
+
+    Returns:
+        ``False`` also for a key with no write time: the sweep never deletes such a pack.
+    """
+    try:
+        written_ns = int(pack_key.rsplit("/", 1)[-1][:20])
+    except ValueError:
+        return False
+    return time.time_ns() - written_ns >= int(UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
 
 
 def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
@@ -613,6 +642,9 @@ class StepLogStore:
     ) -> None:
         """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
 
+        When the pack is lost, each agent of the batch gets a verdict, and its pending steps leave the
+        buffer with a fence verdict: a later step can name a tree whose objects were in the lost pack.
+
         Args:
             batch: The entries of the recorded pack.
             stale: The manifest entries of the batch's steps that did not land.
@@ -627,7 +659,33 @@ class StepLogStore:
                 _keep_verdict(self._failures, step_key, entry["step_id"])
                 agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
                 _keep_verdict(self._agent_failures, agent_key, entry["step_id"])
-            for item, _ in batch:
+            dropped: list[tuple[_Step | _Object, bytes]] = []
+            if lost:
+                lost_agents: dict[tuple[str, str, int], str] = {}
+                for item, _ in batch:
+                    if isinstance(item, _Step):
+                        lost_agents.setdefault((item.run_id, item.agent_id, item.execution_generation), item.step_id)
+                for agent_key, step_id in lost_agents.items():
+                    _keep_verdict(self._agent_failures, agent_key, step_id)
+                # Under the same lock as the verdicts, so no later step of a lost agent stays in the buffer.
+                kept: list[tuple[_Step | _Object, bytes]] = []
+                for entry in self._pending:
+                    item = entry[0]
+                    if (
+                        isinstance(item, _Step)
+                        and (item.run_id, item.agent_id, item.execution_generation) in lost_agents
+                    ):
+                        dropped.append(entry)
+                        step_key = (item.step_id, item.execution_generation)
+                        verdicts[step_key] = item.step_id
+                        _keep_verdict(self._failures, step_key, item.step_id)
+                    else:
+                        kept.append(entry)
+                self._pending = kept
+                self._pending_bytes = sum(len(data) for _, data in kept)
+                if not kept:
+                    self._first_at = None
+            for item, _ in batch + dropped:
                 if isinstance(item, _Object):
                     self._tree_objects.pop((item.run_id, item.object_id), None)
                     continue
@@ -640,7 +698,7 @@ class StepLogStore:
                 waiter = self._waiters.pop(step_key, None)
                 if waiter is not None:
                     waiter.failure = verdicts.get(step_key)
-                    waiter.lost = lost
+                    waiter.lost = lost and step_key not in verdicts
                     waiter.set()
 
     def recover(self) -> int:
@@ -667,8 +725,8 @@ class StepLogStore:
                 try:
                     pack = self._objects.get(key)
                 except KeyError:
-                    # The compactor's sweep claimed and deleted the pack after the list; its claim row
-                    # also keeps a late apply of the pack out.
+                    # The compactor's sweep claimed and deleted the pack after the list. A late apply of
+                    # the pack is refused by its claim row, and after the row goes by the pack's age.
                     continue
                 try:
                     claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
@@ -728,7 +786,8 @@ class StepLogStore:
 
         Raises:
             PackClaimedError: When the row is the sweep's claim, so no store
-                applied the pack.
+                applied the pack, or when no store applied the flush pack
+                before it reached ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
         """
         insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
         now = datetime.now(UTC)
@@ -760,6 +819,11 @@ class StepLogStore:
                 # A current step with a row is a retry of an applied step: it is done.
                 elif entry["step_id"] not in stored:
                     fresh.append(entry)
+            # Checked after the insert, so a wait on the job locks cannot make the check stale. The sweep's
+            # claim row goes after the grace time; then only this age keeps an apply of a deleted pack out.
+            if claimed and pack_key.startswith(f"{PACK_PREFIX}/") and _past_sweep_age(pack_key):
+                session.rollback()
+                raise PackClaimedError(pack_key)
             if not claimed:
                 row_size = session.scalar(
                     select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == pack_key)

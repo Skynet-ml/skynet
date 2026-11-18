@@ -33,7 +33,9 @@ deleted: no worker applies it any more. The sweep first claims the pack with
 a ``storage_packs`` row of no rows and the pack's worker id, the same insert
 that an apply makes. Only one of the two wins, so recovery never applies a
 pack that the sweep deletes. The claim row is a retired pack, and step 4
-deletes it after the grace time. The new packs are outside ``packs/``, where
+deletes it after the grace time. After that, the apply itself refuses a
+flush pack whose key time is older than the age, so a flush that retries
+for longer never records a pack that the sweep deleted. The new packs are outside ``packs/``, where
 recovery never lists them, and their rows commit in the same transaction as
 the moved rows.
 
@@ -85,7 +87,7 @@ from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from .object_store import S3ObjectStore
-from .step_log_store import CLAIM_BYTE_SIZE, PACK_PREFIX
+from .step_log_store import CLAIM_BYTE_SIZE, PACK_PREFIX, UNRECORDED_FLUSH_PACK_AGE_SECONDS
 
 try:
     import boto3
@@ -122,12 +124,6 @@ MAX_ROWS_PER_PASS = 100_000
 # Rows in one UPDATE or keys in one IN query; at most 6 binds a row stays far below the SQLite bind limit.
 CHUNK_SIZE = 200
 INTERVAL_SECONDS = 60.0
-# A flush pack with no row is deleted only after this age. A flush keeps retrying the apply of its
-# written pack while its pod lives, a job lease is 60 seconds, and a pod that restarts under its name
-# applies its own packs at start. Seven days is far past all of them, so no apply is still in flight.
-# A pod that comes back under a new name never applies its packs, so without this sweep their bytes,
-# also those of a deleted account, would stay forever (SKY-733).
-UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
 # Each sweep of the packs with no row lists all of packs/ and compacted/; the LIST cost must not grow with
 # the pass interval or the replica count.
 SWEEP_INTERVAL_SECONDS = 3600.0

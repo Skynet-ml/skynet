@@ -40,7 +40,7 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.step_log_store import PACK_PREFIX, StepLogStore
+from core.storage.step_log_store import PACK_PREFIX, PackClaimedError, StepLogStore, _read_manifest
 from core.storage.tree_compactor import (
     BROKEN_BYTE_SIZE,
     COMPACTED_PREFIX,
@@ -1493,7 +1493,9 @@ def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, ma
     assert objects.list(f"{COMPACTED_PREFIX}/") == [recorded]
 
 
-def _orphan_an_old_flush_pack(engine: Engine, objects: FlakyObjectStore, store: StepLogStore) -> tuple[str, str]:
+def _orphan_an_old_flush_pack(
+    engine: Engine, objects: FlakyObjectStore, store: StepLogStore, written_ns: int = 1
+) -> tuple[str, str]:
     """Write one flush pack, take its transaction back out, and file it under a write time far in the past.
 
     This is the pack of a pod that died after its PUT and came back under a new name.
@@ -1502,6 +1504,7 @@ def _orphan_an_old_flush_pack(engine: Engine, objects: FlakyObjectStore, store: 
         engine: The test engine.
         objects: The test object store.
         store: The step log of worker ``w1``.
+        written_ns: The write time in the new key.
 
     Returns:
         The old pack key and the id of its step.
@@ -1521,7 +1524,7 @@ def _orphan_an_old_flush_pack(engine: Engine, objects: FlakyObjectStore, store: 
         session.execute(delete(AgentStepModel).where(AgentStepModel.pack_key == written))
         session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key == written))
         session.commit()
-    old = f"{PACK_PREFIX}/w1/{1:020d}-{uuid.uuid4().hex}.pack"
+    old = f"{PACK_PREFIX}/w1/{written_ns:020d}-{uuid.uuid4().hex}.pack"
     objects.put(old, objects.get(written))
     objects._path(written).unlink()
     return old, step_id
@@ -1606,15 +1609,17 @@ def test_recovery_skips_a_flush_pack_that_the_sweep_deleted_after_the_list(
 
 
 def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
-    engine, objects, store, make_compactor
+    engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """Recovery applies the old pack first; the sweep's claim then conflicts, and the pack and its rows stay."""
-    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    """Recovery applies the young pack first; once it is old, the sweep's claim conflicts, and the pack and rows stay."""
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
         assert recovering.recover() == 1
     finally:
         recovering.close()
+    # The pack's age passes: the sweep now counts it as old.
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
 
     assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
 
@@ -1624,19 +1629,38 @@ def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
         assert session.get(StoragePackModel, old).byte_size > 0
 
 
-def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(engine, objects, store, make_compactor) -> None:
+def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
     """The sweep reads which old flush packs have a row and sends no claim INSERT for them."""
-    _orphan_an_old_flush_pack(engine, objects, store)
+    _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
         assert recovering.recover() == 1
     finally:
         recovering.close()
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
     statements = _record_statements(engine)
 
     assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
 
     assert [statement for statement, _ in statements if statement.startswith("INSERT INTO storage_packs")] == []
+
+
+def test_a_late_apply_after_the_claim_row_went_is_refused(engine, objects, store, make_compactor) -> None:
+    """A flush that retries past the sweep and the claim row's removal cannot record the deleted pack."""
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    pack = objects.get(old)
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert _pack_rows(engine) == set()
+
+    with pytest.raises(PackClaimedError):
+        store._apply(old, len(pack), _read_manifest(pack))
+
+    assert _pack_rows(engine) == set()
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
 
 
 def test_a_pass_sweeps_the_packs_with_no_row_at_most_once_an_interval(engine, objects, make_compactor) -> None:
