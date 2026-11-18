@@ -80,8 +80,9 @@ all shards share the database. Its name must start with
 ``THROWAWAY_DB_PREFIX`` (``loadtest``), and its ``jobs`` table must hold no
 row of another run. Each invocation puts its own stamp in its run ids and
 worker ids, and deletes only the rows and packs of those ids, so it keeps the
-rows of any other swarm. A session advisory lock lets one pass at a time use
-the database: two passes at once would share the server's load. The
+rows of any other swarm. A session advisory lock allows one swarm pass per
+database. The lock is per database, so it does not stop a pass on another
+database of the same server. The
 objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
 bucket on a local S3 server such as MinIO; then ``LOAD_TEST_SWARM_S3_ENDPOINT``
 must name that server on ``localhost``, ``127.0.0.1`` or ``::1``, and the
@@ -169,8 +170,8 @@ DB_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "application_name"})
 # A loopback server can be a port-forward to a remote database, or the local dev database. The swarm creates
 # tables, deletes rows and puts running jobs in, so it asks for a database name that says it is a throwaway.
 THROWAWAY_DB_PREFIX = "loadtest"
-# A session advisory lock on the throwaway Postgres: one swarm pass at a time. Two passes at once would share the
-# database server, so neither pass's rate or wait would be its own.
+# A session advisory lock on the throwaway Postgres: one swarm pass per database. An advisory lock is per database,
+# so a pass on another database of the same server can still run and share the server's load.
 SWARM_LOCK_KEY = 727_010_000
 # Vercel's sandbox caps for one team: vCPU box starts per minute and concurrent vCPUs.
 VERCEL_VCPU_STARTS_PER_MINUTE = 5_000
@@ -911,8 +912,7 @@ def _shard_process(
                 "lates": [begun - ready for steps in done for ready, begun, _, _ in steps],
                 "commit_calls": [committed - begun for steps in done for _, begun, committed, _ in steps],
                 "times": [finished for steps in done for _, _, _, finished in steps],
-                "first_round_durable": max(steps[0][3] for steps in done),
-                "first_agent_done": min(steps[-1][3] for steps in done),
+                **steady_bounds(done),
                 "boxes_opened": boxes.opened,
                 "boxes_open_max": boxes.open_max,
             }
@@ -921,6 +921,22 @@ def _shard_process(
         # A shard that fails before the barrier must not leave the others waiting there.
         barrier.abort()
         results.put({"worker_id": shard["worker_id"], "error": traceback.format_exc()})
+
+
+def steady_bounds(done: list[list[tuple[float, float, float, float]]]) -> dict[str, float]:
+    """Return the moments that bound one shard's steady part.
+
+    Args:
+        done: The ``(ready, begun, committed, finished)`` times of each step, one list for each agent, in step order.
+
+    Returns:
+        ``first_round_durable``, the moment the first step of every agent is durable (the latest first step), and
+        ``first_agent_done``, the moment the first agent finishes (the earliest last step).
+    """
+    return {
+        "first_round_durable": max(steps[0][3] for steps in done),
+        "first_agent_done": min(steps[-1][3] for steps in done),
+    }
 
 
 def collect_reports(results: Any, processes: dict[str, Any], timeout: float) -> list[dict[str, Any]]:
@@ -1108,8 +1124,9 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         "commits": len(waits),
         "steps_stored": stored,
         "seconds_to_durable": round(last - started, 3),
-        "steady_steps": steady_steps,
         "steady_seconds": round(steady_seconds, 3),
+        # A short steady part can hold few steps, so one batch at its edge moves the rate; the count shows it.
+        "steady_steps": steady_steps,
         "commits_per_second": round(steady_steps / steady_seconds, 1) if steady_seconds > 0 else 0.0,
         "commits_per_second_with_drain": round(drain_steps / (last - steady_from), 1) if last > steady_from else 0.0,
         "commits_per_second_whole_pass": round(len(waits) / (last - started), 1),
@@ -1267,7 +1284,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
     if gated["commits_per_second"] < TARGET_COMMITS_PER_SECOND:
         violations.append(
             f"{gated['shards']}-shard steady commit rate {gated['commits_per_second']}/s"
-            f" is below {TARGET_COMMITS_PER_SECOND}/s"
+            f" over {gated['steady_steps']} steady steps is below {TARGET_COMMITS_PER_SECOND}/s"
         )
     if gated["steady_seconds"] < min_steady_seconds:
         violations.append(
