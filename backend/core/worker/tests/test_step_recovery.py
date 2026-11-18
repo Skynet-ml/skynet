@@ -1130,3 +1130,81 @@ def test_a_wake_that_loses_the_race_to_the_cancel_leaves_the_run_cancelled(
     job = store.get_job(RUN)
     assert job["status"] == "cancelled"
     assert job["execution_generation"] == generation + 1
+
+
+def test_a_cancel_of_a_paused_run_writes_the_paused_cancel_first(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that reads ``paused`` cancels the parked run with its first write, before a wake can move it."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    write = store.update_job_if_status
+    calls = []
+
+    def wake_before_the_second_write(*args: Any, **kwargs: Any) -> bool:
+        """Let the wake sweep move the run before the cancel's second write.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        calls.append(args[1])
+        if len(calls) == 2:
+            store._wake_waiting_runs()
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", wake_before_the_second_write)
+
+    _cancel(store)
+
+    assert calls == [("paused",)]
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    assert job["execution_generation"] == generation + 1
+    assert _budget(store).reserved_cents == 0
+
+
+def test_a_cancel_that_misses_both_writes_reads_the_run_again_and_cancels_it(
+    store: StepJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a park and then a wake make both writes miss, the cancel reads the row again and still cancels the run."""
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    _hold(store, "unstarted")
+    write = store.update_job_if_status
+    calls = []
+
+    def park_then_wake(*args: Any, **kwargs: Any) -> bool:
+        """Park the run before the first write and wake it before the second write.
+
+        Args:
+            *args: The write's arguments.
+            **kwargs: The write's columns.
+
+        Returns:
+            Whether the write applied.
+        """
+        calls.append(args[1])
+        if len(calls) == 1:
+            assert park_run(
+                store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) - timedelta(seconds=1)
+            )
+        elif len(calls) == 2:
+            assert store._wake_waiting_runs() == 1
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_job_if_status", park_then_wake)
+
+    response = _cancel(store)
+
+    assert response.status == "cancelled"
+    assert calls == [("pending", "validating", "running"), ("paused",), ("pending", "validating", "running")]
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert store.claim_next_job("pod-b", 60.0) is None
+    assert _budget(store).reserved_cents == 0

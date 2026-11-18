@@ -50,6 +50,57 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     assert store.get_job("protected-cancel")["status"] == "cancelled"
 
 
+def test_cancel_succeeds_when_the_budget_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed release of the unstarted holds does not turn a cancelled run into a route error."""
+    store = _BaseFakeJobStore()
+    for run_id in ("single-run", "bulk-run"):
+        store.seed_job(run_id, status="running", username="alice")
+        store.update_job(run_id, execution_budget_id="budget")
+    store.engine = object()
+
+    class Budgets:
+        """Close admission, then fail the release of the holds."""
+
+        def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
+            """Accept the admission close.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                reason: Why the budget closes.
+            """
+
+        def close_for_failed_job(self, identity: str, username: str, *, expected_generation: int) -> None:
+            """Fail as a lost database connection would.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                expected_generation: The budget generation the cancel read.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+    client = TestClient(app)
+
+    single = client.post("/optimizations/single-run/cancel")
+    bulk = client.post("/optimizations/bulk-cancel", json={"optimization_ids": ["bulk-run"]})
+
+    assert single.status_code == 200
+    assert single.json()["status"] == "cancelled"
+    assert bulk.status_code == 200
+    assert bulk.json()["cancelled"] == ["bulk-run"]
+    assert bulk.json()["skipped"] == []
+    assert store.get_job("single-run")["status"] == "cancelled"
+    assert store.get_job("bulk-run")["status"] == "cancelled"
+
+
 @pytest.mark.parametrize("action", ["retry", "restart", "clone"])
 def test_protected_fresh_run_requires_new_budget_configuration(action: str) -> None:
     """Avoid transferring spent funding and setup evidence into a different execution."""
