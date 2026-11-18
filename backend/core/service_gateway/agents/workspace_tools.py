@@ -142,7 +142,10 @@ How to write the run's files:
   - ``[setup]``: ``command``, one shell command as text.
   - ``[proposer]``: the role keys ``mcp`` (the path of a ``.mcp.json`` file), ``network`` (a list of host
     names, ``[]`` for no network), ``services`` (names of ``[services.<name>]`` tables) and ``illegal`` (the
-    path of a markdown rules file). A ``tools`` key fails: name the MCP servers in the ``mcp`` file.
+    path of a markdown rules file). A ``tools`` key fails: name the MCP servers in the ``mcp`` file. Also
+    ``entry`` and ``setup``: the user's own proposer command, each a list of strings such as
+    ``["node", "agent.js"]``. ``setup`` needs ``entry``, ``entry`` cannot go with ``mcp``, and a run that
+    names its own proposer replaces them.
   - ``[target.<name>]``, one table for each stage: ``entry`` (required), ``vcpus`` (1 or an even number from
     2 to 32, default 2), ``timeout`` (seconds for each ``skynet.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
