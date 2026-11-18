@@ -74,8 +74,8 @@ packs with no row reads the rows of every shard, so it never deletes a pack
 that another shard records. It claims an unrecorded flush pack on the shard
 that the pack's manifest names, the same database where an apply of the
 pack would insert its row. A shard that fails to answer stops the sweep, but
-not the merges and deletes of the other shards. A job that records a shard
-that this map does not have is logged as an error on each pass. It also
+not the merges and deletes of the other shards. When a job records a shard
+that this map does not have, each pass logs that shard as an error. It also
 stops the sweep: the packs of that shard have their rows there, so they would
 look unrecorded.
 """
@@ -285,7 +285,8 @@ class TreeCompactor:
             # Set before the sweep, so a failed sweep also waits the interval and does not LIST each pass.
             self._next_sweep = time.monotonic() + self._sweep_interval_seconds
             removed += self._attempt(self.remove_unrecorded, "remove_unrecorded")
-        # A sweep that read the shards already logged them, so a pass queries and logs them only once.
+        # A sweep that already read the jobs' recorded shards set the flag and logged any unknown one,
+        # so a pass reads them only once.
         if not self._shards_checked:
             self._attempt(self._report_unknown_shards, "check of the step log shards")
         merged = sum(self._attempt(partial(self.merge, engine), f"merge on shard {name}") for name, engine in shards)
