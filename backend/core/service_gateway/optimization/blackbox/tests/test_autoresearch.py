@@ -1927,9 +1927,15 @@ def test_a_tree_path_past_the_fixed_bounds_stays_behind_whatever_the_local_prefi
 
         Returns:
             The bytes.
+
+        Raises:
+            FileTooLargeError: When the file is longer than the cap, as ``TreeStore.get_blob`` does.
         """
         reads.append(path)
-        return tree[path]
+        data = tree[path]
+        if max_bytes is not None and len(data) > max_bytes:
+            raise FileTooLargeError(path, len(data), max_bytes)
+        return data
 
     def list_files(tree_id: str, path: str = "") -> list[str] | None:
         """List the files of the fake tree under ``work/``.

@@ -718,7 +718,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             # The output is untrusted, so a local refusal, such as a path the bounds let through on a deep run_dir,
             # only leaves the file behind.
             with contextlib.suppress(OSError):
-                if content is None or total + len(content) > _MAX_CARRY_BYTES:
+                if content is None:
                     # A deleted or skipped notebook must not come back from an earlier round.
                     local.unlink(missing_ok=True)
                     continue
