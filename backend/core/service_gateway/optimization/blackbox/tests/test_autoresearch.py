@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import sys
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -2504,6 +2505,47 @@ def test_text_arguments_past_the_depth_bound_get_an_empty_transcript() -> None:
     assert sent(past_parser) == "{}"
     assert sent({"pad": [at_bound["pad"]]}) == "{}"
     assert sent("not json") == "not json"
+
+
+def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
+    """Deep text gives the same transcript and error from a deep stack as from the top.
+
+    Brackets inside JSON strings do not count. A live reply and its replay run at different stack depths, so a
+    stack-dependent result would change the prompt.
+    """
+    at_bound = "[" * loop_tools.MAX_ARGUMENT_DEPTH + "]" * loop_tools.MAX_ARGUMENT_DEPTH
+    in_string = json.dumps({"command": "echo " + '[{\\"' * 1000})
+    texts = ["[" * 990, "[" * 900 + "]" * 900, "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1), at_bound, in_string]
+
+    def results() -> list[tuple[Any, bool]]:
+        """Give each text's transcript arguments and whether the tool loop refuses it.
+
+        Returns:
+            One ``(transcript arguments, refused)`` pair for each text.
+        """
+        calls = [{"id": "c", "name": "bash", "arguments": text} for text in texts]
+        return [
+            (
+                loop_tools.openai_call(call)["function"]["arguments"],
+                loop_tools.refused_arguments(call, "bash") is not None,
+            )
+            for call in calls
+        ]
+
+    def deep(levels: int) -> list[tuple[Any, bool]]:
+        """Give ``results()`` from ``levels`` frames further down the stack.
+
+        Args:
+            levels: The number of frames to add.
+
+        Returns:
+            The results at that depth.
+        """
+        return results() if levels == 0 else deep(levels - 1)
+
+    top = results()
+    assert top == [("{}", True), ("{}", True), ("{}", True), (at_bound, False), (in_string, False)]
+    assert deep(sys.getrecursionlimit() - 200) == top
 
 
 def test_an_evaluation_of_the_lab_parent_is_refused(
