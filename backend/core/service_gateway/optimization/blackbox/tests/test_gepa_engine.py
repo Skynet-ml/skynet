@@ -525,6 +525,48 @@ def stores(tmp_path: Path) -> Iterator[_Stores]:
     created.close()
 
 
+def _store(trees: TreeStore, files: dict[str, bytes]) -> str:
+    """Store files as a tree straight in the tree store, as the caller of a loop stores a seed.
+
+    ``put_files`` refuses a hidden path, so a seed that holds one is written here.
+
+    Args:
+        trees: The tree store.
+        files: The file bytes by ``/``-separated path.
+
+    Returns:
+        The tree id.
+    """
+    root: dict[str, Any] = {}
+    for path, data in files.items():
+        *folders, name = path.split("/")
+        level = root
+        for folder in folders:
+            level = level.setdefault(folder, {})
+        level[name] = data
+
+    def put(level: dict[str, Any]) -> str:
+        """Store one folder and the folders below it.
+
+        Args:
+            level: The folder's entries by name: a nested folder, or the file bytes.
+
+        Returns:
+            The folder's tree id.
+        """
+        return trees.put_tree(
+            _RUN_ID,
+            [
+                TreeEntry(name, "tree", put(value))
+                if isinstance(value, dict)
+                else TreeEntry(name, "file", trees.put_blob(_RUN_ID, value))
+                for name, value in level.items()
+            ],
+        )
+
+    return put(root)
+
+
 class _WorkerDiedError(BaseException):
     """The worker dies in the middle of a model call: like a kill, no handler of ``Exception`` sees it."""
 
@@ -998,7 +1040,13 @@ def test_the_proposer_writes_a_path_that_only_starts_like_the_exploits_folder(tm
 def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
     monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
 ) -> None:
-    """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``optimize.toml`` to the engine."""
+    """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``optimize.toml`` to the engine.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     metric, config = "the-hidden-metric-42", "the-hidden-config-43"
     run = stores.user.workspace().start_run(
         _RUN_ID,
@@ -1032,11 +1080,13 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
         run_dir=tmp_path / "loop",
         hidden_hashes=hidden,
     )
-    seed_tree = loop.put_files(
-        {"answer.txt": b"a\n", "eval/metric.py": metric.encode(), "optimize.toml": config.encode()}
+    raw_tree = _store(
+        stores.trees, {"answer.txt": b"a\n", "eval/metric.py": metric.encode(), "optimize.toml": config.encode()}
     )
-    seed = RepoSeed(seed_tree, editable_paths=("answer.txt",), hidden_hashes=hidden)
-    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    ctx = loop.context(repo_seed=RepoSeed(raw_tree, editable_paths=("answer.txt",), hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    seed_tree = ctx.repo_seed.tree_id
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
     assert proposer is not None
 
     monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 7)
@@ -1054,8 +1104,17 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
     assert counter["opened"] == 1
 
 
-def test_a_file_at_a_folder_that_holds_a_hidden_file_is_refused_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
-    """A file at ``eval`` would replace the folder and drop the hidden ``eval/metric.py``, so the write is refused."""
+def test_a_file_at_a_folder_that_holds_only_hidden_files_writes_as_at_a_missing_path_on_a_real_loop(
+    stores: _Stores, tmp_path: Path
+) -> None:
+    """The engine's seed tree has no ``eval/``, so a file at ``eval`` writes as at any missing path.
+
+    The visible tree never holds ``eval/metric.py``, so the write drops no hidden file and the version holds none.
+
+    Args:
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     run = stores.user.workspace().start_run(
         _RUN_ID,
         step_log=stores.step_log,
@@ -1079,13 +1138,18 @@ def test_a_file_at_a_folder_that_holds_a_hidden_file_is_refused_on_a_real_loop(s
         run_dir=tmp_path / "loop",
         hidden_hashes=hidden,
     )
-    seed_tree = loop.put_files({"answer.txt": b"a\n", "eval/metric.py": b"metric"})
-    seed = RepoSeed(seed_tree, editable_paths=(".",), hidden_hashes=hidden)
-    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    raw_tree = _store(stores.trees, {"answer.txt": b"a\n", "eval/metric.py": b"metric"})
+    ctx = loop.context(repo_seed=RepoSeed(raw_tree, editable_paths=(".",), hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    seed_tree = ctx.repo_seed.tree_id
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
     assert proposer is not None
 
-    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
-    assert calls.prompts[1] == "The files break the editing rules: 'eval' is outside the editable paths."
+    written = proposer({"c": seed_tree}, {"c": []}, ["c"])["c"]
+    assert written != seed_tree
+    assert loop.list_files(written) == ["answer.txt", "eval"]
+    assert loop.read_file(written, "eval") == b"new\n"
+    assert len(calls.prompts) == 1
     assert counter["opened"] == 0
 
 
@@ -1330,7 +1394,12 @@ def test_a_loop_stop_in_a_proposer_command_ends_the_proposal(tmp_path: Path) -> 
 
 
 def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
-    """``ls eval`` answers as for a missing folder, and a file at ``eval`` as for a path outside the editable paths."""
+    """``ls eval`` answers as for a missing folder, as the engine's seed tree has no ``eval/``.
+
+    Args:
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     run = stores.user.workspace().start_run(
         _RUN_ID,
         step_log=stores.step_log,
@@ -1341,7 +1410,7 @@ def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores
         lease_slices=4,
     )
     counter = {"open": 0, "opened": 0}
-    replies = ["```ls\neval\n```", "```ls\nnone\n```", _file("eval"), _file("docs"), "no block", "no block"]
+    replies = ["```ls\neval\n```", "```ls\nnone\n```", "no block", "no block", "no block", "no block"]
     calls = _FakeCalls(replies)
     hidden = hidden_hashes(["eval/metric.py"])
     loop = EngineLoop(
@@ -1355,18 +1424,17 @@ def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores
         run_dir=tmp_path / "loop",
         hidden_hashes=hidden,
     )
-    seed_tree = loop.put_files({"answer.txt": b"a\n", "eval/metric.py": b"metric"})
-    # ``eval`` is editable, so the write reaches the folder check and not the editable-path check.
-    seed = RepoSeed(seed_tree, editable_paths=("answer.txt", "eval"), hidden_hashes=hidden)
-    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    raw_tree = _store(stores.trees, {"answer.txt": b"a\n", "eval/metric.py": b"metric"})
+    ctx = loop.context(repo_seed=RepoSeed(raw_tree, editable_paths=("answer.txt",), hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    seed_tree = ctx.repo_seed.tree_id
+    proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
     assert proposer is not None
 
     assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
     notes = calls.prompts[1:]
     assert notes[0] == "'eval' is not a folder of the current version."
     assert notes[0].replace("eval", "<path>") == notes[1].replace("none", "<path>")
-    assert notes[2] == "The files break the editing rules: 'eval' is outside the editable paths."
-    assert notes[2].replace("eval", "<path>") == notes[3].replace("docs", "<path>")
     assert counter["opened"] == 0
 
 
