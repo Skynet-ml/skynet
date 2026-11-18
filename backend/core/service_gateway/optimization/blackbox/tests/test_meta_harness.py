@@ -43,6 +43,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
     Result,
     Task,
 )
+from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
@@ -1758,6 +1759,40 @@ def test_an_over_cap_candidate_file_replaces_no_stale_local_copy_and_is_refused_
     assert worker._validate({"name": "c1", "file": "agents/other.txt"}) == native_engines.CANDIDATE_MISSING
 
 
+def _pack_reads(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Record the bytes of each pack range read, the read that loads a flushed object's bytes.
+
+    The cap check in the step log runs before this read, so a refused object never shows here.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch; it undoes the wrap after the test.
+
+    Returns:
+        The list that gets the bytes of each range read.
+    """
+    loaded: list[bytes] = []
+    get = LocalObjectStore.get
+
+    def ranged(store: LocalObjectStore, key: str, offset: int = 0, length: int | None = None) -> bytes:
+        """Record the bytes of one range read.
+
+        Args:
+            store: The object store.
+            key: The pack key.
+            offset: The first byte.
+            length: The bytes to read; ``None`` reads to the end.
+
+        Returns:
+            The bytes of the range.
+        """
+        data = get(store, key, offset, length)
+        loaded.append(data)
+        return data
+
+    monkeypatch.setattr(LocalObjectStore, "get", ranged)
+    return loaded
+
+
 def test_an_over_cap_candidate_file_never_loads_and_is_refused_by_size(
     monkeypatch: pytest.MonkeyPatch,
     owner: tuple[User, int],
@@ -1781,29 +1816,13 @@ def test_an_over_cap_candidate_file_never_loads_and_is_refused_by_size(
     worker = _worker(loop, tmp_path)
     big = b"x" * 5000
     tree = loop.put_files({"logs/run/pending_eval.json": _pending("agents/big.txt"), "agents/big.txt": big})
-    loaded: list[bytes | None] = []
-    get_blob = trees.get_blob
-
-    def spy(run_id: str, object_id: str) -> bytes | None:
-        """Record each blob that the tree store loads.
-
-        Args:
-            run_id: The job that reads the blob.
-            object_id: The blob.
-
-        Returns:
-            The blob's file bytes.
-        """
-        data = get_blob(run_id, object_id)
-        loaded.append(data)
-        return data
-
-    monkeypatch.setattr(trees, "get_blob", spy)
+    step_log.flush()
+    loaded = _pack_reads(monkeypatch)
 
     worker._pull(tree)
 
     assert loaded
-    assert big not in loaded
+    assert not any(big in data for data in loaded)
     assert not (worker.work_dir / "agents" / "big.txt").exists()
     assert worker._validate({"name": "c0", "file": "agents/big.txt"}) == native_engines.CANDIDATE_TOO_LARGE
 
@@ -1831,28 +1850,13 @@ def test_an_over_cap_pending_file_never_loads_and_gives_no_candidate(
     pending = _pending("agents/a.txt")
     monkeypatch.setattr(native_engines, "MAX_PENDING_BYTES", len(pending) - 1)
     tree = loop.put_files({"logs/run/pending_eval.json": pending, "agents/a.txt": b"a"})
-    loaded: list[bytes | None] = []
-    get_blob = trees.get_blob
-
-    def spy(run_id: str, object_id: str) -> bytes | None:
-        """Record each blob that the tree store loads.
-
-        Args:
-            run_id: The job that reads the blob.
-            object_id: The blob.
-
-        Returns:
-            The blob's file bytes.
-        """
-        data = get_blob(run_id, object_id)
-        loaded.append(data)
-        return data
-
-    monkeypatch.setattr(trees, "get_blob", spy)
+    step_log.flush()
+    loaded = _pack_reads(monkeypatch)
 
     worker._pull(tree)
 
-    assert pending not in loaded
+    assert loaded
+    assert not any(pending in data for data in loaded)
     assert (worker.logs_dir / "pending_eval.json").read_bytes() == b""
     assert worker._read_pending(worker.logs_dir / "pending_eval.json") == []
     assert not (worker.work_dir / "agents" / "a.txt").exists()
