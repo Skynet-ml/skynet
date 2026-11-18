@@ -549,3 +549,19 @@ def test_harness_sessions_send_each_refusal_to_the_run_log(
     record = json.loads(lines[0].split(" ", 2)[2])
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        autosaddler_runner._git_output(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert autosaddler_runner._git_output(repo, "rev-parse", "--git-dir").strip() == "."
