@@ -801,7 +801,7 @@ FEEDBACK_REQUIRED = (
 )
 
 
-def _feedback(value: Any, where: str) -> str:
+def feedback(value: Any, where: str) -> str:
     """Return a non-empty feedback string or explain what is missing.
 
     Args:
@@ -842,7 +842,7 @@ def named_scores(raw: Any) -> dict[str, dict[str, Any]]:
             raise ScorerError(f"{FEEDBACK_REQUIRED} (The named score {name!r} has no numeric score.)")
         named[str(name)] = {
             "score": float(value),
-            "feedback": _feedback(entry.get("feedback"), f"The named score {name!r}"),
+            "feedback": feedback(entry.get("feedback"), f"The named score {name!r}"),
         }
     return named
 
@@ -880,7 +880,7 @@ def normalize_score(raw: Any) -> tuple[float, SideInfo]:
         raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned a bare number.)")
     else:
         raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned {type(raw).__name__}.)")
-    side_info["feedback"] = _feedback(side_info.get("feedback"), "The score")
+    side_info["feedback"] = feedback(side_info.get("feedback"), "The score")
     if "scores" in side_info:
         side_info["scores"] = named_scores(side_info["scores"])
     return float(score), side_info

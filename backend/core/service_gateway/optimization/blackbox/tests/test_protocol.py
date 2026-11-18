@@ -10,6 +10,7 @@ import pytest
 
 from ..protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     TOO_DEEP_ARGUMENTS,
     UNSCORED,
     BudgetExhaustedError,
@@ -355,6 +356,102 @@ def test_fill_unscored_gives_a_null_case_its_versions_scored_mean() -> None:
     candidates = ["a", "a", "a", "b", "b"]
 
     assert fill_unscored(candidates, [0.2, None, 0.6, None, None]) == pytest.approx([0.2, 0.4, 0.6, UNSCORED, UNSCORED])
+
+
+def test_fill_unscored_gives_a_failed_run_version_no_score() -> None:
+    """A version with a failed [run] case is UNSCORED on every case and ranks below a lower scored version (SKY-751)."""
+    candidates = ["crash", "crash", "crash", "low", "low", "low"]
+    failed = {"status": RUN_FAILED_STATUS}
+    infos = [{}, {}, failed, {}, {}, {}]
+
+    filled = fill_unscored(candidates, [0.9, 0.9, None, 0.3, 0.3, 0.3], infos)
+
+    assert filled[:3] == [UNSCORED] * 3
+    assert filled[3:] == pytest.approx([0.3] * 3)
+    assert sum(filled[3:]) > sum(filled[:3])
+
+
+def test_fill_unscored_keeps_a_scorers_own_run_failed_status_with_a_score() -> None:
+    """A scorer's own ``run_failed`` status next to a real score is not a failed [run] entry (SKY-221, SKY-751)."""
+    assert fill_unscored(["a", "a"], [0.4, 0.6], [{"status": RUN_FAILED_STATUS}, {}]) == pytest.approx([0.4, 0.6])
+
+
+def test_a_scorers_own_run_failed_status_with_a_finite_score_keeps_its_score() -> None:
+    """Only a failed [run] entry, which sends no score, drops a score; a real score with that status stays (SKY-751)."""
+    server = EvalServer(lambda c, e: (0.4, {"feedback": "ok", "status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score == pytest.approx(0.4)
+    assert info == {"feedback": "ok", "status": RUN_FAILED_STATUS}
+    assert server.mean_score("x") == pytest.approx(0.4)
+    assert server.run_failed("x") is False
+    assert server.metric_error("x") is None
+
+
+def test_nested_server_marks_an_unscored_failed_run_as_no_score() -> None:
+    """An Auto lane gets a failed [run] case as UNSCORED; it stays a run failure with no score (SKY-751)."""
+    server = EvalServer(lambda c, e: (UNSCORED, {"status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score is None
+    assert info["status"] == RUN_FAILED_STATUS
+    assert server.metric_error("x") is not None
+    assert server.best_candidate is None
+
+
+def test_a_failed_run_after_a_clean_case_marks_the_version_as_run_failed() -> None:
+    """A version scored on a clean case, then a failed [run] case, keeps the run-failed mark (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 2:
+            return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+        return 0.7, {"feedback": "ok"}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    assert server.mean_score("c") is None
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
+def test_a_failed_run_after_a_metric_error_marks_the_version_as_run_failed() -> None:
+    """A metric error on one case, then a failed [run] case, still marks the version as run-failed (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 1:
+            return None, {"error": "metric boom"}
+        return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
 
 
 def test_score_batch_keeps_order_and_metric_error_status() -> None:

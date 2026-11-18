@@ -100,10 +100,13 @@ locals {
       WORKER_ENABLED = "false"
       # Resource URL of the remote MCP server (SKY-229); empty turns it off.
       MCP_RESOURCE_URL = var.mcp_domain == "" ? "" : "https://${var.mcp_domain}/mcp"
+      # Account deletion purges the account's tree packs (SKY-733).
+      SKYNET_TREE_BUCKET = aws_s3_bucket.trees.id
     })
     worker = merge(local.app_common_env, {
-      APP_SERVICE_NAME = "worker"
-      SERVICE_ROLE     = "worker"
+      APP_SERVICE_NAME   = "worker"
+      SERVICE_ROLE       = "worker"
+      SKYNET_TREE_BUCKET = aws_s3_bucket.trees.id
     })
     migrate = merge(local.app_common_env, {
       APP_SERVICE_NAME = "migrate"

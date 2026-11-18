@@ -75,7 +75,9 @@ from ..rule_judge import (
 )
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
+from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
+from ..tree_sandbox import BoxSession
 from .test_repo_workspace import _archive, _patch
 
 # The metric box holds no repository file, so the [run] entry prints what
@@ -214,6 +216,35 @@ def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
     assert sorted(calls) == [("candidate", ()), ("metric", ())]
 
 
+def test_the_run_entry_and_the_metric_run_through_the_tree_sandbox_session(
+    scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``[run]`` entry runs as root in the candidate box; the metric runs without root in its own box (SKY-785)."""
+    scorer, _, _ = scored
+    calls: list[tuple[str, bool, bool]] = []
+    run = BoxSession.run
+
+    def recorded(self: BoxSession, command: str, **options: Any) -> Any:
+        """Record the box's role marker, the root flag and the output sink, then run the command.
+
+        Args:
+            self: The session.
+            command: The command line.
+            **options: The run's options.
+
+        Returns:
+            The command's result.
+        """
+        role = "candidate" if "candidate" in command else "metric"
+        calls.append((role, options.get("sudo", False), options.get("on_output") is not None))
+        return run(self, command, **options)
+
+    monkeypatch.setattr(BoxSession, "run", recorded)
+
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert sorted(calls) == [("candidate", True, True), ("metric", False, True)]
+
+
 class _ParkLog:
     """Record the park and unpark calls a scorer makes in its run budget."""
 
@@ -321,7 +352,10 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
 
         monkeypatch.setattr(CandidateBox, "close", close_raises)
     if failure == "run_failed":
-        assert scorer.score("")[STATUS_KEY] == RUN_FAILED_STATUS
+        reply = scorer.score("")
+        assert reply[STATUS_KEY] == RUN_FAILED_STATUS
+        # SKY-751: the reply carries the failure text, so the feedback check accepts it.
+        assert normalize_score(reply) == (None, {"feedback": "Run failed: boom", STATUS_KEY: RUN_FAILED_STATUS})
     else:
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")
@@ -4637,8 +4671,12 @@ def test_a_candidate_that_links_the_calls_folder_cannot_touch_the_metric(tmp_pat
     assert [(result["score"], result["feedback"]) for result in results] == [(0.25, "real metric")] * 2
 
 
-def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
-    """A candidate that raises gets 0 and "Run failed:" feedback; the metric never runs (E38)."""
+def test_a_failed_run_has_no_score_and_skips_the_metric(tmp_path: Path) -> None:
+    """A candidate that raises gets no score and "Run failed:" feedback; the metric never runs (E38, SKY-751).
+
+    Args:
+        tmp_path: Folder for the repository and the metric marker.
+    """
     marker = tmp_path / "metric-ran"
     metric = f"def score(repo_path, case, output):\n    open({str(marker)!r}, 'w').write('x')\n    return 1.0\n"
     scorer = _probed(tmp_path, "src/cand.py:boom", code=metric)
@@ -4646,7 +4684,7 @@ def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert result["feedback"].startswith("Run failed: ")
     assert "candidate broke" in result["feedback"]
     assert len(result["feedback"]) <= 2_000
@@ -4654,7 +4692,11 @@ def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
 
 
 def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: Path) -> None:
-    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61)."""
+    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:boom")
     try:
         scorer.prepare()
@@ -4663,7 +4705,7 @@ def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: 
     finally:
         scorer.close()
     feedback = reply["feedback"]
-    assert reply["score"] == 0.0
+    assert reply["score"] is None
     assert feedback.startswith("Run failed: Traceback (most recent call last):")
     assert 'File "src/cand.py"' in feedback
     assert 'raise RuntimeError("candidate broke")' in feedback
@@ -4733,7 +4775,7 @@ def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: 
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
-    """A run without ``[run]`` scores the tree directly and passes no output (E38)."""
+    """A run without ``[run]`` passes no output to the metric (E38)."""
     metric = "import json\ndef score(repo_path, case, output):\n    return 1.0, json.dumps(output)\n"
     scorer = _probed(tmp_path, None, code=metric)
     try:
@@ -4978,13 +5020,17 @@ class _LateForgeryRuntime(LocalSubprocessRuntime):
 
 
 def test_a_process_the_entry_left_cannot_forge_the_supervisor_result(tmp_path: Path) -> None:
-    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398)."""
+    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:leaves_a_forger", runtime=_LateForgeryRuntime())
     try:
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "the entry crashed" in result["feedback"]
     assert "FORGED" not in result["feedback"]
 
@@ -5038,15 +5084,19 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
         scorer.close()
 
 
-def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
-    """A ``[run]`` timeout scores 0, and the metric that would get the time never runs (SKY-642)."""
+def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
+    """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     metric = "def score(repo_path, case, output=None, elapsed_s=None):\n    raise RuntimeError('metric ran')\n"
     scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric, run_timeout=1.0)
     try:
         result = scorer.score("", {"input": 5})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "timeout after 1 s" in result["feedback"]
 
 

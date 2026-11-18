@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 import tarfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,7 +26,7 @@ from core.sandbox.trees import (
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
-from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore, object_id_of
 
 RUN = "job-ada"
 
@@ -222,8 +223,21 @@ def _pax_named(name: str) -> tarfile.TarInfo:
         _archive((_info("a"), b"a\n"), (_info("b", tarfile.LNKTYPE, "missing"), b"")),
         _cut_last_member((_info("a"), b"a\n"), (_info("b"), b"b" * 600)),
         _archive((_info("a"), b"a\n"), (_pax_named("b\0c"), b"x\n")),
+        _archive((_info("a"), b"a\n"), (_info(".git/config"), b"x\n")),
+        _archive((_info("a"), b"a\n"), (_info("sub/.GIT/x"), b"x\n")),
+        _archive((_info("a"), b"a\n"), (_info(".Git"), b"x\n")),
+        _archive((_info("a"), b"a\n"), (_info("sub/.gIt", tarfile.DIRTYPE), b"")),
     ],
-    ids=["path-leaves-the-tree", "hard-link-to-nothing", "content-cut-short", "pax-nul-name"],
+    ids=[
+        "path-leaves-the-tree",
+        "hard-link-to-nothing",
+        "content-cut-short",
+        "pax-nul-name",
+        "git-folder",
+        "upper-case-git-folder",
+        "git-file",
+        "git-dir-member",
+    ],
 )
 def test_a_refused_archive_stores_no_blob(trees: TreeStore, monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
     """A bad last member stops the archive before the good first member's blob is stored.
@@ -255,6 +269,64 @@ def test_a_refused_archive_stores_no_blob(trees: TreeStore, monkeypatch: pytest.
         tar_to_tree(trees, RUN, data)
 
     assert stored == []
+
+
+@pytest.mark.parametrize("name", [".git/config", "sub/.GIT/x", ".Git"])
+def test_a_git_path_part_in_any_letter_case_is_a_bad_archive(trees: TreeStore, name: str) -> None:
+    """A member with a ``.git`` part in any letter case is refused with a clear reason (SKY-810).
+
+    Args:
+        trees: The tree store.
+        name: The member path.
+    """
+    with pytest.raises(BadArchiveError, match=r"holds a \.git"):
+        tar_to_tree(trees, RUN, _archive((_info(name), b"x\n")))
+
+
+def test_names_near_git_stay_in_the_tree(trees: TreeStore) -> None:
+    """``.gitignore``, ``.gitattributes``, ``x.git`` and ``a.git/b`` are plain names."""
+    data = _archive(
+        (_info(".gitignore"), b"1"), (_info(".gitattributes"), b"2"), (_info("x.git"), b"3"), (_info("a.git/b"), b"4")
+    )
+
+    tree_id = tar_to_tree(trees, RUN, data)
+
+    assert sorted(entry.name for entry in trees.get_tree(RUN, tree_id) or []) == [
+        ".gitattributes",
+        ".gitignore",
+        "a.git",
+        "x.git",
+    ]
+
+
+def _put_raw_tree(trees: TreeStore, rows: list[list[str]]) -> str:
+    """Store a tree object without :func:`encode_tree`, as a tree stored before SKY-810 can be.
+
+    Args:
+        trees: The tree store.
+        rows: The ``[name, mode, object_id]`` entries, unchecked.
+
+    Returns:
+        The tree's object id.
+    """
+    stored = b"tree\0" + json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    object_id = object_id_of(stored)
+    trees._step_log.put_object(RUN, object_id, stored)
+    return object_id
+
+
+def test_an_old_tree_with_git_parts_is_written_out_without_them(trees: TreeStore) -> None:
+    """``tree_to_tar`` leaves out ``.git`` entries in any letter case at any depth (SKY-810)."""
+    blob = trees.put_blob(RUN, b"x\n")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["keep.txt", "file", blob]])
+    root = _put_raw_tree(
+        trees, [[".Git", "file", blob], [".git", "tree", git], ["a.py", "file", blob], ["sub", "tree", sub]]
+    )
+
+    members = _members(tree_to_tar(trees, RUN, root))
+
+    assert sorted(members) == ["a.py", "sub", "sub/keep.txt"]
 
 
 def test_an_absolute_member_name_lands_inside_the_tree(trees: TreeStore) -> None:

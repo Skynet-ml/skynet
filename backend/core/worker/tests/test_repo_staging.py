@@ -6,8 +6,11 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -35,11 +38,23 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.i18n_keys import I18nKey
+from core.models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CODEX,
+    BLACKBOX_HARNESS_CUSTOM,
+    HOST_CLI_AUTO_KEY,
+    BlackboxProposer,
+    BlackboxRunRequest,
+    BlackboxTarget,
+)
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import runner
+from core.service_gateway.optimization.blackbox import harness_bridge, runner
+from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
@@ -192,7 +207,9 @@ instructions = "docs/intent.md"
 editable = ["src/geocode"]
 protected = ["src/geocode/eval"]
 """
-_FILES = {"optimize.toml": _CONSTRAINTS, "docs/intent.md": "Pick the place the sender means.\n"}
+# The metric scores only what a [run] or a target stage gives it, so a contract needs one (SKY-761).
+_RUN = '\n[run]\nentry = "run.py:main"\n'
+_FILES = {"optimize.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place the sender means.\n"}
 
 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
@@ -320,7 +337,7 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
     proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
-    files = {**_FILES, "optimize.toml": _CONSTRAINTS + proposer}
+    files = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + proposer}
     monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
@@ -344,8 +361,14 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
 @pytest.mark.parametrize(
     ("files", "message"),
     [
-        ({"optimize.toml": 'version = 1\n[paths]\neditable = ["tests"]\n'}, "outside the approved editable paths"),
-        ({"optimize.toml": 'version = 1\n[services]\ngeocoder = ["search"]\n'}, "cannot grant services"),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["tests"]\n'},
+            "outside the approved editable paths",
+        ),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n'},
+            "cannot grant services",
+        ),
     ],
 )
 def test_staging_refuses_a_file_that_asks_for_more(
@@ -369,6 +392,272 @@ def test_staging_refuses_a_file_that_asks_for_more(
     assert not workdirs[0].exists()
 
 
+# The fake proposer writes the task file path, the task and its own arguments
+# where a version change would go; its setup appends one line each time it runs.
+_FAKE_AGENT = """
+import os, pathlib, sys
+pathlib.Path("src").mkdir(exist_ok=True)
+task = pathlib.Path(os.environ["ASCENT_TASK"])
+pathlib.Path("src/proposed.txt").write_text("\\n".join([str(task), task.read_text(), *sys.argv[1:]]))
+"""
+_FAKE_SETUP = 'import pathlib; open(pathlib.Path("setup-ran"), "a").write("ran\\n")'
+
+
+def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request with no proposer runs the file's setup once in the checkout, then its entry (SKY-753).
+
+    The run is protected, as every hosted run is: its bootstrap installs
+    nothing, so the setup reaches the guest through the repository payload.
+
+    Args:
+        tmp_path: The checkout and the session folder.
+        monkeypatch: Pytest fixture for the fake fetch and the relay key.
+    """
+    files = {
+        "optimize.toml": (
+            'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
+            f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
+            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
+        ),
+        "agent/fake.py": _FAKE_AGENT,
+    }
+    payload = BlackboxRunRequest.model_validate(
+        {
+            **_payload("c" * 40),
+            "objective": "o",
+            "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
+            "cases": [{"input": "x"}],
+            "reflection_model_config": {"name": "openai/reflect"},
+        }
+    ).model_dump(mode="json", by_alias=True)
+    assert "harness" not in payload["proposer"]
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    proposer = BlackboxRunRequest.model_validate(staged_payload).proposer
+    snapshot = staged_payload[repo_staging.REPO_SNAPSHOT_KEY]
+    assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
+    assert proposer.install_command is None
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
+    ]
+    # The launch as native_runtime builds it for a protected run.
+    launch = build_launch(
+        BlackboxTarget(
+            kind="agent",
+            harness=proposer.harness,
+            model="openai/task",
+            install_command=proposer.install_command,
+            run_command=proposer.run_command,
+        ),
+        GatewayConfig(url="https://gw.example/v1", api_key=harness_bridge.KEY_TOKEN),
+        protected=True,
+        exact_commands=snapshot["file_proposer"],
+    )
+    checkout = tmp_path / "repo-checkout"
+    (checkout / "agent").mkdir(parents=True)
+    (checkout / "agent/fake.py").write_text(_FAKE_AGENT)
+    harness_bridge.run_setup(snapshot["proposer_setup"], checkout)
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    outcome = harness_bridge.run_session(
+        launch_payload(launch),
+        workspace=checkout,
+        prompt="Make it faster.",
+        model="openai/task",
+        session_dir=tmp_path / "session",
+    )
+
+    assert outcome.returncode == 0, outcome.stderr
+    assert (checkout / "setup-ran").read_text() == "ran\n"
+    task_file, task, *arguments = (checkout / "src/proposed.txt").read_text().split("\n")
+    assert Path(task_file).is_absolute()
+    assert Path(task_file).is_file()
+    assert task == "Make it faster."
+    assert arguments == ["{model}"]
+
+
+def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request that names a proposer keeps it, and the run record notes the replacement.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload["proposer"] == {"harness": "pi"}
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        "The run's own proposer replaces the one in the contract file."
+    ]
+
+
+def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_default_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wizard run that picks no harness gets the server's default when the file names no proposer (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
+    payload = {**_payload("c" * 40), "proposer": {"max_tool_calls": 100}}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+    assert BlackboxProposer.model_validate(staged_payload["proposer"]).harness == BLACKBOX_HARNESS_CODEX
+
+
+@pytest.mark.parametrize("proposer", [{"run_command": "my-agent"}, {"install_command": "npm ci"}])
+def test_a_run_command_or_install_command_is_the_runs_own_proposer(
+    proposer: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request with its own run or install command but no harness keeps it over the file's command.
+
+    Args:
+        proposer: The request's proposer, without a harness.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
+    staged.cleanup()
+
+    assert staged_payload["proposer"] == proposer
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+
+
+_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+
+
+@pytest.mark.parametrize(
+    ("engine", "message"),
+    [
+        (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
+        (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
+        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve never runs the [proposer] entry command."),
+    ],
+)
+def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(
+    engine: str, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single run of a refused engine names ``[proposer] entry`` and the engine (SKY-753).
+
+    Args:
+        engine: An engine that cannot use the file's proposer command.
+        message: The reason the setup check gives for it.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}}
+
+    with pytest.raises(ConstraintsError, match=re.escape(message)) as caught:
+        _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+
+
+def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Auto run uses the file's command, and its record says why it has fewer lanes (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": {"mode": "auto"}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        "The run uses the proposer command in the contract file: node agent.js",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
+    ]
+
+
+def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A filled-in host CLI is not the run's own proposer, and the staged proposer drops it (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    proposer = BlackboxProposer()
+    proposer.host_cli = "codex"
+    proposer.model_fields_set.discard("host_cli")
+    stored = proposer.model_dump(mode="json")
+    assert stored[HOST_CLI_AUTO_KEY] is True
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": "gepa"}, "proposer": stored}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["harness"] == BLACKBOX_HARNESS_CUSTOM
+    assert staged_payload["proposer"]["host_cli"] is None
+    assert HOST_CLI_AUTO_KEY not in staged_payload["proposer"]
+
+
+def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host CLI in the request, with no marker, is the run's own proposer (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "proposer": {"host_cli": "codex"}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+    assert staged_payload["proposer"] == {"host_cli": "codex"}
+
+
+def test_the_files_proposer_clears_an_empty_install_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty install command keeps the file's proposer, and staging clears it to ``None`` (SKY-753).
+
+    The guest runs ``[proposer] setup`` in its checkout, so the bootstrap must not get an install step.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "proposer": {"install_command": ""}}
+
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["install_command"] is None
+
+
+def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A custom command cannot load the relay's MCP servers yet, so the setup check names the cause.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {
+        "optimize.toml": (
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n'
+        ),
+        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+    }
+
+    with pytest.raises(ConstraintsError, match=r"custom proposer harness cannot load the \[proposer\] mcp") as caught:
+        _stage_with(files, monkeypatch)
+    assert (caught.value.section, caught.value.key) == ("proposer", "mcp")
+
+
 def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A run resumes only under the rules first recorded for it."""
     first, staged = _stage_with(_FILES, monkeypatch)
@@ -389,7 +678,7 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
-_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + "\n[outcome]\ntarget = 0.9\n"}
+_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget = 0.9\n"}
 
 
 def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
@@ -431,7 +720,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert staged.require_version is True
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
 
@@ -446,7 +735,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
     """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
 
     staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
     staged.cleanup()
@@ -455,9 +744,21 @@ def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
 
 
+def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+    no_run = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        _stage_with(no_run, monkeypatch, resumed)
+
+
 _RULED = {
     **_FILES,
-    "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
+    "optimize.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',
     "docs/rules.md": "- Do not hardcode answers for dataset cases.\n- Do not call an outside geocoding service.\n",
 }
 
@@ -516,10 +817,12 @@ def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest
 
 def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     """The contract can come from the repository tree or from the draft files."""
-    _, staged = _stage_with({"optimize.toml": "version = 1\n"}, monkeypatch, require_constraints=True)
+    _, staged = _stage_with(
+        {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
+    )
     staged.cleanup()
     drafted = _payload("c" * 40)
-    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     _, staged = _stage_with({}, monkeypatch, drafted, require_constraints=True)
     staged.cleanup()
     assert staged.constrained is True
@@ -727,7 +1030,10 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
     payload = _payload("c" * 40)
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
     payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
-    toml = 'version = 1\n[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    toml = (
+        'version = 1\n[run]\nentry = "run.py:main"\n'
+        '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    )
 
     _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
 
@@ -1877,6 +2183,123 @@ def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, An
     assert repo_staging.improved_patch(result) is None
 
 
+_RUN_FAILED_START = {
+    "candidate": "",
+    "score": None,
+    "side_info": {"error": "Run failed: ConnectionError", "status": RUN_FAILED_STATUS},
+}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(
+            None,
+            0.4,
+            versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}],
+            details={"baseline_run_failed": True},
+        ),
+        _result(None, None, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+    ],
+)
+def test_a_scored_version_beats_a_starting_code_with_no_score(result: dict[str, Any]) -> None:
+    """A starting code whose ``[run]`` failed has no score, so a scored version opens a PR (SKY-751).
+
+    Args:
+        result: Finished result whose starting code has no score.
+    """
+    assert repo_staging.improved_patch(result) == _EDIT
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+    assert "The starting code has no score" in body
+    assert "This version scored 0.4." in body
+
+
+def test_a_starting_code_whose_final_run_failed_loses_to_a_scored_version() -> None:
+    """The search scored the starting code, but its final ``[run]`` failed, so the winner opens a PR (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": True})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_the_pr_body_says_the_starting_code_has_no_score_when_its_final_run_failed() -> None:
+    """The final run decides the PR body: the search scores never stand in for a failed starting code (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.6, versions=versions, details={"baseline_run_failed": True})
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "The starting code has no score: it failed on at least one case. This version scored 0.6." in body
+    assert "Score went from" not in body
+
+
+def test_a_metric_error_in_the_final_run_never_lets_a_version_win() -> None:
+    """The final run decides: a metric error there opens no PR, even after a search ``[run]`` failure (SKY-751)."""
+    versions = [_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": False})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+@pytest.mark.parametrize("run_failed", [True, False])
+def test_a_final_run_with_no_score_for_either_version_publishes_nothing(run_failed: bool) -> None:
+    """Both final-run scores are empty, so the search scores never stand in and no PR opens (SKY-751).
+
+    Args:
+        run_failed: The final run's ``baseline_run_failed`` flag.
+    """
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": run_failed})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+def test_a_stopped_run_still_compares_the_search_scores() -> None:
+    """A run stopped before its final run has no run-failed flag, so the version scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_a_budget_stop_in_the_winners_held_out_run_compares_the_search_scores() -> None:
+    """The starting code's held-out run finished, the winner's did not, so the search scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(0.3, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert "Score went from 0.3 to 0.5." in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_a_version_whose_run_failed_is_never_published() -> None:
+    """A best version with a failed ``[run]`` case has no score, so it opens no PR (SKY-751)."""
+    failed = {**_RUN_FAILED_START, "candidate": _EDIT}
+    result = _result(None, None, versions=[{"candidate": "", "score": 0.2}, failed])
+
+    assert repo_staging.improved_patch(result) is None
+
+
+_METRIC_ERROR_START = {"candidate": "", "score": None, "side_info": {"error": "KeyError", "status": METRIC_ERROR}}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, 0.4, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, None, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, 0.4, versions=[{"candidate": _EDIT, "score": 0.4}]),
+    ],
+    ids=["final-run", "stopped", "starting-code-not-recorded"],
+)
+def test_a_scored_version_never_beats_a_starting_code_the_metric_crashed_on(result: dict[str, Any]) -> None:
+    """Only a failed ``[run]`` of the starting code lets a scored version open a PR; a metric error does not (SKY-751).
+
+    Args:
+        result: Finished result whose starting code had a metric error.
+    """
+    assert repo_staging.improved_patch(result) is None
+
+
 def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
     """Candidate branches leave out a crashed version and count it as skipped."""
     other = _EDIT.replace("+x = 2", "+x = 3")
@@ -2883,7 +3306,8 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
             "eval/labels.json",
         ),
         (
-            'version = 1\n[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
             ".optimize/exploits/cheat.py",
         ),
     ],
@@ -4011,3 +4435,68 @@ def test_a_snapshot_with_no_outcome_sets_no_rule(
         staged.cleanup()
 
     assert ("record" in result["details"]) is recorded
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_suite_scratch_git_reads_no_config_from_the_scratch_root(tmp_path: Path) -> None:
+    """A ``.gitconfig`` or ``.config/git/config`` in the suite scratch root runs nothing on the worker (SKY-812).
+
+    The control run uses the old environment, with ``HOME`` at the scratch
+    root, and fires the planted fsmonitor command, so the plant is live.
+
+    Args:
+        tmp_path: Pytest fixture.
+    """
+    marker = tmp_path / "marker"
+    root = tmp_path / "root"
+    planted = f"[core]\n\tfsmonitor = \"touch '{marker}'; false\"\n"
+    (root / ".config" / "git").mkdir(parents=True)
+    (root / ".gitconfig").write_text(planted, encoding="utf-8")
+    (root / ".config" / "git" / "config").write_text(planted, encoding="utf-8")
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    old_env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(root)}
+    for arguments in (["init", "--quiet"], ["add", "--all"]):
+        subprocess.run(["git", *arguments], cwd=root, env=old_env, check=True, capture_output=True)
+    assert marker.exists()
+    marker.unlink()
+    shutil.rmtree(root / ".git")
+
+    repo_staging._git(root, "init", "--quiet")
+    repo_staging._git(root, "add", "--all")
+    assert repo_staging._git(root, "write-tree").strip()
+
+    assert not marker.exists()
+
+
+def _git_knows_safe_bare_repository() -> bool:
+    """Return whether a local git exists that reads ``safe.bareRepository`` (git 2.38 or later).
+
+    Returns:
+        True when the bare-repository test can run.
+    """
+    if shutil.which("git") is None:
+        return False
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
+    found = re.search(r"(\d+)\.(\d+)", version)
+    return found is not None and (int(found[1]), int(found[2])) >= (2, 38)
+
+
+@pytest.mark.skipif(not _git_knows_safe_bare_repository(), reason="git 2.38 or later not installed")
+def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite scratch git does not treat a bare-repository layout as a repository (SKY-812).
+
+    The control run reads no global or system config, so a developer's own
+    ``safe.bareRepository`` cannot change it.
+
+    Args:
+        tmp_path: Pytest fixture.
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    bare = tmp_path / "bare"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True, capture_output=True)
+    assert subprocess.run(["git", "rev-parse", "--git-dir"], cwd=bare, check=True, capture_output=True).stdout
+    with pytest.raises(subprocess.CalledProcessError) as refused:
+        repo_staging._git(bare, "rev-parse", "--git-dir")
+    assert "safe.bareRepository" in refused.value.stderr
