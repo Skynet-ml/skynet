@@ -2120,3 +2120,57 @@ def test_a_pause_that_loses_to_a_park_still_holds(
     store.recover_orphaned_jobs()
     assert store.get_job(RUN)["status"] == "paused"
     assert store.claim_next_job("pod-b", 60.0) is None
+
+
+def test_a_cancel_that_loses_to_a_park_ends_the_wait(store: StepJobStore, step_logs: Any) -> None:
+    """A cancel whose status write finds a parked run cancels it and ends the wait (SKY-814).
+
+    Without this, the wake moves the run to pending on its closed budget.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+
+    response = _router_client(store, _ParkingWorker(store, generation)).post(f"/optimizations/{RUN}/cancel")
+
+    assert response.status_code == 200
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["recovery"] is None
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "user_cancelled")
+    store.recover_orphaned_jobs()
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert store.claim_next_job("pod-b", 60.0) is None
+
+
+def test_a_cancel_of_a_parked_run_leaves_its_budget_open(store: StepJobStore, step_logs: Any) -> None:
+    """The cancel guard refuses a run that is already parked before it closes the budget (SKY-814).
+
+    ``paused`` is a terminal status for the cancel guard, so the wake resumes
+    the run on a budget that is still open.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _ParkingWorker(store, generation).cancel_job(RUN)
+
+    response = _router_client(store).post(f"/optimizations/{RUN}/cancel")
+
+    assert response.status_code == 409
+    job = store.get_job(RUN)
+    assert (job["status"], job["recovery"]["phase"]) == ("paused", remote_mod.WAITING_PHASE)
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert budget.blocked_reason is None

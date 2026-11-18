@@ -77,9 +77,10 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
         **fields: Column values to write.
 
     Returns:
-        ``True`` when the write applied, the row already holds the target
-        status that the user's stop wrote, or the store has no CAS; ``False``
-        when the CAS found the row past ``expected`` in another status.
+        ``True`` when the write applied, also over a worker's park, the row
+        already holds the target status that the user's stop wrote, or the
+        store has no CAS; ``False`` when the CAS found the row past
+        ``expected`` in another status.
     """
     cas = getattr(job_store, "update_job_if_status", None)
     if cas is None:
@@ -88,17 +89,15 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
     if cas(optimization_id, expected, ends_recovery=True, **fields):
         return True
     current = job_store.get_job(optimization_id)
-    if current.get("status") != fields["status"]:
-        return False
     recovery = current.get("recovery")
-    if isinstance(recovery, dict) and recovery.get("phase") == WAITING_PHASE:
-        # A worker's park_run also writes ``paused``, and the wake later moves the
-        # run to pending. The user's write ends the waiting marker, so the pause
-        # holds (SKY-814).
-        return cas(optimization_id, (*expected, fields["status"]), ends_recovery=True, **fields)
+    if current.get("status") == "paused" and isinstance(recovery, dict) and recovery.get("phase") == WAITING_PHASE:
+        # A worker's park_run writes ``paused``, and the wake later moves the run
+        # to pending on the user's closed budget. The user's write ends the
+        # waiting marker, so the user's pause or cancel holds (SKY-814).
+        return cas(optimization_id, (*expected, "paused"), ends_recovery=True, **fields)
     # A recovery sweep that sees the user's closed admission writes the user's
     # status itself, so the user's stop did take effect (SKY-814).
-    return True
+    return current.get("status") == fields["status"]
 
 
 def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> None:
