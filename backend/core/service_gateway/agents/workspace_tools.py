@@ -66,7 +66,7 @@ illegal = "docs/rules.md"
 network = ["pypi.org"]
 
 [run]
-entry = ["pytest", "-q", "--junitxml=out.xml"]
+entry = ["pytest", "-q"]
 timeout = 300
 
 [metric]
@@ -97,29 +97,35 @@ How to write the run's files:
   whole file), or change part of one with ``{EDIT_FILE_TOOL}``. Each write goes into the editor at once. The run
   uses your repository files in place of the repository's own; the user's repository stays unchanged. Change
   other repository files only when the run needs it, and tell the user which files you changed.
-* Every run optimizes a repository. The run has no run.py. ``metric.py`` defines ``score(repo_path)``, or
-  ``score(repo_path, case)`` when the run has data, and scores the checkout at ``repo_path``. It returns
+* Every run optimizes a repository. The run has no run.py. With a ``[run]`` entry, ``metric.py`` defines
+  ``score(repo_path, case, output=None)`` and scores ``output``; a metric with fewer arguments never gets the
+  output. Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define
+  ``score(repo_path)`` or ``score(repo_path, case)``, and that metric calls its stages with
+  ``from skynet import call``. The metric box holds no repository files. It returns
   ``(score, feedback)`` or ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
-  {APP_NAME} starts the candidate, never the metric. When the metric needs the candidate's output, write a
-  ``[run]`` section in optimize.toml with ``entry`` set to ``"path/to/file.py:function"`` or a command list,
+  {APP_NAME} starts the candidate, never the metric. Write a ``[run]`` section (or a ``[target.<name>]`` stage)
+  in optimize.toml. Set the ``[run]`` ``entry`` to ``"path/to/file.py:function"`` or a command list,
   for example ``entry = "geocode.py:geocode"``, and write ``score(repo_path, case, output=None)``: ``output``
   is what the entry returned for the case, and ``None`` when nothing ran, so always give it the ``None``
   default. That metric reads ``output`` and never imports or calls the candidate's code. When the repository
   is scored by its own tests, put the test command in ``[run] entry``, for example
-  ``entry = ["pytest", "-q", "--junitxml=out.xml"]``, and write a metric that only reads the saved report; the
-  metric never runs the tests itself. For a command entry, a nonzero exit code is normal output, not a
-  failure: the metric gets ``exit_code`` and decides what it means. For example, pytest exits 1 when some
-  tests fail, so the metric reads the report and gives partial credit. Write each API that a role calls as
-  ``[services.<name>]`` with a ``url`` and ``headers`` that hold each secret as ``${{NAME}}``, for example
-  ``url = "https://api.example.com/v1"`` and ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List
-  in each role's ``services`` every service the role calls, for example ``services = ["judge"]`` in
-  ``[metric]``. When the candidate calls MCP servers, describe them in a standard ``.mcp.json`` file and set
+  ``entry = ["pytest", "-q"]``, and write a metric that only reads ``output["stdout"]`` and
+  ``output["exit_code"]``; the metric never runs the tests itself. The metric box holds no candidate files, so
+  the metric cannot read a report file that the tests write. For a command entry, a nonzero exit code is normal
+  output, not a failure: the metric gets ``exit_code`` and decides what it means. For example, pytest exits 1
+  when some tests fail, so the metric counts the passed and failed tests in ``stdout`` and gives partial credit.
+  Write each API that a role calls as ``[services.<name>]`` with a ``url`` and ``headers`` that hold each
+  secret as ``${{NAME}}``, for example ``url = "https://api.example.com/v1"`` and
+  ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List in each role's ``services`` every service
+  the role calls, for example ``services = ["judge"]`` in ``[metric]``.
+  When the candidate calls MCP servers, describe them in a standard ``.mcp.json`` file and set
   ``mcp = "<path>"`` in ``[run]``, for example ``mcp = ".mcp.json"``; show the user the file's contents. Only
   http servers with a ``url`` are supported now, for example
   ``"maps": {{"url": "https://mapstools.googleapis.com/mcp"}}``. Put placeholders such as ``${{MAPS_KEY}}``
   only in ``headers``. Never write a secret value into any file, even when the user pastes one; write the
   placeholder and tell the user to add the secret to the run. Name every secret the run needs in your reply,
-  so the user can add it before the run. With no ``[run]``, nothing runs and the metric judges only the checkout.
+  so the user can add it before the run. Write a ``[run]`` section or a ``[target.<name>]`` stage; with neither,
+  the parser refuses the file.
   Never put rule text in optimize.toml. When the user states the run's intent, write it in a markdown file,
   for example ``docs/intent.md``, and set ``instructions = "docs/intent.md"`` at the top of optimize.toml,
   before any section. When the user names approaches the run must not use, write them in a markdown file, for
@@ -149,7 +155,8 @@ How to write the run's files:
   - ``[target.<name>]``, one table for each stage: ``entry`` (required), ``vcpus`` (1 or an even number from
     2 to 32, default 2), ``timeout`` (seconds for each ``skynet.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
-    60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``.
+    60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``. A contract needs a ``[run]`` section
+    or at least one ``[target.<name>]`` stage.
   - ``[metric]``: ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts

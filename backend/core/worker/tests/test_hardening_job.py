@@ -395,7 +395,9 @@ def test_the_attacker_tree_has_no_metric_files_or_exploits(tmp_path: Path) -> No
 
 def test_the_job_reads_the_default_exploits_folder_without_a_metric_section(tmp_path: Path) -> None:
     """A repository without [metric] uses the default suite folder and no reference."""
-    recorder = Recorder(tmp_path, files={CONSTRAINTS_FILE: b"version = 1\n", "bot/app.py": b"x = 1\n"})
+    recorder = Recorder(
+        tmp_path, files={CONSTRAINTS_FILE: b'version = 1\n[run]\nentry = "run.py:main"\n', "bot/app.py": b"x = 1\n"}
+    )
 
     _run(recorder, _cloud_job(), local_mode=False)
 
