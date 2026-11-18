@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from .. import exec_shim, harness, harness_bridge
+from .. import exec_shim, harness, harness_bridge, repo_tree
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -3662,7 +3662,7 @@ def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
         """
         if sum(len(argument) + 1 for argument in arguments) > 1000:
             raise OSError(7, "Argument list too long")
-        if arguments[:2] == ["git", "checkout"]:
+        if arguments[:4] == ["git", *harness_bridge._SAFE_GIT, "checkout"]:
             checkouts.append(arguments)
         return run(arguments, *args, **kwargs)
 
@@ -3749,3 +3749,20 @@ def test_the_copy_of_the_checkout_counts_toward_the_setup_time_limit(
     assert not log.exists()
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "undo").exists()
+
+
+def test_checkout_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup undo's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    assert harness_bridge._SAFE_GIT == repo_tree.SAFE_GIT
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo)
+    monkeypatch.setattr(harness_bridge, "_SAFE_GIT", ())
+    assert harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo).strip() == "."

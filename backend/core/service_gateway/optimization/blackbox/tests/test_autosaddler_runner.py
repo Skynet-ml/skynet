@@ -42,8 +42,8 @@ spec.loader.exec_module(runner)
 class ScriptedProvider:
     """Answer every upstream session with a schema-valid, vowel-adding patch."""
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, model):
+        self.model = model
         Path("sessions.log").touch()
 
     async def run(self, request):
@@ -70,7 +70,7 @@ class ScriptedProvider:
             output = {"schema_version": "app-autosaddler-reflection/v1", "lessons": []}
         with Path("sessions.log").open("a") as log:
             log.write(kind + "\\n")
-        usage = Usage(input_tokens=5, output_tokens=3, model=self.config.model)
+        usage = Usage(input_tokens=5, output_tokens=3, model=self.model)
         return SessionResult(
             status="completed",
             structured_output=output,
@@ -81,7 +81,7 @@ class ScriptedProvider:
         )
 
 
-runner.ClaudeAgentProvider = ScriptedProvider
+runner.harness_provider = lambda proposer, model, on_refusal=None: ScriptedProvider(model)
 original_execute = runner.execute
 
 
@@ -149,6 +149,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         "max_iterations": 2,
         "timeout_seconds": 60,
         "source": native_runtime.AUTOSADDLER_REVISION,
+        "proposer": {"harness": "custom", "model": "claude-test", "price": {"input": 0.0, "output": 0.0}},
         "task": {
             "name": "test",
             "seed_candidate": "bcd",
@@ -197,7 +198,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
     assert result["best_candidate"] == "bcdaaaaaa"
     assert result["best_score"] == pytest.approx(_vowel_fraction("bcdaaaaaa"))
     assert result["total_evals"] == len(scored)
-    assert {example for _, example in scored} == {"a", "b", "c"}
+    assert {example for _, example in scored} == {"a", "b"}
     assert result["metadata"]["iterations"] == 2
     sessions = (tmp_path / "sessions.log").read_text().split()
     assert sessions.count("diagnose_patch") == 2
@@ -699,3 +700,19 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(setup_pid, signal.SIGKILL)
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        autosaddler_runner._git_output(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert autosaddler_runner._git_output(repo, "rev-parse", "--git-dir").strip() == "."

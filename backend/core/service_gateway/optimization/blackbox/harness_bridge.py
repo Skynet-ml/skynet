@@ -54,6 +54,9 @@ SETUP_TIMEOUT_SECONDS = 1_800.0
 # worktree of a checkout shares its common dir, so the setup runs once per git
 # checkout and its worktrees. Each Auto lane checkout runs it again (SKY-753).
 SETUP_STATE = "ascent-proposer-setup"
+# repo_tree.SAFE_GIT, which this lone file cannot import: the setup undo's git
+# calls refuse an implicit bare repository layout, as Skynet's other git calls do (SKY-812).
+_SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
 # An exclude line cannot hold these: a newline starts a new pattern, and git
@@ -546,7 +549,7 @@ def _checkout_git(arguments: list[str], checkout: Path, stdin: bytes = b"") -> s
     Raises:
         RuntimeError: When git fails.
     """
-    done = subprocess.run(["git", *arguments], cwd=checkout, input=stdin, capture_output=True, check=False)
+    done = subprocess.run(["git", *_SAFE_GIT, *arguments], cwd=checkout, input=stdin, capture_output=True, check=False)
     # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
     stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
     if done.returncode != 0:

@@ -919,7 +919,9 @@ def _git(cwd: Path, *arguments: str) -> str:
     Raises:
         RuntimeError: When git exits non-zero.
     """
-    result = subprocess.run(["git", *arguments], cwd=cwd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", *repo_tree.SAFE_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-500:]}")
     return result.stdout
