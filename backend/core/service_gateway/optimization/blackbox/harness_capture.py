@@ -513,10 +513,11 @@ def snapshot_session(
     which hold the key; a workspace entry named ``SESSIONS_DIR``, whose slot
     holds the real session folder; the session folder's logs
     (``_SESSION_LOGS``); and a ``.git`` entry in any letter case, at any
-    depth, which the tree store refuses (SKY-810). Left out and recorded: entries that cannot be read or
-    stored (a failed open, a name that holds the key or is not UTF-8, a pipe
-    or socket, a linked session folder), folders at ``_MAX_DEPTH``, files past
-    the size caps and entries past the count cap.
+    depth, which the tree store refuses (SKY-810). Left out and recorded:
+    entries that cannot be read or stored (a failed open, a name that holds
+    the key or is not UTF-8, a pipe or socket, a linked session folder),
+    folders at ``_MAX_DEPTH``, files past the size caps and entries past the
+    count cap.
 
     The session folder is walked first, so a full workspace cannot use up the
     caps before it: a resume needs the harness's own state more than any file.

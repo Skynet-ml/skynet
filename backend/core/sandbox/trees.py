@@ -317,10 +317,10 @@ def tar_to_tree(store: TreeStore, run_id: str, data: bytes) -> str:
 
     Raises:
         BadArchiveError: When the archive is over a size limit, does not
-            read, a member path leaves the top level, is too deep or holds a NUL byte or a
-            ``.git`` part in any letter case, a name
-            is both a file and a folder, a name is too long or not UTF-8, or
-            a hard link names no earlier file.
+            read, a member path leaves the top level, is too deep or holds a
+            NUL byte or a ``.git`` part in any letter case, a name is both a
+            file and a folder, a name is too long or not UTF-8, or a hard
+            link names no earlier file.
     """
     if len(data) > MAX_ARCHIVE_BYTES:
         raise BadArchiveError(f"The archive is larger than {MAX_ARCHIVE_BYTES} bytes.")
