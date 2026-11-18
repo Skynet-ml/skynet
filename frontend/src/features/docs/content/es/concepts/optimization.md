@@ -2,26 +2,29 @@ Skynet es Optimize Anything: cada ejecución optimiza un repositorio. Un motor p
 
 ## El contrato común
 
-Cada ejecución tiene un repositorio y un evaluador. El evaluador es una función de Python que recibe la ruta de una versión del repositorio y un caso.
+Cada ejecución tiene un repositorio, un archivo `optimize.toml` con una entrada `[run]` o una etapa `[target.<name>]`, y un evaluador. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador es una función de Python que recibe la salida de la entrada y el caso.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` es la carpeta de una versión del repositorio, después de ejecutar el comando de configuración.
+- `output` es lo que la entrada `[run]` devolvió para el caso.
 - `case` es un dict. `case["input"]` contiene los campos de entrada de un caso. `case["expected"]` contiene el valor esperado, o `None` cuando el caso no tiene ninguno.
+- `repo_path` es una carpeta que contiene solo tus archivos de métrica.
 - `score` devuelve un par: un número y un dict con una cadena `"feedback"`.
 
-El repositorio tiene un archivo `serve.py` en su raíz con `def serve(input)`. El evaluador puede llamarlo, y Skynet lo usa para servir la mejor versión después de la ejecución.
+El repositorio tiene un archivo `serve.py` en su raíz con `def serve(input)`. La entrada `[run]` lo llama en su propia caja de sandbox. Skynet lo usa para servir la mejor versión después de la ejecución.
+
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja no contiene archivos del repositorio ni código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
 
 > [!NOTE]
 > El agente de código que escribe las versiones no puede ver el código fuente del evaluador, los valores esperados ni los secretos de la ejecución.
@@ -58,7 +61,7 @@ def label(message):
 - Las llamadas con las claves de Skynet se miden contra el presupuesto de la ejecución.
 - Con tu propia clave (BYOK), la llamada va a la clave de tu proveedor. Skynet no cobra ninguna tarifa por el modelo.
 - La pasarela rechaza las solicitudes para cualquier otro modelo.
-- Los secretos de la ejecución llegan a tu código y a tu evaluador como variables de entorno. El nombre de la variable es el nombre del secreto. Skynet oculta los valores de los secretos en la salida.
+- Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. Skynet añade el secreto fuera del sandbox y oculta los valores de los secretos en la salida.
 
 El sandbox no tiene otro acceso a la red.
 

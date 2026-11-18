@@ -2,26 +2,29 @@ Skynet هو Optimize Anything: كل تشغيل يحسّن مستودعًا. يق
 
 ## العقد المشترك
 
-لكل تشغيل مستودع ومُقيِّم. المُقيِّم دالة Python تتلقى مسار نسخة واحدة من المستودع وحالة واحدة.
+لكل تشغيل مستودع، وملف `optimize.toml` فيه `entry` في `[run]` أو مرحلة `[target.<name>]`، ومُقيِّم. يشغّل `entry` في `[run]` نسخة واحدة من المستودع على حالة واحدة. المُقيِّم دالة Python تتلقى مخرجات `entry` والحالة.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path` هو مجلد نسخة واحدة من المستودع، بعد تشغيل أمر الإعداد.
+- `output` هو ما أرجعه `entry` في `[run]` للحالة.
 - `case` قاموس (dict). يحتوي `case["input"]` على حقول الإدخال لحالة واحدة. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` إذا لم تكن للحالة قيمة متوقعة.
+- `repo_path` مجلد يحتوي ملفات المقياس فقط.
 - تُرجع `score` زوجًا: رقمًا، وقاموسًا فيه سلسلة نصية `"feedback"`.
 
-في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يمكن للمُقيِّم أن يستدعيه، ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
+في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]` في صندوق معزول خاص به. ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
+
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق ملفات المستودع ولا كود النسخة، لذلك لا يستطيع المُقيِّم استيراد `serve.py`. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from skynet import call`. إذا لم يوجد `entry` في `[run]` ولا مرحلة `[target.<name>]`، يرفض Skynet ملف `optimize.toml`.
 
 > [!NOTE]
 > لا يستطيع وكيل البرمجة الذي يكتب النسخ رؤية مصدر المُقيِّم ولا القيم المتوقعة ولا أسرار التشغيل.
@@ -58,7 +61,7 @@ def label(message):
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل.
 - بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك. لا تفرض Skynet رسومًا على النموذج.
 - ترفض البوابة الطلبات لأي نموذج آخر.
-- تصل أسرار التشغيل إلى كودك وإلى مُقيِّمك كمتغيرات بيئة. اسم المتغير هو اسم السر. يُخفي Skynet قيم الأسرار في المخرجات.
+- لا يتلقى كودك ومُقيِّمك أسرار التشغيل كمتغيرات بيئة. يصل السر إلى دور ما فقط عبر جدول `[services.<name>]` يذكره الدور في `[run] services` أو `[metric] services`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يضيف Skynet السر خارج البيئة المعزولة، ويُخفي قيم الأسرار في المخرجات.
 
 لا يوجد للبيئة المعزولة أي وصول آخر إلى الشبكة.
 

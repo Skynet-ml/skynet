@@ -55,26 +55,27 @@ Skynet مخزن را در حساب GitHub شما می‌سازد. دستیار �
 
 ## ۵. معیار و اجرا
 
-مرحلهٔ آخر **معیار و اجرا** است. دستیار امتیازدهنده را برای شما می‌نویسد. می‌توانید آن را ویرایش کنید. امتیازدهنده مسیر یک نسخه از مخزن و یک مورد را دریافت می‌کند:
+مرحلهٔ آخر **معیار و اجرا** است. دستیار امتیازدهنده و فایل `optimize.toml` را برای شما می‌نویسد. می‌توانید آن‌ها را ویرایش کنید. `entry` بخش `[run]` یک نسخه از مخزن را روی یک مورد اجرا می‌کند. امتیازدهنده خروجی `entry` و مورد را دریافت می‌کند:
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return 1.0, {"feedback": "Correct label."}
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` ستون‌های ورودی یک مورد را نگه می‌دارد. `case["expected"]` ستون خروجی را نگه می‌دارد، با نام ستون به‌عنوان کلید. مخزن یک فایل `serve.py` با `def serve(input)` دارد. Skynet بعد از اجرا از همین تابع برای ارائهٔ بهترین نسخه استفاده می‌کند.
+`case["input"]` ستون‌های ورودی یک مورد را نگه می‌دارد. `case["expected"]` ستون خروجی را نگه می‌دارد، با نام ستون به‌عنوان کلید. مخزن یک فایل `serve.py` با `def serve(input)` دارد. `entry` بخش `[run]` آن را فراخوانی می‌کند، و `output` مقدار بازگشتی آن است. امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه و بدون فایل‌های مخزن اجرا می‌شود، پس نمی‌تواند `serve.py` را import کند. Skynet بعد از اجرا از همین تابع برای ارائهٔ بهترین نسخه استفاده می‌کند.
 
-سپس بررسی را اجرا کنید. این بررسی راه‌اندازی و امتیازدهندهٔ شما را در محیط اجرا روی نسخهٔ شروع اجرا می‌کند. فقط بعد از قبولی در بررسی می‌توانید اجرا را شروع کنید.
+سپس بررسی را اجرا کنید. این بررسی راه‌اندازی، `entry` بخش `[run]` و امتیازدهندهٔ شما را در محیط اجرا روی نسخهٔ شروع اجرا می‌کند. فقط بعد از قبولی در بررسی می‌توانید اجرا را شروع کنید.
 
 ## ۶. شروع و پیگیری
 

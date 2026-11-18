@@ -55,26 +55,27 @@ Lisez [Moteurs](/docs/concepts/engines) pour choisir un moteur précis.
 
 ## 5. Métrique et exécution
 
-La dernière étape est **Métrique et exécution**. L'assistant rédige l'évaluateur pour vous. Vous pouvez le modifier. L'évaluateur reçoit le chemin d'une version du dépôt et un cas :
+La dernière étape est **Métrique et exécution**. L'assistant rédige l'évaluateur et le fichier `optimize.toml` pour vous. Vous pouvez les modifier. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur reçoit la sortie de l'entrée et le cas :
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return 1.0, {"feedback": "Correct label."}
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` contient les colonnes d'entrée d'un cas. `case["expected"]` contient la colonne de sortie, indexée par le nom de la colonne. Le dépôt contient un fichier `serve.py` avec `def serve(input)`. Skynet utilise la même fonction pour servir la meilleure version après l'exécution.
+`case["input"]` contient les colonnes d'entrée d'un cas. `case["expected"]` contient la colonne de sortie, indexée par le nom de la colonne. Le dépôt contient un fichier `serve.py` avec `def serve(input)`. L'entrée `[run]` l'appelle, et `output` est sa valeur de retour. L'évaluateur s'exécute dans une boîte de sandbox séparée sans fichiers du dépôt, donc il ne peut pas importer `serve.py`. Skynet utilise la même fonction pour servir la meilleure version après l'exécution.
 
-Lancez ensuite la vérification. La vérification exécute votre installation et votre évaluateur sur la version de départ, dans la sandbox. Vous ne pouvez lancer l'exécution qu'une fois la vérification réussie.
+Lancez ensuite la vérification. La vérification exécute votre installation, l'entrée `[run]` et votre évaluateur sur la version de départ, dans la sandbox. Vous ne pouvez lancer l'exécution qu'une fois la vérification réussie.
 
 ## 6. Lancer et suivre
 
