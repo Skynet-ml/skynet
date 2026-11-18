@@ -1805,6 +1805,21 @@ def test_a_bug_in_a_model_call_ends_the_run_and_gepa_does_not_call_the_model_aga
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
 
 
+def test_a_component_that_the_parent_lacks_is_kept_as_the_failure(tmp_path: Path) -> None:
+    """GEPA would retry a proposal for a component that the parent lacks, so the ``KeyError`` ends the run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = _FakeCalls([])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+    with pytest.raises(KeyError):
+        proposer({"c": "tree-parent"}, {}, ["other"])
+    assert isinstance(proposer.failure, KeyError)
+    assert calls.prompts == []
+
+
 def test_a_parent_write_that_the_run_cannot_see_ends_the_run(tmp_path: Path) -> None:
     """``start_tree`` checks the seed and ``put_files`` gives each other parent, so a ``LookupError`` there is a bug.
 
