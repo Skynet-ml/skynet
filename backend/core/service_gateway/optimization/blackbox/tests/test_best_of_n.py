@@ -618,7 +618,7 @@ def brief(
 def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_paths(
     brief: Callable[..., str],
 ) -> None:
-    """Editable ``.`` shows every file in sorted order, except read-only, constrained and hidden ones."""
+    """Editable ``.`` shows every file in sorted order, except read-only and hidden ones."""
     files = {
         "src/b.py": b"B-SOURCE",
         "src/a.py": b"A-SOURCE",
@@ -632,15 +632,52 @@ def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_pa
     text = brief(files, (".",), hidden=("eval", "optimize.toml"), readonly=("tests",), constrained=("./config.yaml",))
 
     assert "You may change: the whole repository." in text
-    assert "Do not change: `tests`, `config.yaml`." in text
-    assert text.index("`README`") < text.index("`src/a.py`") < text.index("`src/b.py`")
+    assert "Do not change: `tests`." in text
+    assert "You may change these paths only within the rules of the constraints file: `config.yaml`." in text
+    assert text.index("`README`") < text.index("`config.yaml`:") < text.index("`src/a.py`") < text.index("`src/b.py`")
     assert "A-SOURCE" in text
     assert "B-SOURCE" in text
     assert "README-TEXT" in text
+    assert "CONFIG-TEXT" in text
     assert "TEST-SOURCE" not in text
-    assert "CONFIG-TEXT" not in text
     assert "METRIC-SECRET" not in text
     assert "OPTIMIZE-SECRET" not in text
+
+
+def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_their_files(
+    brief: Callable[..., str],
+) -> None:
+    """A constrained path gets its own sorted line and its content, and a hidden constrained path never shows."""
+    files = {
+        "src/app.py": b"APP-SOURCE",
+        "tests/test_app.py": b"TEST-SOURCE",
+        "conf/b.yaml": b"CONF-B",
+        "conf/a.yaml": b"CONF-A",
+        "config.yaml": b"CONFIG-TEXT",
+        "conf/secret.yaml": b"CONF-SECRET",
+        "optimize.toml": b"OPTIMIZE-SECRET",
+    }
+
+    text = brief(
+        files,
+        ("src",),
+        hidden=("conf/secret.yaml", "optimize.toml"),
+        readonly=("tests",),
+        constrained=("./config.yaml", "conf", "optimize.toml", "conf/secret.yaml"),
+    )
+
+    assert "Do not change: `tests`." in text
+    assert "You may change these paths only within the rules of the constraints file: `conf`, `config.yaml`." in text
+    assert text.index("`src/app.py`:") < text.index("`conf/a.yaml`:") < text.index("`conf/b.yaml`:")
+    assert text.index("`conf/b.yaml`:") < text.index("`config.yaml`:")
+    assert "CONF-A" in text
+    assert "CONF-B" in text
+    assert "CONFIG-TEXT" in text
+    assert "APP-SOURCE" in text
+    assert "TEST-SOURCE" not in text
+    assert "secret" not in text
+    assert "SECRET" not in text
+    assert "optimize.toml" not in text
 
 
 def test_a_repository_brief_never_shows_a_file_in_a_hidden_folder_or_through_a_dot_slash_path(

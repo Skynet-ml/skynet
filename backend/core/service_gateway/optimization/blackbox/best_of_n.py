@@ -230,7 +230,7 @@ def _repository_brief(
     read_file: Callable[[str, str], bytes | None],
     list_files: Callable[[str, str], list[str] | None],
 ) -> str:
-    """Brief the model on the repository: the candidate's form, the path rules and the editable files.
+    """Brief the model on the repository: the candidate's form, the path rules and the files it may change.
 
     Upstream's prompt is fixed, so the brief goes in the task's background,
     which upstream sends unchanged in every sample's prompt. The files come
@@ -248,11 +248,9 @@ def _repository_brief(
     # The seed contract: the engine never learns a hidden name (E61), so the
     # path rules leave out each hidden path and each path inside a hidden folder.
     editable_paths = [path for path in map(posixpath.normpath, seed.editable_paths) if _visible(seed, path)]
-    fixed = [
-        path
-        for path in map(posixpath.normpath, (*seed.readonly_paths, *seed.constrained_paths))
-        if _visible(seed, path)
-    ]
+    fixed = [path for path in map(posixpath.normpath, seed.readonly_paths) if _visible(seed, path)]
+    # A constrained path may change, but only within the rules of the repository's constraints file.
+    constrained = sorted({path for path in map(posixpath.normpath, seed.constrained_paths) if _visible(seed, path)})
     editable = ", ".join("the whole repository" if path == "." else f"`{path}`" for path in editable_paths)
     lines = [
         "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
@@ -264,8 +262,14 @@ def _repository_brief(
     ]
     if fixed:
         lines.append("Do not change: " + ", ".join(f"`{path}`" for path in fixed) + ".")
+    if constrained:
+        lines.append(
+            "You may change these paths only within the rules of the constraints file: "
+            + ", ".join(f"`{path}`" for path in constrained)
+            + "."
+        )
     shown: dict[str, None] = {}
-    for path in editable_paths:
+    for path in (*editable_paths, *constrained):
         for name in list_files(seed.tree_id, path) or [path]:
             if not any(name == other or name.startswith(f"{other}/") for other in fixed):
                 shown[name] = None
