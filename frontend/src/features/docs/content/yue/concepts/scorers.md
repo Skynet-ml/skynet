@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+如果一個版本嘅 `[run]` 入口失敗，Skynet 會自己俾嗰個版本 0 分。如果入口開唔到、超時，或者俾信號停咗，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。非零嘅結束碼唔算失敗：評分器會喺 `output` 收到佢。
 
 ### 用模型做評判
 
@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## 模型呼叫同密鑰
 
 - 用 Skynet 金鑰嘅呼叫會計入運行預算。用你自己嘅金鑰（BYOK）嘅話，呼叫會計落你嘅供應商金鑰，Skynet 唔收模型費用。睇 [預算同收費](/docs/concepts/billing)。
-- 運行密鑰會以環境變數嘅形式去到評分器。變數名就係密鑰名，例如 `os.environ["SEARCH_API_KEY"]`。
+- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `SKYNET_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
 - Skynet 會喺評分器輸出同日誌入面隱藏密鑰嘅值。
 
 ## 限制

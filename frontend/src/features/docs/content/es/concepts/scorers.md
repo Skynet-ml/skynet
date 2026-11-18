@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+Skynet da por sí mismo un 0 a una versión cuando su entrada `[run]` falla. Si la entrada no arranca, supera el tiempo límite o una señal la detiene, el comentario es `Run failed: …`, y Skynet no llama al evaluador. Un código de salida distinto de cero no es un fallo: el evaluador lo recibe en `output`.
 
 ### Modelo como juez
 
@@ -131,7 +131,7 @@ El evaluador también puede usar cualquier cliente compatible con OpenAI con las
 ## Llamadas al modelo y secretos
 
 - Las llamadas con las claves de Skynet se miden contra el presupuesto de la ejecución. Con tu propia clave (BYOK), la llamada va a la clave de tu proveedor, sin tarifa de modelo de Skynet. Lee [Facturación](/docs/concepts/billing).
-- Los secretos de la ejecución llegan al evaluador como variables de entorno. El nombre de la variable es el nombre del secreto, por ejemplo `os.environ["SEARCH_API_KEY"]`.
+- El evaluador no recibe los secretos de la ejecución como variables de entorno. Un secreto llega al evaluador solo a través de una tabla `[services.<name>]` que `[metric] services` incluye. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El evaluador envía sus solicitudes a la URL de `SKYNET_SERVICE_<NAME>_URL`. Skynet añade el secreto fuera del sandbox.
 - Skynet oculta los valores de los secretos en la salida del evaluador y en los registros.
 
 ## Límites

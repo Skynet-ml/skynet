@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+バージョンの `[run]` エントリーが失敗すると、Skynet が自分でそのバージョンを 0 と採点します。エントリーが起動できない、タイムアウトする、またはシグナルで止まると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。0 以外の終了コードは失敗ではありません。スコアラーは `output` でそれを受け取ります。
 
 ### 審査員としてのモデル
 
@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## モデル呼び出しとシークレット
 
 - Skynet のキーによる呼び出しは、実行予算に対して計測されます。独自のキー (BYOK) では、呼び出しはあなたのプロバイダーキーに送られ、Skynet のモデル料金はかかりません。[請求](/docs/concepts/billing) をお読みください。
-- 実行シークレットは、環境変数としてスコアラーに届きます。変数名はシークレット名です。例: `os.environ["SEARCH_API_KEY"]`。
+- スコアラーは、実行シークレットを環境変数として受け取りません。シークレットがスコアラーに届くのは、`[metric] services` が挙げる `[services.<name>]` テーブルを通る場合だけです。シークレットは、テーブルの `headers` に `${NAME}` として書きます。スコアラーは、`SKYNET_SERVICE_<NAME>_URL` の URL にリクエストを送ります。Skynet はサンドボックスの外でシークレットを追加します。
 - Skynet は、スコアラーの出力とログの中のシークレットの値を隠します。
 
 ## 制限

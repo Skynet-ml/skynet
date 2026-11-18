@@ -61,7 +61,7 @@ def label(message):
 - Aufrufe über die Schlüssel von Skynet werden auf das Laufbudget angerechnet.
 - Mit Ihrem eigenen Schlüssel (BYOK) geht der Aufruf an Ihren Anbieterschlüssel. Skynet berechnet keine Modellgebühr.
 - Das Gateway lehnt Anfragen für jedes andere Modell ab.
-- Die Secrets des Durchlaufs erreichen Ihren Code und Ihren Scorer als Umgebungsvariablen. Der Variablenname ist der Name des Secrets. Skynet verbirgt Secret-Werte in der Ausgabe.
+- Ihr Code und Ihr Scorer erhalten keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht eine Rolle nur über eine Tabelle `[services.<name>]`, die die Rolle in `[run] services` oder `[metric] services` nennt. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Skynet fügt das Secret außerhalb der Sandbox hinzu und verbirgt Secret-Werte in der Ausgabe.
 
 Die Sandbox hat keinen anderen Netzwerkzugang.
 

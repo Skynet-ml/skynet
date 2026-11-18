@@ -61,7 +61,7 @@ def label(message):
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür.
 - Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider. Skynet model ücreti almaz.
 - Ağ geçidi başka herhangi bir model için gelen istekleri reddeder.
-- Çalıştırma gizli anahtarları kodunuza ve puanlayıcınıza ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır. Skynet gizli değerleri çıktıda gizler.
+- Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Skynet gizli anahtarı sandbox'ın dışında ekler ve gizli değerleri çıktıda gizler.
 
 Sandbox'ın başka bir ağ erişimi yoktur.
 

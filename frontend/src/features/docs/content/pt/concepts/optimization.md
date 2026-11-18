@@ -61,7 +61,7 @@ def label(message):
 - As chamadas com as chaves do Skynet são medidas no orçamento da execução.
 - Com a sua própria chave (BYOK), a chamada vai para a chave do seu provedor. O Skynet não cobra taxa de modelo.
 - O gateway recusa pedidos para qualquer outro modelo.
-- Os segredos da execução chegam ao seu código e ao seu avaliador como variáveis de ambiente. O nome da variável é o nome do segredo. O Skynet oculta os valores dos segredos na saída.
+- O seu código e o seu avaliador não recebem os segredos da execução como variáveis de ambiente. Um segredo chega a um papel só por uma tabela `[services.<name>]` que o papel lista em `[run] services` ou `[metric] services`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O Skynet adiciona o segredo fora da sandbox e oculta os valores dos segredos na saída.
 
 A sandbox não tem nenhum outro acesso à rede.
 

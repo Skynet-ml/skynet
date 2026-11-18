@@ -61,7 +61,7 @@ def label(message):
 - Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione.
 - Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider. Skynet non applica costi per il modello.
 - Il gateway rifiuta le richieste per qualsiasi altro modello.
-- I segreti dell'esecuzione arrivano al tuo codice e al tuo scorer come variabili d'ambiente. Il nome della variabile è il nome del segreto. Skynet nasconde i valori dei segreti nell'output.
+- Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Skynet aggiunge il segreto fuori dalla sandbox e nasconde i valori dei segreti nell'output.
 
 La sandbox non ha altri accessi alla rete.
 

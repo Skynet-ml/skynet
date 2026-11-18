@@ -61,7 +61,7 @@ def label(message):
 - Les appels sur les clés de Skynet sont décomptés du budget de l'exécution.
 - Avec votre propre clé (BYOK), l'appel passe par la clé de votre fournisseur. Skynet ne facture aucuns frais de modèle.
 - La passerelle refuse les requêtes pour tout autre modèle.
-- Les secrets de l'exécution arrivent à votre code et à votre évaluateur sous forme de variables d'environnement. Le nom de la variable est le nom du secret. Skynet masque les valeurs des secrets dans la sortie.
+- Votre code et votre évaluateur ne reçoivent pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à un rôle seulement par une table `[services.<name>]` que le rôle liste dans `[run] services` ou `[metric] services`. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. Skynet ajoute le secret hors de la sandbox et masque les valeurs des secrets dans la sortie.
 
 La sandbox n'a aucun autre accès au réseau.
 

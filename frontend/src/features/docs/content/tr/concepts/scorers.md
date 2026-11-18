@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+Bir sürümün `[run]` giriş noktası başarısız olursa Skynet o sürüme kendisi 0 puan verir. Giriş noktası başlayamazsa, zaman aşımına uğrarsa veya bir sinyal onu durdurursa geri bildirim `Run failed: …` olur ve Skynet puanlayıcıyı çağırmaz. Sıfır olmayan bir çıkış kodu başarısızlık değildir: puanlayıcı onu `output` içinde alır.
 
 ### Hakem olarak model
 
@@ -131,7 +131,7 @@ Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenle
 ## Model çağrıları ve gizli anahtarlar
 
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
-- Çalıştırma gizli anahtarları puanlayıcıya ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır, örneğin `os.environ["SEARCH_API_KEY"]`.
+- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `SKYNET_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
 - Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler

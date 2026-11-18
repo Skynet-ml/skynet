@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+يعطي Skynet النسخة الدرجة 0 بنفسه عندما يفشل `entry` في `[run]` الخاص بها. إذا لم يبدأ `entry`، أو تجاوز المهلة، أو أوقفته إشارة، تكون الملاحظات `Run failed: …`، ولا يستدعي Skynet المُقيِّم. رمز الخروج غير الصفري ليس فشلًا: يتلقاه المُقيِّم في `output`.
 
 ### النموذج كحَكَم
 
@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## استدعاءات النماذج والأسرار
 
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل. بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك، دون رسوم نموذج من Skynet. اقرأ [الفوترة](/docs/concepts/billing).
-- تصل أسرار التشغيل إلى المُقيِّم كمتغيرات بيئة. اسم المتغير هو اسم السر، مثل `os.environ["SEARCH_API_KEY"]`.
+- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `SKYNET_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
 - يُخفي Skynet قيم الأسرار في مخرجات المُقيِّم وفي السجلات.
 
 ## الحدود

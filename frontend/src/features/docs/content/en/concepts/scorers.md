@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+Skynet scores a version 0 itself when its `[run]` entry fails. If the entry cannot start, times out or a signal stops it, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code is not a failure: the scorer gets it in `output`.
 
 ### Model as judge
 
@@ -131,7 +131,7 @@ The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`,
 ## Model calls and secrets
 
 - Calls on Skynet's keys are metered against the run budget. With your own key (BYOK), the call goes to your provider key, with no Skynet model fee. Read [Billing](/docs/concepts/billing).
-- Run secrets reach the scorer as environment variables. The variable name is the secret name, for example `os.environ["SEARCH_API_KEY"]`.
+- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
 - Skynet hides secret values in the scorer output and in the logs.
 
 ## Limits

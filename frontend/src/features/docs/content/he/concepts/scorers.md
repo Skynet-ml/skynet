@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+‏Skynet נותן בעצמו ציון 0 לגרסה כשה-`entry` של `[run]` שלה נכשל. אם ה-`entry` לא מתחיל, חורג מהזמן הקצוב או שאות עוצר אותו, המשוב הוא `Run failed: …`, ו-Skynet לא קורא לפונקציית הניקוד. קוד יציאה שונה מאפס אינו כישלון: פונקציית הניקוד מקבלת אותו ב-`output`.
 
 ### מודל כשופט
 
@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## קריאות למודל וסודות
 
 - קריאות על המפתחות של Skynet נמדדות מול תקציב הריצה. עם מפתח משלך (BYOK), הקריאה הולכת למפתח של הספק שלך, בלי עמלת מודל של Skynet. קרא/י את [חיוב](/docs/concepts/billing).
-- הסודות של הריצה מגיעים לפונקציית הניקוד כמשתני סביבה. שם המשתנה הוא שם הסוד, למשל `os.environ["SEARCH_API_KEY"]`.
+- פונקציית הניקוד לא מקבלת את הסודות של הריצה כמשתני סביבה. סוד מגיע לפונקציית הניקוד רק דרך טבלת `[services.<name>]` ש-`[metric] services` מפרט. כתוב/י את הסוד ב-`headers` של הטבלה בצורה `${NAME}`. פונקציית הניקוד שולחת את הבקשות שלה לכתובת ה-URL שב-`SKYNET_SERVICE_<NAME>_URL`. ‏Skynet מוסיף את הסוד מחוץ ל-sandbox.
 - Skynet מסתיר את ערכי הסודות בפלט של פונקציית הניקוד וביומנים.
 
 ## מגבלות

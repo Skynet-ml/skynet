@@ -61,7 +61,7 @@ def label(message):
 - Las llamadas con las claves de Skynet se miden contra el presupuesto de la ejecución.
 - Con tu propia clave (BYOK), la llamada va a la clave de tu proveedor. Skynet no cobra ninguna tarifa por el modelo.
 - La pasarela rechaza las solicitudes para cualquier otro modelo.
-- Los secretos de la ejecución llegan a tu código y a tu evaluador como variables de entorno. El nombre de la variable es el nombre del secreto. Skynet oculta los valores de los secretos en la salida.
+- Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. Skynet añade el secreto fuera del sandbox y oculta los valores de los secretos en la salida.
 
 El sandbox no tiene otro acceso a la red.
 

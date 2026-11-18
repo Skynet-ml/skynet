@@ -93,12 +93,12 @@ timeout = 300
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output is None:
-        return 0.0, {"feedback": "The tests did not run."}
     if output["exit_code"] == 0:
         return 1.0, {"feedback": "All tests pass."}
     return 0.0, {"feedback": output["stdout"][-2000:]}
 ```
+
+버전의 `[run]` 엔트리가 실패하면 Skynet이 직접 그 버전에 0점을 줍니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 0이 아닌 종료 코드는 실패가 아닙니다. 채점기는 그 값을 `output`으로 받습니다.
 
 ### 모델을 심사자로 사용
 
@@ -131,7 +131,7 @@ def score(repo_path, case, output=None):
 ## 모델 호출과 시크릿
 
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다. 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 가며, Skynet 모델 요금은 없습니다. [예산과 결제](/docs/concepts/billing)를 읽어 보세요.
-- 실행 시크릿은 환경 변수로 채점기에 전달됩니다. 변수 이름은 시크릿 이름입니다. 예: `os.environ["SEARCH_API_KEY"]`.
+- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블을 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `SKYNET_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
 - Skynet은 채점기 출력과 로그에서 시크릿 값을 숨깁니다.
 
 ## 제한

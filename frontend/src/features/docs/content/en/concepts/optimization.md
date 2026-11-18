@@ -61,7 +61,7 @@ def label(message):
 - Calls on Skynet's keys are metered against the run budget.
 - With your own key (BYOK), the call goes to your provider key. Skynet charges no model fee.
 - The gateway refuses requests for any other model.
-- Run secrets reach your code and your scorer as environment variables. The variable name is the secret name. Skynet hides secret values in the output.
+- Your code and your scorer get no run secrets as environment variables. A secret reaches a role only through a `[services.<name>]` table that the role lists in `[run] services` or `[metric] services`. Write the secret in the table's `headers` as `${NAME}`. Skynet adds the secret outside the sandbox and hides secret values in the output.
 
 The sandbox has no other network access.
 
