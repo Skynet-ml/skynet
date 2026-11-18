@@ -588,11 +588,24 @@ def test_gepa_hands_a_repository_run_to_the_native_runtime(tmp_path: Path, monke
 def test_best_of_n_hands_a_repository_run_to_the_native_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Best-of-N on a repository samples coding-agent versions in the native sandbox."""
+    """Best-of-N on a repository samples coding-agent versions in the native sandbox.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to replace the native runtime.
+    """
     calls: list[str] = []
 
     def fake_native(engine_id: str, *_: object) -> Result:
-        """Record which native engine Best-of-N asked for."""
+        """Record which native engine Best-of-N asked for.
+
+        Args:
+            engine_id: The native engine that Best-of-N asked for.
+            *_: The task, server and context, which the fake ignores.
+
+        Returns:
+            A fixed result with a score of 1.0.
+        """
         calls.append(engine_id)
         return Result(best_candidate="", best_score=1.0, total_evals=1)
 
