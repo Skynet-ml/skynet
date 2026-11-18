@@ -908,6 +908,44 @@ def test_a_long_command_output_is_cut(
     assert "[... 51 characters cut ...]" in stdout
 
 
+def test_a_long_evaluate_result_is_cut(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """An evaluate result past ``OUTPUT_CHARS`` keeps its head and tail, so the next prompt stays bounded.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score by length, with a long side information text.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: Not used.
+
+        Returns:
+            The length and the long text.
+        """
+        del loop, case
+        return float(len(str(candidate))), {"log": "z" * loop_tools.OUTPUT_CHARS}
+
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop, max_evals=2, stop_at_score=None, score=score)
+
+    result = model.calls[2][-1]
+    assert result["role"] == "tool"
+    assert len(result["content"]) < loop_tools.OUTPUT_CHARS + 100
+    assert "characters cut ...]" in result["content"]
+
+
 def test_a_prompt_past_its_cap_stops_the_session_and_the_run_goes_on(
     owner: tuple[User, int],
     engine: Engine,
