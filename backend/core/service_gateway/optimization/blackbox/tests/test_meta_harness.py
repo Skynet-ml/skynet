@@ -50,6 +50,8 @@ from core.worker.tests.test_engine_loop import (
     _CountingSource,
     _new_generation,
     _steps,
+    _store,
+    _tree,
     _WorkerDiedError,
 )
 
@@ -415,7 +417,7 @@ def test_a_repository_run_is_refused(
     """A repository run needs ``save.sh`` and git in the box, which this port does not give yet."""
     model = _Proposer()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
-    seed = RepoSeed(tree_id="tree")
+    seed = RepoSeed(tree_id=_tree(trees, "a.py", "a"))
 
     with pytest.raises(ServiceError, match="repository"):
         _run(loop, repo_seed=seed)
@@ -428,7 +430,8 @@ def test_a_bash_call_cannot_read_a_hidden_path(
     """The bash tool runs through the loop, so ``cat`` of the hidden ``eval/`` and ``optimize.toml`` gives nothing."""
     hidden = hidden_hashes(["eval", "optimize.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1, hidden=hidden)
-    tree = loop.put_files({"eval/metric.py": b"secret", "optimize.toml": b"secret", "src/a.py": b"a"})
+    # The loop refuses to write a hidden path, so the seed tree goes straight into the tree store.
+    tree = _store(trees, {"eval/metric.py": b"secret", "optimize.toml": b"secret", "src/a.py": b"a"})
     ctx = loop.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
     config = OptimizeAnythingConfig(engine="meta_harness", run_dir=str(tmp_path / "mh"), engine_config={"model": ""})
     worker = meta_mod._WorkerMetaHarness(config, ctx)
