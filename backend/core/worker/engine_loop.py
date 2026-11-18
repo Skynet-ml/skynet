@@ -79,14 +79,14 @@ write, replace or remove a hidden path, and a ``run`` whose command writes one
 fails with :class:`TreeRejectedError`, as a box error that a replay raises
 again. A refusal confirms that a guessed path is hidden, but never gives its
 content.
-:meth:`EngineLoop.remaining_cost_usd`
-commits the budget room that it reads as a step with no cost, as a durable
-workflow step does, and a replay gives the committed room. An engine that
-stops on the room then stops at the same place on a resume.
-:meth:`EngineLoop.context` puts these calls, ``run`` and the caller's
-:class:`RepoSeed` on the :class:`EngineContext`. The engine's seed names the
-seed tree without its hidden paths. The raw seed tree id is a hash of the
-hidden content too, so the engine never gets it.
+
+:meth:`EngineLoop.remaining_cost_usd` commits the budget room that it reads as
+a step with no cost, as a durable workflow step does, and a replay gives the
+committed room. An engine that stops on the room then stops at the same place
+on a resume. :meth:`EngineLoop.context` puts these calls, ``run`` and the
+caller's :class:`RepoSeed` on the :class:`EngineContext`. The engine's seed
+names the seed tree without its hidden paths. The raw seed tree id is a hash
+of the hidden content too, so the engine never gets it.
 
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
