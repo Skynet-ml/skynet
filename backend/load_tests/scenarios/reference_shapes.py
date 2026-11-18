@@ -20,12 +20,16 @@ The report prices sandbox use per run from the metered box-seconds and list
 prices: the new path opens a box only for a step, and the old path kept one
 box open for the whole run, also while the engine waited for the model.
 
+With no box kill, each shape's result is deterministic: the scenario
+compares it to the result that the shape's own score formula gives.
+
 The chaos gate (``chaos_gate.py``) reuses this harness.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import shlex
@@ -128,6 +132,7 @@ class Shape:
         work_script: The seed tree's ``work.sh``; it writes ``answer.txt`` from the candidate in ``$1``.
         metric_script: The metric tree's ``score.awk``; it prints the score from ``outputs/answer.txt``.
         vcpus: The box size.
+        score: The score that ``work.sh`` and ``score.awk`` give for an integer candidate, as Python computes it.
         gpu: The GPU type of the ``gpu:<type>`` placement, or ``None`` for a CPU shape.
     """
 
@@ -135,6 +140,7 @@ class Shape:
     work_script: str
     metric_script: str
     vcpus: int
+    score: Callable[[int], float]
     gpu: str | None = None
 
     def command(self, candidate: str) -> str:
@@ -154,6 +160,32 @@ class Shape:
         return "awk -f metric/score.awk outputs/answer.txt"
 
 
+def _fixed(value: float, places: int) -> float:
+    """Round a number as awk's ``printf "%.<places>f"`` prints it.
+
+    Args:
+        value: The number.
+        places: The decimal places.
+
+    Returns:
+        The printed number, read back.
+    """
+    return float(f"{value:.{places}f}")
+
+
+def _circle_packing(n: int) -> float:
+    """Return the circle packing score of one candidate.
+
+    Args:
+        n: The candidate.
+
+    Returns:
+        The score.
+    """
+    r = 1 / (2 * math.sqrt(n))
+    return _fixed(n * 3.14159265 * r * r * (1 - n / 40), 6)
+
+
 SHAPES: tuple[Shape, ...] = (
     Shape(
         "circle_packing",
@@ -163,6 +195,7 @@ SHAPES: tuple[Shape, ...] = (
         ),
         metric_script='{ printf "%.6f\\n", $2 }\n',
         vcpus=2,
+        score=_circle_packing,
     ),
     Shape(
         "llama_cpp",
@@ -171,25 +204,51 @@ SHAPES: tuple[Shape, ...] = (
         ),
         metric_script='{ printf "%.3f\\n", $1 }\n',
         vcpus=4,
+        score=lambda t: _fixed(100 * t / (1 + (t - 4) * (t - 4) / 8), 3),
     ),
     Shape(
         "repo_test_speed",
         work_script='awk -v w="$1" \'BEGIN { printf "%.3f\\n", 60 / w + w }\' > answer.txt\n',
         metric_script='{ printf "%.3f\\n", 100 - $1 }\n',
         vcpus=2,
+        score=lambda w: _fixed(100 - _fixed(60 / w + w, 3), 3),
     ),
     Shape(
         "kernelbench_l1",
         work_script='awk -v b="$1" \'BEGIN { printf "%.4f\\n", 1 / (0.2 + 1 / (b * 16)) }\' > answer.txt\n',
         metric_script='{ printf "%.4f\\n", $1 }\n',
         vcpus=4,
+        score=lambda b: _fixed(1 / (0.2 + 1 / (b * 16)), 4),
         gpu="A10G",
     ),
 )
 
 
+def expected_result(shape: Shape, rounds: int) -> tuple[str, float, int]:
+    """Return the result of a run with no box kill: the fake engine's best candidate by the shape's score.
+
+    Args:
+        shape: The shape.
+        rounds: The fake engine's model rounds.
+
+    Returns:
+        ``(best candidate, best score, evals)``.
+    """
+    best = int(SEED_CANDIDATE)
+    for candidate in range(best + 1, best + rounds + 1):
+        # The fake engine keeps the first best: a later candidate wins only with a higher score.
+        if shape.score(candidate) > shape.score(best):
+            best = candidate
+    return str(best), shape.score(best), rounds + 1
+
+
+# Where each kill kind fires: a ``commit`` kill fires after the step log buffers a step and before it is durable.
+_KILL_POINTS = {"box": {"box"}, "worker": {"model", "box"}, "commit": {"commit"}}
+KILL_KINDS = tuple(_KILL_POINTS)
+
+
 class ChaosSwitch:
-    """One run's chaos fuse: the chaos job arms a kill, and the run's next model call or box command fires it."""
+    """One run's chaos fuse: the chaos job arms a kill, and the run's next model call, box command or commit fires it."""
 
     def __init__(self) -> None:
         """Start unarmed and not live."""
@@ -197,13 +256,15 @@ class ChaosSwitch:
         self._armed: str | None = None
         self.live = False
         self.fired: Counter[str] = Counter()
+        # ``(step id, generation)`` of each step that a commit kill cut off before it was durable.
+        self.cuts: list[tuple[str, int]] = []
 
     def arm(self, kind: str) -> None:
         """Arm one kill.
 
         Args:
             kind: ``box`` kills the next box command; ``worker`` kills the worker at its next model call or box
-                command.
+                command; ``commit`` kills the worker right after its next step commit returns.
         """
         with self._lock:
             self._armed = kind
@@ -212,18 +273,28 @@ class ChaosSwitch:
         """Fire the armed kill when it applies at this point.
 
         Args:
-            where: ``model`` or ``box``.
+            where: ``model``, ``box`` or ``commit``.
 
         Returns:
             The kill that fired, or ``None``.
         """
         with self._lock:
             kind = self._armed
-            if kind is None or (kind == "box" and where != "box"):
+            if kind is None or where not in _KILL_POINTS[kind]:
                 return None
             self._armed = None
             self.fired[kind] += 1
             return kind
+
+    def cut(self, step_id: str, generation: int) -> None:
+        """Keep one step that a commit kill cut off before it was durable.
+
+        Args:
+            step_id: The step id.
+            generation: The generation of the commit.
+        """
+        with self._lock:
+            self.cuts.append((step_id, generation))
 
     def disarm(self) -> None:
         """Drop an armed kill that did not fire."""
@@ -246,6 +317,8 @@ class WorkLog:
         self.lost: Counter[str] = Counter()
         # The scorer names the box step before it asks for the box, as the box source does not get the step.
         self.box_step = ""
+        # The last real work that no commit took yet: the step that the next commit records.
+        self._last: str | None = None
 
     def did(self, step: str) -> None:
         """Count one real model call or box.
@@ -255,6 +328,17 @@ class WorkLog:
         """
         with self._lock:
             self.done[step] += 1
+            self._last = step
+
+    def take_last(self) -> str | None:
+        """Return the last real work that no commit took yet, and clear it.
+
+        Returns:
+            The step's key, or ``None`` when the commit records no new work.
+        """
+        with self._lock:
+            step, self._last = self._last, None
+            return step
 
     def lose(self, step: str) -> None:
         """Count one worker kill that lost a step before it committed, so its resume may do it again.
@@ -540,6 +624,50 @@ class MeteredSource(RuntimeBoxSource):
             self._meter.stopped(self._started.pop(id(box)))
 
 
+class ChaosStepLog(StepLogStore):
+    """A step log that the chaos job can kill right after a commit returns, before the step is durable.
+
+    ``EngineLoop`` waits for each step to be durable before it returns, so a kill at a model call or a box
+    command never lands between a commit and its flush. This kill does: the killed worker leaves the step only
+    in its buffer, the run moves to its next generation, and the flush drops the step at the fence.
+    """
+
+    def __init__(self, *args: Any, switch: ChaosSwitch, work: WorkLog | None, **kwargs: Any) -> None:
+        """Start the step log with the run's chaos switch.
+
+        Args:
+            *args: The :class:`StepLogStore` arguments.
+            switch: The run's chaos switch.
+            work: The run's work log, or ``None``.
+            **kwargs: The other :class:`StepLogStore` arguments.
+        """
+        super().__init__(*args, **kwargs)
+        self._switch = switch
+        self._work = work
+
+    def commit(self, **fields: Any) -> str:
+        """Buffer one step, then kill the worker when the chaos job armed a commit kill.
+
+        Args:
+            **fields: The :meth:`StepLogStore.commit` arguments.
+
+        Returns:
+            The step id.
+
+        Raises:
+            WorkerKilledError: When the chaos job killed the worker after the commit.
+        """
+        step_id = super().commit(**fields)
+        step = self._work.take_last() if self._work is not None else None
+        if self._switch.take("commit") == "commit":
+            # The step is only in the buffer, so the resume may do its work again.
+            if self._work is not None and step is not None:
+                self._work.lose(step)
+            self._switch.cut(step_id, fields["execution_generation"])
+            raise WorkerKilledError
+        return step_id
+
+
 class FakeEngine:
     """A small deterministic engine: it scores the seed, then asks the model for a new version each round."""
 
@@ -590,6 +718,9 @@ class RunOutcome:
         gapless: Whether every agent's seq runs from 0 with no gap.
         replayed: Whether a replay gave the same result with no model call, no box and no new step.
         repeated: The steps that a resumed worker did again although they committed before the kill.
+        correct: Whether the best score is the shape's own score of the best candidate and, with no box kill, the
+            result is :func:`expected_result`.
+        cuts_lost: How many steps that a commit kill cut off the fence dropped, so the resume committed them again.
         error: The error that stopped the run, or ``None``.
         meter: The run's box meter.
         work: The run's real work by step.
@@ -606,14 +737,27 @@ class RunOutcome:
     gapless: bool = False
     replayed: bool = False
     repeated: list[str] = field(default_factory=list)
+    correct: bool = False
+    cuts_lost: int = 0
     error: str | None = None
     meter: BoxMeter = field(default_factory=BoxMeter)
     work: WorkLog = field(default_factory=WorkLog)
 
     @property
     def ok(self) -> bool:
-        """Return whether the run finished with a correct, replayable step log and did no committed step again."""
-        return self.finished and self.gapless and self.replayed and not self.repeated
+        """Return whether the run opened boxes, gave the right result, kept a replayable step log and repeated nothing.
+
+        A box failure gives a ``None`` score, so a run whose every step fails still finishes; ``correct`` needs a
+        real best score.
+        """
+        return (
+            self.finished
+            and self.correct
+            and self.meter.opened > 0
+            and self.gapless
+            and self.replayed
+            and not self.repeated
+        )
 
 
 def box_runtime() -> tuple[SandboxRuntime, str]:
@@ -691,22 +835,34 @@ class Harness:
             store.close()
         self._trees[run_id] = (seed_tree, metric_tree)
 
-    def _step_log(self, worker_id: str) -> StepLogStore:
+    def _step_log(self, worker_id: str, switch: ChaosSwitch | None = None, work: WorkLog | None = None) -> StepLogStore:
         """Start one step log with the harness's flush window and size cap.
 
         Args:
             worker_id: The worker id; it starts with the run id, so :meth:`footprint` finds its packs.
+            switch: The run's chaos switch, for a step log that a commit kill can cut; ``None`` for no chaos.
+            work: The run's work log, or ``None``.
 
         Returns:
             The step log.
         """
-        return StepLogStore(
-            self.engine,
-            self.objects,
-            worker_id,
-            flush_window_seconds=FLUSH_WINDOW_SECONDS,
-            flush_max_bytes=FLUSH_MAX_BYTES,
-        )
+        options: dict[str, Any] = {"flush_window_seconds": FLUSH_WINDOW_SECONDS, "flush_max_bytes": FLUSH_MAX_BYTES}
+        if switch is None:
+            return StepLogStore(self.engine, self.objects, worker_id, **options)
+        return ChaosStepLog(self.engine, self.objects, worker_id, switch=switch, work=work, **options)
+
+    def stored_generation(self, step_id: str) -> int | None:
+        """Return the generation of a step's stored row.
+
+        Args:
+            step_id: The step id.
+
+        Returns:
+            The generation, or ``None`` when no row has the id.
+        """
+        with Session(self.engine) as session:
+            row = session.get(AgentStepModel, step_id)
+            return None if row is None else int(row.execution_generation)
 
     def new_generation(self, run_id: str) -> int:
         """Move the job to its next generation, as the orphan sweep does after a worker dies.
@@ -792,7 +948,7 @@ class Harness:
         """
         user, budget_generation = self._owners[run_id]
         # Each incarnation is a new worker with its own step log, as after a pod restart under a new name.
-        store = self._step_log(f"{run_id}-g{generation}")
+        store = self._step_log(f"{run_id}-g{generation}", switch, work)
         trees = TreeStore(store)
         seed_tree, metric_tree = self._trees[run_id]
         run = user.workspace().start_run(
@@ -945,13 +1101,42 @@ def run_shape(
     outcome.steps = len(steps)
     outcome.gapless = _gapless(steps)
     outcome.repeated = outcome.work.repeated()
+    if switch is not None:
+        outcome.cuts_lost = sum(
+            1 for step_id, generation in switch.cuts if harness.stored_generation(step_id) != generation
+        )
     if outcome.finished:
+        outcome.correct = _correct(shape, rounds, outcome.result, box_killed=bool(switch and switch.fired["box"]))
         outcome.replayed = _replays(harness, shape, run_id, rounds, outcome.result)
         if outcome.repeated:
             outcome.error = f"a resumed worker did committed steps again: {', '.join(outcome.repeated)}"
         elif not outcome.replayed:
             outcome.error = "replay failed"
+        elif not outcome.correct:
+            outcome.error = f"wrong result {outcome.result}, expected {expected_result(shape, rounds)}"
+    if outcome.error is None and outcome.meter.opened == 0:
+        outcome.error = "the run opened no box"
     return outcome
+
+
+def _correct(shape: Shape, rounds: int, result: tuple[str, float | None, int] | None, *, box_killed: bool) -> bool:
+    """Return whether a run's result is right for its shape.
+
+    Args:
+        shape: The shape.
+        rounds: The fake engine's model rounds.
+        result: The run's result.
+        box_killed: Whether a box kill failed a step; it can change the best candidate.
+
+    Returns:
+        Whether the best score is real and is the shape's score of the best candidate, and, with no box kill,
+        whether the result is :func:`expected_result`.
+    """
+    if result is None or result[1] is None:
+        return False
+    if result[1] != shape.score(int(result[0])):
+        return False
+    return box_killed or result == expected_result(shape, rounds)
 
 
 def _replays(
@@ -1090,6 +1275,7 @@ def outcome_report(shape: Shape, outcome: RunOutcome, model_wait_seconds: float)
         "gapless": outcome.gapless,
         "replayed": outcome.replayed,
         "repeated_steps": outcome.repeated,
+        "correct": outcome.correct,
         "result": list(outcome.result) if outcome.result else None,
         "restarts": outcome.restarts,
         "model_calls": outcome.model_calls,
@@ -1100,7 +1286,8 @@ def outcome_report(shape: Shape, outcome: RunOutcome, model_wait_seconds: float)
     }
     if shape.gpu:
         row["gpu_placements"] = dict(outcome.meter.placements)
-        row["gpu_placement_checked"] = sum(outcome.meter.placements.values()) == outcome.meter.opened
+        # A run that opened no box checked no placement: 0 placements of 0 boxes is not a pass.
+        row["gpu_placement_checked"] = 0 < sum(outcome.meter.placements.values()) == outcome.meter.opened
         row["ok"] = row["ok"] and row["gpu_placement_checked"]
     if outcome.error:
         row["error"] = outcome.error

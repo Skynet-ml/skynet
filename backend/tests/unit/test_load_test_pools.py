@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -548,3 +549,273 @@ def test_failed_replay_names_its_error(tmp_path: Path, monkeypatch: pytest.Monke
         harness.close()
     assert outcome.finished
     assert outcome.error == "replay failed"
+
+
+def _small_pass_config() -> swarm_10k.SwarmConfig:
+    """Return a swarm config for a pass of a few seconds: 20 agents, 5 steps each, a 0.01 s flush window.
+
+    Returns:
+        The config.
+    """
+    return _swarm_config(agents=20, steps_per_agent=5, flush_window_seconds=0.01)
+
+
+def test_swarm_pass_gives_the_same_step_log_on_two_shards(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a real 1-shard pass and a real 2-shard pass store every step and the same step log.
+
+    Args:
+        monkeypatch: Puts 10 agents in each run, so the 20 agents fill one run for each shard.
+        tmp_path: The folder for the shard databases and objects.
+    """
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    monkeypatch.setattr(swarm_10k, "AGENTS_PER_RUN", 10)
+    config = _small_pass_config()
+    single = swarm_10k.run_pass(config, 1, tmp_path / "pass-1")
+    sharded = swarm_10k.run_pass(config, 2, tmp_path / "pass-2")
+    assert sharded["runs_per_shard"] == [1, 1]
+    assert single["digest"] == sharded["digest"]
+    for figures in (single, sharded):
+        assert figures["commits"] == figures["steps_stored"] == 100
+        assert figures["steady_seconds"] > 0
+
+
+def test_swarm_pass_cleans_every_shard_and_keeps_the_first_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that a failed pack cleanup of one shard does not stop the cleanup of the next shard.
+
+    Args:
+        monkeypatch: Makes each shard's cleanup fail with its own error.
+        tmp_path: The folder for the shard databases and objects.
+    """
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    monkeypatch.setattr(swarm_10k, "AGENTS_PER_RUN", 10)
+    cleaned: list[str] = []
+
+    def fail(shard: swarm_10k.Shard) -> None:
+        """Fail one shard's cleanup with an error that names the shard.
+
+        Args:
+            shard: The shard.
+
+        Raises:
+            OSError: Always.
+        """
+        cleaned.append(shard.worker_id)
+        raise OSError(f"cleanup of shard {len(cleaned)} failed")
+
+    monkeypatch.setattr(swarm_10k, "_delete_packs", fail)
+    with pytest.raises(OSError, match="cleanup of shard 1 failed"):
+        swarm_10k.run_pass(_small_pass_config(), 2, tmp_path)
+    assert len(cleaned) == 2
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["postgresql://user@db.example.com/swarm", "postgresql://user@10.0.0.5:5432/swarm", "postgresql:///swarm"],
+)
+def test_swarm_refuses_a_database_that_is_not_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str) -> None:
+    """Check that the swarm refuses a database URL off the local host, before it opens the database.
+
+    Args:
+        monkeypatch: Makes an opened database fail the test.
+        tmp_path: The pass folder.
+        url: The URL.
+    """
+    monkeypatch.setattr(swarm_10k, "create_engine", _no_start)
+    with pytest.raises(RuntimeError, match="LOAD_TEST_SWARM_DB_URL"):
+        swarm_10k.run_pass(_swarm_config(db_url=url), 2, tmp_path)
+
+
+def test_swarm_takes_a_local_database() -> None:
+    """Check that a database URL on the local host passes the check."""
+    for url in (None, "postgresql://user@localhost:5432/swarm", "postgresql://user@127.0.0.1/swarm"):
+        swarm_10k._check_db_url(url)
+
+
+def test_swarm_box_caps_are_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the swarm reports its box load with the mark that the box caps are not gated.
+
+    Args:
+        monkeypatch: Replaces ``run_pass``.
+    """
+    monkeypatch.setattr(swarm_10k, "run_pass", lambda config, shards, folder: _pass_figures(shards))
+    result = swarm_10k.run(_swarm_config(box_seconds=1_000_000.0))
+    assert result.extras["box_caps_gated"] is False
+    assert result.extras["box_load_target"]["fresh_box_per_step"]["concurrency_within_cap"] is False
+    assert result.slo_passed
+
+
+def _run_one(tmp_path: Path, shape: reference_shapes.Shape, switch: Any = None) -> reference_shapes.RunOutcome:
+    """Run one shape for one round on local subprocess boxes.
+
+    Args:
+        tmp_path: The folder for the harness.
+        shape: The shape.
+        switch: The run's chaos switch, or ``None``.
+
+    Returns:
+        The run's outcome.
+    """
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        return reference_shapes.run_shape(harness, shape, "one-0", rounds=1, switch=switch)
+    finally:
+        harness.close()
+
+
+def test_run_whose_every_step_fails_is_not_ok(tmp_path: Path) -> None:
+    """Check that a run whose step command always fails does not pass, although it finishes and replays.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    outcome = _run_one(tmp_path, replace(reference_shapes.SHAPES[0], work_script="exit 3\n"))
+    assert outcome.finished
+    assert outcome.result is not None
+    assert outcome.result[1] is None
+    assert not outcome.correct
+    assert not outcome.ok
+
+
+def test_run_with_a_wrong_result_is_not_ok(tmp_path: Path) -> None:
+    """Check that a run whose score is not the shape's own score of its best candidate does not pass.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    outcome = _run_one(tmp_path, replace(reference_shapes.SHAPES[1], score=lambda candidate: -1.0))
+    assert not outcome.ok
+    assert outcome.error is not None
+    assert outcome.error.startswith("wrong result")
+
+
+def test_expected_result_matches_a_clean_run(tmp_path: Path) -> None:
+    """Check that a run with no chaos gives the result that the shape's score formula gives.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    shape = reference_shapes.SHAPES[1]
+    outcome = _run_one(tmp_path, shape)
+    assert outcome.ok, outcome.error
+    assert outcome.result == reference_shapes.expected_result(shape, 1) == ("2", 133.333, 2)
+
+
+def test_gpu_shape_checks_each_placement(tmp_path: Path) -> None:
+    """Check that the GPU shape opens each box through a checked ``gpu:<type>`` placement.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    shape = reference_shapes.SHAPES[3]
+    outcome = _run_one(tmp_path, shape)
+    row = reference_shapes.outcome_report(shape, outcome, 1.0)
+    assert outcome.meter.opened > 0
+    assert row["gpu_placements"] == {"gpu:A10G": outcome.meter.opened}
+    assert row["gpu_placement_checked"] is True
+    assert row["ok"] is True
+
+
+@pytest.mark.parametrize(("opened", "placed"), [(0, 0), (4, 3)])
+def test_gpu_check_fails_with_no_box_or_an_unchecked_box(opened: int, placed: int) -> None:
+    """Check that the GPU check fails with no box at all, and with a box that skipped the placement check.
+
+    Args:
+        opened: The boxes that the run opened.
+        placed: The boxes whose placement was checked.
+    """
+    shape = reference_shapes.SHAPES[3]
+    outcome = reference_shapes.RunOutcome("gpu-0", shape.name)
+    outcome.meter.opened = opened
+    outcome.meter.placements["gpu:A10G"] = placed
+    row = reference_shapes.outcome_report(shape, outcome, 1.0)
+    assert row["gpu_placement_checked"] is False
+    assert row["ok"] is False
+
+
+class _KillFirstBox(reference_shapes.ChaosSwitch):
+    """A chaos switch that kills the run's first box."""
+
+    def __init__(self) -> None:
+        """Start with the box kill armed."""
+        super().__init__()
+        self.arm("box")
+
+
+def test_killed_box_commits_a_failure_that_replays(tmp_path: Path) -> None:
+    """Check that a killed box gives a committed box failure, and that the run still passes and replays.
+
+    The kill fails the seed's run box, so the seed has no score and the model's candidate 2 wins.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    shape = reference_shapes.SHAPES[0]
+    switch = _KillFirstBox()
+    outcome = _run_one(tmp_path, shape, switch)
+    assert switch.fired == {"box": 1}
+    assert outcome.restarts == 0
+    assert outcome.result == ("2", shape.score(2), 2)
+    assert outcome.replayed
+    assert outcome.ok, outcome.error
+
+
+class _KillAfterModelCommit(reference_shapes.ChaosSwitch):
+    """A chaos switch that kills the worker right after the first model step commits."""
+
+    def __init__(self) -> None:
+        """Start before the model call, with the kill not used."""
+        super().__init__()
+        self._after_model = False
+        self._used = False
+
+    def take(self, where: str) -> str | None:
+        """Arm a commit kill at the first commit after the model call, then fire it as the base switch does.
+
+        Args:
+            where: ``model``, ``box`` or ``commit``.
+
+        Returns:
+            The kill that fired, or ``None``.
+        """
+        if where == "model":
+            self._after_model = True
+        elif where == "commit" and self._after_model and not self._used:
+            self._used = True
+            self.arm("commit")
+        return super().take(where)
+
+
+def test_commit_kill_loses_the_step_before_the_flush(tmp_path: Path) -> None:
+    """Check that a kill after a commit and before the flush loses the step, and the resume does it again.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    switch = _KillAfterModelCommit()
+    outcome = _run_one(tmp_path, reference_shapes.SHAPES[0], switch)
+    assert switch.fired == {"commit": 1}
+    assert outcome.restarts == 1
+    assert outcome.cuts_lost == 1
+    assert outcome.work.lost == {"model improve 1": 1}
+    assert outcome.work.done["model improve 1"] == 2
+    assert outcome.repeated == []
+    assert outcome.ok, outcome.error
+
+
+def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the chaos gate fails when its job fires no kill, also when every run passes.
+
+    Args:
+        monkeypatch: Runs one shape and stops the chaos job from arming a kill.
+    """
+    monkeypatch.setattr(chaos_gate, "SHAPES", reference_shapes.SHAPES[:1])
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=1, rounds=1, workers=1, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    assert result.extras["runs_ok"] == 1
+    assert result.slo_violations == ["the chaos job did not fire every kill kind: {'box': 0, 'worker': 0, 'commit': 0}"]
+    assert not result.slo_passed

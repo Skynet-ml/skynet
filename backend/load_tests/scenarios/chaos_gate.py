@@ -8,14 +8,20 @@ random and arms one kill:
   turns that into a box failure, the step log commits the failure, and the
   engine scores the version as failed.
 - ``worker``: the worker dies at its next model call or box command, as
-  under SIGKILL. The steps that it buffered and did not flush are lost.
-  The run then moves to its next generation and a new worker resumes it
-  from the committed steps.
+  under SIGKILL, before the step commits. The run then moves to its next
+  generation and a new worker resumes it from the committed steps.
+- ``commit``: the worker dies right after a step commit returns and before
+  the step is durable. ``EngineLoop`` waits for each step to be durable
+  before it returns, so only this kill lands in that window. The step is
+  only in the dead worker's buffer; the run moves to its next generation,
+  the flush drops the step at the fence, and the resume does it again.
 
-The gate passes only when 100% of the runs finish, every agent's step log
-has no gap, a resumed worker does again only the work that the killed
-worker did not commit, and a replay of each finished run gives the same
-result with no model call, no box and no new step.
+The gate passes only when 100% of the runs finish with the right result,
+every agent's step log has no gap, a resumed worker does again only the
+work that the killed worker did not make durable, a replay of each
+finished run gives the same result with no model call, no box and no new
+step, all three kill kinds fire, and the fence drops at least one step
+that a commit kill cut off.
 
 ``failure_injection.py`` kills real stack containers; this gate kills
 in-process boxes and workers, so it needs no stack and spends no money.
@@ -38,6 +44,7 @@ from ..lib.metrics import ScenarioMetrics, ScenarioResult
 from ..lib.reporter import print_result
 from .reference_shapes import (
     DEFAULT_MODEL_WAIT_SECONDS,
+    KILL_KINDS,
     SHAPES,
     ChaosSwitch,
     Harness,
@@ -77,7 +84,7 @@ class ChaosGateConfig:
 
 
 class ChaosJob(threading.Thread):
-    """A background job that arms a box kill or a worker kill on a random live run."""
+    """A background job that arms a box, worker or commit kill on a random live run."""
 
     def __init__(self, switches: list[ChaosSwitch], interval: float, seed: int) -> None:
         """Bind the job to every run's switch.
@@ -92,7 +99,7 @@ class ChaosJob(threading.Thread):
         self._interval = interval
         self._random = random.Random(seed)
         self._halt = threading.Event()
-        self.armed: dict[str, int] = {"box": 0, "worker": 0}
+        self.armed: dict[str, int] = dict.fromkeys(KILL_KINDS, 0)
 
     def run(self) -> None:
         """Arm one kill after each random wait until the job stops."""
@@ -100,7 +107,7 @@ class ChaosJob(threading.Thread):
             live = [switch for switch in self._switches if switch.live]
             if not live:
                 continue
-            kind = self._random.choice(("box", "worker"))
+            kind = self._random.choice(KILL_KINDS)
             self._random.choice(live).arm(kind)
             self.armed[kind] += 1
 
@@ -161,12 +168,13 @@ def run(config: ChaosGateConfig) -> ScenarioResult:
             harness.close()
     elapsed = time.monotonic() - started
     rows: list[dict[str, Any]] = []
-    fired = {"box": 0, "worker": 0}
+    fired = dict.fromkeys(KILL_KINDS, 0)
     for (shape, outcome), (_, _, switch) in zip(outcomes, plan, strict=True):
         metrics.record(status_code=200 if outcome.ok else 500, latency_seconds=outcome.wall_seconds)
         row = outcome_report(shape, outcome, config.model_wait_seconds)
         row["shape"] = shape.name
         row["kills"] = dict(switch.fired)
+        row["commit_cuts_lost"] = outcome.cuts_lost
         rows.append(row)
         for kind, count in switch.fired.items():
             fired[kind] += count
@@ -181,6 +189,7 @@ def run(config: ChaosGateConfig) -> ScenarioResult:
         "runs_ok_pct": round(100 * passed / len(rows), 2) if rows else 0.0,
         "kills_armed": chaos.armed,
         "kills_fired": fired,
+        "commit_cuts_lost": sum(row["commit_cuts_lost"] for row in rows),
         "worker_restarts": sum(row["restarts"] for row in rows),
         "elapsed_seconds": round(elapsed, 3),
         "seed": config.seed,
@@ -192,8 +201,10 @@ def run(config: ChaosGateConfig) -> ScenarioResult:
         for row in rows
         if not row["ok"]
     ]
-    if fired["box"] == 0 or fired["worker"] == 0:
-        result.slo_violations.append(f"the chaos job did not fire both kill kinds: {fired}")
+    if not all(fired.values()):
+        result.slo_violations.append(f"the chaos job did not fire every kill kind: {fired}")
+    elif result.extras["commit_cuts_lost"] == 0:
+        result.slo_violations.append("no commit kill landed before the flush, so the fence dropped no step")
     result.slo_passed = not result.slo_violations
     return result
 

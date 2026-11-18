@@ -1,4 +1,4 @@
-"""10K-agent swarm: step log commit rate, step wait and box caps, with no paid call (SKY-727).
+"""10K-agent swarm: step log commit rate and step wait, with no paid call (SKY-727).
 
 The swarm drives the step log (``core/storage/step_log_store.py``) the way
 the engine loops of many agents do. Each agent commits a step and then
@@ -46,7 +46,9 @@ monotonic clock:
   step is reported on its own;
 - the box load that the swarm puts on Vercel: box starts per minute and
   concurrent boxes, for a fresh box per step and for one pooled box per
-  agent, against the Vercel caps.
+  agent, against the Vercel caps. These figures are only reported, never
+  gated (``box_caps_gated`` is ``False``): box caps are out of scope here,
+  and SKY-732 owns them.
 
 The swarm runs twice: on 1 shard process, then on ``shards`` shard
 processes. Both passes must give the same step log. With fewer than 2
@@ -65,7 +67,8 @@ per second. The gate shows only that the step log is not the limit at this
 agent count; it does not measure the models or the boxes.
 
 The database is one SQLite file per shard, unless ``LOAD_TEST_SWARM_DB_URL``
-names a throwaway Postgres; there all shards share the database. The
+names a throwaway Postgres on ``localhost``, ``127.0.0.1`` or ``::1``; there
+all shards share the database. The
 objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
 bucket on a local S3 server such as MinIO; then ``LOAD_TEST_SWARM_S3_ENDPOINT``
 must name that server on ``localhost``, ``127.0.0.1`` or ``::1``, and the
@@ -277,6 +280,21 @@ def _object_store(folder: Path) -> tuple[Any, Any]:
         raise RuntimeError("boto3 is not installed")
     client = boto3.client("s3", endpoint_url=endpoint)
     return S3ObjectStore(bucket, client), client
+
+
+def _check_db_url(url: str | None) -> None:
+    """Refuse a database URL that is not on the local host.
+
+    The swarm creates tables and deletes the swarm's rows in the database that the URL names.
+
+    Args:
+        url: ``LOAD_TEST_SWARM_DB_URL``, or ``None`` for SQLite files.
+
+    Raises:
+        RuntimeError: When the URL names a host that is not local, or no host.
+    """
+    if url is not None and urlsplit(url).hostname not in LOCAL_S3_HOSTS:
+        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL must name a database on {sorted(LOCAL_S3_HOSTS)}")
 
 
 def _delete_packs(shard: Shard) -> None:
@@ -752,8 +770,9 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         The pass figures, with the step log digest.
 
     Raises:
-        RuntimeError: When a shard process fails or does not report.
+        RuntimeError: When the database URL is not local, or a shard process fails or does not report.
     """
+    _check_db_url(config.db_url)
     runs = [run_id_for(index) for index in range(math.ceil(config.agents / AGENTS_PER_RUN))]
     agents = [(runs[index // AGENTS_PER_RUN], f"agent-{index:05d}") for index in range(config.agents)]
     stamp = f"{int(time.time() * 1000) % 10**9}"
@@ -762,6 +781,8 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
     # Spawn, not fork: a forked child would inherit the parent's engines and threads.
     context = multiprocessing.get_context("spawn")
     processes: list[Any] = []
+    # A cleanup error must not hide the error that stopped the pass.
+    failed = True
     try:
         for index in range(shard_count):
             shard_folder = folder / f"shard-{index}"
@@ -808,15 +829,24 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         if errors:
             raise RuntimeError("a shard process failed:\n" + "\n".join(errors))
         digest, stored = _digest(shards)
+        failed = False
     finally:
         for process in processes:
             process.join(timeout=30)
             if process.is_alive():
                 process.kill()
                 process.join()
+        # Each shard gets its cleanup, also after another shard's cleanup fails; the first error wins.
+        cleanup_error: Exception | None = None
         for shard in shards:
-            _delete_packs(shard)
-            shard.engine.dispose()
+            try:
+                _delete_packs(shard)
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+            finally:
+                shard.engine.dispose()
+        if cleanup_error is not None and not failed:
+            raise cleanup_error
     waits = [wait for report in reports for wait in report["waits"]]
     lates = [late for report in reports for late in report["lates"]]
     times = [moment for report in reports for moment in report["times"]]
@@ -840,7 +870,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         "steady_steps": steady_steps,
         "steady_seconds": round(steady_seconds, 3),
         "commits_per_second": round(steady_steps / steady_seconds, 1) if steady_seconds > 0 else 0.0,
-        "commits_per_second_with_drain": round(drain_steps / (last - steady_from), 1),
+        "commits_per_second_with_drain": round(drain_steps / (last - steady_from), 1) if last > steady_from else 0.0,
         "commits_per_second_whole_pass": round(len(waits) / (last - started), 1),
         "step_wait_ms": {
             "mean": round(1000 * statistics.fmean(waits), 2),
@@ -967,6 +997,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
             "vcpu_starts_per_minute": VERCEL_VCPU_STARTS_PER_MINUTE,
             "concurrent_vcpus": VERCEL_CONCURRENT_VCPUS,
         },
+        # Reported only: box caps are out of scope for this gate (SKY-732).
+        "box_caps_gated": False,
         "box_load_measured": box_load(config, gated["commits_per_second"]),
         "box_load_target": box_load(config, TARGET_COMMITS_PER_SECOND),
     }
