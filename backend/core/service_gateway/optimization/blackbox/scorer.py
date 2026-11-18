@@ -31,7 +31,7 @@ class JobScorer(Protocol):
 
     usage: ScorerUsage | None
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case``.
 
         Args:
@@ -39,7 +39,7 @@ class JobScorer(Protocol):
             case: The case to score it on, if the task has cases.
 
         Returns:
-            The score and side information.
+            The score (``None`` for a failed ``[run]`` entry) and side information.
         """
         ...
 
@@ -70,7 +70,9 @@ def normalize_score(raw: Any) -> tuple[float | None, SideInfo]:
             # A remote endpoint can send this shape too; the proposer learns
             # only from the feedback, so it stays required here.
             side_info = {key: value for key, value in raw.items() if key != "score"}
-            side_info["feedback"] = runner._feedback(side_info.get("feedback"), "The failed run")
+            side_info["feedback"] = runner.feedback(side_info.get("feedback"), "The failed run")
+            if "scores" in side_info:
+                side_info["scores"] = runner.named_scores(side_info["scores"])
             return None, side_info
         return runner.normalize_score(raw)
     except runner.ScorerError as exc:

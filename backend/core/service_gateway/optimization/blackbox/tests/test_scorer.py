@@ -77,6 +77,34 @@ def test_normalize_score_rejects_a_failed_run_without_feedback(feedback: str | N
         normalize_score(raw)
 
 
+@pytest.mark.parametrize(
+    "scores",
+    [{"acc": {"score": "bad", "feedback": "x"}}, {"acc": {"score": 0.5}}, "not a mapping"],
+)
+def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_one(scores: Any) -> None:
+    """A failed ``[run]`` entry validates its named scores like a scored result does (SKY-751).
+
+    Args:
+        scores: A malformed ``scores`` value.
+    """
+    failed = {"score": None, "status": "run_failed", "feedback": "x", "scores": scores}
+    scored = {"score": 0.5, "feedback": "x", "scores": scores}
+
+    for raw in (failed, scored):
+        with pytest.raises(ServiceError, match="must return feedback"):
+            normalize_score(raw)
+
+
+def test_normalize_score_keeps_valid_named_scores_on_a_failed_run() -> None:
+    """A failed ``[run]`` entry keeps its valid named scores in the normalized form (SKY-751)."""
+    raw = {"score": None, "status": "run_failed", "feedback": "x", "scores": {"acc": (1, "ok")}}
+
+    assert normalize_score(raw) == (
+        None,
+        {"status": "run_failed", "feedback": "x", "scores": {"acc": {"score": 1.0, "feedback": "ok"}}},
+    )
+
+
 def test_load_scorer_prefers_score_then_metric_then_single_function() -> None:
     """Entrypoint lookup order: ``score``, ``metric``, the only function defined."""
     both = "def metric(c, x=None): return 0.0\ndef score(c, x=None): return 1.0\n"
