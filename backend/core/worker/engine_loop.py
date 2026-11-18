@@ -722,7 +722,8 @@ class EngineLoop:
 
         Raises:
             LoopStoppedError: The kept stop, which a call that was already past :meth:`_stops` did not see; or
-                a new one when the run is closed or no longer active at the loop's generation.
+                a new one when the run is closed, no longer active at the loop's generation, or the owner check
+                fails.
         """
         stopped = self._stopped
         if stopped is not None:
@@ -730,7 +731,13 @@ class EngineLoop:
         run = self._run
         if run.closed:
             raise LoopStoppedError(f"Run {run.run_id} is closed.")
-        if not still_owns_run(self._engine, run.run_id, run.execution_generation):
+        try:
+            owns = still_owns_run(self._engine, run.run_id, run.execution_generation)
+        except Exception as error:
+            # A failed check, such as a dropped database connection, must stop the loop: as a scorer error the
+            # eval server would record a metric error and go on with no committed step, and a replay would shift.
+            raise LoopStoppedError(f"Owner check failed: {type(error).__name__}: {error}") from error
+        if not owns:
             raise LoopStoppedError(f"Run {run.run_id} is no longer active at generation {run.execution_generation}.")
 
     def _entries(self, tree_id: str) -> dict[str, TreeEntry]:
@@ -1128,8 +1135,8 @@ class EngineLoop:
             The agent's log.
 
         Raises:
-            LoopStoppedError: When the agent's committed log has a gap, its workspace does not restore, or the
-                run is closed.
+            LoopStoppedError: When the agent's committed log has a gap, its workspace does not restore, the run
+                is closed, or the step log read fails.
         """
         agent_id = current_tags().get(LANE_KEY) or ROOT_AGENT_ID
         with self._lock:
@@ -1144,7 +1151,8 @@ class EngineLoop:
             if log is None:
                 try:
                     log = self._open(agent_id)
-                except (LookupError, RuntimeError, ValueError) as error:
+                except Exception as error:
+                    # Also a database error, such as a dropped connection: an open that fails for any reason stops.
                     raise LoopStoppedError(f"Agent {agent_id} cannot open: {type(error).__name__}: {error}") from error
                 with self._lock:
                     self._logs[agent_id] = log

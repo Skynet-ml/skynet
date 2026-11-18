@@ -610,6 +610,73 @@ def test_a_swallowed_divergence_keeps_the_loop_stopped(
     assert model.prompts == []
 
 
+def test_an_owner_check_database_error_in_a_scorer_stops_the_server_and_the_loop(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped connection in the owner check is a kept stop, not a metric error that lets the run go on."""
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    def dropped(*args: Any) -> bool:
+        """Fail as an owner query on a dropped database connection does.
+
+        Args:
+            *args: The owner check's arguments.
+
+        Raises:
+            OperationalError: Always.
+        """
+        raise OperationalError("owner", {}, Exception("connection dropped"))
+
+    monkeypatch.setattr(engine_loop, "still_owns_run", dropped)
+    server = loop.server(scorer, max_evals=10)
+    with pytest.raises(LoopStoppedError, match="OperationalError"):
+        server.evaluate("seed")
+    with pytest.raises(LoopStoppedError):
+        server.evaluate("seed")
+    assert loop._stopped is not None
+    assert boxes.opened == 0
+    assert _steps(engine) == []
+
+
+def test_an_agent_open_database_error_stops_the_loop_and_does_not_open_again(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped connection while the agent opens is a kept stop: the next call opens nothing and calls no model."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    reads: list[str] = []
+
+    def dropped(*args: Any) -> dict[str, Any] | None:
+        """Fail as a step-log read on a dropped database connection does.
+
+        Args:
+            *args: The read's arguments.
+
+        Raises:
+            OperationalError: Always.
+        """
+        reads.append(args[-1])
+        raise OperationalError("last step", {}, Exception("connection dropped"))
+
+    monkeypatch.setattr(engine_loop, "last_committed_step", dropped)
+    with pytest.raises(LoopStoppedError, match="cannot open: OperationalError"):
+        loop.model("improve seed")
+    with pytest.raises(LoopStoppedError):
+        loop.model("improve seed")
+    assert reads == [ROOT_AGENT_ID]
+    assert model.prompts == []
+
+
 def test_a_budget_refusal_stops_the_loop(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -1660,6 +1727,13 @@ def test_listing_a_partly_hidden_folder_writes_no_object_and_works_after_the_ste
     real_put = step_log.put_object
 
     def spy(run_id: str, object_id: str, data: bytes) -> None:
+        """Record the object id, then put the object.
+
+        Args:
+            run_id: The run.
+            object_id: The object's id.
+            data: The object's bytes.
+        """
         put.append(object_id)
         real_put(run_id, object_id, data)
 
