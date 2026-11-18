@@ -1106,16 +1106,23 @@ def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
     assert mailbox.total_evals == 1
 
 
+@pytest.mark.parametrize(
+    ("max_concurrency", "sent_cases"),
+    [(1, [0, 1]), (3, [0, 1, 2])],
+    ids=["one-case-at-a-time", "cases-in-parallel"],
+)
 def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keeps_the_step_order(
-    tmp_path: Path,
+    max_concurrency: int, sent_cases: list[int], tmp_path: Path
 ) -> None:
-    """Skip a version's later cases after a crashed case, and answer only when no case of it still runs.
+    """Skip a version's cases not yet started after a crashed case, and answer only when no case of it still runs.
 
     The worker commits each request as one step by position. A case left
     running after the answer races the next proposal's model request, so a
     replay could see another order and fail the resume.
 
     Args:
+        max_concurrency: Cases the scorer runs at once; the engine loop runs one.
+        sent_cases: The cases whose requests reach the worker.
         tmp_path: Scratch folder for the queue and the program.
     """
 
@@ -1154,7 +1161,7 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
         queue=tmp_path / "queue",
         examples=[{"id": 0}, {"id": 1}, {"id": 2}],
         part_names=None,
-        max_concurrency=1,
+        max_concurrency=max_concurrency,
         stop_at_score=None,
     )
     program = tmp_path / "results" / "gen_3" / "main.md"
@@ -1167,7 +1174,9 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
     time.sleep(0.5)
 
     steps = [(request["kind"], (request.get("example") or {}).get("id")) for request in sent]
-    assert steps == [("evaluate", 0), ("evaluate", 1), ("model", None)]
+    # With cases in parallel, the order of the first two requests is up to the threads.
+    assert sorted(steps[:-1]) == [("evaluate", case) for case in sent_cases]
+    assert steps[-1] == ("model", None)
     scorer.stop()
 
 
