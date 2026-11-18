@@ -242,7 +242,10 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
 
     assert constraints.proposer_command_files == ("agent/run.js",)
     assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
-    patch = "diff --git a/agent/run.js b/agent/run.js\n--- a/agent/run.js\n+++ b/agent/run.js\n@@ -1 +1 @@\n-// agent\n+// mine\n"
+    patch = (
+        "diff --git a/agent/run.js b/agent/run.js\n--- a/agent/run.js\n+++ b/agent/run.js\n"
+        "@@ -1 +1 @@\n-// agent\n+// mine\n"
+    )
     assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
     assert environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())["proposer_entry"] == [
         "node",

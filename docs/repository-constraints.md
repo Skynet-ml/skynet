@@ -32,8 +32,8 @@ network = ["docs.python.org"]
 # Optional. Your own proposer command. Used only when the run names no
 # proposer of its own. See "Your own proposer" below.
 entry = ["node", "agent/my-agent.js"]
-# Optional. Runs before the first session in each checkout, for example to
-# install the command.
+# Optional. Runs once in the proposer box, before the first session, for
+# example to install the command.
 setup = ["npm", "ci"]
 
 [data]

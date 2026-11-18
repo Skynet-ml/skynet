@@ -634,6 +634,18 @@ def _copy_path(source: Path, target: Path) -> None:
         shutil.copy2(source, target, follow_symlinks=False)
 
 
+def _unsafe(path: str) -> bool:
+    """Tell whether no exclude line can hold a path.
+
+    Args:
+        path: A checkout-relative path; a folder ends with ``/``.
+
+    Returns:
+        True when the name is not UTF-8, holds a control character or ends in whitespace.
+    """
+    return bool(_CONTROL_CHARS.search(path)) or path.rstrip("/") != path.rstrip("/").rstrip()
+
+
 def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
     """Turn a setup's output paths into exclude lines, and refuse a name no line can hold.
 
@@ -647,14 +659,14 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
     Raises:
         RuntimeError: When a name is not UTF-8, holds a control character or ends in whitespace.
     """
-    unsafe = sorted(
-        path for path in paths if _CONTROL_CHARS.search(path) or path.rstrip("/") != path.rstrip("/").rstrip()
-    )
+    paths = list(paths)
+    unsafe = sorted(path for path in paths if _unsafe(path))
     if unsafe:
         raise RuntimeError(
             f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names are"
-            f" not UTF-8, hold a control character or end in whitespace: {', '.join(repr(path) for path in unsafe)}. The run"
-            " cannot keep such a file out of the versions. Rename it in the setup."
+            " not UTF-8, hold a control character or end in whitespace:"
+            f" {', '.join(repr(path) for path in unsafe)}. The run cannot keep such a file out of the versions."
+            " Rename it in the setup."
         )
     return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
 
@@ -665,7 +677,7 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
     The setup runs in the first checkout. Its output, ignored files
     included, is copied into :data:`SETUP_STATE` in the git dir, and a
     session after a reset or in a new worktree gets that copy back, without
-    a second setup. What the setup adds and git does not ignore is excluded
+    a second setup. What the setup adds, ignored files included, is excluded
     from every version, like the harness files (SKY-753).
 
     Args:
@@ -675,8 +687,9 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
 
     Raises:
         RuntimeError: When the setup or git fails, the setup changes a file of
-            the version or moves ``HEAD``, or it writes a name that no exclude
-            line can hold.
+            the version or moves ``HEAD``, it writes a name that no exclude
+            line can hold, another session's setup holds the lock past
+            ``timeout_seconds``, or the setup's record is unreadable.
     """
     common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
     common = common if common.is_absolute() else checkout / common
@@ -684,10 +697,28 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
     state.mkdir(parents=True, exist_ok=True)
     with (state / "lock").open("a") as lock:
         # Parallel AutoSaddler sessions share the git dir; one runs the setup, the others wait for its output.
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        # A blocking flock would wait past the session's time limit, so the wait polls up to that limit.
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish"
+                        f" in another session within {timeout_seconds:g} seconds."
+                    ) from None
+                time.sleep(0.1)
         record = state / "done.json"
         if record.exists():
-            kept = json.loads(record.read_text(encoding="utf-8"))["output"]
+            try:
+                kept = json.loads(record.read_text(encoding="utf-8"))["output"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise RuntimeError(
+                    f"The record of the [proposer] setup command in optimize.toml ({shlex.join(command)}) at"
+                    f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
+                ) from error
             # The first session writes the whole copy before done.json, and nothing changes it after,
             # so later sessions copy it unlocked and do not wait in line for each other.
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -733,8 +764,11 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
                 " write only new files that git does not track."
             )
         added = sorted(_setup_output(checkout, before))
-        lines = _excludable(added, command)
-        kept = sorted(set(added) | _setup_output(checkout, ignored_before, ignored=True))
+        ignored = _setup_output(checkout, ignored_before, ignored=True)
+        # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
+        # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
+        lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
+        kept = sorted(set(added) | ignored)
         output = state / "output"
         shutil.rmtree(output, ignore_errors=True)
         for path in kept:
@@ -747,7 +781,10 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
         with exclude.open("a", encoding="utf-8") as stream:
             stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-        record.write_text(json.dumps({"output": kept}), encoding="utf-8")
+        # A stop between truncate and write would leave an empty record, so the record is replaced whole.
+        partial = state / "done.json.tmp"
+        partial.write_text(json.dumps({"output": kept}), encoding="utf-8")
+        partial.replace(record)
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:

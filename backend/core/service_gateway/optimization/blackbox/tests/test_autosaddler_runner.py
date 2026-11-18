@@ -642,7 +642,7 @@ def test_each_autosaddler_session_worktree_gets_the_files_setup(
 def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AutoSaddler runs sessions in its own process, without the bridge's SIGTERM handler; its stop sweep ends the setup.
+    """AutoSaddler runs sessions in its own process, without the bridge's SIGTERM handler; its stop ends the setup.
 
     Args:
         tmp_path: The checkout and the setup's pid file.

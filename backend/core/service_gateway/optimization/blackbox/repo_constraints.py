@@ -311,7 +311,8 @@ class RepoConstraints:
     # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
     proposer_entry: tuple[str, ...] | None = None
     proposer_setup: tuple[str, ...] | None = None
-    # The repository files and folders that entry and setup name; read_constraints fills them, and the file proposer protects them.
+    # The repository files and folders that entry and setup name; read_constraints fills them,
+    # and the file proposer protects them.
     proposer_command_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)

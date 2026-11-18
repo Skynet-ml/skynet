@@ -2452,7 +2452,10 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
 
     with pytest.raises(
         RuntimeError,
-        match=r"(?s)setup command in optimize.toml \(.*\) changed or removed files of the version: gone\.txt, kept\.txt\.",
+        match=(
+            r"(?s)setup command in optimize.toml \(.*\) changed or removed files of the version:"
+            r" gone\.txt, kept\.txt\."
+        ),
     ):
         harness_bridge.ensure_setup(command, checkout)
 
@@ -2598,9 +2601,117 @@ def test_a_reset_checkout_gets_the_setups_ignored_output_back(tmp_path: Path) ->
 
     assert log.read_text() == "ran\n"
     assert (checkout / "node_modules/pkg/index.js").read_text() == "js"
-    # Git ignores the folder already, so it needs no exclude line.
-    exclude = checkout / ".git/info/exclude"
-    assert "/node_modules/" not in (exclude.read_text().splitlines() if exclude.exists() else [])
+    # A version can drop the .gitignore line, so the ignored folder gets an exclude line as well.
+    assert "/node_modules/" in (checkout / ".git/info/exclude").read_text().splitlines()
+
+
+def test_ignored_setup_output_stays_out_of_a_version_that_drops_its_gitignore_line(tmp_path: Path) -> None:
+    """A version that removes ``deps/`` from .gitignore must not take the restored setup output in (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".gitignore").write_text("deps/\n")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "ignore"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    command = [sys.executable, "-c", "import os; os.makedirs('deps'); open('deps/lib.js', 'w').write('js')"]
+
+    harness_bridge.ensure_setup(command, checkout)
+    subprocess.run(["git", "clean", "-fdxq"], cwd=checkout, check=True)
+    (checkout / ".gitignore").write_text("")
+    harness_bridge.ensure_setup(command, checkout)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert (checkout / "deps/lib.js").read_text() == "js"
+    assert status == " M .gitignore\n"
+
+
+def test_a_stop_while_the_setup_record_is_written_leaves_no_broken_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop during the record's write leaves no empty ``done.json``, so the next session runs the setup (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+        monkeypatch: Pytest monkeypatch.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    log = tmp_path / "setup.log"
+    command = [sys.executable, "-c", f"open('dep.txt', 'w').write('d'); open({str(log)!r}, 'a').write('ran\\n')"]
+    write_text = Path.write_text
+
+    def stop_after_truncate(self: Path, *args: Any, **kwargs: Any) -> int:
+        """Truncate a record file and stop before its content is written, as a SIGTERM there does.
+
+        Args:
+            self: The file to write.
+            *args: The content and other arguments of :meth:`Path.write_text`.
+            **kwargs: The keyword arguments of :meth:`Path.write_text`.
+
+        Returns:
+            The number of characters written, for any other file.
+
+        Raises:
+            KeyboardInterrupt: For a file in the setup's state folder.
+        """
+        if self.parent.name == harness_bridge.SETUP_STATE:
+            self.open("w").close()
+            raise KeyboardInterrupt
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", stop_after_truncate)
+    with pytest.raises(KeyboardInterrupt):
+        harness_bridge.ensure_setup(command, checkout)
+    monkeypatch.undo()
+    harness_bridge.ensure_setup(command, checkout)
+
+    assert log.read_text() == "ran\nran\n"
+    assert "output" in json.loads((checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").read_text())
+
+
+def test_an_unreadable_setup_record_stops_with_a_clear_error(tmp_path: Path) -> None:
+    """A broken ``done.json`` names the setup and the record, not a bare JSON error (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    command = [sys.executable, "-c", "open('dep.txt', 'w')"]
+    harness_bridge.ensure_setup(command, checkout)
+    (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").write_text("")
+
+    with pytest.raises(
+        RuntimeError, match=r"(?s)record of the \[proposer\] setup command in optimize.toml \(.*\) at .*done\.json"
+    ):
+        harness_bridge.ensure_setup(command, checkout)
+
+
+def test_a_session_waits_for_another_sessions_setup_only_up_to_its_time_limit(tmp_path: Path) -> None:
+    """A session whose limit ends while another session's setup holds the lock stops with a clear error (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    state.mkdir()
+    started = time.monotonic()
+    with (state / "lock").open("a") as other:
+        fcntl.flock(other, fcntl.LOCK_EX)
+        with pytest.raises(RuntimeError, match=r"did not finish in another session within 0\.5 seconds"):
+            harness_bridge.ensure_setup([sys.executable, "-c", "pass"], checkout, timeout_seconds=0.5)
+
+    assert time.monotonic() - started < 10
 
 
 def test_a_later_session_copies_the_setup_output_without_the_lock(
