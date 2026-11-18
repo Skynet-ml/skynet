@@ -33,7 +33,7 @@ from core.storage.models import (
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_compactor import TreeCompactor
-from core.storage.tree_purge import TreePurgeError, delete_unused_packs, purge_user
+from core.storage.tree_purge import TreePurgeError, TreePurgeSummary, delete_unused_packs, purge_user, purge_user_shards
 from core.storage.tree_store import TreeEntry, TreeStore
 
 ADA_RUNS = ["job-1", "job-2"]
@@ -1151,6 +1151,25 @@ def test_a_bucket_that_cannot_open_fails_the_purge(
     with pytest.raises(TreePurgeError, match="tree bucket") as error:
         _purge(engine, None)
     assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_shard_packs_with_no_delete_function_stay_for_the_compactor(caplog: pytest.LogCaptureFixture) -> None:
+    """Shard packs that appear when purge_user built no delete function are logged and not listed.
+
+    Args:
+        caplog: Pytest log capture fixture.
+    """
+    shard = create_engine("sqlite://")
+    summary = TreePurgeSummary(deleted_rows=2, shard_purge=lambda: (3, {"packs/w2/b": shard}))
+
+    with caplog.at_level("WARNING", logger=tree_purge.__name__):
+        assert purge_user_shards(summary) == 3
+
+    assert summary.deleted_rows == 5
+    assert summary.unused_packs == []
+    assert summary.pack_engines == {}
+    assert summary.shard_purge is None
+    assert "1 tree packs (packs/w2/b) on step log shards have no delete function" in caplog.text
 
 
 def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: dict[str, str], tmp_path: Path) -> None:

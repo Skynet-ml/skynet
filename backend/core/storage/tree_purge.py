@@ -621,7 +621,8 @@ def purge_user_shards(summary: TreePurgeSummary) -> int:
     deleted_rows, pack_engines = summary.shard_purge()
     summary.shard_purge = None
     if pack_engines and summary.delete_objects is None:
-        # Only when a row lands on a shard after the check in purge_user; the compactor deletes these packs.
+        # The job locks cover only the run_ids that the caller read, so a run that the account starts after
+        # that read can write tree objects to a shard after the check in purge_user. The compactor deletes them.
         logger.warning("%s on step log shards have no delete function", _describe(sorted(pack_engines)))
     else:
         summary.unused_packs = sorted([*summary.unused_packs, *pack_engines])
