@@ -684,12 +684,14 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         command: The exact argument list from ``optimize.toml``.
         checkout: The repository checkout or worktree the proposer command runs in.
         timeout_seconds: Stop the setup, and every process it started, after this long.
+            The wait for another session's setup counts inside it.
 
     Raises:
         RuntimeError: When the setup or git fails, the setup changes a file of
             the version or moves ``HEAD``, it writes a name that no exclude
             line can hold, another session's setup holds the lock past
-            ``timeout_seconds``, or the setup's record is unreadable.
+            ``timeout_seconds`` or fails with no time left to run it again,
+            or the setup's record is unreadable.
     """
     common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
     common = common if common.is_absolute() else checkout / common
@@ -735,7 +737,14 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         version_files = {path: _tracked_state(checkout, path) for path in before}
         head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
         tracked = _tracked_changes(checkout)
-        run_setup(command, checkout, timeout_seconds)
+        # A waiter whose lock holder failed runs the setup itself, but only in the time its own limit has left.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
+                f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
+            )
+        run_setup(command, checkout, remaining)
         moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
         if moved != head:
             # A commit would hide its changes from the diff below, and enter every version.
@@ -1868,7 +1877,14 @@ def run_session(
         )
         ensure_setup(list(proposer["setup"]), workspace, setup_seconds)
         if timeout_seconds is not None:
-            timeout_seconds = max(0.0, timeout_seconds - (time.monotonic() - setup_started))
+            limit = timeout_seconds
+            timeout_seconds -= time.monotonic() - setup_started
+            if timeout_seconds <= 0:
+                # A harness with no time left would be killed at once, so the setup's overrun stops the session.
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(proposer['setup'])}) used up"
+                    f" the session's time limit of {limit:g} seconds."
+                )
     if api_key is None:
         api_key = _env(KEY_ENV)
     for relative_path, content in (proposer.get("files") or {}).items():

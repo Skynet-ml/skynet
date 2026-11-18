@@ -2470,7 +2470,7 @@ def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
     """
     slow = {**_PLAIN, "setup": [sys.executable, "-c", "import time; time.sleep(30)"]}
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match=r"did not finish within 1 seconds"):
+    with pytest.raises(RuntimeError, match=r"did not finish within (1|0\.\d+) seconds"):
         run_session(
             slow,
             workspace=_git_checkout(tmp_path / "slow"),
@@ -2500,6 +2500,33 @@ def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
 
     assert outcome.timed_out
     assert time.monotonic() - started < 4.5
+
+
+def test_a_setup_that_uses_up_the_session_time_stops_before_the_harness_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A harness with no time left would be killed at once, so the session raises instead (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the session folder and the harness marker.
+        monkeypatch: Makes the setup end just past the session's limit.
+    """
+    ran = tmp_path / "harness-ran"
+    monkeypatch.setattr(harness_bridge, "ensure_setup", lambda command, checkout, seconds: time.sleep(seconds + 0.2))
+    proposer = {**_PLAIN, "run_command": f"touch {shlex.quote(str(ran))}", "setup": ["true"]}
+
+    with pytest.raises(RuntimeError, match=r"\(true\) used up the session's time limit of 0\.5 seconds"):
+        run_session(
+            proposer,
+            workspace=_git_checkout(tmp_path / "checkout"),
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "s",
+            timeout_seconds=0.5,
+            api_key="k",
+        )
+
+    assert not ran.exists()
 
 
 class _ExitCalledError(Exception):
@@ -2708,10 +2735,82 @@ def test_a_session_waits_for_another_sessions_setup_only_up_to_its_time_limit(tm
     started = time.monotonic()
     with (state / "lock").open("a") as other:
         fcntl.flock(other, fcntl.LOCK_EX)
-        with pytest.raises(RuntimeError, match=r"did not finish in another session within 0\.5 seconds"):
-            harness_bridge.ensure_setup([sys.executable, "-c", "pass"], checkout, timeout_seconds=0.5)
+        error = _finish_in_thread(
+            lambda: harness_bridge.ensure_setup([sys.executable, "-c", "pass"], checkout, timeout_seconds=0.5)
+        )
 
+    assert isinstance(error, RuntimeError)
+    assert re.search(r"did not finish in another session within 0\.5 seconds", str(error))
     assert time.monotonic() - started < 10
+
+
+def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(tmp_path: Path) -> None:
+    """The wait for a setup that then fails counts inside the waiter's limit, so it never runs a full limit more.
+
+    Args:
+        tmp_path: The checkout and the holder's start marker.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    marker = tmp_path / "holder-started"
+    holder_command = [
+        sys.executable,
+        "-c",
+        f"import time; open({str(marker)!r}, 'w'); time.sleep(2); raise SystemExit(1)",
+    ]
+    holder = threading.Thread(
+        target=lambda: _run_and_keep_error(lambda: harness_bridge.ensure_setup(holder_command, checkout), []),
+        daemon=True,
+    )
+    holder.start()
+    for _ in range(200):
+        if marker.exists():
+            break
+        time.sleep(0.05)
+    assert marker.exists()
+
+    started = time.monotonic()
+    error = _finish_in_thread(
+        lambda: harness_bridge.ensure_setup(
+            [sys.executable, "-c", "import time; time.sleep(30)"], checkout, timeout_seconds=3.0
+        )
+    )
+    elapsed = time.monotonic() - started
+    holder.join(timeout=10)
+
+    assert not holder.is_alive()
+    assert isinstance(error, RuntimeError)
+    assert elapsed < 3.0 + 1.5
+
+
+def _run_and_keep_error(call: Any, errors: list[BaseException]) -> None:
+    """Run ``call`` and append the exception it raises, if any.
+
+    Args:
+        call: The function to run.
+        errors: Gets the exception.
+    """
+    try:
+        call()
+    except BaseException as error:
+        errors.append(error)
+
+
+def _finish_in_thread(call: Any, timeout_seconds: float = 20.0) -> BaseException | None:
+    """Run ``call`` in a thread, so a lock wait that blocks fails the test instead of hanging it.
+
+    Args:
+        call: The function to run.
+        timeout_seconds: Fail when the thread is still running after this long.
+
+    Returns:
+        The exception ``call`` raised, or ``None``.
+    """
+    errors: list[BaseException] = []
+    thread = threading.Thread(target=_run_and_keep_error, args=(call, errors), daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    assert not thread.is_alive(), "The call did not finish; a lock wait blocked."
+    return errors[0] if errors else None
 
 
 def test_a_later_session_copies_the_setup_output_without_the_lock(
