@@ -668,6 +668,51 @@ def test_a_release_error_after_good_work_is_a_box_failure_without_the_provider_t
     assert source.released == [True]
 
 
+class _TimedOutMetricBox(_FakeBox):
+    """A fake box whose ``metric`` command times out."""
+
+    def run(self, command: str, **options: Any) -> CommandResult:
+        """Time out the ``metric`` command and answer every other command with success.
+
+        Args:
+            command: The shell command.
+            **options: Not used.
+
+        Returns:
+            A timed-out result for ``metric``, else the fake box's success.
+        """
+        if command == "metric":
+            return CommandResult(exit_code=137, timed_out=True)
+        return super().run(command, **options)
+
+
+def test_a_release_error_after_work_that_drops_the_box_is_a_box_failure(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """Work that ends but gives its box back unhealthy has no error of its own, so the release error goes up."""
+    error = SandboxInfraError("box-secret-name")
+    sandbox, source = _fake_sandbox(trees, step_log, _TimedOutMetricBox(), error)
+    empty = _tree(trees, {})
+
+    with pytest.raises(BoxFailureError) as raised:
+        sandbox.score(_step(), empty, empty, "metric")
+
+    assert str(raised.value) == f"Step {RUN}:agent-1:1: The box did not go back (SandboxInfraError)."
+    assert raised.value.__cause__ is error
+    assert source.released == [False]
+
+
+def test_a_metric_that_times_out_gives_its_box_back_unhealthy(trees: TreeStore, step_log: StepLogStore) -> None:
+    """The timeout kills only the metric's process group, so its box must not serve another score."""
+    sandbox, _, metrics = _sandbox(trees, step_log, _Runtime(), timeout_seconds=1)
+    empty = _tree(trees, {})
+
+    with pytest.raises(MetricFailedError):
+        sandbox.score(_step(), empty, empty, "sleep 30")
+
+    assert metrics.released == [False]
+
+
 @pytest.mark.parametrize("error", [BudgetReached("stopped"), UsagePendingError("pending")])
 def test_a_budget_error_of_a_release_after_good_work_goes_up(
     trees: TreeStore, step_log: StepLogStore, error: BaseException

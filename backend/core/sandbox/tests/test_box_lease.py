@@ -38,6 +38,7 @@ from core.service_gateway.optimization.blackbox.tree_sandbox import (
     RuntimeBoxLease,
     StepRef,
     TreeSandbox,
+    _clean,
 )
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
@@ -1881,9 +1882,9 @@ class _DyingBox:
         self.closed = False
         # The health check's outcome: None runs it, an exit code fakes it, an error is raised from it.
         self.check: int | BaseException | None = None
-        # The process scan's output, or its whole result; None runs the real scan. The host's own processes come
-        # and go, so a real scan on a test host can see a new process that no step started.
-        self.processes: str | CommandResult | None = "1 Tue Nov 17 00:00:00 2026\n"
+        # The process scan's output, its whole result or its error; None runs the real scan. The host's own
+        # processes come and go, so a real scan on a test host can see a new process that no step started.
+        self.processes: str | CommandResult | BaseException | None = "1 Tue Nov 17 00:00:00 2026\n"
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write files into the inner box.
@@ -1905,10 +1906,12 @@ class _DyingBox:
 
         Raises:
             SandboxInfraError: For an agent command once the box is dead.
-            BaseException: The set health check error, for the ``true`` command.
+            BaseException: The set health check error, for the ``true`` command, or the set process scan error.
         """
         if command == "true" and isinstance(self.check, BaseException):
             raise self.check
+        if command == PROCESS_SCAN and isinstance(self.processes, BaseException):
+            raise self.processes
         if command == "true" and self.check is not None:
             return CommandResult(exit_code=self.check)
         if command == PROCESS_SCAN and isinstance(self.processes, CommandResult):
@@ -2173,6 +2176,55 @@ def test_a_step_whose_process_scan_fails_gives_its_box_back_unhealthy(
     assert runtime.boxes[0].closed
 
 
+@pytest.mark.parametrize(
+    ("scan", "message"),
+    [
+        (
+            CommandResult(exit_code=127, stderr="ps: not found " + "x" * 300 + "\nsecond line"),
+            "The process scan of a _DyingBox box failed (exit code 127, timed out False): ps: not found " + "x" * 186,
+        ),
+        (
+            CommandResult(exit_code=0, stdout=_SNAPSHOT, timed_out=True),
+            "The process scan of a _DyingBox box failed (exit code 0, timed out True): ",
+        ),
+        (
+            SandboxInfraError("box-secret-name"),
+            "The process scan of a _DyingBox box did not run (SandboxInfraError)",
+        ),
+    ],
+    ids=["fails", "times-out", "raises"],
+)
+def test_a_failed_process_scan_logs_the_box_type_and_the_cause(
+    trees: TreeStore,
+    step_log: StepLogStore,
+    caplog: pytest.LogCaptureFixture,
+    scan: CommandResult | BaseException,
+    message: str,
+) -> None:
+    """A dropped box tells the operator why: the box type, the exit code and the first stderr line, capped.
+
+    Args:
+        trees: The tree store.
+        step_log: The test step log.
+        caplog: Pytest log capture.
+        scan: The faked result or error of each process scan.
+        message: The log line of each failed scan; the step scans before and after its command.
+    """
+    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
+    empty = _tree(trees, {})
+    try:
+        sandbox.run(_step(1), empty, "true", [])
+        runtime.boxes[0].processes = scan
+        with caplog.at_level(logging.WARNING, logger=TreeSandbox.__module__):
+            sandbox.run(_step(2), empty, "true", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert [record.getMessage() for record in caplog.records if record.name == TreeSandbox.__module__] == [message] * 2
+    assert "box-secret-name" not in caplog.text
+
+
 def _fake_tools(folder: Path, marker: Path, names: Sequence[str]) -> None:
     """Write a tool for each name that records its run in the marker file and fails.
 
@@ -2292,6 +2344,141 @@ def test_the_scan_skips_pid_2_only_when_it_is_kthreadd(tmp_path: Path, comm: str
 
     assert result.returncode == 0
     assert {line.split()[0] for line in result.stdout.splitlines() if not line.startswith("state ")} == expected
+
+
+def test_the_scan_skips_its_own_shell_its_ancestors_and_its_children(tmp_path: Path) -> None:
+    """The scan's shell, the processes above it and the tools that it starts change with each scan, so none prints.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake ps.
+    """
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    # ps runs as a child of the scan's shell, so $PPID is that shell and $$ is one of its children.
+    # The shell's parent 77777 stands for the caller's process.
+    (folder / "ps").write_text(
+        '#!/bin/sh\nprintf \'%5s %5s Tue Nov 17 00:00:00 2026\\n\' 1 0 4242 1 77777 1 "$PPID" 77777 "$$" "$PPID"\n'
+    )
+    (folder / "ps").chmod(0o755)
+
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+        env={"PATH": f"{folder}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert {line.split()[0] for line in result.stdout.splitlines() if not line.startswith("state ")} == {"1", "4242"}
+
+
+@pytest.mark.parametrize("profile", [".profile", ".bashrc", ".bash_profile", ".bash_login"])
+def test_the_scan_state_changes_when_any_shell_profile_changes(profile: str) -> None:
+    """A login or interactive shell reads each of these files, so a write to any one changes the state line.
+
+    Args:
+        profile: The profile file in the box's HOME.
+    """
+    box = LocalSubprocessRuntime().open(_SPEC)
+    try:
+        first = _state(box)
+        box.run(f'echo "echo hi" > "$HOME/{profile}"', timeout_seconds=30)
+        changed = _state(box)
+    finally:
+        box.close()
+
+    assert first != changed
+
+
+def test_the_scan_state_changes_when_the_target_of_a_linked_tool_changes(tmp_path: Path) -> None:
+    """A tool on the box PATH can be a link, so the state covers the file that the link names.
+
+    Args:
+        tmp_path: Scratch folder; it holds the box PATH folder and the link target.
+    """
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    target = tmp_path / "target"
+    target.write_text("aaaa\n")
+    (folder / "python3").symlink_to(target)
+    box = LocalSubprocessRuntime().open(replace(_SPEC, env={"PATH": f"{folder}:/usr/bin:/bin"}))
+    try:
+        first = _state(box)
+        target.write_text("a longer text\n")
+        changed = _state(box)
+    finally:
+        box.close()
+
+    assert first != changed
+
+
+def test_the_scan_state_with_gnu_stat_covers_each_file_size(tmp_path: Path) -> None:
+    """A box has GNU stat, so a fake stat that maps the GNU format to BSD runs the GNU branch on a macOS host too.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake stat, its marker file and the box PATH folder.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "gnu.txt"
+    # On a host with GNU stat the fake only runs the real one. On macOS it accepts the probe and maps each
+    # GNU format field to its BSD field, so a GNU format that drops a field drops it here too.
+    (tools / "stat").write_text(
+        "#!/bin/sh\n"
+        f"echo used >> '{marker}'\n"
+        'if /usr/bin/stat -c %i / >/dev/null 2>&1; then exec /usr/bin/stat "$@"; fi\n'
+        'if [ "$1" = -c ] && [ "$3" = / ]; then echo 2; exit 0; fi\n'
+        'link=; if [ "$1" = -L ]; then link=-L; shift; fi\n'
+        '[ "$1" = -c ] || exit 64\n'
+        "fmt=$(printf '%s' \"$2\" | sed -e 's/%n/%N/g' -e 's/%s/%z/g' -e 's/%Y/%m/g' -e 's/%Z/%c/g')\n"
+        "shift 2\n"
+        'exec /usr/bin/stat $link -f "$fmt" "$@"\n'
+    )
+    (tools / "stat").chmod(0o755)
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    (folder / "tool").write_text("aaaa\n")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def state() -> str:
+        """Return the state line of one scan with the fake stat first on PATH.
+
+        Returns:
+            The line that starts with ``state``.
+        """
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+            env={"PATH": f"{tools}:/usr/bin:/bin", "BOX_PATH": str(folder), "HOME": str(home)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0
+        return next(line for line in result.stdout.splitlines() if line.startswith("state "))
+
+    first = state()
+    again = state()
+    (folder / "tool").write_text("a longer text\n")
+    changed = state()
+
+    assert marker.exists()
+    assert first == again
+    assert first != changed
+
+
+def test_the_clean_shell_keeps_the_box_locale() -> None:
+    """tar and ps run in the clean shell, and they must read file names and dates in the box shell's locale."""
+    box = LocalSubprocessRuntime().open(replace(_SPEC, env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}))
+    try:
+        result = box.run(_clean('printf "%s|%s" "$LANG" "$LC_ALL"'), timeout_seconds=30)
+    finally:
+        box.close()
+
+    assert result.stdout == "C.UTF-8|C.UTF-8"
 
 
 def test_a_box_that_dies_mid_step_is_replaced_and_the_step_reruns_from_its_tree(

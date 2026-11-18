@@ -102,6 +102,7 @@ _MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_P
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
 _CHECK_TIMEOUT_SECONDS = 30
+_SCAN_STDERR_CHARS = 200
 # Runs a control script in a clean shell. env -i drops the box environment, so a tool comes only from the
 # root-owned /usr/bin and /bin, and not from a folder that the box user can write. The box locale passes
 # through, so tar names files as the box shell does. BOX_PATH and HOME give the scan the folders to check.
@@ -303,10 +304,24 @@ def _processes(box: SandboxSession) -> frozenset[str] | None:
         result = box.run(PROCESS_SCAN, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
     except _BUDGET_ERRORS:
         raise
-    except Exception:
+    except Exception as error:
+        # Only the type: the provider's text can name the box.
+        logger.warning("The process scan of a %s box did not run (%s)", type(box).__name__, type(error).__name__)
         return None
     lines = frozenset(result.stdout.splitlines())
-    return lines if result.ok and not result.timed_out and lines else None
+    if result.ok and not result.timed_out and lines:
+        return lines
+    # The first stderr line names the cause, such as a box without ps. The box controls that text, so a cap
+    # keeps a long line out of the log.
+    first = next(iter(result.stderr.splitlines()), "")[:_SCAN_STDERR_CHARS]
+    logger.warning(
+        "The process scan of a %s box failed (exit code %s, timed out %s): %s",
+        type(box).__name__,
+        result.exit_code,
+        result.timed_out,
+        first,
+    )
+    return None
 
 
 def _clean(script: str) -> str:
