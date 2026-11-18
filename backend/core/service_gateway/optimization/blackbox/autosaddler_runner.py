@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -46,7 +47,7 @@ try:
     from autosaddler.v2.harness.component_map import ComponentMapHarnessSpace
     from autosaddler.v2.harness.git import GitHarnessSpace, GitVerificationVerdict
     from autosaddler.v2.prompting import assets as as_assets
-    from autosaddler.v2.prompting.history import build_history_bundle
+    from autosaddler.v2.prompting.history import HISTORY_ROOT, build_history_bundle
     from autosaddler.v2.prompting.models import SessionSpec
     from autosaddler.v2.prompting.models import Usage as SessionUsage
     from autosaddler.v2.providers.base import BaseAgentProvider, TransportOutcome
@@ -55,7 +56,7 @@ try:
 except ImportError:  # Upstream needs Python 3.12; parent-side tests still import the helpers.
     as_domain = as_policies = as_ports = as_assets = None
     AutoSaddlerEngine = RunState = ComponentMapHarnessSpace = GitHarnessSpace = GitVerificationVerdict = None
-    build_history_bundle = SessionSpec = LocalRunStore = None
+    HISTORY_ROOT = build_history_bundle = SessionSpec = LocalRunStore = None
     SessionUsage = BaseAgentProvider = TransportOutcome = WorkspaceRenderer = None
 
 try:
@@ -99,6 +100,21 @@ _HARNESS_SKILL_DIRECTORY = ".agents/skills"
 _GIT_IDENTITY = ("-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false")
 # Repository runs read their prompts and skills from this plugin subfolder.
 _REPO_ASSETS = "repo/"
+# Mirrors protocol.RUN_FAILED_STATUS: this file imports no app code. The status
+# marks a case whose [run] entry failed (SKY-751).
+_RUN_FAILED_STATUS = "run_failed"
+# Upstream AutoSaddler 0.2.0 ends the run when a training case has no valid
+# score, and a valid score must be finite. So a case with no score gets this
+# floor, in upstream's view only: it always loses, and the app never reports
+# it. It is not -sys.float_info.max because upstream sums the case scores
+# before it divides, and that sum must stay finite (up to 1.7e8 cases).
+# SKY-750 (metric direction): the floor assumes that a higher score is
+# better. A minimize run must flip it to +1e300.
+_NO_SCORE_FLOOR = -1e300
+# Upstream records means and per-case means that can hold the floor, and the
+# agent reads them. Such a mean is near _NO_SCORE_FLOOR / n with n below 1.7e8
+# cases, so any number at or below this bound comes from the floor.
+_NO_SCORE_BOUND = _NO_SCORE_FLOOR / 1e9
 
 
 class EvaluationStopped(BaseException):
@@ -165,7 +181,11 @@ class EvaluatorMailbox:
                     raise self.error
                 with self._write_lock:
                     self.total_evals += 1
-                return float(response["score"]), dict(response.get("info") or {})
+                # The parent sends null for a case with no score (a metric
+                # error or a failed [run] entry); the evaluator gives any
+                # non-finite score the no-score floor (SKY-751).
+                score = response.get("score")
+                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply
@@ -494,6 +514,12 @@ class AppEvaluator:
         self.fingerprint = fingerprint
         self.components: dict[str, dict[str, str]] = {}
         self.best_development: dict[str, Any] | None = None
+        # Development candidates with a case that has no score. Their
+        # upstream aggregate holds the floor, so the app reports no score.
+        self.no_score_candidates: set[str] = set()
+        # The subset with a failed [run] case. A metric error fails for every
+        # version, so only these never become a parent (SKY-751).
+        self.run_failed_candidates: set[str] = set()
         # The run view orders versions numerically, so each candidate that
         # reaches development gets the next version number in arrival order.
         self.versions: dict[str, int] = {}
@@ -616,14 +642,9 @@ class AppEvaluator:
             cost = as_domain.Cost(rollouts=1, wall_seconds=time.monotonic() - started)
             # Upstream only diagnoses an iteration that has failing training
             # cases, so anything short of a full score must read as a task
-            # failure; a non-numeric score is the scorer breaking, not the
-            # candidate failing, which upstream keeps out of the averages.
-            if not math.isfinite(score):
-                disposition: Any = "execution_error"
-            elif score >= 1.0:
-                disposition = "success"
-            else:
-                disposition = "task_failure"
+            # failure. A case with no score is a valid task failure at the
+            # floor: an invalid case ends the upstream run (SKY-751).
+            disposition: Any = "success" if math.isfinite(score) and score >= 1.0 else "task_failure"
             # Repetitions re-score the same case, so only the first fills the
             # version's case in the run view; the aggregate averages them.
             if context.purpose == "development" and repetition == 0 and math.isfinite(score):
@@ -643,7 +664,7 @@ class AppEvaluator:
                 split=context.split,
                 repetition=repetition,
                 disposition=disposition,
-                score=score if math.isfinite(score) else None,
+                score=score if math.isfinite(score) else _NO_SCORE_FLOOR,
                 evaluator_fingerprint=self.fingerprint,
                 cost=cost,
                 metadata={"scorer_feedback": as_domain.to_json_value(_json_finite(info))},
@@ -665,11 +686,13 @@ class AppEvaluator:
         Raises:
             TargetReached: When the aggregate meets the stop target.
         """
-        if score is None or not math.isfinite(score):
-            return
-        # A version with a crashed case has a filled mean (SKY-367). Final
-        # selection drops it, so it must not become best or stop the run.
-        if any(observation.score is None for observation in observations):
+        # A version with a case that has no score has the floor in its mean
+        # (SKY-751). Final selection drops it, so it must not become best,
+        # show a score or stop the run.
+        if score is None or not math.isfinite(score) or any(_no_score(item) for item in observations):
+            self.no_score_candidates.add(candidate_id)
+            if any(_failed_run_case(item) for item in observations):
+                self.run_failed_candidates.add(candidate_id)
             return
         if self.best_development is None or score > self.best_development["best_score"]:
             self.best_development = {"best_candidate": value, "best_score": score, "candidate_id": candidate_id}
@@ -691,6 +714,237 @@ class AppEvaluator:
         )
         if self.stop_at_score is not None and score >= self.stop_at_score:
             raise TargetReached(f"Development score {score} reached the target {self.stop_at_score}.")
+
+
+def _no_score(observation: Any) -> bool:
+    """Tell whether an upstream observation has no score from the parent scorer.
+
+    Args:
+        observation: Upstream observation.
+
+    Returns:
+        Whether its score is missing, not finite or the no-score floor.
+    """
+    score = observation.score
+    return score is None or not math.isfinite(score) or score == _NO_SCORE_FLOOR
+
+
+def _without_floor(value: Any) -> Any:
+    """Replace every number that comes from the no-score floor with ``None``.
+
+    Args:
+        value: A JSON value from an upstream session context or history file.
+
+    Returns:
+        The value, with each floor-derived number as ``None``.
+    """
+    if isinstance(value, float) and value <= _NO_SCORE_BOUND:
+        return None
+    if isinstance(value, Mapping):
+        return {key: _without_floor(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_without_floor(item) for item in value]
+    return value
+
+
+def _history_files(store: Any, context: Mapping[str, Any]) -> dict[str, str]:
+    """Build upstream's history files with no floor-derived number in them.
+
+    Upstream writes raw aggregates and case scores into the history, so a
+    version with a case that has no score shows the floor. The app never
+    reports that floor (SKY-751), so it reads as ``None``. The manifest
+    digests then describe the files the agent gets.
+
+    Args:
+        store: Upstream run store.
+        context: Upstream session context.
+
+    Returns:
+        Workspace paths mapped to file text.
+    """
+    files = dict(build_history_bundle(store, context).workspace_files)
+    manifest_path = f"{HISTORY_ROOT}/manifest.json"
+    for path, text in files.items():
+        if path.endswith(".json") and path != manifest_path:
+            files[path] = as_domain.canonical_json(_without_floor(json.loads(text))) + "\n"
+    manifest = json.loads(files[manifest_path])
+    manifest["files"] = {
+        path: {"sha256": as_domain.sha256_digest(text), "bytes": len(text.encode("utf-8"))}
+        for path, text in sorted(files.items())
+        if path != manifest_path
+    }
+    files[manifest_path] = as_domain.canonical_json(manifest) + "\n"
+    return files
+
+
+def _scored_view(evaluation: Any) -> Any:
+    """Return the evaluation with each floor observation made invalid again.
+
+    Upstream acceptance then compares only the cases both versions scored,
+    and its recorded means never hold the floor.
+
+    Args:
+        evaluation: Upstream evaluation.
+
+    Returns:
+        The evaluation itself when it holds no floor, else a copy.
+    """
+    if not any(observation.score == _NO_SCORE_FLOOR for observation in evaluation.observations):
+        return evaluation
+    observations = tuple(
+        dataclasses.replace(observation, disposition="execution_error", score=None)
+        if observation.score == _NO_SCORE_FLOOR
+        else observation
+        for observation in evaluation.observations
+    )
+    return dataclasses.replace(evaluation, observations=observations)
+
+
+def _failed_run_case(observation: Any) -> bool:
+    """Tell whether an upstream observation is a case whose ``[run]`` entry failed.
+
+    Args:
+        observation: Upstream observation that carries the scorer feedback.
+
+    Returns:
+        Whether it has no score and the run-failed status. A scorer may
+        report that status with a real score, which it keeps, as in
+        ``protocol.py``.
+    """
+    feedback = observation.metadata.get("scorer_feedback")
+    return isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS and _no_score(observation)
+
+
+def _run_failed(evaluation: Any) -> bool:
+    """Tell whether any case of an upstream evaluation had a failed ``[run]`` entry.
+
+    Args:
+        evaluation: Upstream evaluation whose observations carry the scorer feedback.
+
+    Returns:
+        Whether any observation is a failed ``[run]`` case.
+    """
+    return any(_failed_run_case(observation) for observation in evaluation.observations)
+
+
+def _compared_keys(parent: Any, child: Any) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Check two training evaluations as upstream acceptance does and list their cases.
+
+    Args:
+        parent: Parent's training evaluation.
+        child: Child's training evaluation.
+
+    Returns:
+        The sorted ``(case, repetition)`` keys both sides observed, and the
+        subset where both sides have a valid observation.
+
+    Raises:
+        ValueError: The evaluations are not training evaluations of the same
+            cases, as upstream ``MatchedValidStrictImprovement`` requires.
+    """
+    if parent.split != "train" or child.split != "train":
+        raise ValueError("Acceptance may compare training evaluations only")
+    if parent.requested_case_ids != child.requested_case_ids:
+        raise ValueError("Parent and child must be evaluated on the identical ordered case set")
+    parent_by_key = {(item.case_id, item.repetition): item for item in parent.observations}
+    child_by_key = {(item.case_id, item.repetition): item for item in child.observations}
+    if parent_by_key.keys() != child_by_key.keys():
+        raise ValueError("Parent and child observations must have identical case/repetition keys")
+    keys = sorted(parent_by_key)
+    return keys, [key for key in keys if parent_by_key[key].is_valid and child_by_key[key].is_valid]
+
+
+class NoScoreRejectedAcceptance:
+    """Acceptance that never prefers a version with a failed ``[run]`` entry (SKY-751).
+
+    Upstream compares only the cases both versions scored, so a child that
+    crashed on one case and scored high on the rest would replace a fully
+    scored parent. A child with a failed entry is rejected; a child that
+    fixes its parent's failed entry is accepted. Acceptance sees only the
+    training batch; ``AppPromptPack`` keeps a version with a failed ``[run]``
+    case in development from becoming a parent.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap upstream's acceptance policy.
+
+        Args:
+            inner: Upstream acceptance, used when both or neither side failed.
+        """
+        self.inner = inner
+
+    def compare(self, parent: Any, child: Any) -> Any:
+        """Decide whether the child replaces the parent.
+
+        Args:
+            parent: Parent's training evaluation.
+            child: Child's training evaluation on the same cases.
+
+        Returns:
+            Upstream's patch verdict.
+        """
+        parent_failed, child_failed = _run_failed(parent), _run_failed(child)
+        parent, child = _scored_view(parent), _scored_view(child)
+        keys, matched = _compared_keys(parent, child)
+        if parent_failed == child_failed and matched:
+            return self.inner.compare(parent, child)
+        # Upstream raises when no case is valid on both sides, which would end
+        # the run; with nothing to compare, the child cannot be better.
+        if parent_failed == child_failed:
+            accepted, reason = False, "no case has a valid score on both versions"
+        elif parent_failed:
+            accepted, reason = True, "the child fixes a failed [run] entry"
+        else:
+            accepted, reason = False, "the child has a failed [run] entry"
+        # The verdict's scores are only a record. Upstream records reject
+        # non-finite numbers, so a side with no valid case records 0.0.
+        return as_domain.PatchVerdict(
+            before_score=parent.aggregate_score if parent.aggregate_score is not None else 0.0,
+            after_score=child.aggregate_score if child.aggregate_score is not None else 0.0,
+            compared_case_ids=tuple(dict.fromkeys(case_id for case_id, _ in keys)),
+            accepted=accepted,
+            reason=reason,
+        )
+
+
+class NoScoreLastRanking:
+    """Ranking that never selects a version with a failed ``[run]`` case (SKY-751).
+
+    Such a case holds the floor in upstream's mean. The app reports no score
+    for that version, so it must not win the final selection. A metric error
+    fails for every version, so that version ranks by its mean over its
+    scored cases, as the SKY-367 fill ranks it in the other engines.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap upstream's ranking policy.
+
+        Args:
+            inner: Upstream ranking, used on the versions with no failed ``[run]`` case.
+        """
+        self.inner = inner
+
+    def select(self, candidates: Sequence[tuple[Any, Any]]) -> tuple[Any, Any]:
+        """Select the best version with a score, or the seed when no version has one.
+
+        Args:
+            candidates: ``(candidate, development evaluation)`` pairs, the seed first.
+
+        Returns:
+            The selected pair.
+        """
+        views = {id(item[1]): _scored_view(item[1]) for item in candidates}
+        scored = [
+            (candidate, views[id(evaluation)])
+            for candidate, evaluation in candidates
+            if not _run_failed(evaluation) and views[id(evaluation)].aggregate_score is not None
+        ]
+        if not scored:
+            # The app reports no score for the seed then, which finishes the
+            # run with no score; any other unscored version would fail the run.
+            return candidates[0]
+        selected, _ = self.inner.select(scored)
+        return next(item for item in candidates if item[0] is selected)
 
 
 class AppEvidenceBuilder:
@@ -732,7 +986,7 @@ class AppEvidenceBuilder:
                         {
                             "repetition": item.repetition,
                             "disposition": item.disposition,
-                            "score": item.score,
+                            "score": None if _no_score(item) else item.score,
                             "scorer_feedback": item.metadata.get("scorer_feedback"),
                         }
                         for item in observations
@@ -1031,6 +1285,7 @@ class AppPromptPack:
         objective: str | None,
         background: str | None,
         readonly_paths: Sequence[str] | None = None,
+        run_failed_candidates: set[str] | None = None,
     ) -> None:
         """Bind the prompt pack to the run store and task framing.
 
@@ -1040,8 +1295,11 @@ class AppPromptPack:
             objective: User objective text.
             background: User background notes.
             readonly_paths: Paths that stay as fetched; set only for a repository run.
+            run_failed_candidates: The evaluator's live set of versions with a
+                failed ``[run]`` case in development.
         """
         self.store = store
+        self.run_failed_candidates = set() if run_failed_candidates is None else run_failed_candidates
         self.component_names = tuple(component_names)
         self.objective = objective
         self.background = background
@@ -1068,8 +1326,7 @@ class AppPromptPack:
             "mutation_scope": list(self.component_names),
             **({} if self.readonly_paths is None else {"readonly_paths": list(self.readonly_paths)}),
         }
-        workspace_files = {_SESSION_CONTEXT_PATH: as_domain.canonical_json(rendered) + "\n"}
-        workspace_files.update(build_history_bundle(self.store, context).workspace_files)
+        workspace_files = _history_files(self.store, context)
         mutation_label = None
         if kind == "diagnose_patch":
             workspace_files[_TRAINING_EVIDENCE_PATH] = self._evidence(context.get("evidence"))
@@ -1080,15 +1337,28 @@ class AppPromptPack:
             mutation_label = "candidate-patch"
         elif kind == "evolve":
             candidate_ids = _strings(context.get("candidate_ids"), "candidate_ids")
-            schema = _evolve_schema(
-                candidate_ids, _source_options(context.get("component_source_options"), candidate_ids)
-            )
+            options = _source_options(context.get("component_source_options"), candidate_ids)
+            # Upstream accepts on the training batch only, so a version with a
+            # failed [run] case in development stays in its accepted list. Only
+            # the parents the agent may name exclude it (SKY-751); a metric
+            # error keeps its version. When every accepted version failed a
+            # [run] case, the search keeps them all.
+            parents = [item for item in candidate_ids if item not in self.run_failed_candidates] or list(candidate_ids)
+            options = {
+                name: kept
+                for name, sources in options.items()
+                if (kept := [item for item in sources if item in parents])
+            }
+            rendered["candidate_ids"], rendered["component_source_options"] = parents, options
+            schema = _evolve_schema(parents, options)
             skill_paths = _ANALYSIS_SKILLS
         elif kind == "reflect":
             schema = _reflection_schema()
             skill_paths = _ANALYSIS_SKILLS
         else:
             raise ValueError(f"Unknown app session kind: {kind}")
+        # The context holds upstream's raw aggregates, which can hold the floor.
+        workspace_files[_SESSION_CONTEXT_PATH] = as_domain.canonical_json(_without_floor(rendered)) + "\n"
         resolved = resolved_assets(kind, skill_paths, self.prefix)
         workspace_files[_PROMPT_ASSETS_PATH] = (
             as_domain.canonical_json(
@@ -1457,6 +1727,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             objective=task.get("objective"),
             background=task.get("background"),
             readonly_paths=readonly_paths,
+            run_failed_candidates=evaluator.run_failed_candidates,
         ),
         train_cases=train_cases,
         development_cases=development_cases,
@@ -1477,9 +1748,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     max_iterations = payload.get("max_iterations") or max_evals
     policies = as_policies.PolicyBundle(
         task_selection=as_policies.FixedTaskSelectionPolicy(batch_size=min(2, len(train_cases))),
-        acceptance=as_policies.MatchedValidStrictImprovement(),
+        acceptance=NoScoreRejectedAcceptance(as_policies.MatchedValidStrictImprovement()),
         development=as_policies.FullOnAcceptDevelopment(),
-        ranking=as_policies.MeanDevelopmentRanking(),
+        ranking=NoScoreLastRanking(as_policies.MeanDevelopmentRanking()),
         budget=as_policies.BudgetPolicy(max_rollouts=max_evals, max_iterations=int(max_iterations)),
     )
     store.initialize(
@@ -1490,9 +1761,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             "provider": {"type": proposer["harness"], "model": model},
             "optimization": {
                 "task_selection": {"type": "fixed", "batch_size": policies.task_selection.batch_size},
-                "acceptance": {"type": "matched_valid_strict_improvement"},
+                "acceptance": {"type": "no_score_rejected", "inner": "matched_valid_strict_improvement"},
                 "development": {"type": "full_on_accept"},
-                "ranking": {"type": "mean_development"},
+                "ranking": {"type": "no_score_last", "inner": "mean_development"},
                 "budget": {"max_rollouts": max_evals, "max_iterations": int(max_iterations)},
                 "stop_at_score": payload.get("stop_at_score"),
             },
@@ -1509,10 +1780,14 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             result = engine.run()
             selected = store.read_json("result.json")
+            no_score = result.selected_candidate_id in evaluator.no_score_candidates
+            if no_score and isinstance(selected, dict):
+                selected = {**selected, "development_score": None}
             document.update(
                 {
                     "best_candidate": evaluator.value_of(_candidate(store, result.selected_candidate_id)),
-                    "best_score": result.development_score,
+                    # Upstream's score for that version holds the no-score floor (SKY-751).
+                    "best_score": None if no_score else result.development_score,
                     "total_evals": mailbox.total_evals,
                     "metadata": {
                         "autosaddler_run_id": result.run_id,

@@ -345,22 +345,28 @@ def _fill_unscored(average: float, info: dict[str, Any]) -> tuple[float, dict[st
     The mailbox turns a parent null into negative infinity, and the parent's
     JSON never carries a non-finite score, so a non-finite case is a metric
     error. The engines rank versions by this aggregate, so a case that always
-    crashes must not pull every version to negative infinity (SKY-367).
+    crashes must not pull every version to negative infinity (SKY-367). A
+    failed ``[run]`` entry is the version's own fault, so it gets no fill and
+    the sweep's aggregate is negative infinity (SKY-751).
 
     Args:
         average: Upstream's mean over the sweep's cases.
-        info: Upstream's per-case details, with ``scores`` keyed by case id.
+        info: Upstream's per-case details, with ``scores`` and ``infos`` keyed by case id.
 
     Returns:
         The filled cases' mean and the details with each null case filled
         and listed under ``UNSCORED_CASES_KEY``. A sweep that scored no case
         keeps its mean and lists every case, so no engine ranks it as fully
-        scored.
+        scored. A sweep with a failed ``[run]`` entry keeps its real case
+        scores, lists every case, and has a negative infinity aggregate.
     """
     scores = info.get("scores")
     if not isinstance(scores, dict) or not scores:
         return average, info
-    filled = native_engines.fill_unscored([""] * len(scores), list(scores.values()))
+    infos = info.get("infos") if isinstance(info.get("infos"), dict) else {}
+    filled = native_engines.fill_unscored(
+        [""] * len(scores), list(scores.values()), [infos.get(case) for case in scores]
+    )
     if not all(math.isfinite(score) for score in filled):
         return average, {**info, native_engines.UNSCORED_CASES_KEY: list(scores)}
     unscored = [case for case, score in scores.items() if not math.isfinite(score)]

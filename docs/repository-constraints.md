@@ -542,7 +542,41 @@ Residual risk:
 - Where the image has no `/usr/local/bin/python3` (for example a local test
   host), the supervisor falls back to `python3` from `PATH`.
 
-A timeout or other `[run]` failure scores 0, and the metric does not run.
+A timeout, a crash, a non-zero exit or other `[run]` failure gives the case
+no score, and the metric does not run. The runner never makes a score. Only
+the metric makes a score. The failure text goes to the proposer as feedback.
+A version with a case that has no score has no score itself:
+
+- It cannot be the best version of the search, and it ranks below every
+  version that has a score.
+- Every engine applies this rule during the search too. The version never
+  replaces a version that has a score and never leads the frontier. It can
+  still be a parent for the next step in two cases. GEPA always starts from
+  the starting version, also when that version failed a case. AutoSaddler
+  keeps every parent when the `[run]` entry of every accepted version failed.
+- A metric error is different during the search. The metric fails, not your
+  program, so the case gets the version's mean over its other cases. A metric
+  that fails one case for every version then still lets the search rank the
+  versions.
+- A metric error in the final run also gives the version no score.
+- A version with a metric error stays in the version tree with no score,
+  so its child versions keep their parent.
+- It reaches no `[outcome] target`, passes no minimum and opens no pull
+  request.
+- The starting version can fail a case. Then a version that passes every
+  case counts as better and opens a pull request. The result shows no
+  starting score and no improvement number.
+- When no version has a score, the run keeps the starting version and says
+  why.
+
+If a failure must count as a number, catch the failure in your program and
+write an output that the metric can score. The metric then gives the number.
+
+Release note (SKY-751): before this change, a failed `[run]` case scored 0.
+A run whose starting code fails some cases, with the goal to fail fewer
+cases, now gets no score for each version that still fails a case. The
+search then loses its step-by-step progress signal. To keep that signal,
+catch the failure in the program, as above, and let the metric score it.
 
 ## What is enforced
 
