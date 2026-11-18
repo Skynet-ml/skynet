@@ -387,7 +387,8 @@ A manual hold on a change or on a promotion still stops it.
   merges a batch into `staging` as soon as the batch passes all its
   pre-merge gates. These are gates 1-4 in "Merge gates", and the checks in
   "Automatic merges", "Linear revisions and holds" and "PR tests and batch
-  CI". Gate 5 (the staging smoke test) runs after the merge.
+  CI". Gate 5 (the staging deploy and the staging smoke test) runs after
+  the merge.
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
   other batch is in progress. Exception: after a stop for a CI failure that
   no PR in the batch causes, the next batch waits for the Urgent fix PR. It
