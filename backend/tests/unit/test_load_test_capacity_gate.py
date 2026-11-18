@@ -2474,3 +2474,244 @@ def test_swarm_gate_needs_postgres_and_local_s3(
             "the target is not proven on this backend: it needs Postgres (LOAD_TEST_SWARM_DB_URL)"
             " and local S3 (LOAD_TEST_SWARM_S3_BUCKET)"
         ]
+
+
+def _metered_outcome(shape: reference_shapes.Shape) -> reference_shapes.RunOutcome:
+    """Return a run outcome with two boxes of 30 s and 90 s and 6 model calls.
+
+    Args:
+        shape: The shape.
+
+    Returns:
+        The outcome.
+    """
+    meter = reference_shapes.BoxMeter()
+    meter.lifetimes = [30.0, 90.0]
+    meter.opened = 2
+    return reference_shapes.RunOutcome("cost-0", shape.name, model_calls=6, meter=meter)
+
+
+def test_sandbox_cost_of_a_cpu_shape_matches_hand_figures() -> None:
+    """Check the Vercel price of both paths against figures done by hand from the iad1 list rates."""
+    shape = reference_shapes.SHAPES[0]
+    assert shape.vcpus == 2
+    assert shape.gpu is None
+    cost = reference_shapes.sandbox_cost(shape, _metered_outcome(shape), 20.0)
+    # A box costs $0.0000006, plus active CPU at $0.128 an hour, plus 4 GB for each started minute at $0.0212 an
+    # hour. New path: 30 s and 90 s boxes, busy all their life. Old path: one box open 120 + 6 * 20 = 240 s.
+    new = (0.0000006 + 30 * 0.128 / 3600 + 4 * 60 * 0.0212 / 3600) + (
+        0.0000006 + 90 * 0.128 / 3600 + 4 * 120 * 0.0212 / 3600
+    )
+    old = 0.0000006 + 120 * 0.128 / 3600 + 4 * 240 * 0.0212 / 3600
+    assert cost["box_seconds_new"] == 120.0
+    assert cost["box_seconds_old"] == 240.0
+    assert cost["usd_new"] == pytest.approx(round(new, 6))
+    assert cost["usd_old"] == pytest.approx(round(old, 6))
+    assert cost["usd_old"] == 0.009921
+    assert cost["new_over_old"] == pytest.approx(round(new / old, 3))
+
+
+def test_sandbox_cost_of_the_gpu_shape_matches_hand_figures() -> None:
+    """Check the Modal price of both paths against figures done by hand from the A10G and CPU core rates."""
+    shape = reference_shapes.SHAPES[3]
+    assert shape.vcpus == 4
+    assert shape.gpu == "A10G"
+    cost = reference_shapes.sandbox_cost(shape, _metered_outcome(shape), 20.0)
+    rate = 0.000306 + 4 * 0.0000131
+    assert cost["box_seconds_new"] == 120.0
+    assert cost["box_seconds_old"] == 240.0
+    assert cost["usd_new"] == pytest.approx(rate * 120)
+    assert cost["usd_old"] == pytest.approx(rate * 240)
+    assert cost["new_over_old"] == 0.5
+
+
+def test_box_load_figures_match_hand_figures() -> None:
+    """Check the fresh-box and pooled box load at 100 commits a second against figures done by hand."""
+    config = _swarm_config(agents=10_000, box_seconds=30.0, box_vcpus=2, box_steps_per_step=0.75)
+    # 100 commits/s * 0.75 = 75 box starts/s: 4,500 a minute, 9,000 vCPU starts a minute (cap 5,000), and
+    # 75 * 30 s = 2,250 boxes open at once, 4,500 vCPUs (cap 10,000). Pooled: one 2-vCPU box for each agent.
+    assert swarm_10k.box_load(config, 100.0) == {
+        "commits_per_second": 100.0,
+        "fresh_box_per_step": {
+            "box_starts_per_minute": 4_500,
+            "vcpu_starts_per_minute": 9_000,
+            "concurrent_boxes": 2_250,
+            "concurrent_vcpus": 4_500,
+            "starts_within_cap": False,
+            "concurrency_within_cap": True,
+        },
+        "pooled_box_per_agent": {
+            "box_starts_per_minute": None,
+            "vcpu_starts_per_minute": None,
+            "concurrent_boxes": 10_000,
+            "concurrent_vcpus": 20_000,
+            "starts_within_cap": None,
+            "concurrency_within_cap": False,
+        },
+    }
+
+
+class _FakeSwitch:
+    """A chaos switch stand-in that keeps each kill that the chaos job arms."""
+
+    def __init__(self, live: bool) -> None:
+        """Start with no kill.
+
+        Args:
+            live: Whether the run is live.
+        """
+        self.live = live
+        self.kinds: list[str] = []
+
+    def arm(self, kind: str) -> None:
+        """Keep one armed kill.
+
+        Args:
+            kind: The kill kind.
+        """
+        self.kinds.append(kind)
+
+
+def test_chaos_job_arms_only_live_runs_and_counts_each_kill() -> None:
+    """Check that the chaos job arms kills only on live runs and counts each armed kill by kind."""
+    switches = [_FakeSwitch(True), _FakeSwitch(False), _FakeSwitch(True), _FakeSwitch(False)]
+    job = chaos_gate.ChaosJob(switches, 0.002, seed=5)
+    job.start()
+    deadline = time.monotonic() + 10
+    try:
+        while sum(len(switch.kinds) for switch in switches) < 30 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        job.stop()
+    kinds = [kind for switch in switches for kind in switch.kinds]
+    assert len(kinds) >= 30
+    assert switches[1].kinds == []
+    assert switches[3].kinds == []
+    assert switches[0].kinds
+    assert switches[2].kinds
+    assert job.armed == {kind: kinds.count(kind) for kind in reference_shapes.KILL_KINDS}
+
+
+class _DoneWaiter:
+    """A durable barrier stand-in that is set, with a closed log or a failure."""
+
+    def __init__(self, closed: bool, failure: BaseException | None) -> None:
+        """Keep the barrier's end state.
+
+        Args:
+            closed: Whether the step log closed before the step was durable.
+            failure: The step's fence failure, or ``None``.
+        """
+        self.closed = closed
+        self.failure = failure
+
+    def is_set(self) -> bool:
+        """Return that the barrier is set.
+
+        Returns:
+            Always ``True``.
+        """
+        return True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Return at once: the barrier is set.
+
+        Args:
+            timeout: Not used.
+
+        Returns:
+            Always ``True``.
+        """
+        return True
+
+
+@pytest.mark.parametrize(("closed", "failure"), [(True, None), (False, RuntimeError("fence"))])
+def test_swarm_driver_fails_a_step_that_did_not_land(
+    monkeypatch: pytest.MonkeyPatch, closed: bool, failure: BaseException | None
+) -> None:
+    """Check that a driver raises when a step's barrier ends with a closed step log or a fence failure.
+
+    Args:
+        monkeypatch: Replaces the commit and the barrier.
+        closed: Whether the step log closed before the step was durable.
+        failure: The step's fence failure, or ``None``.
+    """
+    monkeypatch.setattr(swarm_10k, "_commit_step", lambda *args: ("step-0", 0.0, 0.0))
+    monkeypatch.setattr(swarm_10k, "_waiter", lambda store, step_id: _DoneWaiter(closed, failure))
+    config = _swarm_config(agents=1, steps_per_agent=10)
+    with pytest.raises(RuntimeError, match="step step-0 did not land"):
+        swarm_10k._drive([("run-0", "agent-00000")], config, None, None, 0.0, threading.Event())
+
+
+def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a knob flag sets its environment variable and a knob with no flag keeps its value.
+
+    Args:
+        monkeypatch: Sets the command line and the environment.
+    """
+    defaults = [
+        "BACKEND_AUTH_SECRET",
+        "LOAD_TEST_DB_URL",
+        "LOAD_TEST_API_URL",
+        "LOAD_TEST_FRONTEND_URL",
+        "LOAD_TEST_MOCK_LM_URL",
+        "LOAD_TEST_COMPOSE_FILE",
+        "LOAD_TEST_COMPOSE_PROJECT",
+    ]
+    for name in defaults + [env_name for _, env_name, _ in run_all._SCENARIO_KNOBS]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOAD_TEST_CHAOS_RUNS_PER_SHAPE", "7")
+    monkeypatch.setattr(sys, "argv", ["run_all", "--swarm-agents=10000", "--chaos-seed=5"])
+    run_all._ensure_env(run_all._parse_args())
+    assert run_all.os.environ["LOAD_TEST_SWARM_AGENTS"] == "10000"
+    assert run_all.os.environ["LOAD_TEST_CHAOS_SEED"] == "5"
+    assert run_all.os.environ["LOAD_TEST_CHAOS_RUNS_PER_SHAPE"] == "7"
+    assert "LOAD_TEST_SWARM_SHARDS" not in run_all.os.environ
+
+
+class _KillEveryWorker(reference_shapes.ChaosSwitch):
+    """A chaos switch that kills the worker at each model call or box command, up to a fixed count."""
+
+    def __init__(self, kills: int) -> None:
+        """Start with every kill to come.
+
+        Args:
+            kills: How many kills fire; then the run goes on with no kill, so a broken cap cannot hang the test.
+        """
+        super().__init__()
+        self._kills = kills
+
+    def take(self, where: str) -> str | None:
+        """Fire a worker kill at a model call or a box command while kills are left.
+
+        Args:
+            where: ``model``, ``box`` or ``commit``.
+
+        Returns:
+            ``worker``, or ``None``.
+        """
+        if where == "commit" or self._kills == 0:
+            return None
+        self._kills -= 1
+        self.fired["worker"] += 1
+        return "worker"
+
+
+def test_run_stops_after_too_many_restarts(tmp_path: Path) -> None:
+    """Check that a run whose worker dies again and again stops at its restart cap and is not ok.
+
+    Args:
+        tmp_path: The folder for the harness.
+    """
+    switch = _KillEveryWorker(kills=12)
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        outcome = reference_shapes.run_shape(
+            harness, reference_shapes.SHAPES[0], "cap-0", rounds=1, switch=switch, max_restarts=2
+        )
+    finally:
+        harness.close()
+    assert outcome.restarts == 3
+    assert outcome.error == "more than 2 restarts"
+    assert not outcome.finished
+    assert not outcome.ok
