@@ -30,13 +30,14 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from gepa.core.state import GEPAState, ValsetEvaluation
+from pydantic import SecretStr
 from sqlalchemy import create_engine, make_url, text
 from sqlalchemy.orm import Session
 
 import core.storage.remote as remote_mod
 from alembic import command
 from core.billing.budgets import BudgetService
-from core.config import app_env
+from core.config import app_env, settings
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
 from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
 from core.sandbox.tests.fake_provider import InMemorySandbox
@@ -98,6 +99,9 @@ def _upgrade_to_head(db_url: str) -> None:
     that variable is set, and ``tests/conftest.py`` loads a developer's
     ``backend/.env`` (which points it at the dev database). So the variable
     is set to the test URL for the length of the upgrade only (SKY-803).
+    A call from code has no CLI options, so ``env.py`` also upgrades every
+    ``STEP_LOG_SHARDS`` database that ``backend/.env`` names. The shard map is
+    empty for the length of the upgrade (SKY-824).
 
     Args:
         db_url: SQLAlchemy URL of the live Postgres test target.
@@ -107,6 +111,7 @@ def _upgrade_to_head(db_url: str) -> None:
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("REMOTE_DB_URL", db_url)
+        mp.setattr(settings, "step_log_shards", {})
         command.upgrade(alembic_cfg, "head")
 
 
@@ -149,6 +154,20 @@ def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
     finally:
         engine.dispose()
     assert os.environ["REMOTE_DB_URL"] == other
+
+
+def test_alembic_setup_skips_the_step_log_shards_from_the_settings(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade only the test database, even when ``STEP_LOG_SHARDS`` names another database."""
+    shard_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_shard_{uuid.uuid4().hex[:8]}")
+    shards = {"proof": SecretStr(shard_url.render_as_string(hide_password=False))}
+    monkeypatch.setattr(settings, "step_log_shards", shards)
+
+    # The shard database does not exist, so a shard upgrade would raise.
+    _upgrade_to_head(TEST_DB_URL or "")
+
+    assert settings.step_log_shards is shards
 
 
 @pytest.fixture

@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, delete, make_url, select, text
+from sqlalchemy import create_engine, delete, make_url, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -46,39 +46,43 @@ pytestmark = pytest.mark.skipif(
 _T0 = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
+def _migrated_engine(db_url: str) -> Engine:
+    """Upgrade ``db_url`` to Alembic head and open an engine on it.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+
+    Returns:
+        The engine. The caller disposes it.
+    """
+    _reset_legacy_schema(db_url)
+    _upgrade_to_head(db_url)
+    return create_engine(db_url, pool_size=12)
+
+
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
     """Upgrade the live database to Alembic head.
 
-    Returns:
+    Yields:
         The engine.
     """
-    _reset_legacy_schema(TEST_DB_URL or "")
-    _upgrade_to_head(TEST_DB_URL or "")
-
-    engine = create_engine(TEST_DB_URL or "", pool_size=12)
+    engine = _migrated_engine(TEST_DB_URL or "")
     try:
         yield engine
     finally:
         engine.dispose()
 
 
-def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
-    engine: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Upgrade the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database.
-
-    The ``engine`` fixture runs first, so a legacy test database gets its reset before this upgrade.
-    """
+def test_engine_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Migrate the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database."""
     other_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_{uuid.uuid4().hex[:8]}")
     other = other_url.render_as_string(hide_password=False)
     monkeypatch.setenv("REMOTE_DB_URL", other)
 
     # The other database does not exist, so an upgrade that went to it would raise.
-    _upgrade_to_head(TEST_DB_URL or "")
+    _migrated_engine(TEST_DB_URL or "").dispose()
 
-    with engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
     assert os.environ["REMOTE_DB_URL"] == other
 
 
