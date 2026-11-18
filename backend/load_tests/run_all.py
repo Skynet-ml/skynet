@@ -43,7 +43,7 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from .lib.metrics import ScenarioResult
+from .lib.metrics import ScenarioMetrics, ScenarioResult
 from .lib.reporter import print_result, write_json_report, write_markdown_report
 from .lib.warmup import warm_validation_cache
 from .scenarios import (
@@ -290,12 +290,22 @@ async def _run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> li
         mock_lm_url: Mock LM URL forwarded to each scenario.
 
     Returns:
-        The collected :class:`ScenarioResult` objects in run order.
+        The collected :class:`ScenarioResult` objects in run order. A scenario that raises an ``Exception``, such as
+        a ``ValueError`` for a bad knob value, gives a failed result with the error text.
     """
     results: list[ScenarioResult] = []
     for name in names:
         print(f"\n[loadtest] running scenario: {name}")
-        result = await _SCENARIOS[name](api_url, mock_lm_url)
+        try:
+            result = await _SCENARIOS[name](api_url, mock_lm_url)
+        except Exception as exc:
+            # Like a failed run row: one scenario's error fails only that scenario, so the report keeps the others.
+            error = f"{type(exc).__name__}: {exc}"
+            print(f"[loadtest] scenario {name} raised {error}", file=sys.stderr)
+            result = ScenarioMetrics(name).finish()
+            result.extras = {"error": error}
+            result.slo_passed = False
+            result.slo_violations = [f"scenario raised {error}"]
         results.append(result)
     return results
 

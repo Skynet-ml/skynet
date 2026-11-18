@@ -1192,12 +1192,9 @@ def _correct(
         failed: The candidates whose box a chaos kill failed; it can change the best candidate.
 
     Returns:
-        Whether the best score is real and is the shape's score of the best candidate, and whether the result is
-        :func:`expected_result` with those failed candidates.
+        Whether the best score is real and the result is :func:`expected_result` with those failed candidates.
     """
     if result is None or result[1] is None:
-        return False
-    if result[1] != shape.score(int(result[0])):
         return False
     return result == expected_result(shape, rounds, failed)
 

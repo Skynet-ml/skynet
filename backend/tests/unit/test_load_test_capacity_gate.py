@@ -1,6 +1,7 @@
 """The SKY-727 load-test harness: thread caps, the swarm gate, shard failures and the resume check."""
 
 import asyncio
+import json
 import os
 import queue
 import sys
@@ -258,6 +259,54 @@ def test_run_all_leaves_the_swarm_out_by_default(monkeypatch: pytest.MonkeyPatch
     names = run_all._parse_args().scenarios.split(",")
     assert "swarm_10k" not in names
     assert {"reference_shapes", "chaos_gate", "mixed_realistic"} <= set(names)
+
+
+def test_run_all_reports_a_scenario_that_raises_as_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a scenario error fails only that scenario, and that the report keeps the earlier results.
+
+    Args:
+        monkeypatch: Sets the command line and the scenarios.
+        tmp_path: Holds the reports.
+    """
+
+    async def first(api_url: str, mock_lm_url: str) -> Any:
+        """Return a passed result.
+
+        Args:
+            api_url: Not used.
+            mock_lm_url: Not used.
+
+        Returns:
+            A result whose gate passed.
+        """
+        result = ScenarioMetrics("first").finish()
+        result.slo_passed = True
+        return result
+
+    async def second(api_url: str, mock_lm_url: str) -> Any:
+        """Fail as a scenario does with a bad knob value.
+
+        Args:
+            api_url: Not used.
+            mock_lm_url: Not used.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad knob: 10k")
+
+    monkeypatch.setattr(run_all, "_SCENARIOS", {"first": first, "second": second})
+    monkeypatch.setattr(run_all, "_IN_PROCESS_SCENARIOS", frozenset({"first", "second"}))
+    monkeypatch.setattr(run_all, "_ensure_env", lambda args: None)
+    monkeypatch.setattr(sys, "argv", ["run_all", "--scenarios=first,second", f"--results-dir={tmp_path}"])
+    assert run_all.main() == 1
+    [report] = tmp_path.glob("*.json")
+    assert len(list(tmp_path.glob("*.md"))) == 1
+    first_row, second_row = json.loads(report.read_text())["scenarios"]
+    assert (first_row["name"], first_row["slo_passed"]) == ("first", True)
+    assert (second_row["name"], second_row["slo_passed"]) == ("second", False)
+    assert second_row["extras"]["error"] == "ValueError: bad knob: 10k"
+    assert second_row["slo_violations"] == ["scenario raised ValueError: bad knob: 10k"]
 
 
 def test_swarm_gate_passes_good_figures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -587,6 +636,28 @@ def test_chaos_gate_rejects_a_kill_interval_of_zero(monkeypatch: pytest.MonkeyPa
     )
     with pytest.raises(ValueError, match="kill interval"):
         chaos_gate.run(config)
+
+
+def test_chaos_job_waits_while_no_run_is_live() -> None:
+    """Check that the chaos job arms nothing and keeps going while no run is live, then arms a kill on a live run."""
+    switches = [reference_shapes.ChaosSwitch(), reference_shapes.ChaosSwitch()]
+    chaos = chaos_gate.ChaosJob(switches, interval=0.005, seed=1)
+    chaos.start()
+    try:
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            assert chaos.is_alive()
+            time.sleep(0.01)
+        assert sum(chaos.armed.values()) == 0
+        switches[1].live = True
+        deadline = time.monotonic() + 5
+        while sum(chaos.armed.values()) == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        chaos.stop()
+    assert sum(chaos.armed.values()) > 0
+    assert [switches[0].take(where) for where in ("model", "box", "commit")] == [None, None, None]
+    assert any(switches[1].take(where) for where in ("model", "box", "commit"))
 
 
 def test_work_log_allows_a_repeat_only_for_a_lost_step() -> None:
