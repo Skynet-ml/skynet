@@ -221,6 +221,41 @@ def test_an_image_runs_when_it_can_read_the_runs_outcome(
     assert all(event.get("error") != vercel_dspy.OUTCOME_IMAGE_MESSAGE for event in events)
 
 
+@pytest.mark.parametrize(("image_protocol", "refused"), [(17, True), (SANDBOX_PROTOCOL, False)])
+def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
+    image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image before 18 runs the entry as a plain custom command, without setup or ``ASCENT_TASK`` (SKY-753).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        refused: Whether the worker refuses the image.
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    events: queue.Queue = queue.Queue()
+    payload = _descriptor_payload(
+        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "file_proposer": True}
+    )
+
+    vercel_dspy.run_vercel_dspy(payload, "job-file-proposer", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+
+    if refused:
+        assert session.steps == ["probe"]
+        assert seen[0]["error"] == vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE
+    else:
+        assert "optimizer" in session.steps
+        assert all(event.get("error") != vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE for event in seen)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 
@@ -309,6 +344,65 @@ def test_a_setup_check_never_writes_the_codex_requirements() -> None:
     assert not vercel_dspy._starts_codex({"_preflight": True, "proposer": {"harness": "codex"}})
     assert vercel_dspy._starts_codex({"proposer": {"harness": "codex"}})
     assert vercel_dspy._starts_codex({"proposer": {}})
+
+
+@pytest.mark.parametrize(
+    ("strategy", "starts"),
+    [
+        ({}, True),
+        ({"mode": "auto"}, True),
+        ({"mode": "single", "engine": "autosaddler"}, True),
+        ({"mode": "single", "engine": "gepa"}, False),
+        ({"mode": "single", "engine": "best_of_n"}, False),
+    ],
+    ids=["default-auto", "auto", "autosaddler", "gepa", "best-of-n"],
+)
+def test_a_files_proposer_run_that_can_reach_the_autosaddler_fallback_writes_the_codex_requirements(
+    strategy: dict[str, str], starts: bool
+) -> None:
+    """The file's command is ``custom``, but AutoSaddler answers a session outside a checkout with Codex (SKY-753).
+
+    The guest's contained runtime cannot write the root-owned file, so the parent writes it.
+
+    Args:
+        strategy: The run's strategy.
+        starts: Whether a Codex agent can start in the box.
+    """
+    payload = {
+        "proposer": {"harness": "custom", "run_command": "node agent.js"},
+        "strategy": strategy,
+        vercel_dspy.REPO_SNAPSHOT_KEY: {"file_proposer": True},
+    }
+
+    assert vercel_dspy._starts_codex(payload) is starts
+    assert not vercel_dspy._starts_codex({**payload, vercel_dspy.REPO_SNAPSHOT_KEY: {"file_proposer": False}})
+    assert not vercel_dspy._starts_codex({**payload, "_preflight": True})
+
+
+def test_the_parent_writes_the_codex_requirements_for_a_files_proposer_autosaddler_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file proposer AutoSaddler run gets the root write before the optimizer starts (SKY-753).
+
+    Args:
+        tmp_path: Checkpoint directory and the packed tree.
+        monkeypatch: The remote runtime.
+    """
+    archive = tmp_path / "tree.tar.gz"
+    archive.write_bytes(b"tree")
+    session = FakeSession()
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    payload = _descriptor_payload(
+        tmp_path,
+        proposer={"harness": "custom", "run_command": "node agent.js"},
+        strategy={"mode": "single", "engine": "autosaddler"},
+    )
+    payload[vercel_dspy.REPO_SNAPSHOT_KEY] = {"archive": str(archive), "file_proposer": True}
+
+    vercel_dspy.run_vercel_dspy(payload, "job-file-proposer", events, "spawn")
+
+    assert session.steps.index("codex_requirements") < session.steps.index("optimizer")
 
 
 def test_remote_preflight_never_reads_submitted_checkpoint_directory(
