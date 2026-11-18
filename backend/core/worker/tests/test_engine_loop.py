@@ -1455,6 +1455,58 @@ def test_converted_openai_tool_calls_commit_and_a_resume_replays_them_unchanged(
     assert resumed_model.prompts == []
 
 
+def test_a_tool_only_reply_with_no_text_gives_an_empty_text_live_and_on_a_resume(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OpenAI-shaped tool-only reply has ``content: None``; the engine must get "", never the text "None".
+
+    Args:
+        monkeypatch: Replaces the loop's model with one that gives a tool-only reply.
+    """
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    calls = tool_calls_from_openai(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": "{}"}}],
+        }
+    )
+
+    def tool_only(prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None) -> ModelReply:
+        """Give a reply with tool calls and no text, as a converted OpenAI message gives it.
+
+        Args:
+            prompt: The prompt.
+            tools: The tool definitions.
+
+        Returns:
+            The reply, with ``None`` as its text.
+        """
+        return ModelReply(None, Decimal(1), calls)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(first, "_model", tool_only)
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.text == ""
+    assert step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))["body"]["text"] == ""
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_a_committed_model_step_with_a_null_text_replays_an_empty_text() -> None:
+    """A record that an older build committed with a null text replays "", as a new record does."""
+    reply = engine_loop._reply({"body": {"text": None, "cost_cents": "1"}})
+
+    assert reply == ModelReply("", Decimal(1), [])
+
+
 @pytest.mark.parametrize("tools", [None, [{"name": "other", "description": "", "input_schema": {}}]])
 def test_a_resume_with_other_tools_diverges(
     tools: list[ToolDefinition] | None,

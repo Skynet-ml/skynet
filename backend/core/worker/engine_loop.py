@@ -252,7 +252,8 @@ def _reply(record: dict[str, Any]) -> ModelReply:
         Its text, its cost and its tool calls.
     """
     body = record["body"]
-    return ModelReply(str(body["text"]), Decimal(body["cost_cents"]), list(body.get("tool_calls", [])))
+    # An OpenAI-shaped reply with only tool calls has no text; a record with a null text gives "", not "None".
+    return ModelReply(str(body["text"] or ""), Decimal(body["cost_cents"]), list(body.get("tool_calls", [])))
 
 
 def _call(record: dict[str, Any]) -> str:
@@ -549,7 +550,7 @@ class EngineLoop:
                         cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
-                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text}
+                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
                     if reply.tool_calls:
                         body["tool_calls"] = reply.tool_calls
                     return StepResult(body, reply.cost_cents)
