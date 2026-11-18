@@ -355,8 +355,9 @@ A manual hold on a change or on a promotion still stops it.
   batch commit needs a new dispatched run.
 - **No unreviewed code on the batch branch.**
   - A CI failure that a PR causes, or a bug in a PR: remove that PR from the
-    batch, as "Merging into staging" says. Fix it in the PR's own branch. After a new approval, the
-    PR returns to **Ready to Merge** and goes into a later batch.
+    batch, as "Merging into staging" says. Fix it in the PR's own branch.
+    After a new approval, the PR returns to **Ready to Merge** and goes into
+    a later batch.
   - A rebuild uses a new branch (`batch/<date>-<n+1>`) and a new batch PR.
     Close the old batch PR and delete its branch.
   - A merge conflict between PRs: the orchestrator may resolve it in the
@@ -365,8 +366,9 @@ A manual hold on a change or on a promotion still stops it.
 - **A red batch run or a red promotion run blocks the promotion.** A red
   batch run that no PR in the batch causes, or a red promotion run, gets its
   fix in a new PR, which goes through the next batch. A PR that causes a red
-  batch run leaves the batch and gets its fix in its own branch. Do not promote `staging` to
-  `main` while the latest batch run or the promotion run is red.
+  batch run leaves the batch and gets its fix in its own branch. Do not
+  promote `staging` to `main` while the latest batch run or the promotion run
+  is red.
 - Bootstrap (SKY-570): the PR that adds this flow merges the same way.
   Dispatch `ci` and `i18n` on its own branch (`gh workflow run ci.yml --ref
   <branch>`), wait for both runs to pass, then merge the PR.
@@ -380,7 +382,9 @@ A manual hold on a change or on a promotion still stops it.
   CI". Gate 5 (the staging smoke test) runs after the merge.
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
   other batch is in progress. A batch is in progress while its batch PR is
-  open, or while its `batch/` branch is not merged and not deleted.
+  open, or while its `batch/` branch is not merged and not deleted. After a
+  stop for a CI failure that no PR causes, the next batch waits until the
+  Urgent fix PR is in **Ready to Merge**.
 - When the orchestrator stops or rebuilds a batch, it first closes the
   batch PR and deletes the `batch/` branch.
 - After an approval, the orchestrator does not merge the PR outside a
