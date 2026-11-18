@@ -18,7 +18,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import Engine, case, create_engine, func, or_, text
+from sqlalchemy import ColumnElement, Engine, case, create_engine, func, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
@@ -62,7 +62,6 @@ from .models import (
     ProgressEventModel,
     RunCallModel,
     RunCandidateModel,
-    RunFolderItemModel,
     SandboxTrialModel,
     UserModel,
     UserQuotaAuditModel,
@@ -72,6 +71,7 @@ from .models import (
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
 from .shard_map import MAIN, ShardMap, UnroutableRunError
+from .tree_purge import delete_run_rows, mark_run_packs, purge_run_shards
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -302,6 +302,12 @@ def _json_int(value: Any) -> int | None:
     Extraction returns text on PostgreSQL (``->>``) and native affinity values
     on SQLite, so both forms must coerce; junk degrades to ``None``, mirroring
     the ``isinstance`` guards the analytics aggregations always applied.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The integer, or ``None`` when the value is not one.
     """
     try:
         return int(value)
@@ -310,7 +316,14 @@ def _json_int(value: Any) -> int | None:
 
 
 def _json_float(value: Any) -> float | None:
-    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one."""
+    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The float, or ``None`` when the value is not one.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -775,6 +788,9 @@ class RemoteDBJobStore:
         Safe to call repeatedly. If the database role lacks the privilege
         to install the extension, the log line below is the operator's
         hint to run ``CREATE EXTENSION vector`` once out-of-band.
+
+        Returns:
+            True when the extension exists, False when its install failed.
         """
         try:
             with self._engine.connect() as conn:
@@ -796,6 +812,9 @@ class RemoteDBJobStore:
         SQLAlchemy's create_all can't express HNSW, and we don't want to
         pay for a reindex on every restart — the IF NOT EXISTS guard
         makes the call free on warm databases.
+
+        Returns:
+            True when the indexes exist, False when their creation failed.
         """
         statements = [
             (
@@ -1398,40 +1417,39 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: ID of the job to remove.
+
+        Raises:
+            TreePurgeError: When a step log shard fails, or the run records a shard that the map does not
+                have; the job stays.
         """
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id == optimization_id).delete()
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id == optimization_id).delete()
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id == optimization_id
-            ).delete()
-            session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
-            self._close_deleted_job_budgets(session, [optimization_id])
+            delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
+            mark_run_packs(session, [optimization_id], self.step_log_shards)
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
+            # The cascade stops at the main database, so the other step log shards delete the steps, as
+            # the last step before the main commit. The databases have no two-phase commit: a main
+            # commit that still fails leaves the shard steps deleted and the job in place.
+            purge_run_shards([optimization_id], self.step_log_shards)
             session.commit()
         finally:
             session.close()
         self._evict_job_counters([optimization_id])
 
-    def _close_deleted_job_budgets(self, session: Session, optimization_ids: list[str]) -> None:
-        """Close the execution budgets of jobs about to be deleted.
-
-        Budgets and ledger rows are financial history with no foreign key to
-        ``jobs``, so they are kept; this releases unstarted holds and drops the
-        link that would otherwise point at a deleted job.
+    def _job_embeddings(self, optimization_ids: list[str]) -> ColumnElement[bool] | None:
+        """Select the embedding rows that a job delete removes.
 
         Args:
-            session: The open delete session the caller commits.
             optimization_ids: Job ids being deleted.
+
+        Returns:
+            The rows of these jobs, or ``None`` when embeddings are off.
         """
-        BudgetService(engine=self._engine).close_for_deleted_jobs(list(optimization_ids), session=session)
+        if not settings.embeddings_enabled:
+            return None
+        return JobEmbeddingModel.optimization_id.in_(optimization_ids)
 
     def _evict_job_counters(self, optimization_ids: list[str]) -> None:
         """Drop the per-job in-memory bookkeeping for deleted jobs.
@@ -1495,45 +1513,26 @@ class RemoteDBJobStore:
 
         Returns:
             The number of job rows actually deleted.
+
+        Raises:
+            TreePurgeError: When a step log shard fails, or a run records a shard that the map does not
+                have; the jobs stay.
         """
         if not optimization_ids:
             return 0
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id.in_(optimization_ids)).delete(
-                    synchronize_session=False
-                )
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id.in_(optimization_ids)
-            ).delete(synchronize_session=False)
-            session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            self._close_deleted_job_budgets(session, optimization_ids)
+            delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
+            mark_run_packs(session, optimization_ids, self.step_log_shards)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))
                 .delete(synchronize_session=False)
             )
+            # As in delete_job: the other shards delete the steps last, right before the main commit.
+            purge_run_shards(optimization_ids, self.step_log_shards)
             session.commit()
         finally:
             session.close()
@@ -2859,7 +2858,15 @@ class RemoteDBJobStore:
         return self._claim_next_job_fallback(worker_id, lease_seconds)
 
     def _claim_next_job_postgres(self, worker_id: str, lease_seconds: float) -> JobRecord | None:
-        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``."""
+        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
+        """
         sql = text(
             """
             UPDATE jobs
@@ -2912,6 +2919,13 @@ class RemoteDBJobStore:
         Holds an exclusive transaction so concurrent claims are serialized at
         the engine level. Not race-safe across processes but adequate for
         single-process test runs.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
         """
         session = self._get_session()
         try:
@@ -3081,19 +3095,22 @@ class RemoteDBJobStore:
         """
         session = self._get_session()
         try:
-            source = (
-                session.query(JobModel)
-                .filter(
-                    JobModel.optimization_id == source_optimization_id,
-                    JobModel.execution_generation == generation,
-                    JobModel.status.in_(["running", "validating"]),
-                )
+            # Both jobs lock in key order, as a run or account delete locks its jobs (SKY-733).
+            jobs = {
+                job.optimization_id: job
+                for job in session.query(JobModel)
+                .filter(JobModel.optimization_id.in_(sorted({source_optimization_id, optimization_id})))
+                .order_by(JobModel.optimization_id)
                 .with_for_update()
-                .one_or_none()
-            )
-            if source is None:
+            }
+            source = jobs.get(source_optimization_id)
+            if (
+                source is None
+                or source.execution_generation != generation
+                or source.status not in {"running", "validating"}
+            ):
                 return False
-            target = source if source_optimization_id == optimization_id else session.get(JobModel, optimization_id)
+            target = jobs.get(optimization_id)
             if target is None or target.status not in {"running", "validating"}:
                 return False
             session.add(
