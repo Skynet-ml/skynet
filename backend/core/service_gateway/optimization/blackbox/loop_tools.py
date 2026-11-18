@@ -86,7 +86,7 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
     """
     value = call.get("arguments")
     if isinstance(value, str):
-        if len(value) > MAX_ARGUMENT_CHARS:
+        if len(value) > MAX_ARGUMENT_CHARS or _too_deep_text(value):
             return None, True
         try:
             value = json.loads(value)
@@ -187,21 +187,37 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _too_deep_text(text: str) -> bool:
-    """Tell whether JSON text nests deeper than ``MAX_ARGUMENT_DEPTH``.
+    """Tell whether text nests brackets deeper than ``MAX_ARGUMENT_DEPTH``, with no parser and no recursion.
+
+    The parser's recursion limit depends on the stack at the call, so a live reply and its replay could see two
+    results for the same deep text. This count depends only on the text: brackets inside JSON strings do not count.
 
     Args:
-        text: The arguments as JSON text, inside the length bound.
+        text: The arguments as JSON text, valid or not.
 
     Returns:
-        ``True`` when the parsed value is too deep or too deep for the parser; ``False`` for text that is not JSON.
+        ``True`` when a ``[`` or ``{`` outside a string sits deeper than the bound.
     """
-    try:
-        return _too_deep(json.loads(text))
-    # JSON nested past the parser's recursion limit is past the depth bound too.
-    except RecursionError:
-        return True
-    except ValueError:
-        return False
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_ARGUMENT_DEPTH:
+                return True
+        elif char in "]}":
+            depth -= 1
+    return False
 
 
 def _too_deep(value: Any) -> bool:

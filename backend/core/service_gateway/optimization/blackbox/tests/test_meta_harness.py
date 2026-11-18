@@ -1367,15 +1367,15 @@ def test_the_transcript_holds_tool_calls_in_the_openai_form(
         {"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": command}}
     ]
     assert json.loads(command)["command"].startswith("printf %s seedx > agents/c1.txt")
-    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"b": 1, "a": 2}}) == {
+    assert loop_tools.openai_call({"id": "i", "name": "bash", "arguments": {"b": 1, "a": 2}}) == {
         "id": "i",
         "type": "function",
         "function": {"name": "bash", "arguments": '{"a": 2, "b": 1}'},
     }
-    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": "not json"})["function"]["arguments"] == (
+    assert loop_tools.openai_call({"id": "i", "name": "bash", "arguments": "not json"})["function"]["arguments"] == (
         "not json"
     )
-    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"a": "א"}})["function"]["arguments"] == (
+    assert loop_tools.openai_call({"id": "i", "name": "bash", "arguments": {"a": "א"}})["function"]["arguments"] == (
         '{"a": "א"}'
     )
 
@@ -1782,17 +1782,20 @@ def _nested(depth: int) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [
-        ("[" * 990, "command string"),
-        (json.dumps({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}), "nested at most"),
+        # Text nested past the bound is refused by a bracket count, so the parser's stack-dependent limit never decides.
+        ("[" * 990, "nested at most"),
+        (json.dumps({"command": "true", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}), "nested at most"),
         # Long JSON text whose parsed object is small: only the text bound refuses it.
-        ('{"command": "true"}' + " " * meta_mod.MAX_ARGUMENT_CHARS, "nested at most"),
-        ({"command": "x" * (meta_mod.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
-        ({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}, "nested at most"),
+        ('{"command": "true"}' + " " * loop_tools.MAX_ARGUMENT_CHARS, "nested at most"),
+        ({"command": "x" * (loop_tools.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
+        ({"command": "true", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}, "nested at most"),
         # Close to the depth past which the engine loop cannot commit the reply. How deep ``json.dumps`` can go
         # depends on the stack at the call, so the transcript must not depend on it.
         (_nested(900), "nested at most"),
+        # Short JSON text nested past the depth bound: the transcript holds an empty object, as in AutoResearch.
+        (json.dumps(_nested(loop_tools.MAX_ARGUMENT_DEPTH)), "nested at most"),
     ],
-    ids=["deep-text", "long-text", "padded-text", "long-command", "long-object", "deep-object"],
+    ids=["deep-text", "long-text", "padded-text", "long-command", "long-object", "deep-object", "short-deep-text"],
 )
 def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
     arguments: Any,
@@ -1822,7 +1825,7 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     assert result.best_candidate == "seed"
     assert boxes.opened == 0
     assert error in json.loads(model.calls[1][-1]["content"])["error"]
-    refused = isinstance(arguments, dict) or len(arguments) > meta_mod.MAX_ARGUMENT_CHARS
+    refused = error == "nested at most"
     assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == ("{}" if refused else arguments)
     resumed, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=0), generation=2)
     assert _run(resumed).best_candidate == "seed"
@@ -1843,16 +1846,16 @@ def test_an_argument_at_the_depth_bound_still_runs(
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     worker = _worker(loop, tmp_path)
     tree = loop.put_files({"a.txt": b"a"})
-    arguments = _nested(meta_mod.MAX_ARGUMENT_DEPTH - 1)
+    arguments = _nested(loop_tools.MAX_ARGUMENT_DEPTH - 1)
 
     output, _ = worker._exec(tree, {"id": "c", "name": "bash", "arguments": arguments})
 
     assert json.loads(output)["exit_code"] == 0
     assert (
-        json.loads(meta_mod._openai_call({"id": "c", "name": "bash", "arguments": arguments})["function"]["arguments"])
+        json.loads(loop_tools.openai_call({"id": "c", "name": "bash", "arguments": arguments})["function"]["arguments"])
         == arguments
     )
-    deeper = _nested(meta_mod.MAX_ARGUMENT_DEPTH)
+    deeper = _nested(loop_tools.MAX_ARGUMENT_DEPTH)
     assert "error" in json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": deeper})[0])
 
 
@@ -2216,7 +2219,7 @@ def test_a_command_over_its_byte_bound_gets_an_error_result(
 
     if runs:
         assert json.loads(output)["exit_code"] == 0
-        sent = meta_mod._openai_call({"id": "c", "name": "bash", "arguments": {"command": command}})
+        sent = loop_tools.openai_call({"id": "c", "name": "bash", "arguments": {"command": command}})
         assert json.loads(sent["function"]["arguments"]) == {"command": command}
     else:
         assert f"at most {loop_tools.MAX_COMMAND_BYTES} bytes" in json.loads(output)["error"]

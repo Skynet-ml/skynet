@@ -26,7 +26,7 @@ import json
 import logging
 import math
 import posixpath
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from decimal import Decimal
 from typing import Any
 
@@ -78,70 +78,9 @@ BASH_TOOL = {
 _TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
 _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
 
-# Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
-# never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
-# parser, ``json.dumps`` and the next prompt hash raise RecursionError.
-MAX_ARGUMENT_CHARS = 200_000
-MAX_ARGUMENT_DEPTH = 32
-_REFUSED_ARGUMENTS = "{}"
 CANDIDATE_OUTSIDE_AGENTS = "candidate file must be a relative path under agents/"
 
 logger = logging.getLogger(__name__)
-
-
-def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
-    """Give one flat tool call of the engine loop in the OpenAI form that the next prompt's history holds.
-
-    The AutoSaddler port (SKY-723) sends the same form, so both ports send one transcript shape.
-
-    Args:
-        call: The flat ``{"id", "name", "arguments"}`` call.
-
-    Returns:
-        ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
-    """
-    arguments = call.get("arguments")
-    # ``_exec`` refuses these arguments, so the transcript holds an empty object in their place: an over-long text,
-    # or a mapping past the depth or length bound. A shorter text stays as it is, also when its JSON is too deep.
-    # A lone surrogate cannot get here: the step commit refuses it first (SKY-821).
-    if isinstance(arguments, str):
-        if len(arguments) > MAX_ARGUMENT_CHARS:
-            arguments = _REFUSED_ARGUMENTS
-    elif _too_deep(arguments):
-        arguments = _REFUSED_ARGUMENTS
-    else:
-        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_exec`` measures
-        # the arguments with no escapes, so Hebrew text does not count six characters a letter.
-        arguments = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-        if len(arguments) > MAX_ARGUMENT_CHARS:
-            arguments = _REFUSED_ARGUMENTS
-    return {
-        "id": call.get("id"),
-        "type": "function",
-        "function": {"name": call.get("name"), "arguments": arguments},
-    }
-
-
-def _too_deep(value: Any) -> bool:
-    """Tell whether a JSON value nests deeper than ``MAX_ARGUMENT_DEPTH``, with no recursion.
-
-    Args:
-        value: The parsed JSON value.
-
-    Returns:
-        ``True`` when a list or object sits deeper than the bound.
-    """
-    stack = [(value, 1)]
-    while stack:
-        item, depth = stack.pop()
-        if isinstance(item, dict):
-            item = list(item.values())
-        if not isinstance(item, list):
-            continue
-        if depth > MAX_ARGUMENT_DEPTH:
-            return True
-        stack.extend((child, depth + 1) for child in item)
-    return False
 
 
 class _UpstreamServer:
@@ -439,7 +378,11 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 {
                     "role": "assistant",
                     "content": reply.text,
-                    **({"tool_calls": [_openai_call(call) for call in reply.tool_calls]} if reply.tool_calls else {}),
+                    **(
+                        {"tool_calls": [loop_tools.openai_call(call) for call in reply.tool_calls]}
+                        if reply.tool_calls
+                        else {}
+                    ),
                 }
             )
             if not reply.tool_calls:
@@ -473,20 +416,10 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             The tool result as JSON text, and the tree after the command.
         """
         assert self._ctx.run_command is not None
-        arguments = call.get("arguments")
-        if isinstance(arguments, str):
-            if len(arguments) > MAX_ARGUMENT_CHARS:
-                return self._refuse_arguments(tree)
-            try:
-                arguments = json.loads(arguments)
-            # JSON nested past the parser's recursion limit raises RecursionError.
-            except (ValueError, RecursionError):
-                arguments = None
-        if _too_deep(arguments):
-            return self._refuse_arguments(tree)
-        # The protocol gives valid JSON object arguments as a mapping, so the text bound above never sees them.
-        if isinstance(arguments, dict) and len(json.dumps(arguments, ensure_ascii=False)) > MAX_ARGUMENT_CHARS:
-            return self._refuse_arguments(tree)
+        refused = loop_tools.refused_arguments(call, BASH_TOOL["name"])
+        if refused is not None:
+            return refused, tree
+        arguments = loop_tools.arguments(call)
         command = arguments.get("command") if isinstance(arguments, dict) else None
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
             # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
@@ -494,22 +427,6 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 {"error": f"Call the {BASH_TOOL['name']} tool with a command string."}, ensure_ascii=False
             ), tree
         return loop_tools.run_command(self._ctx, tree, command)
-
-    @staticmethod
-    def _refuse_arguments(tree: str) -> tuple[str, str]:
-        """Give the error result for tool call arguments past the length or depth bound.
-
-        Args:
-            tree: The workspace tree, which does not change.
-
-        Returns:
-            The error result as JSON text, and the tree.
-        """
-        error = (
-            f"Send the {BASH_TOOL['name']} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
-            f"nested at most {MAX_ARGUMENT_DEPTH} levels."
-        )
-        return json.dumps({"error": error}, ensure_ascii=False), tree
 
     def _pull(self, tree: str) -> None:
         """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
