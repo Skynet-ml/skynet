@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -1047,6 +1048,137 @@ def test_delete_answers_200_when_the_pack_delete_after_the_commit_fails(harness:
         assert session.get(UserModel, _EMAIL) is None
         assert session.scalars(select(TreeObjectModel)).all() == []
         assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
+
+
+def _seed_chat_and_pack(engine: Engine) -> str:
+    """Seed a chat of the account and one old pack that only the account's tree points at.
+
+    Args:
+        engine: The harness engine.
+
+    Returns:
+        The id of the seeded chat.
+    """
+    conversation_id = str(uuid4())
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id=conversation_id, username=_EMAIL, title="t"))
+        session.add(
+            StoragePackModel(
+                pack_key="packs/w1/p1", worker_id="w1", byte_size=10, created_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        session.add(
+            TreeObjectModel(
+                username=_EMAIL, object_id="o1", byte_size=10, pack_key="packs/w1/p1", pack_offset=0, pack_length=10
+            )
+        )
+        session.commit()
+    return conversation_id
+
+
+def _session_that_fails(step: str) -> type[Session]:
+    """Build a session class whose pack re-read or pack row delete raises a database error.
+
+    Args:
+        step: ``"read"`` fails ``scalars``; ``"delete"`` fails ``execute``.
+
+    Returns:
+        The session class.
+    """
+
+    class _FailingSession(Session):
+        """A session that fails one database step of the pack delete."""
+
+        def scalars(self, *args: Any, **kwargs: Any) -> Any:
+            """Fail the pack re-read, or run it.
+
+            Args:
+                *args: The statement and its parameters.
+                **kwargs: The execution options.
+
+            Returns:
+                The scalar result.
+
+            Raises:
+                OperationalError: When ``step`` is ``"read"``.
+            """
+            if step == "read":
+                raise OperationalError("SELECT pack_key", {}, Exception("database is gone"))
+            return super().scalars(*args, **kwargs)
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            """Fail the pack row delete, or run it.
+
+            Args:
+                *args: The statement and its parameters.
+                **kwargs: The execution options.
+
+            Returns:
+                The result.
+
+            Raises:
+                OperationalError: When ``step`` is ``"delete"``.
+            """
+            if step == "delete":
+                raise OperationalError("DELETE FROM storage_packs", {}, Exception("database is gone"))
+            return super().execute(*args, **kwargs)
+
+    return _FailingSession
+
+
+@pytest.mark.parametrize("step", ["read", "delete"])
+def test_delete_answers_200_and_stops_the_chats_when_the_pack_rows_fail_after_the_commit(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, step: str
+) -> None:
+    """A database error in the pack re-read or row delete after the commit is logged, not a 500 (SKY-733).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest fixture that records the stopped chats.
+        caplog: Pytest fixture that captures the log.
+        step: The database step of the pack delete that fails.
+    """
+    conversation_id = _seed_chat_and_pack(harness.engine)
+    stopped: list[str] = []
+    monkeypatch.setattr(account_data_mod, "stop_chat_runner", stopped.append)
+    deleted: list[str] = []
+
+    with (
+        patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.extend),
+        patch("core.storage.tree_purge.Session", _session_that_fails(step)),
+    ):
+        resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert stopped == [conversation_id]
+    assert "its unused tree packs are not" in caplog.text
+    assert deleted == ([] if step == "read" else ["packs/w1/p1"])
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+        assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
+
+
+def test_delete_stops_the_chats_before_the_pack_delete(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error in the pack delete after the commit cannot leave the chats running (SKY-733).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest fixture that records the stopped chats.
+    """
+    conversation_id = _seed_chat_and_pack(harness.engine)
+    stopped: list[str] = []
+    monkeypatch.setattr(account_data_mod, "stop_chat_runner", stopped.append)
+
+    with (
+        patch("core.storage.tree_purge.bucket_deleter", return_value=_fail),
+        patch.object(account_data_mod, "delete_unused_packs", side_effect=RuntimeError("unexpected")),
+        pytest.raises(RuntimeError, match="unexpected"),
+    ):
+        harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert stopped == [conversation_id]
 
 
 def _waits_for_a_lock(engine: Engine) -> bool:

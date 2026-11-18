@@ -531,8 +531,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         Counts of hard-deleted and anonymized rows.
 
     Raises:
-        TreePurgeError: When the account has tree packs to delete and the
-            tree bucket is not set or does not open.
+        TreePurgeError: When the account has tree packs to delete and
+            ``SKYNET_TREE_BUCKET`` is not set, or boto3 is missing.
     """
     deleted = 0
     anonymized = 0

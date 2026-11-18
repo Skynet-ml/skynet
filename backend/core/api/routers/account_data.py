@@ -127,9 +127,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
             DomainError: 401 (``accounts.invalid_credentials``) when a local
                 account's confirmation password is missing or does not match.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
-                the account has tree packs to delete and the tree bucket is
-                not set or does not open. The database rows stay, so the
-                account is not deleted.
+                the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
+                is not set, or boto3 is missing. The database rows stay, so
+                the account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking
@@ -146,15 +146,16 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 logger.exception("Account deletion stopped: the tree packs of the account were not deleted")
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
             session.commit()
+        # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.
+        # They stop before the pack delete, so a failed pack delete cannot leave them running.
+        for conversation_id in chats:
+            stop_chat_runner(conversation_id)
         try:
             delete_unused_packs(job_store.engine, summary.trees)
         except TreePurgeError:
             # The account is gone, so the answer stays a success. The packs keep their rows, which no row
             # points at, and the compactor deletes them in its next pass.
             logger.exception("The account is deleted, but its unused tree packs are not; the compactor deletes them")
-        # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.
-        for conversation_id in chats:
-            stop_chat_runner(conversation_id)
         return AccountDeletionResult(
             deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows
         )

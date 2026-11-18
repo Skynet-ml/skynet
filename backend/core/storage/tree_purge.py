@@ -60,6 +60,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, delete, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..billing.budgets import BudgetService
@@ -342,7 +343,7 @@ def purge_user(
         The count of deleted rows, the unused packs, and the delete function for them.
 
     Raises:
-        TreePurgeError: When a pack must go and the bucket is not set or does not open.
+        TreePurgeError: When a pack must go and ``SKYNET_TREE_BUCKET`` is not set, or boto3 is missing.
     """
     run_ids = sorted(run_ids)
     # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the
@@ -403,11 +404,12 @@ def purge_user(
         )
     if not unused:
         return TreePurgeSummary(deleted_rows=deleted_rows)
-    # The bucket opens before the commit, so a deletion whose packs no bucket can delete fails.
+    # The delete function is built before the commit, so a deletion with packs and no bucket name or no
+    # boto3 fails. Nothing contacts the bucket here; a later S3 failure leaves the packs to the compactor.
     try:
         deleter = delete_objects or bucket_deleter()
     except Exception as exc:
-        raise TreePurgeError("could not open the tree bucket") from exc
+        raise TreePurgeError("could not build the tree bucket client") from exc
     if deleter is None:
         raise TreePurgeError(f"{len(unused)} tree packs must be deleted, but SKYNET_TREE_BUCKET is not set")
     return TreePurgeSummary(deleted_rows=deleted_rows, unused_packs=unused, delete_objects=deleter)
@@ -428,23 +430,28 @@ def delete_unused_packs(engine: Engine, summary: TreePurgeSummary) -> int:
         The count of deleted packs.
 
     Raises:
-        TreePurgeError: When an object delete fails. The pack rows stay, so the
-            compactor deletes the packs in its next pass.
+        TreePurgeError: When an object delete or a database read or delete
+            fails. The pack rows stay, so the compactor deletes the packs in
+            its next pass.
     """
     if not summary.unused_packs:
         return 0
     if summary.delete_objects is None:
         raise TreePurgeError(f"no delete function for {_describe(summary.unused_packs)}")
-    with Session(engine) as session:
-        unused: list[str] = []
-        for chunk in _chunks(summary.unused_packs):
-            unused.extend(
-                session.scalars(
-                    select(StoragePackModel.pack_key)
-                    .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
-                    .order_by(StoragePackModel.pack_key)
+    # The caller already committed the purge, so a database error must not become a failed request.
+    try:
+        with Session(engine) as session:
+            unused: list[str] = []
+            for chunk in _chunks(summary.unused_packs):
+                unused.extend(
+                    session.scalars(
+                        select(StoragePackModel.pack_key)
+                        .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
+                        .order_by(StoragePackModel.pack_key)
+                    )
                 )
-            )
+    except SQLAlchemyError as exc:
+        raise TreePurgeError(f"could not read the rows of {_describe(summary.unused_packs)}") from exc
     if not unused:
         return 0
     # The objects go before their rows: recovery applies a pack object that has no row.
@@ -454,13 +461,16 @@ def delete_unused_packs(engine: Engine, summary: TreePurgeSummary) -> int:
         raise
     except Exception as exc:
         raise TreePurgeError(f"could not delete {_describe(unused)}") from exc
-    with Session(engine) as session:
-        for chunk in _chunks(unused):
-            session.execute(
-                delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED),
-                execution_options={"synchronize_session": False},
-            )
-        session.commit()
+    try:
+        with Session(engine) as session:
+            for chunk in _chunks(unused):
+                session.execute(
+                    delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED),
+                    execution_options={"synchronize_session": False},
+                )
+            session.commit()
+    except SQLAlchemyError as exc:
+        raise TreePurgeError(f"could not delete the rows of {_describe(unused)}") from exc
     return len(unused)
 
 
