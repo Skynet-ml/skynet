@@ -52,11 +52,14 @@ Place = Literal["local", "cloud"]
 # supervisor that stops it at its timeout (SKY-375); only the gate still
 # refused it (SKY-635). The candidate box and the metric box are separate, so
 # each opens with its own role's hosts and vCPUs (SKY-398). No judge reads the
-# ``[run] illegal`` rules yet, so that key still stops the run.
+# ``[run] illegal`` rules yet, so that key still stops the run. Staging maps
+# ``[proposer] entry`` and ``setup`` to the custom proposer command, which runs
+# in the proposer's box under the same ``[proposer]`` rules (SKY-753).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
 _PROPOSER_MCP = frozenset({"proposer.mcp"})
 _PROPOSER_SERVICES = frozenset({"proposer.services"})
+_PROPOSER_COMMAND = frozenset({"proposer.entry", "proposer.setup"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
 _TARGET_MCP = frozenset({"target.mcp"})
@@ -70,6 +73,7 @@ _ENFORCED_EVERYWHERE = (
     | _PROPOSER_NETWORK
     | _PROPOSER_MCP
     | _PROPOSER_SERVICES
+    | _PROPOSER_COMMAND
     | _STAGE_SERVICES
     | _TARGET_STAGES
     | _TARGET_MCP
@@ -469,7 +473,11 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     """
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
-    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("mcp", "network", "services") if key in proposer]
+    keys = [
+        (f"proposer.{key}", f"[proposer] {key}")
+        for key in ("mcp", "network", "services", "entry", "setup")
+        if key in proposer
+    ]
     stages = document.get("target", {})
     target_keys = ("entry", "timeout", "vcpus", "illegal", "mcp", "network", "services")
     # A stage box is offline except for the relay, so ``network = []`` asks

@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, delete, event, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from core.config import app_env, settings
 from core.storage import tree_compactor
@@ -40,7 +41,14 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.step_log_store import StepLogStore
+from core.storage.shard_map import MAIN
+from core.storage.step_log_store import (
+    PACK_PREFIX,
+    SWEEP_AGE_MARGIN_SECONDS,
+    PackClaimedError,
+    StepLogStore,
+    _read_manifest,
+)
 from core.storage.tree_compactor import (
     BROKEN_BYTE_SIZE,
     COMPACTED_PREFIX,
@@ -347,7 +355,14 @@ def _without_pack(engine: Engine, written: dict[str, Any], pack_key: str) -> dic
 
 
 def test_merge_puts_old_packs_into_one_object_and_moves_every_row(engine, objects, store, make_compactor) -> None:
-    """Three flush packs become one compacted pack; every step and tree reads from it."""
+    """Three flush packs become one compacted pack; every step and tree reads from it.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
     assert len(old) == 3
@@ -362,7 +377,13 @@ def test_merge_puts_old_packs_into_one_object_and_moves_every_row(engine, object
 
 
 def test_the_merge_moves_the_rows_in_one_transaction(engine, store, make_compactor) -> None:
-    """The merge commits once: the new pack row, the moved rows and the retire times."""
+    """The merge commits once: the new pack row, the moved rows and the retire times.
+
+    Args:
+        engine: The test engine.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     commits: list[object] = []
     event.listen(engine, "commit", commits.append)
@@ -373,7 +394,14 @@ def test_the_merge_moves_the_rows_in_one_transaction(engine, store, make_compact
 
 
 def test_young_packs_are_not_merged(engine, objects, store, make_compactor) -> None:
-    """A pack younger than the minimum age stays where it is."""
+    """A pack younger than the minimum age stays where it is.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
 
     assert make_compactor(min_age_seconds=3600).merge() == 0
@@ -381,7 +409,14 @@ def test_young_packs_are_not_merged(engine, objects, store, make_compactor) -> N
 
 
 def test_a_lone_pack_is_not_merged(engine, objects, store, make_compactor) -> None:
-    """One old pack alone has nothing to merge with."""
+    """One old pack alone has nothing to merge with.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store, flushes=1)
 
     assert make_compactor().merge() == 0
@@ -389,7 +424,14 @@ def test_a_lone_pack_is_not_merged(engine, objects, store, make_compactor) -> No
 
 
 def test_a_large_pack_is_not_merged(engine, objects, store, make_compactor) -> None:
-    """A pack over half the target size stays out, even when it and a small pack fit the target together."""
+    """A pack over half the target size stays out, even when it and a small pack fit the target together.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     (_, large_size), (_, small_size) = _fill_sizes(store, [1000, 300])
     target = large_size + small_size
     assert 2 * large_size > target
@@ -401,7 +443,14 @@ def test_a_large_pack_is_not_merged(engine, objects, store, make_compactor) -> N
 def test_a_read_during_compaction_finds_each_tree_in_the_old_or_the_new_pack(
     engine, objects, store, make_compactor
 ) -> None:
-    """Reads before the commit use the old packs; a row read before the move still reads until the grace ends."""
+    """Reads before the commit use the old packs; a row read before the move still reads until the grace ends.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     with Session(engine) as session:
         before = [(row.pack_key, row.pack_offset, row.pack_length) for row in session.scalars(select(TreeObjectModel))]
@@ -421,7 +470,15 @@ def test_a_read_during_compaction_finds_each_tree_in_the_old_or_the_new_pack(
 def test_old_packs_are_removed_only_after_no_row_points_at_them(
     engine, objects, store, deleted, make_compactor
 ) -> None:
-    """Each delete comes after the index moved; the retired packs and their rows go, the new pack stays."""
+    """Each delete comes after the index moved; the retired packs and their rows go, the new pack stays.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        deleted: The list that gets each deleted key.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
 
@@ -450,7 +507,14 @@ def test_old_packs_are_removed_only_after_no_row_points_at_them(
 def test_a_kill_after_the_new_pack_put_loses_nothing_and_the_next_pass_finishes(
     engine, objects, store, make_compactor
 ) -> None:
-    """The rows stay on the old packs; the next pass deletes the new pack with no row and merges again."""
+    """The rows stay on the old packs; the next pass deletes the new pack with no row and merges again.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
     objects.fail_compacted_put = True
@@ -473,7 +537,14 @@ def test_a_kill_after_the_new_pack_put_loses_nothing_and_the_next_pass_finishes(
 
 
 def test_a_new_pack_with_no_row_stays_during_the_grace_time(engine, objects, store, make_compactor) -> None:
-    """A new pack whose pass may still commit is not deleted before the grace time ends."""
+    """A new pack whose pass may still commit is not deleted before the grace time ends.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     objects.fail_compacted_put = True
     with pytest.raises(OSError):
@@ -484,7 +555,14 @@ def test_a_new_pack_with_no_row_stays_during_the_grace_time(engine, objects, sto
 
 
 def test_a_failure_after_the_row_moves_loses_nothing(engine, objects, store, make_compactor) -> None:
-    """A failure after the rows moved and before the commit leaves every row and every old pack as it was."""
+    """A failure after the rows moved and before the commit leaves every row and every old pack as it was.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
 
@@ -518,7 +596,15 @@ def test_a_failure_after_the_row_moves_loses_nothing(engine, objects, store, mak
 def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
     engine, objects, store, deleted, make_compactor
 ) -> None:
-    """A kill after some old packs went keeps their rows; recovery adds nothing; the next pass ends the work."""
+    """A kill after some old packs went keeps their rows; recovery adds nothing; the next pass ends the work.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        deleted: The list that gets each deleted key.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     make_compactor().merge()
     calls: list[str] = []
@@ -555,7 +641,14 @@ def test_a_kill_during_the_removal_loses_nothing_and_the_next_pass_finishes(
 
 
 def test_recovery_never_applies_a_compacted_pack(engine, objects, store, make_compactor) -> None:
-    """After a merge and the removal, recovery of the worker applies nothing and the rows stay on the new pack."""
+    """After a merge and the removal, recovery of the worker applies nothing and the rows stay on the new pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     make_compactor().merge()
     make_compactor(grace_seconds=0.0).remove_retired()
@@ -575,7 +668,15 @@ def test_recovery_never_applies_a_compacted_pack(engine, objects, store, make_co
 def test_a_pack_written_but_not_applied_is_left_for_its_flush(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """A pack with no ``storage_packs`` row is not merged or deleted; its flush applies it later."""
+    """A pack with no ``storage_packs`` row is not merged or deleted; its flush applies it later.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _fill(store, flushes=2)
     other = StepLogStore(engine, objects, "w2", flush_window_seconds=60.0)
     try:
@@ -618,7 +719,14 @@ def test_a_pack_written_but_not_applied_is_left_for_its_flush(
 
 
 def test_a_second_compactor_does_not_merge_the_packs_again(engine, objects, store, make_compactor) -> None:
-    """After one compactor merged the packs, a second one finds only the new pack and merges nothing."""
+    """After one compactor merged the packs, a second one finds only the new pack and merges nothing.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     first, second = make_compactor(grace_seconds=600), make_compactor(grace_seconds=600)
     assert first.merge() == 3
@@ -628,7 +736,15 @@ def test_a_second_compactor_does_not_merge_the_packs_again(engine, objects, stor
 
 
 def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects, store, make_compactor, caplog) -> None:
-    """A second pass merges the same packs during the first one's PUT; the first one moves no row and drops its pack."""
+    """A second pass merges the same packs during the first one's PUT; the first one moves no row and drops its pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
     caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
     written = _fill(store)
     rows = len(_rows_of_packs(engine))
@@ -660,7 +776,15 @@ def test_a_merge_that_another_pass_finished_first_moves_nothing(engine, objects,
 def test_a_merge_whose_steps_a_job_delete_removed_first_moves_nothing(
     engine, objects, store, make_compactor, caplog
 ) -> None:
-    """A job delete removes one run's steps during the PUT; the merge moves no row and drops its new pack."""
+    """A job delete removes one run's steps during the PUT; the merge moves no row and drops its new pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
     caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
     _fill(store)
     old = _pack_keys_of_rows(engine)
@@ -692,7 +816,15 @@ def test_a_merge_whose_steps_a_job_delete_removed_first_moves_nothing(
 def test_the_merge_holds_no_connection_during_the_object_io(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """The GETs and the PUT run with no database connection checked out, so no transaction stays open."""
+    """The GETs and the PUT run with no database connection checked out, so no transaction stays open.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _fill(store)
     at_put: list[int] = []
     at_get: list[int] = []
@@ -720,7 +852,14 @@ def test_the_merge_holds_no_connection_during_the_object_io(
 
 
 def test_a_merge_that_takes_half_the_grace_time_gives_up(engine, objects, store, make_compactor) -> None:
-    """A merge that reaches its commit after half the grace time rolls back, deletes its new pack and raises."""
+    """A merge that reaches its commit after half the grace time rolls back, deletes its new pack and raises.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
     objects.on_compacted_put = lambda key: time.sleep(0.15)
@@ -735,7 +874,14 @@ def test_a_merge_that_takes_half_the_grace_time_gives_up(engine, objects, store,
 
 
 def test_the_retire_time_is_the_commit_time(engine, objects, store, make_compactor) -> None:
-    """The old packs and the new pack get a ``created_at`` from after the PUT, not from the start of the merge."""
+    """The old packs and the new pack get a ``created_at`` from after the PUT, not from the start of the merge.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     put_at: list[datetime] = []
     objects.on_compacted_put = lambda key: put_at.append(datetime.now(UTC).replace(tzinfo=None))
@@ -749,7 +895,13 @@ def test_the_retire_time_is_the_commit_time(engine, objects, store, make_compact
 
 
 def test_old_packs_get_the_full_grace_time_after_the_merge(engine, store, make_compactor) -> None:
-    """Packs that were written two hours ago are not deleted at once after the merge retires them."""
+    """Packs that were written two hours ago are not deleted at once after the merge retires them.
+
+    Args:
+        engine: The test engine.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     with Session(engine) as session:
         session.execute(update(StoragePackModel).values(created_at=datetime.now(UTC) - timedelta(hours=2)))
@@ -761,7 +913,14 @@ def test_old_packs_get_the_full_grace_time_after_the_merge(engine, store, make_c
 
 
 def test_a_failed_removal_does_not_skip_the_merge(engine, objects, store, make_compactor) -> None:
-    """A pass whose removal steps fail still merges."""
+    """A pass whose removal steps fail still merges.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     compactor = make_compactor()
 
@@ -781,7 +940,14 @@ def test_a_failed_removal_does_not_skip_the_merge(engine, objects, store, make_c
 
 
 def test_remove_unrecorded_reads_no_rows_for_young_keys(engine, objects, store, make_compactor) -> None:
-    """New packs younger than the grace time do not go into the database query."""
+    """New packs younger than the grace time do not go into the database query.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     objects.fail_compacted_put = True
     with pytest.raises(OSError):
@@ -837,7 +1003,14 @@ def _record_statements(engine: Engine) -> list[tuple[str, bool]]:
 
 
 def test_remove_retired_holds_no_connection_during_the_deletes(engine, objects, store, make_compactor) -> None:
-    """Each object delete runs with no database connection checked out, so no transaction stays open."""
+    """Each object delete runs with no database connection checked out, so no transaction stays open.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     make_compactor().merge()
     checked_out: list[int] = []
@@ -860,7 +1033,15 @@ def test_remove_retired_holds_no_connection_during_the_deletes(engine, objects, 
 def test_the_merge_moves_the_rows_with_one_statement_for_each_chunk(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """The rows move in one UPDATE for each chunk, with no executemany and no count query."""
+    """The rows move in one UPDATE for each chunk, with no executemany and no count query.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store)
     with Session(engine) as session:
         step_rows = len(session.scalars(select(AgentStepModel.step_id)).all())
@@ -893,7 +1074,15 @@ def _rows_per_pack(engine: Engine) -> int:
 
 
 def test_the_row_cap_ends_the_pass_early(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """A pass stops adding packs when the next pack does not fit under the row cap."""
+    """A pass stops adding packs when the next pack does not fit under the row cap.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
 
@@ -903,7 +1092,15 @@ def test_the_row_cap_ends_the_pass_early(engine, objects, store, make_compactor,
 
 
 def test_two_packs_over_the_row_cap_are_not_merged(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """When no two packs fit under the row cap together, the pass merges nothing and writes no pack."""
+    """When no two packs fit under the row cap together, the pass merges nothing and writes no pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _fill(store)
     old = _pack_keys_of_rows(engine)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine) - 1)
@@ -914,7 +1111,15 @@ def test_two_packs_over_the_row_cap_are_not_merged(engine, objects, store, make_
 
 
 def test_a_pack_at_the_row_cap_is_full(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The oldest pack has the cap's rows but no full mark; the pass skips it and merges the next two."""
+    """The oldest pack has the cap's rows but no full mark; the pass skips it and merges the next two.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store, flushes=4)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
     assert make_compactor().merge() == 2
@@ -934,7 +1139,15 @@ def test_a_pack_at_the_row_cap_is_full(engine, objects, store, make_compactor, m
 
 
 def test_full_packs_do_not_fill_the_candidate_window(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """More full packs than the window holds are older than two small packs; a pass still merges the small ones."""
+    """More full packs than the window holds are older than two small packs; a pass still merges the small ones.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store, flushes=8)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * _rows_per_pack(engine))
     for _ in range(3):
@@ -966,7 +1179,14 @@ def test_full_packs_do_not_fill_the_candidate_window(engine, objects, store, mak
 
 
 def test_a_pass_never_goes_past_the_target_bytes(engine, objects, store, make_compactor) -> None:
-    """A pack that would take the new pack past the target stays out of the pass."""
+    """A pack that would take the new pack past the target stays out of the pass.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     with Session(engine) as session:
         total = sum(session.scalars(select(StoragePackModel.byte_size)))
@@ -1008,7 +1228,14 @@ def _fill_sizes(step_log: StepLogStore, paddings: list[int]) -> list[tuple[str, 
 
 
 def test_an_old_large_pack_does_not_stop_the_newer_merges(engine, objects, store, make_compactor) -> None:
-    """The oldest pack has no room for one more pack; the pass still merges the three newer small packs."""
+    """The oldest pack has no room for one more pack; the pass still merges the three newer small packs.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     packs = _fill_sizes(store, [4000, 300, 300, 300])
     (large, large_size), *small = packs
     target = large_size + min(size for _, size in small) - 1
@@ -1020,7 +1247,14 @@ def test_an_old_large_pack_does_not_stop_the_newer_merges(engine, objects, store
 
 
 def test_a_later_smaller_pack_fills_the_target_exactly(engine, objects, store, make_compactor) -> None:
-    """A pack that does not fit is skipped, and a later smaller pack that brings the total to the target joins."""
+    """A pack that does not fit is skipped, and a later smaller pack that brings the total to the target joins.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     packs = _fill_sizes(store, [1000, 1000, 600, 300])
     (_, size0), (_, size1), (skipped, size2), (_, size3) = packs
     assert size2 > size3
@@ -1041,7 +1275,16 @@ class _SlowDownError(OSError):
     "error", [OSError("connection reset"), _SlowDownError("SlowDown")], ids=["oserror", "slowdown"]
 )
 def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_compactor, monkeypatch, error) -> None:
-    """A GET that fails with an error other than a missing object or an empty range fails the merge and marks no pack."""
+    """A GET that fails with an error other than a missing object or an empty range fails the merge and marks no pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+        error: The GET error that is not a missing object or an empty range.
+    """
     _fill(store)
     failing = min(objects.list("packs/w1/"))
     with Session(engine) as session:
@@ -1077,7 +1320,13 @@ def test_a_failed_get_leaves_the_pack_unmarked(engine, objects, store, make_comp
 
 
 def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine, objects, make_compactor) -> None:
-    """One unrecorded pack whose delete fails stays; the unrecorded packs after it go."""
+    """One unrecorded pack whose delete fails stays; the unrecorded packs after it go.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
     stuck, other = (f"{COMPACTED_PREFIX}/{n:020d}-a.pack" for n in (1, 2))
     objects.put(stuck, b"x")
     objects.put(other, b"x")
@@ -1099,8 +1348,160 @@ def test_an_unrecorded_delete_that_always_fails_does_not_stop_the_others(engine,
     assert objects.list(f"{COMPACTED_PREFIX}/") == [stuck]
 
 
+def _offsets_on(engine: Engine, pack_key: str) -> list[int]:
+    """Return the sorted offsets of the step and tree object rows that point at one pack.
+
+    Args:
+        engine: The test engine.
+        pack_key: The pack.
+
+    Returns:
+        The offsets.
+    """
+    with Session(engine) as session:
+        return sorted(
+            [
+                *session.scalars(select(AgentStepModel.pack_offset).where(AgentStepModel.pack_key == pack_key)),
+                *session.scalars(select(TreeObjectModel.pack_offset).where(TreeObjectModel.pack_key == pack_key)),
+            ]
+        )
+
+
+def test_a_marked_pack_over_the_row_cap_moves_in_parts_until_it_is_empty(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """A marked pack with more rows than the cap moves cap - 1 rows per pass, by offset, and stays marked until empty.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    written = _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    offsets = _offsets_on(engine, marked)
+    assert len(offsets) == 9
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 4)
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+
+    assert make_compactor().merge() == 1
+    assert _offsets_on(engine, marked) == offsets[3:]
+    with Session(engine) as session:
+        pack = session.get(StoragePackModel, marked)
+        assert pack.needs_rewrite
+        assert pack.byte_size != BROKEN_BYTE_SIZE
+    assert _pass(make_compactor) == (1, 0)
+    assert _offsets_on(engine, marked) == offsets[6:]
+
+    assert _pass(make_compactor) == (1, 0)
+    assert marked not in _pack_keys_of_rows(engine)
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert marked not in objects.list("")
+    _assert_all_readable(store, written)
+
+
+def test_a_lone_marked_pack_over_the_target_bytes_is_rewritten_in_one_pass(
+    engine, objects, store, make_compactor
+) -> None:
+    """A marked pack larger than the target and under the row cap is the first pack, so one pass rewrites it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
+    written = _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    assert len(_offsets_on(engine, marked)) < tree_compactor.MAX_ROWS_PER_PASS
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+        size = session.get(StoragePackModel, marked).byte_size
+
+    assert make_compactor(target_bytes=size - 1).merge() == 1
+
+    assert marked not in _pack_keys_of_rows(engine)
+    _assert_all_readable(store, written)
+
+
+def test_a_newer_marked_pack_comes_before_a_full_window_of_older_small_packs(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """More older small packs than the window holds; the first pass still takes the newer marked pack.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    written = _fill(store, flushes=4)
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+    with Session(engine) as session:
+        *older, marked = session.scalars(
+            select(StoragePackModel.pack_key).order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
+        ).all()
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key.in_(older))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key == marked)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=1), needs_rewrite=True)
+        )
+        session.commit()
+    assert len(older) > tree_compactor.MAX_PACKS_PER_PASS
+
+    assert make_compactor().merge() == 2
+
+    assert marked not in _pack_keys_of_rows(engine)
+    _assert_all_readable(store, written)
+
+
+def test_a_marked_pack_that_breaks_logs_an_error(engine, objects, store, make_compactor, caplog) -> None:
+    """A marked pack with no object leaves the candidates with the deleted bytes, so the pass logs an error.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    objects._path(marked).unlink()
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+
+    with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
+        assert make_compactor().merge() == 0
+
+    assert any(
+        record.levelno == logging.ERROR and "needs_rewrite" in record.getMessage() and marked in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The oldest pack has no object; the pass keeps its rows on it, and the next pass merges the other two."""
+    """The oldest pack has no object; the pass keeps its rows on it, and the next pass merges the other two.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _fill(store)
     missing = min(objects.list("packs/w1/"))
     objects._path(missing).unlink()
@@ -1117,7 +1518,14 @@ def test_a_missing_pack_leaves_the_pass_and_the_candidates(engine, objects, stor
 
 
 def test_a_missing_pack_in_the_window_leaves_the_other_packs_merged(engine, objects, store, make_compactor) -> None:
-    """The last pack by key has no object; the pass merges the other two and keeps every row of it on it."""
+    """The last pack by key has no object; the pass merges the other two and keeps every row of it on it.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     missing = max(objects.list("packs/w1/"))
     objects._path(missing).unlink()
@@ -1140,7 +1548,15 @@ def test_a_missing_pack_in_the_window_leaves_the_other_packs_merged(engine, obje
 def test_an_empty_pack_that_s3_refuses_to_range_is_marked_broken(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """A GET that fails with S3's InvalidRange, as a range GET on an empty object does, marks the pack broken."""
+    """A GET that fails with S3's InvalidRange, as a range GET on an empty object does, marks the pack broken.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store)
     empty = min(objects.list("packs/w1/"))
     get = objects.get
@@ -1179,7 +1595,14 @@ def test_an_empty_pack_that_s3_refuses_to_range_is_marked_broken(
 
 
 def test_a_short_pack_leaves_the_pass_and_shifts_no_offsets(engine, objects, store, make_compactor) -> None:
-    """A pack object shorter than its rows is broken; its rows stay on it, and the other two packs read back."""
+    """A pack object shorter than its rows is broken; its rows stay on it, and the other two packs read back.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     short = min(objects.list("packs/w1/"))
     with Session(engine) as session:
@@ -1205,7 +1628,14 @@ def test_a_short_pack_leaves_the_pass_and_shifts_no_offsets(engine, objects, sto
 def test_recovery_skips_a_short_pack_and_applies_a_later_unrecorded_pack(
     engine, objects, store, make_compactor
 ) -> None:
-    """A short flush pack keeps its worker id, so recovery counts it as recorded and goes on to a lost pack."""
+    """A short flush pack keeps its worker id, so recovery counts it as recorded and goes on to a lost pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     short = min(objects.list("packs/w1/"))
     objects.put(short, objects.get(short)[:40])
@@ -1240,7 +1670,15 @@ def test_recovery_skips_a_short_pack_and_applies_a_later_unrecorded_pack(
 
 
 def test_slow_gets_do_not_use_the_half_grace_limit(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The GETs together take longer than half the grace time; the merge still commits."""
+    """The GETs together take longer than half the grace time; the merge still commits.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store)
     get = objects.get
 
@@ -1265,7 +1703,14 @@ def test_slow_gets_do_not_use_the_half_grace_limit(engine, objects, store, make_
 
 
 def test_a_lock_error_other_than_lock_not_available_is_raised(engine, objects, store, make_compactor) -> None:
-    """An OperationalError at the lock step that is not 55P03 leaves the merge as an error, and no row moves."""
+    """An OperationalError at the lock step that is not 55P03 leaves the merge as an error, and no row moves.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     old = _pack_keys_of_rows(engine)
 
@@ -1297,7 +1742,17 @@ def test_a_lock_error_other_than_lock_not_available_is_raised(engine, objects, s
 def test_the_full_mark_needs_more_than_half_the_row_cap(
     engine, objects, store, make_compactor, monkeypatch, extra, mark
 ) -> None:
-    """A merge of exactly half the row cap is not full; one row over half is."""
+    """A merge of exactly half the row cap is not full; one row over half is.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+        extra: The rows added to twice the moved rows to make the row cap.
+        mark: The worker id that the merged pack must carry.
+    """
     _fill(store, flushes=2)
     moved = 2 * _rows_per_pack(engine)
     monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 2 * moved + extra)
@@ -1309,7 +1764,15 @@ def test_the_full_mark_needs_more_than_half_the_row_cap(
 
 
 def test_the_retire_time_is_set_in_chunks(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The retire time of the old packs is set with one UPDATE for each chunk of keys."""
+    """The retire time of the old packs is set with one UPDATE for each chunk of keys.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store)
     monkeypatch.setattr(tree_compactor, "CHUNK_SIZE", 2)
     statements = _record_statements(engine)
@@ -1321,7 +1784,14 @@ def test_the_retire_time_is_set_in_chunks(engine, objects, store, make_compactor
 
 
 def test_a_delete_that_always_fails_does_not_stop_the_removal(engine, objects, store, make_compactor) -> None:
-    """One retired pack whose delete fails keeps its row; the other retired packs and their rows go."""
+    """One retired pack whose delete fails keeps its row; the other retired packs and their rows go.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     _fill(store)
     make_compactor().merge()
     stuck = min(objects.list("packs/w1/"))
@@ -1345,7 +1815,14 @@ def test_a_delete_that_always_fails_does_not_stop_the_removal(engine, objects, s
 
 
 def test_packs_merged_after_the_candidate_read_write_no_empty_pack(engine, objects, store, make_compactor) -> None:
-    """Another pass merges the packs between this pass's candidate read and row read; this pass writes nothing."""
+    """Another pass merges the packs between this pass's candidate read and row read; this pass writes nothing.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
     results: list[int] = []
@@ -1374,7 +1851,13 @@ def test_packs_merged_after_the_candidate_read_write_no_empty_pack(engine, objec
 
 
 def test_remove_unrecorded_skips_a_key_with_no_write_time(engine, objects, make_compactor) -> None:
-    """A key under the prefix that does not start with a write time is kept; the other orphans still go."""
+    """A key under the prefix that does not start with a write time is kept; the other orphans still go.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
     bad = f"{COMPACTED_PREFIX}/not-a-pack"
     orphan = f"{COMPACTED_PREFIX}/{1:020d}-a.pack"
     objects.put(bad, b"x")
@@ -1384,8 +1867,54 @@ def test_remove_unrecorded_skips_a_key_with_no_write_time(engine, objects, make_
     assert objects.list(f"{COMPACTED_PREFIX}/") == [bad]
 
 
+def test_remove_unrecorded_deletes_only_an_old_flush_pack_with_no_row(engine, objects, make_compactor) -> None:
+    """A flush pack with no row goes after the long age; a young orphan and an old recorded pack stay.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
+    old_orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    young_orphan = f"{PACK_PREFIX}/gone-pod/{time.time_ns():020d}-b.pack"
+    recorded = f"{PACK_PREFIX}/w1/{2:020d}-c.pack"
+    for key in (old_orphan, young_orphan, recorded):
+        objects.put(key, b"x")
+    with Session(engine) as session:
+        session.add(StoragePackModel(pack_key=recorded, worker_id="w1", byte_size=1))
+        session.commit()
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+
+    assert sorted(objects.list(f"{PACK_PREFIX}/")) == sorted([young_orphan, recorded])
+
+
+def test_a_flush_pack_younger_than_the_long_age_stays_also_with_no_grace_time(engine, objects, make_compactor) -> None:
+    """The grace time of compacted packs does not apply to flush packs: an apply may still be in flight.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
+    age_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
+    almost = f"{PACK_PREFIX}/gone-pod/{time.time_ns() - age_ns + 60 * 10**9:020d}-a.pack"
+    objects.put(almost, b"x")
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+    assert objects.list(f"{PACK_PREFIX}/") == [almost]
+
+
 def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, make_compactor, monkeypatch) -> None:
-    """The recorded check runs one query for each chunk of old keys and keeps the recorded pack."""
+    """The recorded check runs one query for each chunk of old keys and keeps the recorded pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _fill(store)
     make_compactor().merge()
     (recorded,) = objects.list(f"{COMPACTED_PREFIX}/")
@@ -1399,6 +1928,273 @@ def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, ma
 
     assert sum("FROM storage_packs" in statement for statement, _ in statements) == 3
     assert objects.list(f"{COMPACTED_PREFIX}/") == [recorded]
+
+
+def _orphan_an_old_flush_pack(
+    engine: Engine, objects: FlakyObjectStore, store: StepLogStore, written_ns: int = 1
+) -> tuple[str, str]:
+    """Write one flush pack, take its transaction back out, and file it under a write time far in the past.
+
+    This is the pack of a pod that died after its PUT and came back under a new name.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log of worker ``w1``.
+        written_ns: The write time in the new key.
+
+    Returns:
+        The old pack key and the id of its step.
+    """
+    step_id = store.commit(
+        run_id=RUNS[0],
+        agent_id="agent-a",
+        seq=1,
+        kind="model",
+        execution_generation=1,
+        grant_list_id="grants-1",
+        body={"output": "lost"},
+    )
+    store.flush()
+    with Session(engine) as session:
+        written = session.get(AgentStepModel, step_id).pack_key
+        session.execute(delete(AgentStepModel).where(AgentStepModel.pack_key == written))
+        session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key == written))
+        session.commit()
+    old = f"{PACK_PREFIX}/w1/{written_ns:020d}-{uuid.uuid4().hex}.pack"
+    objects.put(old, objects.get(written))
+    objects._path(written).unlink()
+    return old, step_id
+
+
+def test_the_sweep_claims_a_flush_pack_that_recovery_read_before_the_delete(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """Recovery GETs an old pack, the sweep deletes it, then recovery applies: the claim row keeps the apply out.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    original_get = objects.get
+    swept: list[int] = []
+
+    def get_then_sweep(key: str, *args: Any, **kwargs: Any) -> bytes:
+        """Read the pack, then run the sweep before recovery applies what it read.
+
+        Args:
+            key: The object key.
+            *args: The other get arguments.
+            **kwargs: The other get keyword arguments.
+
+        Returns:
+            The bytes read before the sweep.
+        """
+        data = original_get(key, *args, **kwargs)
+        if key == old and not swept:
+            swept.append(make_compactor(grace_seconds=0.0).remove_unrecorded())
+        return data
+
+    monkeypatch.setattr(objects, "get", get_then_sweep)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 0
+    finally:
+        recovering.close()
+
+    assert swept == [1]
+    assert objects.list(f"{PACK_PREFIX}/") == []
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+        claim = session.get(StoragePackModel, old)
+        assert (claim.worker_id, claim.byte_size, claim.needs_rewrite) == ("w1", 0, False)
+    # The claim is a retired pack with no row: the removal drops it after the grace time.
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert _pack_rows(engine) == set()
+
+
+def test_recovery_skips_a_flush_pack_that_the_sweep_deleted_after_the_list(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """Recovery lists an old pack, the sweep claims and deletes it, then recovery's GET finds nothing and skips it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    original_list = objects.list
+    sweeping: list[bool] = []
+
+    def list_then_sweep(prefix: str) -> list[str]:
+        """List the worker's packs, then run the sweep once before recovery reads them.
+
+        Args:
+            prefix: The key prefix.
+
+        Returns:
+            The keys listed before the sweep.
+        """
+        listed = original_list(prefix)
+        if prefix == f"{PACK_PREFIX}/w1/" and not sweeping:
+            sweeping.append(True)
+            assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+        return listed
+
+    monkeypatch.setattr(objects, "list", list_then_sweep)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 0
+    finally:
+        recovering.close()
+
+    assert original_list(f"{PACK_PREFIX}/") == []
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+        assert session.get(StoragePackModel, old).worker_id == "w1"
+
+
+def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """Recovery applies the young pack first; once it is old, the sweep's claim conflicts, and the pack and rows stay.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 1
+    finally:
+        recovering.close()
+    # The pack's age passes: the sweep now counts it as old.
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+
+    assert objects.list(f"{PACK_PREFIX}/") == [old]
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id).pack_key == old
+        assert session.get(StoragePackModel, old).byte_size > 0
+
+
+def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """The sweep reads which old flush packs have a row and sends no claim INSERT for them.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 1
+    finally:
+        recovering.close()
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    statements = _record_statements(engine)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+
+    assert [statement for statement, _ in statements if statement.startswith("INSERT INTO storage_packs")] == []
+
+
+def test_a_late_apply_after_the_claim_row_went_is_refused(engine, objects, store, make_compactor) -> None:
+    """A flush that retries past the sweep and the claim row's removal cannot record the deleted pack.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    pack = objects.get(old)
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert _pack_rows(engine) == set()
+
+    with pytest.raises(PackClaimedError):
+        store._apply(MAIN, old, len(pack), _read_manifest(pack))
+
+    assert _pack_rows(engine) == set()
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+
+
+def test_an_apply_refuses_a_flush_pack_a_little_younger_than_the_sweep_age(
+    engine, objects, store, make_compactor
+) -> None:
+    """Inside the clock skew margin, the sweep keeps the pack, but the apply already refuses it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
+    sweep_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
+    margin_ns = int(SWEEP_AGE_MARGIN_SECONDS * 1e9)
+    old, step_id = _orphan_an_old_flush_pack(
+        engine, objects, store, written_ns=time.time_ns() - sweep_ns + margin_ns // 2
+    )
+    pack = objects.get(old)
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+    with pytest.raises(PackClaimedError):
+        store._apply(MAIN, old, len(pack), _read_manifest(pack))
+
+    assert objects.list(f"{PACK_PREFIX}/") == [old]
+    assert _pack_rows(engine) == set()
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+
+
+def test_a_pass_sweeps_the_packs_with_no_row_at_most_once_an_interval(engine, objects, make_compactor) -> None:
+    """Two passes inside the sweep interval list the prefixes once; with no interval, each pass sweeps.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
+    for interval, expected in ((3600.0, 1), (0.0, 2)):
+        compactor = make_compactor(sweep_interval_seconds=interval)
+        sweeps: list[int] = []
+
+        def count(sweeps: list[int] = sweeps) -> int:
+            """Count one sweep.
+
+            Args:
+                sweeps: The list that gets one item for each sweep.
+
+            Returns:
+                No pack deleted.
+            """
+            sweeps.append(1)
+            return 0
+
+        compactor.remove_unrecorded = count
+        compactor.run_once()
+        compactor.run_once()
+        assert len(sweeps) == expected
 
 
 def _kill_child(database: str, root: str, marker: str) -> None:
@@ -1425,7 +2221,15 @@ def _kill_child(database: str, root: str, marker: str) -> None:
 
 
 def test_a_sigkill_inside_the_merge_commit_loses_nothing(tmp_path, engine, objects, store, make_compactor) -> None:
-    """A real kill at the commit leaves every row on its old pack; the next pass finishes the merge."""
+    """A real kill at the commit leaves every row on its old pack; the next pass finishes the merge.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     written = _fill(store)
     old = set(objects.list("packs/w1/"))
     marker = tmp_path / "marker"
@@ -1450,14 +2254,24 @@ def test_a_sigkill_inside_the_merge_commit_loses_nothing(tmp_path, engine, objec
 
 
 def test_start_tree_compactor_needs_a_bucket(engine, monkeypatch) -> None:
-    """With no bucket set, the worker starts no compactor."""
+    """With no bucket set, the worker starts no compactor.
+
+    Args:
+        engine: The test engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(settings, "tree_bucket", None)
 
     assert start_tree_compactor(engine) is None
 
 
 def test_start_tree_compactor_deletes_through_the_bucket(engine, monkeypatch) -> None:
-    """With a bucket set, the compactor runs over S3 and deletes with ``delete_object`` in that bucket."""
+    """With a bucket set, the compactor runs over S3 and deletes with ``delete_object`` in that bucket.
+
+    Args:
+        engine: The test engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     client = MagicMock()
     monkeypatch.setattr(settings, "tree_bucket", "trees-test")
     monkeypatch.setattr(tree_compactor, "boto3", types.SimpleNamespace(client=lambda name: client))
@@ -1525,7 +2339,14 @@ def postgres_store(postgres_engine: Engine, objects: FlakyObjectStore) -> Iterat
 
 @needs_postgres
 def test_postgres_two_merges_at_once_do_not_overlap(tmp_path, postgres_engine, objects, postgres_store) -> None:
-    """Two merges on two connections wait for each other at the PUT; one wins, the other moves nothing."""
+    """Two merges on two connections wait for each other at the PUT; one wins, the other moves nothing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     written = _fill(postgres_store)
     both_put = threading.Barrier(2, timeout=30)
     objects.on_compacted_put = lambda key: both_put.wait()
@@ -1550,7 +2371,14 @@ def test_postgres_two_merges_at_once_do_not_overlap(tmp_path, postgres_engine, o
 
 @needs_postgres
 def test_postgres_a_merge_does_not_wait_for_a_locked_pack(tmp_path, postgres_engine, objects, postgres_store) -> None:
-    """A merge that finds one of its packs locked by another pass gives up at once and keeps every row."""
+    """A merge that finds one of its packs locked by another pass gives up at once and keeps every row.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     written = _fill(postgres_store)
     old = set(objects.list("packs/w1/"))
     results: list[int] = []
@@ -1577,7 +2405,14 @@ def test_postgres_a_merge_does_not_wait_for_a_locked_pack(tmp_path, postgres_eng
 def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
     tmp_path, postgres_engine, objects, postgres_store
 ) -> None:
-    """The merge locks the jobs and then the packs, each sorted by key and with NOWAIT, so two passes cannot split them."""
+    """The merge locks the jobs and then the packs, each sorted by key and with NOWAIT, so two passes cannot split them.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     _fill(postgres_store)
     statements = _record_statements(postgres_engine)
     compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
@@ -1593,10 +2428,84 @@ def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
 
 
 @needs_postgres
+def test_postgres_the_broken_mark_locks_packs_in_key_order_with_nowait(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """The broken mark locks its packs sorted by key and with NOWAIT before its UPDATE, as an account purge locks them.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
+    _fill(postgres_store)
+    missing = sorted(objects.list("packs/w1/"))[:2]
+    for key in missing:
+        objects._path(key).unlink()
+    recorded = _record_statements(postgres_engine)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+
+    assert compactor.merge() == 0
+
+    statements = [statement for statement, _ in recorded]
+    mark = next(
+        i for i, statement in enumerate(statements) if statement.startswith("UPDATE storage_packs SET byte_size")
+    )
+    locks = [statement for statement in statements[:mark] if "NOWAIT" in statement]
+    assert len(locks) == 1
+    assert "FROM storage_packs" in locks[0]
+    assert "ORDER BY storage_packs.pack_key FOR UPDATE NOWAIT" in locks[0]
+    with Session(postgres_engine) as session:
+        assert {session.get(StoragePackModel, key).byte_size for key in missing} == {BROKEN_BYTE_SIZE}
+
+
+@needs_postgres
+def test_postgres_the_broken_mark_does_not_wait_for_a_locked_pack(
+    tmp_path, postgres_engine, objects, postgres_store
+) -> None:
+    """A broken pack that another transaction holds stays unmarked, and the pass does not wait for the lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
+    _fill(postgres_store)
+    missing = min(objects.list("packs/w1/"))
+    objects._path(missing).unlink()
+    results: list[int] = []
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        holder.execute(
+            select(StoragePackModel.pack_key).where(StoragePackModel.pack_key == missing).with_for_update()
+        ).all()
+        thread = threading.Thread(target=lambda: results.append(compactor.merge()))
+        thread.start()
+        thread.join(10)
+        waited = thread.is_alive()
+        holder.rollback()
+    thread.join(30)
+
+    assert not waited
+    with Session(postgres_engine) as session:
+        assert session.get(StoragePackModel, missing).byte_size != BROKEN_BYTE_SIZE
+
+
+@needs_postgres
 def test_postgres_a_merge_does_not_wait_for_a_locked_job(
     tmp_path, postgres_engine, objects, postgres_store, caplog
 ) -> None:
-    """A job row that another transaction holds, as a job delete does, makes the merge give up at once."""
+    """A job row that another transaction holds, as a job delete does, makes the merge give up at once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+        caplog: Pytest's log capture fixture.
+    """
     caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
     written = _fill(postgres_store)
     rows = len(_rows_of_packs(postgres_engine))
@@ -1627,7 +2536,14 @@ def test_postgres_a_merge_does_not_wait_for_a_locked_job(
 def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
     tmp_path, postgres_engine, objects, postgres_store
 ) -> None:
-    """While a merge holds its job locks, a non-key job UPDATE finishes at once and a job DELETE waits."""
+    """While a merge holds its job locks, a non-key job UPDATE finishes at once and a job DELETE waits.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     written = _fill(postgres_store)
     at_move = threading.Event()
     release = threading.Event()
@@ -1675,3 +2591,259 @@ def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
 
     assert results == [3]
     _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_the_compactor_queries_use_their_indexes(tmp_path, postgres_engine, objects, postgres_store) -> None:
+    """EXPLAIN of each compactor read, as the compactor sent it, names the index that serves it (SKY-802)."""
+    _fill(postgres_store)
+    reads: list[tuple[str, Any]] = []
+
+    def record(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Record each SELECT with its parameters.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+        """
+        if statement.startswith("SELECT") and "FOR " not in statement:
+            reads.append((statement, parameters))
+
+    delete_object = _deleter(tmp_path / "objects", [])
+    merger = TreeCompactor(postgres_engine, objects, delete_object, min_age_seconds=0.0)
+    # A zero grace time lets the removals find the packs at once; a merge with it would give up.
+    remover = TreeCompactor(postgres_engine, objects, delete_object, grace_seconds=0.0)
+    event.listen(postgres_engine, "before_cursor_execute", record)
+    try:
+        assert merger.merge() == 3
+        assert remover.remove_retired() == 3
+        objects.put(f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack", b"x")
+        assert remover.remove_unrecorded() == 1
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", record)
+
+    def plan(prefix: str) -> str:
+        """Return the plan of the first recorded read that starts with a prefix, with sequential scans off.
+
+        A few test rows make a sequential scan the cheapest plan, so the test turns it off to show
+        that the index can serve the query.
+
+        Args:
+            prefix: The start of the SQL text.
+
+        Returns:
+            The plan text.
+        """
+        statement, parameters = next(read for read in reads if read[0].startswith(prefix))
+        with postgres_engine.connect() as connection:
+            connection.execute(text("SET enable_seqscan = off"))
+            return "\n".join(row[0] for row in connection.exec_driver_sql(f"EXPLAIN {statement}", parameters))
+
+    candidates = plan("SELECT storage_packs.pack_key, storage_packs.byte_size")
+    retired = plan("SELECT storage_packs.pack_key \nFROM storage_packs \nWHERE storage_packs.created_at")
+    for query in (candidates, retired):
+        assert "ix_storage_packs_created_at_pack_key" in query
+        assert "ix_agent_steps_pack_key" in query
+        assert "ix_tree_objects_pack_key" in query
+    assert "ix_agent_steps_pack_key" in plan("SELECT agent_steps.step_id")
+    assert "ix_tree_objects_pack_key" in plan("SELECT tree_objects.username")
+    assert "storage_packs_pkey" in plan(
+        "SELECT storage_packs.pack_key \nFROM storage_packs \nWHERE storage_packs.pack_key IN"
+    )
+
+
+@needs_postgres
+def test_postgres_only_one_replica_sweeps_the_packs_with_no_row(tmp_path, postgres_engine, objects) -> None:
+    """A replica that finds the sweep lock held skips the sweep; once the lock is free, it sweeps.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+    """
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        assert holder.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+        try:
+            assert compactor.remove_unrecorded() == 0
+            assert objects.list(f"{PACK_PREFIX}/") == [orphan]
+        finally:
+            holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+            holder.commit()
+
+    assert compactor.remove_unrecorded() == 1
+    assert objects.list(f"{PACK_PREFIX}/") == []
+    with Session(postgres_engine) as session:
+        assert session.get(StoragePackModel, orphan).worker_id == "gone-pod"
+
+
+def _sweep_lock_free(engine: Engine) -> bool:
+    """Return whether a new session can take the sweep lock; free it again when it can.
+
+    Args:
+        engine: The PostgreSQL engine.
+
+    Returns:
+        Whether the lock was free.
+    """
+    # A pooled connection could be the holder itself, and a session lock lets its holder take it again.
+    fresh = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with fresh.connect() as connection:
+            key = {"key": tree_compactor.SWEEP_LOCK_KEY}
+            free = connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), key)
+            if free:
+                connection.execute(text("SELECT pg_advisory_unlock(:key)"), key)
+            connection.commit()
+            return bool(free)
+    finally:
+        fresh.dispose()
+
+
+def _sweep_lock_holder_states(engine: Engine) -> list[str]:
+    """Return the ``pg_stat_activity`` state of each session that holds the sweep lock.
+
+    Args:
+        engine: The PostgreSQL engine.
+
+    Returns:
+        The states, one for each holder.
+    """
+    with engine.connect() as connection:
+        states = list(
+            connection.scalars(
+                text(
+                    "SELECT a.state FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 "
+                    "AND (l.classid::bigint << 32) | l.objid::bigint = :key"
+                ),
+                {"key": tree_compactor.SWEEP_LOCK_KEY},
+            )
+        )
+        connection.commit()
+        return states
+
+
+@needs_postgres
+def test_postgres_the_sweep_holds_a_session_lock_with_no_open_transaction(
+    tmp_path, postgres_engine, objects, monkeypatch
+) -> None:
+    """During the sweep, the lock holder is idle and not in a transaction, and a second sweep skips.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    other = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    seen: list[tuple[list[str], int]] = []
+    real_list = objects.list
+
+    def list_and_check(prefix: str) -> list[str]:
+        """Record the lock holders' states and a second sweep's result at the first list, then list.
+
+        Args:
+            prefix: The key prefix.
+
+        Returns:
+            The listed keys.
+        """
+        if not seen:
+            seen.append((_sweep_lock_holder_states(postgres_engine), other.remove_unrecorded()))
+        return real_list(prefix)
+
+    monkeypatch.setattr(objects, "list", list_and_check)
+
+    assert compactor.remove_unrecorded() == 1
+    assert seen == [(["idle"], 0)]
+    assert _sweep_lock_free(postgres_engine)
+
+
+@needs_postgres
+def test_postgres_a_sweep_that_raises_frees_the_lock(tmp_path, postgres_engine, objects, monkeypatch) -> None:
+    """A sweep whose object list fails raises, and the next session can take the sweep lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+
+    def fail(prefix: str) -> list[str]:
+        """Fail as an S3 LIST that does not answer.
+
+        Args:
+            prefix: The key prefix.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("list failed")
+
+    monkeypatch.setattr(objects, "list", fail)
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+
+    with pytest.raises(RuntimeError, match="list failed"):
+        compactor.remove_unrecorded()
+    assert _sweep_lock_free(postgres_engine)
+
+
+@needs_postgres
+def test_postgres_a_failed_unlock_closes_the_connection_and_frees_the_lock(
+    tmp_path, postgres_engine, objects, caplog
+) -> None:
+    """When the unlock fails, the sweep closes its connection, so no pooled connection keeps the lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        caplog: Pytest's log capture fixture.
+    """
+    caplog.set_level(logging.WARNING, logger="core.storage.tree_compactor")
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+
+    def fail_unlock(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        """Fail the unlock statement.
+
+        Args:
+            connection: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters.
+            context: The execution context.
+            executemany: Whether the statement runs once for each parameter set.
+
+        Raises:
+            RuntimeError: For the unlock statement.
+        """
+        if "pg_advisory_unlock" in statement:
+            raise RuntimeError("unlock failed")
+
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    event.listen(postgres_engine, "before_cursor_execute", fail_unlock)
+    try:
+        assert compactor.remove_unrecorded() == 1
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", fail_unlock)
+
+    assert [r.getMessage() for r in caplog.records] == [
+        "Could not free the tree pack sweep lock; closing its connection"
+    ]
+    assert _sweep_lock_free(postgres_engine)
