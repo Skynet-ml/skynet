@@ -19,7 +19,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetError
-from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.operation_pricing import UnpricedOperationError, json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.sandbox import trees as tree_helpers
@@ -1372,16 +1372,20 @@ def test_a_runtime_box_source_refuses_a_gpu_grant_before_any_box_opens(
 
 
 def test_a_gpu_step_records_another_grant_list_id_than_a_cpu_step(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The step log shows the hardware: a GPU grant changes the id, and a CPU step keeps its network-only id."""
+    """The step log shows the hardware: the id names the GPU type, and a CPU step keeps its network-only id."""
     sandbox, _ = _fake_sandbox(trees, step_log, _FakeBox())
     empty = _tree(trees, {})
     hosts = [Grant("api.example.com")]
 
     sandbox.score(_step(1), empty, empty, "echo 1.0", hosts)
     sandbox.score(_step(2), empty, empty, "echo 1.0", [*hosts, Grant("gpu:a100")])
+    sandbox.score(_step(3), empty, empty, "echo 1.0", [*hosts, Grant("gpu:h100")])
 
-    cpu, gpu = step_log.get_step(f"{RUN}:agent-1:1"), step_log.get_step(f"{RUN}:agent-1:2")
+    cpu, a100, h100 = (step_log.get_step(f"{RUN}:agent-1:{index}") for index in (1, 2, 3))
     assert cpu is not None
-    assert gpu is not None
-    assert cpu["grant_list_id"] == resolve_grants(hosts, {}).grant_list_id
-    assert gpu["grant_list_id"] != cpu["grant_list_id"]
+    assert a100 is not None
+    assert h100 is not None
+    network_id = resolve_grants(hosts, {}).grant_list_id
+    assert cpu["grant_list_id"] == network_id
+    assert a100["grant_list_id"] == json_fingerprint([network_id, "gpu:a100"])
+    assert h100["grant_list_id"] != a100["grant_list_id"]
