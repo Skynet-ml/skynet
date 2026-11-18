@@ -1134,7 +1134,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         "steady_steps": steady_steps,
         "commits_per_second": round(steady_steps / steady_seconds, 1) if steady_seconds > 0 else 0.0,
         "commits_per_second_with_drain": round(drain_steps / (last - steady_from), 1) if last > steady_from else 0.0,
-        "commits_per_second_whole_pass": round(len(waits) / (last - started), 1),
+        "commits_per_second_whole_pass": round(len(waits) / (last - started), 1) if last > started else 0.0,
         "step_wait_ms": {
             "mean": round(1000 * statistics.fmean(waits), 2),
             "p50": round(_percentile_ms(waits, 0.50), 2),

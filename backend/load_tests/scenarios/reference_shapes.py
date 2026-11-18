@@ -1108,9 +1108,14 @@ def run_shape(
         switch.live = True
     try:
         while outcome.result is None and outcome.error is None:
-            loop, store, scorer = harness.loop(
-                shape, run_id, generation, model, outcome.meter, switch, work=outcome.work
-            )
+            try:
+                loop, store, scorer = harness.loop(
+                    shape, run_id, generation, model, outcome.meter, switch, work=outcome.work
+                )
+            except Exception as error:
+                # A failed start closes its own step log. It fails this run only, not the chaos gate's other runs.
+                outcome.error = f"{type(error).__name__}: {error}"
+                break
             try:
                 result = FakeEngine(rounds).run(
                     Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context()

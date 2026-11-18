@@ -628,11 +628,53 @@ def test_a_failed_loop_start_closes_its_step_log(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(EngineLoop, "__init__", refuse)
     harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
     try:
-        with pytest.raises(RuntimeError, match="start refused"):
-            reference_shapes.run_shape(harness, reference_shapes.SHAPES[0], "start-0", rounds=1)
+        outcome = reference_shapes.run_shape(harness, reference_shapes.SHAPES[0], "start-0", rounds=1)
     finally:
         harness.close()
     assert "start-0-g1" in closed
+    assert outcome.error == "RuntimeError: start refused"
+    assert not outcome.ok
+
+
+def test_chaos_gate_keeps_the_other_runs_when_one_loop_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a run whose loop start fails gives one not-ok row, and the gate still reports the other run.
+
+    Args:
+        monkeypatch: Runs one shape twice, fails the loop start of the first run, and stops the chaos job.
+    """
+    real_loop = reference_shapes.Harness.loop
+
+    def loop(self: reference_shapes.Harness, shape: Any, run_id: str, *args: Any, **kwargs: Any) -> Any:
+        """Fail the first run's loop start, as a step log that does not open does; start the other run.
+
+        Args:
+            self: The harness.
+            shape: The shape.
+            run_id: The job id.
+            *args: The other ``Harness.loop`` arguments.
+            **kwargs: The other ``Harness.loop`` keyword arguments.
+
+        Returns:
+            The loop, its step log and the step scorer.
+
+        Raises:
+            OSError: For the first run.
+        """
+        if run_id == "chaos-0-0":
+            raise OSError("step log did not open")
+        return real_loop(self, shape, run_id, *args, **kwargs)
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", reference_shapes.SHAPES[:1])
+    monkeypatch.setattr(reference_shapes.Harness, "loop", loop)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=2, rounds=1, workers=2, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    rows = result.extras["runs_detail"]
+    assert [row["ok"] for row in rows] == [False, True]
+    assert result.extras["runs_ok"] == 1
+    assert not result.slo_passed
 
 
 def _small_pass_config() -> swarm_10k.SwarmConfig:
@@ -1591,6 +1633,36 @@ def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(
     assert figures["commits_per_second_with_drain"] == 0.0
 
 
+def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that a pass whose last step is durable at its start time gives 0 rates, as a coarse clock can.
+
+    Args:
+        monkeypatch: Replaces the shard processes with one made-up report.
+        tmp_path: The pass folder.
+    """
+    context = SimpleNamespace(Barrier=lambda count: None, Queue=lambda: None, Process=_NoProcess)
+    monkeypatch.setattr(swarm_10k, "multiprocessing", SimpleNamespace(get_context=lambda method: context))
+    report = {
+        "worker_id": "swarm-w",
+        "started": 1.0,
+        "waits": [0.1],
+        "lates": [0.0],
+        "commit_calls": [0.0],
+        "times": [1.0],
+        "first_round_durable": 1.0,
+        "first_agent_done": 1.0,
+        "boxes_opened": 0,
+        "boxes_open_max": 0,
+    }
+    monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
+    figures = swarm_10k.run_pass(_small_pass_config(), 1, tmp_path)
+    assert figures["seconds_to_durable"] == 0.0
+    assert figures["commits_per_second_whole_pass"] == 0.0
+
+
 def _named_sqlite(
     path: Path,
     name: str,
@@ -2368,6 +2440,23 @@ def test_run_all_starts_no_stack_for_in_process_scenarios(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_all, "_run_scenarios", run_scenarios)
     assert asyncio.run(run_all._async_main()) == 0
     assert ran == ["reference_shapes", "chaos_gate", "swarm_10k"]
+
+
+def test_run_all_refuses_an_unknown_scenario_before_the_stack(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Check that ``run_all`` stops on an unknown scenario name before it starts the stack or any scenario.
+
+    Args:
+        monkeypatch: Sets the command line with a typo, and makes each stack step and scenario fail the test.
+        capsys: Reads the error message.
+    """
+    monkeypatch.setattr(sys, "argv", ["run_all", "--scenarios=reference_shapes,chaos_gat"])
+    monkeypatch.setattr(run_all, "_ensure_env", lambda args: None)
+    for name in ("_bring_up", "_wait_for_http", "warm_validation_cache", "_bring_down", "_run_scenarios"):
+        monkeypatch.setattr(run_all, name, _no_start)
+    assert asyncio.run(run_all._async_main()) == 2
+    assert "unknown scenario(s): chaos_gat" in capsys.readouterr().err
 
 
 def test_run_all_takes_the_swarm_database_only_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

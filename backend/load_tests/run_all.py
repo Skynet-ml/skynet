@@ -324,11 +324,19 @@ async def _async_main() -> int:
     """Orchestrator entrypoint coroutine.
 
     Returns:
-        Process exit code: ``0`` when every SLO gate passes, otherwise ``1``.
+        Process exit code: ``0`` when every SLO gate passes, ``2`` for an unknown scenario name, otherwise ``1``.
     """
     args = _parse_args()
     _ensure_env(args)
     names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+    # A typo would count as a stack scenario, bring the whole stack up, and then be skipped.
+    unknown = [name for name in names if name not in _SCENARIOS]
+    if unknown:
+        print(
+            f"[loadtest] unknown scenario(s): {', '.join(unknown)}; choose from: {', '.join(_SCENARIOS)}",
+            file=sys.stderr,
+        )
+        return 2
     needs_stack = any(name not in _IN_PROCESS_SCENARIOS for name in names)
 
     if needs_stack and not args.skip_stack:
