@@ -143,6 +143,8 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    escape_surrogates,
+    safe_tool_call,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from ..service_gateway.optimization.blackbox.tree_sandbox import (
@@ -501,7 +503,8 @@ class EngineLoop:
         Both shapes are flat and provider-neutral. A tool definition is ``{"name", "description",
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
         (:class:`ToolCall`), with ``arguments`` as a dict, or as raw text when it is not a JSON object. The
-        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`.
+        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`. The step stores each
+        lone surrogate of the reply as an escape, and arguments that hold one as their JSON text.
 
         Args:
             prompt: The prompt text or messages.
@@ -557,9 +560,11 @@ class EngineLoop:
                         cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
-                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
+                    # Model output is untrusted: a lone surrogate in it would fail the UTF-8 commit and stop the
+                    # run (SKY-821).
+                    body: dict[str, Any] = {"prompt_sha256": digest, "text": escape_surrogates(reply.text or "")}
                     if reply.tool_calls:
-                        body["tool_calls"] = reply.tool_calls
+                        body["tool_calls"] = [safe_tool_call(call) for call in reply.tool_calls]
                     return StepResult(body, reply.cost_cents)
 
                 try:
