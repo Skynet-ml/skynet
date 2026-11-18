@@ -1909,12 +1909,14 @@ def test_a_scorer_of_the_eval_server_cannot_read_a_hidden_path(
     ("hidden", "links", "secret"),
     [
         (["eval"], {"eval": "real"}, "real/answer.txt"),
+        (["eval"], {"eval": "real.txt"}, "real.txt"),
         (["data/answer.txt"], {"data": "real"}, "real/answer.txt"),
         (["data/sub/answer.txt"], {"data": "real", "real/sub": "../other"}, "other/answer.txt"),
         (["data/eval"], {"data": "real", "real/eval/link": "../../other"}, "other/answer.txt"),
     ],
     ids=[
         "hidden-link",
+        "hidden-link-to-a-file",
         "hidden-file-below-a-linked-folder",
         "hidden-file-below-a-chain-of-links",
         "link-in-a-hidden-folder-below-a-linked-folder",
