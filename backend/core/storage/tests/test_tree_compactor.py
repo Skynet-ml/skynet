@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, delete, event, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from core.config import app_env, settings
 from core.storage import tree_compactor
@@ -2693,12 +2694,18 @@ def _sweep_lock_free(engine: Engine) -> bool:
     Returns:
         Whether the lock was free.
     """
-    with engine.connect() as connection:
-        free = connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
-        if free:
-            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
-        connection.commit()
-        return bool(free)
+    # A pooled connection could be the holder itself, and a session lock lets its holder take it again.
+    fresh = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with fresh.connect() as connection:
+            key = {"key": tree_compactor.SWEEP_LOCK_KEY}
+            free = connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), key)
+            if free:
+                connection.execute(text("SELECT pg_advisory_unlock(:key)"), key)
+            connection.commit()
+            return bool(free)
+    finally:
+        fresh.dispose()
 
 
 def _sweep_lock_holder_states(engine: Engine) -> list[str]:
