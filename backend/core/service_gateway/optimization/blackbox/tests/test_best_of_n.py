@@ -772,10 +772,13 @@ def test_a_repository_brief_skips_a_file_larger_than_the_room_left(
         brief: Builds the brief for a seed.
         monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
     """
-    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 150)
+    paths = ("first.txt", "large.txt", "last.txt")
+    # The rules and the closing count line come out of the cap, so the files get 150 bytes.
+    cap = len(brief({}, paths)) + len("\n3 more files are not shown.") + 150
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", cap)
     files = {"first.txt": b"FIRST!", "large.txt": b"LARGE-FILE" * 20, "last.txt": b"END"}
 
-    text = brief(files, ("first.txt", "large.txt", "last.txt"))
+    text = brief(files, paths)
 
     assert "FIRST!" in text
     assert "`large.txt` is not shown: the brief has no room for it." in text
@@ -815,7 +818,8 @@ def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_i
         brief: Builds the brief for a seed.
         monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
     """
-    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 200)
+    cap = len(brief({}, ("bin",))) + len("\n100 more files are not shown.") + 200
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", cap)
     files = {f"bin/{index:03}": b"\x00" for index in range(100)}
     reads: list[str] = []
 
@@ -824,8 +828,44 @@ def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_i
     notices = text.count("is not text, so it is not shown.")
     assert 0 < notices == len(reads) < 10
     assert text.endswith(f"\n{100 - len(reads)} more files are not shown.")
-    # The fixed header lines and the path rules add about 400 bytes on top of the cap.
-    assert len(text) < 200 + 600
+    assert len(text.encode()) <= cap
+
+
+def test_a_repository_brief_with_thousands_of_read_only_paths_stays_within_its_cap(
+    brief: Callable[..., str],
+) -> None:
+    """A rule lists its first paths and counts the rest, so a repository of many LFS files keeps a bounded brief.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
+    readonly = tuple(f"assets/lfs-{index:05}-{'x' * 40}.bin" for index in range(5_000))
+    files = {"src/app.py": b"print('app')"}
+
+    text = brief(files, ("src",), readonly=readonly, constrained=readonly[:3_000])
+
+    assert len(text.encode()) <= best_of_n._BRIEF_MAX_BYTES
+    assert f"`{readonly[0]}`" in text
+    assert f"`{readonly[best_of_n._BRIEF_MAX_PATHS]}`" not in text
+    assert f", and {5_000 - best_of_n._BRIEF_MAX_PATHS} more." in text
+    assert f", and {3_000 - best_of_n._BRIEF_MAX_PATHS} more." in text
+    assert "print('app')" in text
+
+
+def test_a_repository_brief_counts_the_rule_lines_and_line_breaks_against_its_cap(
+    brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path rules and the line breaks between entries take room, so the joined brief never passes the cap.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
+    files = {f"src/{index:03}.txt": b"x" * 40 for index in range(200)}
+    readonly = tuple(f"fixed/{index:03}" for index in range(40))
+    for cap in range(len(brief({}, ("src",), readonly=readonly)) + 30, 4_000, 7):
+        monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", cap)
+        assert len(brief(files, ("src",), readonly=readonly).encode()) <= cap
 
 
 def test_a_repository_brief_reads_no_file_past_its_read_cap(
@@ -872,14 +912,37 @@ def test_a_repository_brief_does_not_decode_a_file_larger_than_the_room(monkeypa
     Args:
         monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
     """
-    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 100)
     files: dict[str, bytes] = {"big.txt": _UndecodableBytes(b"x" * 101), "small.txt": b"ok"}
     seed = RepoSeed("tree", editable_paths=("big.txt", "small.txt"))
+    rules = _repository_brief(seed, lambda _tree, _path: None, lambda _tree, _path: None)
+    # The rules and the closing count line come out of the cap, so the files get 100 bytes.
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", len(rules) + len("\n2 more files are not shown.") + 100)
 
     text = _repository_brief(seed, lambda _tree, path: files.get(path), lambda _tree, _path: None)
 
     assert "`big.txt` is not shown: the brief has no room for it." in text
     assert "Current content of `small.txt`:\n```\nok\n```" in text
+
+
+@pytest.mark.parametrize("content", [b"<<" * 40, b"``` " * 20])
+def test_a_repository_brief_skips_a_file_that_fits_the_room_only_before_its_fence_and_escaping(
+    brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    """A file within the room whose fenced, escaped block passes the room gets the "no room" line and no content.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+        content: File bytes that escaping makes longer.
+    """
+    rules = len(brief({}, ("doc.md",)))
+    # The file gets room for its raw bytes and its notice, but not for its block.
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", rules + len("\n1 more files are not shown.") + len(content) + 2)
+
+    text = brief({"doc.md": content}, ("doc.md",))
+
+    assert text.endswith("\n`doc.md` is not shown: the brief has no room for it.")
+    assert "Current content of" not in text
 
 
 def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_fence(
@@ -1039,6 +1102,24 @@ def test_a_last_hunk_header_without_an_old_count_counts_one_old_line(tmp_path: P
     (checkout / "README.md").write_text("a\nb\n\n")
     apply_patch(checkout, _as_patch(sample))
     assert (checkout / "README.md").read_text() == "a\nb\nnew\n\n"
+
+
+def test_a_last_hunk_header_without_a_new_count_counts_one_new_line(tmp_path: Path) -> None:
+    """An omitted new count means one line, so the stripped bare empty context line comes back and applies.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    diff = _HEAD + "@@ -2,2 +2 @@\n-b\n\n"
+    sample = _parse_candidate(f"```diff\n{diff}```")
+    assert sample is not None
+
+    assert _as_patch(sample) == diff
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "README.md").write_text("a\nb\n\n")
+    apply_patch(checkout, _as_patch(sample))
+    assert (checkout / "README.md").read_text() == "a\n\n"
 
 
 @pytest.mark.parametrize(("count", "padding"), [("17", 16), ("18", 0), ("999999999", 0), ("9999999999999", 0)])

@@ -59,7 +59,7 @@ from ..native_runtime import (
     native_task_payload,
     run_native_engine,
 )
-from ..protocol import EvalServer, Result, ScorerAbortError, Task
+from ..protocol import EvalServer, RepoSeed, Result, ScorerAbortError, Task
 from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
@@ -666,6 +666,46 @@ def test_best_of_n_hands_a_repository_run_to_the_native_runtime(
     # Production's context until the cutover (SKY-728): no engine loop seed or file readers.
     ctx.repo_seed = ctx.read_file = ctx.list_files = None
     result = best_of_n.BestOfNEngine().run(Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+    assert calls == ["best_of_n_repo"]
+    assert result.best_score == 1.0
+
+
+@pytest.mark.parametrize("missing", ["repo_seed", "read_file", "list_files"])
+def test_best_of_n_hands_a_repository_run_to_the_native_runtime_without_any_one_loop_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """Best-of-N samples on the engine loop only with all three readers, so a context that lacks one goes native.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to replace the native runtime.
+        missing: The loop reader that the context lacks.
+    """
+    calls: list[str] = []
+
+    def fake_native(engine_id: str, *_: object) -> Result:
+        """Record which native engine Best-of-N asked for.
+
+        Args:
+            engine_id: The native engine that Best-of-N asked for.
+            *_: The task, server and context, which the fake ignores.
+
+        Returns:
+            A fixed result with a score of 1.0.
+        """
+        calls.append(engine_id)
+        return Result(best_candidate="", best_score=1.0, total_evals=1)
+
+    monkeypatch.setattr(best_of_n, "run_native_engine", fake_native)
+    ctx = _context(tmp_path, FakeRuntime(FakeSession()))
+    ctx.native_options = replace(ctx.native_options, repo={"chunks": [], "editable_paths": ["."], "readonly_paths": []})
+    ctx.repo_seed = RepoSeed("tree", editable_paths=(".",))
+    ctx.read_file = lambda _tree, _path: None
+    ctx.list_files = lambda _tree, _path: None
+    setattr(ctx, missing, None)
+
+    result = best_of_n.BestOfNEngine().run(Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
     assert calls == ["best_of_n_repo"]
     assert result.best_score == 1.0
 

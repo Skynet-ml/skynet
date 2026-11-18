@@ -23,9 +23,16 @@ from .upstream import local_result, reflection_endpoint, upstream_server
 # Top train samples re-scored on the validation split; each costs one scorer
 # run per validation case, so the cap keeps sampling the bulk of the budget.
 _MAX_FINALISTS = 3
-# The file blocks and notices that a repository brief shows the model; upstream
-# sends the brief in every sample's prompt, so the cap bounds each model call.
+# The whole repository brief: path rules, file blocks, notices and the line
+# breaks between them. Upstream sends the brief in every sample's prompt, so
+# the cap bounds each model call.
 _BRIEF_MAX_BYTES = 64_000
+# A repository can name thousands of paths in one rule (for example every LFS
+# file as read-only), so each rule lists a few and counts the rest.
+_BRIEF_MAX_PATHS = 50
+# Paths have no length bound, so each rule's list also stops at a byte budget:
+# three full rules still leave most of the brief for file content.
+_BRIEF_MAX_PATH_BYTES = _BRIEF_MAX_BYTES // 8
 # The tree entries carry no size, so a repository of many large or binary files
 # would make the brief read about a thousand whole blobs on each resume.
 _BRIEF_MAX_READS = 256
@@ -261,7 +268,7 @@ def _repository_brief(
     fixed = [path for path in map(posixpath.normpath, seed.readonly_paths) if _visible(seed, path)]
     # A constrained path may change, but only within the rules of the repository's constraints file.
     constrained = sorted({path for path in map(posixpath.normpath, seed.constrained_paths) if _visible(seed, path)})
-    editable = ", ".join("the whole repository" if path == "." else f"`{path}`" for path in editable_paths)
+    editable = _path_list(["the whole repository" if path == "." else f"`{path}`" for path in editable_paths])
     lines = [
         "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
         "repository root; an empty diff keeps the repository as it is.",
@@ -272,11 +279,11 @@ def _repository_brief(
         f"You may change: {editable or 'nothing'}.",
     ]
     if fixed:
-        lines.append("Do not change: " + ", ".join(f"`{path}`" for path in fixed) + ".")
+        lines.append("Do not change: " + _path_list([f"`{path}`" for path in fixed]) + ".")
     if constrained:
         lines.append(
             "You may change these paths only within the rules of the constraints file: "
-            + ", ".join(f"`{path}`" for path in constrained)
+            + _path_list([f"`{path}`" for path in constrained])
             + "."
         )
     shown: dict[str, None] = {}
@@ -285,41 +292,87 @@ def _repository_brief(
             if not any(name == other or name.startswith(f"{other}/") for other in fixed):
                 shown[name] = None
     names = list(shown)
-    room = _BRIEF_MAX_BYTES
+    # Each line after the first costs its "\n" too, and the room keeps space
+    # for the closing count line, so the joined brief stays within the cap.
+    closing = f"{len(names)} more files are not shown."
+    room = _BRIEF_MAX_BYTES - len("\n".join(lines).encode()) - len(closing.encode()) - 1
     for index, path in enumerate(names):
-        # Notices cost room too, so a repository of many skipped files still
-        # gives a bounded brief, and no file is read once the room is spent.
-        if room <= 0 or index >= _BRIEF_MAX_READS:
+        # A file gets no read once not even its short notice fits, so a
+        # repository of many skipped files reads no file past the room.
+        entry = ""
+        if index < _BRIEF_MAX_READS and len(_not_text(path).encode()) + 1 <= room:
+            data = read_file(seed.tree_id, path)
+            if data is None:
+                continue
+            entry = _file_entry(path, data, room - 1)
+        if not entry or len(entry.encode()) + 1 > room:
             lines.append(f"{len(names) - index} more files are not shown.")
             break
-        data = read_file(seed.tree_id, path)
-        if data is None:
-            continue
-        no_room = f"`{path}` is not shown: the brief has no room for it."
-        # Escaping never shortens the text, so a file larger than the room
-        # cannot fit, and the brief does not decode or escape it.
-        if len(data) > room:
-            notice = no_room
-        else:
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                text = None
-            # A NUL byte is valid UTF-8, but it marks a binary file.
-            if text is None or "\x00" in text:
-                notice = f"`{path}` is not text, so it is not shown."
-            else:
-                # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
-                block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
-                size = len(block.encode())
-                if size <= room:
-                    room -= size
-                    lines.append(block)
-                    continue
-                notice = no_room
-        room -= len(notice.encode())
-        lines.append(notice)
+        room -= len(entry.encode()) + 1
+        lines.append(entry)
     return "\n".join(lines)
+
+
+def _path_list(labels: list[str]) -> str:
+    """Join the first path labels of a rule, and count the rest.
+
+    Args:
+        labels: The rule's path labels, in order.
+
+    Returns:
+        At most :data:`_BRIEF_MAX_PATHS` labels within :data:`_BRIEF_MAX_PATH_BYTES`, then ``and N more``.
+    """
+    shown: list[str] = []
+    size = 0
+    for label in labels[:_BRIEF_MAX_PATHS]:
+        size += len(label.encode()) + 2
+        if size > _BRIEF_MAX_PATH_BYTES:
+            break
+        shown.append(label)
+    rest = len(labels) - len(shown)
+    return ", ".join([*shown, f"and {rest} more"] if rest else shown)
+
+
+def _not_text(path: str) -> str:
+    """Return the notice for a file the brief cannot show as text.
+
+    Args:
+        path: The file path.
+
+    Returns:
+        The notice line.
+    """
+    return f"`{path}` is not text, so it is not shown."
+
+
+def _file_entry(path: str, data: bytes, room: int) -> str:
+    """Return a file's brief entry: its fenced, escaped content when it fits the room, else a notice.
+
+    Args:
+        path: The file path.
+        data: The file bytes.
+        room: The bytes left for the entry itself.
+
+    Returns:
+        The content block, the binary notice or the "no room" notice.
+    """
+    no_room = f"`{path}` is not shown: the brief has no room for it."
+    # Escaping shortens only a run of 17 or more backticks, so a file larger
+    # than the room almost never fits, and the brief does not decode or escape it.
+    if len(data) > room:
+        return no_room
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return _not_text(path)
+    # A NUL byte is valid UTF-8, but it marks a binary file.
+    if "\x00" in text:
+        return _not_text(path)
+    # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
+    block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
+    if len(block.encode()) <= room:
+        return block
+    return no_room
 
 
 def _escape_backticks(text: str) -> str:
