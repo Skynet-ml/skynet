@@ -82,11 +82,10 @@ all shards share the database. Its name must start with
 job that is not a swarm run (an id that does not start with ``swarm-``).
 Each invocation puts its own stamp in its run ids and worker ids, and deletes
 only the rows and packs of those ids, so it keeps the rows of any other swarm.
-The server must also see the connection on a loopback address or a Unix
-socket. A Docker Postgres with a published port sees its container address
-(such as ``172.17.0.1``), so the swarm refuses it: run the throwaway
-Postgres natively, in Docker with ``--network host``, or through a Unix
-socket.
+The server must also see the connection on a loopback address; the swarm
+refuses a Unix socket. A Docker Postgres with a published port sees its
+container address (such as ``172.17.0.1``), so the swarm refuses it: run the
+throwaway Postgres natively, or in Docker with ``--network host``.
 A session advisory lock allows one swarm pass per database. The lock is per
 database, so it does not stop a pass on another database of the same server.
 The objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
@@ -395,12 +394,10 @@ def _check_server_addr(engine: Engine) -> None:
     """
     with engine.connect() as connection:
         address = connection.execute(text("SELECT inet_server_addr()")).scalar()
-    # NULL means a Unix socket, which is local by definition.
-    if address is not None and not ipaddress.ip_address(str(address).split("/")[0]).is_loopback:
+    if address is None or not ipaddress.ip_address(str(address).split("/")[0]).is_loopback:
         raise RuntimeError(
             f"LOAD_TEST_SWARM_DB_URL reached server address {address}, which is not loopback: run the throwaway"
-            " Postgres natively, in Docker with --network host, or through a Unix socket"
-            " (a published Docker port shows the container address)"
+            " Postgres natively, or in Docker with --network host (a published Docker port shows the container address)"
         )
 
 

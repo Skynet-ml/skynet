@@ -1284,6 +1284,7 @@ def test_swarm_pass_cleans_every_shard_and_keeps_the_first_error(
         ("postgresql://user@db.example.com/swarm", {}),
         ("postgresql://user@10.0.0.5:5432/swarm", {}),
         ("postgresql:///swarm", {}),
+        ("postgresql:///swarm?host=/var/run/postgresql", {}),
         ("postgresql://user@localhost/swarm?host=db.example.com", {}),
         ("postgresql://user@localhost/swarm?hostaddr=10.0.0.5", {}),
         ("postgresql://user@127.0.0.1/swarm?service=remote", {}),
@@ -1340,7 +1341,7 @@ class _FakeServer:
         """Keep the address.
 
         Args:
-            address: The server address, or ``None`` for a Unix socket.
+            address: The server address, or ``None`` when the server reports none.
         """
         self.address = address
         self.disposed = False
@@ -1360,14 +1361,16 @@ class _FakeServer:
         self.disposed = True
 
 
-@pytest.mark.parametrize("address", ["192.0.2.1", "10.0.0.5/32", "2001:db8::1"])
-def test_swarm_refuses_a_server_off_loopback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, address: str) -> None:
+@pytest.mark.parametrize("address", [None, "192.0.2.1", "10.0.0.5/32", "2001:db8::1"])
+def test_swarm_refuses_a_server_off_loopback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, address: str | None
+) -> None:
     """Check that the swarm refuses a server off loopback before it resets any row, and closes the engine's pool.
 
     Args:
         monkeypatch: Replaces the engine and makes a reset fail the test.
         tmp_path: The pass folder.
-        address: The server address.
+        address: The server address, or ``None`` for a Unix socket.
     """
     for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
         monkeypatch.delenv(name, raising=False)
@@ -1377,16 +1380,17 @@ def test_swarm_refuses_a_server_off_loopback(monkeypatch: pytest.MonkeyPatch, tm
     with pytest.raises(RuntimeError, match="not loopback") as refused:
         swarm_10k.run_pass(_swarm_config(db_url="postgresql://user@localhost/swarm"), 2, tmp_path)
     assert server.disposed
-    for remedy in ("natively", "--network host", "Unix socket"):
+    for remedy in ("natively", "--network host"):
         assert remedy in str(refused.value)
+    assert "Unix socket" not in str(refused.value)
 
 
-@pytest.mark.parametrize("address", [None, "127.0.0.1", "::1"])
-def test_swarm_takes_a_loopback_server(address: str | None) -> None:
-    """Check that a server on loopback, or on a Unix socket, passes the address check.
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1"])
+def test_swarm_takes_a_loopback_server(address: str) -> None:
+    """Check that a server on loopback passes the address check.
 
     Args:
-        address: The server address, or ``None`` for a Unix socket.
+        address: The server address.
     """
     swarm_10k._check_server_addr(_FakeServer(address))
 
