@@ -372,9 +372,9 @@ A manual hold on a change or on a promotion still stops it.
 ### Merging into staging (batch flow 2026-11-10, no window 2026-11-18)
 
 - There is no fixed merge window (Gilad, 2026-11-18). The orchestrator
-  merges a batch into `staging` as soon as its `ci` and `i18n` runs pass,
-  and, after a conflict fix, its batch review approves (see "PR tests and
-  batch CI").
+  merges a batch into `staging` as soon as the batch passes all its merge
+  gates. The gates are in "Automatic merges", "Linear revisions and holds"
+  and "PR tests and batch CI".
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
   other batch PR is open.
 - After an approval, the orchestrator does not merge the PR outside a
@@ -390,8 +390,8 @@ A manual hold on a change or on a promotion still stops it.
   failure) leaves the batch. It waits for the next batch, with the reason
   in the PR and in Linear.
 - After GitHub confirms the batch merge, move each included issue to Done
-  and attach the batch merge commit. The orchestrator never merges into
-  `main` or touches production.
+  and attach the batch merge commit. A batch merge goes only into
+  `staging`. It never goes into `main` and never touches production.
 
 ## Sources
 
