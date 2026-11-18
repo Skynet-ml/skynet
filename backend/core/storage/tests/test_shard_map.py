@@ -1434,7 +1434,7 @@ def _delete_one(root: Path) -> Any:
 def test_the_sweep_keeps_a_pack_that_another_shard_records_and_claims_an_orphan_on_its_shard(
     main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path, monkeypatch
 ) -> None:
-    """An old flush pack with a row on any shard stays; an orphan goes after a claim on the shard its manifest names.
+    """Old packs with a row on any shard stay; an orphan flush pack goes after a claim on the shard its manifest names.
 
     Args:
         main: The main database.
@@ -1450,13 +1450,71 @@ def test_the_sweep_keeps_a_pack_that_another_shard_records_and_claims_an_orphan_
         (on_shard,) = session.scalars(select(StoragePackModel.pack_key)).all()
     orphan = f"packs/gone-pod/{1:020d}-a.pack"
     objects.put(orphan, objects.get(on_shard))
+    merged = f"{tree_compactor.COMPACTED_PREFIX}/{1:020d}-b.pack"
+    objects.put(merged, b"x")
+    with Session(shard) as session:
+        session.add(StoragePackModel(pack_key=merged, worker_id=tree_compactor.COMPACTOR_ID, byte_size=1))
+        session.commit()
     monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
-    compactor = TreeCompactor(main, objects, _delete_one(tmp_path / "objects"), shards=two_shard_log._shards)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
 
     assert compactor.remove_unrecorded() == 1
 
     assert sorted(objects.list("packs/")) == recorded
+    assert objects.list(f"{tree_compactor.COMPACTED_PREFIX}/") == [merged]
     with Session(shard) as session:
         assert session.scalar(select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == orphan)) == (
             CLAIM_BYTE_SIZE
         )
+
+
+@needs_two_postgres
+def test_the_run_delete_merge_and_account_purge_work_on_two_postgres_databases(
+    objects: LocalObjectStore, tmp_path: Path, monkeypatch
+) -> None:
+    """On PostgreSQL the shard merge locks the jobs on main, and the purge leaves no account row on either database.
+
+    Args:
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(SHARD_DB_URL or "")})
+    main = create_engine(MAIN_DB_URL or "")
+    shard = create_engine(SHARD_DB_URL or "")
+    try:
+        _wipe(main)
+        _wipe(shard)
+        Base.metadata.create_all(main, tables=[t for t in Base.metadata.sorted_tables if "embedding" not in t.name])
+        upgrade_step_log_shards()
+        with Session(main) as session:
+            for run_id in RUNS:
+                session.add(JobModel(optimization_id=run_id, username="ada", execution_generation=1))
+            session.commit()
+        shards = ShardMap(main, {"s2": shard})
+        store = StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=shards)
+        try:
+            _write_account(store)
+        finally:
+            store.close()
+        gone = _a_run_on(shards, "s2")
+        with Session(main) as session:
+            mark_run_packs(session, [gone], shards)
+            session.commit()
+        assert gone not in _step_runs(shard)
+        compactor = TreeCompactor(main, objects, _delete_one(tmp_path / "objects"), min_age_seconds=0.0, shards=shards)
+        assert compactor.run_once()[0] == 1
+
+        summary = _purge_ada(main, shards, _unlinker(tmp_path / "objects", []))
+        delete_unused_packs(main, summary)
+
+        assert _table_rows(main)[:2] == _table_rows(shard)[:2] == (0, 0)
+        again = _purge_ada(main, shards, _unlinker(tmp_path / "objects", []))
+        assert (again.deleted_rows, again.unused_packs) == (0, [])
+    finally:
+        _wipe(main)
+        _wipe(shard)
+        main.dispose()
+        shard.dispose()
