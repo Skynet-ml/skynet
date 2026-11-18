@@ -170,8 +170,8 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     if _parse(call)[1]:
         value = _REFUSED_ARGUMENTS
     elif isinstance(value, str):
-        # Text that is not JSON passes ``_parse`` and gets the misuse error, but a lone surrogate in it would still
-        # break the UTF-8 prompt, so the transcript also holds an empty object for it.
+        # Text that is not a JSON object passes ``_parse`` and gets the misuse error, but a lone surrogate in it would
+        # still break the UTF-8 prompt, so the transcript also holds an empty object for it.
         if _refused_text(value):
             value = _REFUSED_ARGUMENTS
     else:
@@ -362,7 +362,6 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     Returns:
         The tool result as JSON text, and the tree after the command.
     """
-    assert ctx.run_command is not None
     # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop. The name comes
     # first, so a call to an unknown tool never gets the bash bound error.
     if call.get("name") != "bash":
