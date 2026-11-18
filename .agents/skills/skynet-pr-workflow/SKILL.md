@@ -140,11 +140,11 @@ for review until the evidence is there.
   call it ready to merge.
 - **A red `staging` run is never a "known failure".** This covers the batch
   CI run (`ci` by `workflow_dispatch`), the `ci` run on the promotion PR and
-  the `staging deploy` run (`staging-deploy.yml`). For a staging smoke
-  failure, gate 5 applies. The reviewer or implementation agent that sees a
-  red run names the failing check and the commit where it started, in its
-  report. When a PR in the current batch causes the failure, section 7
-  applies. Otherwise the orchestrator opens an Urgent Linear issue and
+  the `staging deploy` run (`staging-deploy.yml`). For a failed staging
+  deploy or a staging smoke failure, gate 5 applies. The reviewer or
+  implementation agent that sees a red run names the failing check and the
+  commit where it started, in its report. When a PR in the current batch
+  causes the failure, section 7 applies. Otherwise the orchestrator opens an Urgent Linear issue and
   delegates the fix. The fix PR is the first PR in the next batch (SKY-625,
   SKY-626).
 
@@ -261,13 +261,17 @@ A PR merges into `staging` only when **all** of these gates pass:
 4. Batch CI: the PR's approved head goes into a batch branch made from the
    latest `staging`, and the full CI passes on the batch (see "PR tests and
    batch CI").
-5. After the merge, the staging smoke test passes. If it fails, revert that
-   PR's merge commit from the batch right away (`git revert -m 1 <merge
-   commit>`). Reopen its issue with the failure. The revert goes in its own
-   PR and through the batch CI flow below. The revert PR uses the reopened
-   issue. The orchestrator moves that issue to **In Progress**. After an
-   Opus 5.5 review approves the revert PR, the orchestrator moves the issue
-   to **Ready to Merge**.
+5. After the merge, the staging deploy and the staging smoke test pass. If
+   one fails, the orchestrator finds the PR in the batch that causes the
+   failure. Open a revert PR right away (`git revert -m 1 <merge commit>`).
+   The revert lands on `staging` only through a batch and the batch CI flow
+   below. Reopen the PR's issue with the failure. The revert PR uses the
+   reopened issue. The orchestrator moves that issue to **In Progress**.
+   After an Opus 5.5 review approves the revert PR, the orchestrator moves
+   the issue to **Ready to Merge**. When no single PR causes the failure
+   (infra, a flaky check or an unknown cause), there is no revert PR. Then
+   section 3 (Urgent issue) applies, as for a CI failure that no PR in the
+   batch causes.
 
 After the merge reaches staging, the orchestrator runs the acceptance checks
 on staging (section 4). A failed check becomes a new bug issue.
@@ -389,10 +393,12 @@ A manual hold on a change or on a promotion still stops it.
   no PR in the batch causes, the next batch waits for the Urgent fix PR. It
   starts when that PR is in **Ready to Merge**.
 - A batch is in progress while its batch PR is open or its `batch/` branch
-  exists. After the merge, the batch stays in progress until its staging
-  smoke test (gate 5) passes or fails. After a smoke failure, the next
-  batch waits for the revert PR (gate 5). It starts with the revert PR when
-  its issue is in **Ready to Merge**.
+  exists. After the merge, the batch stays in progress until the staging
+  deploy fails or the staging smoke test (gate 5) passes or fails. After a
+  deploy or smoke failure, the next batch waits for the revert PR (gate 5).
+  It starts with the revert PR when its issue is in **Ready to Merge**.
+  When no single PR causes the failure, the next batch waits for the Urgent
+  fix PR instead.
 - When the orchestrator stops or rebuilds a batch, it first closes the
   batch PR and deletes the `batch/` branch.
 - After an approval, the orchestrator does not merge the PR outside a
@@ -417,8 +423,11 @@ A manual hold on a change or on a promotion still stops it.
   and deletes the `batch/` branch. The next batch starts with the Urgent fix
   PR, then the PRs in **Ready to Merge**.
 - After GitHub confirms the batch merge, move each included issue to Done
-  and attach the batch merge commit. A batch merge goes only into
-  `staging`. It never goes into `main` and never touches production.
+  and attach the batch merge commit. Exception: the reopened issue of a
+  revert PR (gate 5) goes back to **Todo** for the real fix, not to Done.
+- A batch merge goes only into `staging`. It never goes into `main` and
+  never touches production. The promotion to `main` is a separate step with
+  its own gates ("`staging` → `main`" in "Every PR merges on the gates").
 
 ## Sources
 
