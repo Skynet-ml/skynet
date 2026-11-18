@@ -31,6 +31,7 @@ from ....models import (
     OptimizationStatus,
     OptimizationSubmissionResponse,
 )
+from ....storage.remote import WAITING_PHASE
 from ....worker.budget_probe import STOP_REASON_BUDGET_PROJECTED
 from ....worker.checkpoint_compat import CheckpointCompatibilityError
 from ... import repo_judge
@@ -77,8 +78,8 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
 
     Returns:
         ``True`` when the write applied, the row already holds the target
-        status, or the store has no CAS; ``False`` only when the CAS found the
-        row past ``expected`` in another status.
+        status that the user's stop wrote, or the store has no CAS; ``False``
+        when the CAS found the row past ``expected`` in another status.
     """
     cas = getattr(job_store, "update_job_if_status", None)
     if cas is None:
@@ -86,9 +87,18 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
         return True
     if cas(optimization_id, expected, ends_recovery=True, **fields):
         return True
+    current = job_store.get_job(optimization_id)
+    if current.get("status") != fields["status"]:
+        return False
+    recovery = current.get("recovery")
+    if isinstance(recovery, dict) and recovery.get("phase") == WAITING_PHASE:
+        # A worker's park_run also writes ``paused``, and the wake later moves the
+        # run to pending. The user's write ends the waiting marker, so the pause
+        # holds (SKY-814).
+        return cas(optimization_id, (*expected, fields["status"]), ends_recovery=True, **fields)
     # A recovery sweep that sees the user's closed admission writes the user's
     # status itself, so the user's stop did take effect (SKY-814).
-    return job_store.get_job(optimization_id).get("status") == fields["status"]
+    return True
 
 
 def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> None:

@@ -2016,3 +2016,60 @@ def test_a_user_stop_wins_over_a_budget_stop_of_the_requeue(
     assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
     assert (budget.state, budget.blocked_reason) == ("closed", reason)
+
+
+class _ParkingWorker:
+    """A worker signal that parks the run, as a waiting engine does, in the pause route's window."""
+
+    def __init__(self, store: StepJobStore, generation: int) -> None:
+        """Keep the store and the generation that the worker owns.
+
+        Args:
+            store: The job store.
+            generation: The generation that the parking worker owns.
+        """
+        self.store = store
+        self.generation = generation
+
+    def cancel_job(self, optimization_id: str) -> None:
+        """Park the run with a wake time in the past, before the route's status write.
+
+        Args:
+            optimization_id: The run that the route pauses.
+        """
+        assert park_run(
+            self.store.engine,
+            optimization_id,
+            expected_generation=self.generation,
+            wake_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+
+
+def test_a_pause_that_loses_to_a_park_still_holds(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pause whose status write finds a parked run ends the wait, so the wake does not requeue it (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    # The step log is the run's resumable state; the pause route asks for a checkpoint.
+    monkeypatch.setattr(store, "has_compatible_gepa_checkpoint", lambda _run: True, raising=False)
+
+    response = _router_client(store, _ParkingWorker(store, generation)).post(f"/optimizations/{RUN}/pause")
+
+    assert response.status_code == 200
+    monkeypatch.undo()
+    job = store.get_job(RUN)
+    assert job["status"] == "paused"
+    assert job["recovery"] is None
+    store.recover_orphaned_jobs()
+    assert store.get_job(RUN)["status"] == "paused"
+    assert store.claim_next_job("pod-b", 60.0) is None
