@@ -57,7 +57,7 @@ Pro の更新に失敗した場合、アカウントは 7 日間 Pro の制限�
 | フォルダーの階層                   | 3 階層                                                                  |
 | ファイル形式                       | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`scorer.py` にはスコアラーがあります。Skynet はケースごとにその `score(repo_path, case)` 関数を呼び出します。
+`scorer.py` にはスコアラーがあります。Skynet はケースごとにその `score(repo_path, case, output=None)` 関数を呼び出します。`output` 引数には、`[run]` エントリーがそのケースに返した値が入ります。
 
 ## リクエストレート
 

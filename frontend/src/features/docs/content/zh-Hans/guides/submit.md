@@ -90,13 +90,13 @@ Skynet 会把每个候选推送到各自的分支。`skynet/best` 分支指向�
 
 ### 评分器
 
-编写 `scorer.py`。它定义 `score(repo_path, case)`，并返回一个分数和反馈。助手可以为你编写它。请阅读[指标与评分器](/docs/concepts/scorers)。
+编写 `scorer.py`。它定义 `score(repo_path, case, output=None)`，并返回一个分数和反馈。评分器读取 `output`，即 `[run]` 入口为该用例返回的值。评分器不在版本文件夹中运行，也不会从仓库导入代码。助手可以为你编写它。请阅读[指标与评分器](/docs/concepts/scorers)。
 
 仓库可以有一个包含 `def serve(input)` 的 `serve.py` 文件。运行结束后，Skynet 用它来部署最佳版本。请阅读[查看结果](/docs/guides/results)。
 
 ### 密钥
 
-添加密钥，例如你的代码需要的 API 密钥。每个密钥都以同名环境变量的形式传给你的代码和评分器。编码智能体看不到它们。Skynet 会在日志中隐藏它们的值。
+添加密钥，例如你的代码需要的 API 密钥。你的代码和评分器不会以环境变量的形式收到运行密钥。密钥只能通过角色在 `[run] services` 或 `[metric] services` 中列出的 `[services.<name>]` 表，或该角色 `mcp` 文件中的服务器，传给该角色。把密钥以 `${NAME}` 的形式写在该表的 `headers` 中。编码智能体看不到它们。Skynet 会在日志中隐藏它们的值。
 
 ### 检查
 

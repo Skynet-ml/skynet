@@ -40,8 +40,9 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
-# SKY-751: the status of a case whose ``[run]`` entry failed (crash, non-zero
-# exit, timeout). The runner never invents a score, so that case has no score
+# SKY-751: the status of a case whose ``[run]`` entry failed (crash, timeout,
+# a function entry that exits before it returns; a command entry's non-zero exit
+# is an output). The runner never invents a score, so that case has no score
 # too; it keeps its own status so the final run can report the failure text.
 RUN_FAILED_STATUS = "run_failed"
 STATUS_KEY = "status"

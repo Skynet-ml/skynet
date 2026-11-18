@@ -3,19 +3,23 @@
 ## Контракт
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | Аргумент    | Що містить                                                                       |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | Папка однієї версії репозиторію після виконання команди налаштування              |
+| `repo_path` | Папка, у якій є лише ваші файли метрики. У ній немає інших файлів репозиторію й коду версії |
 | `case`      | Словник. `case["input"]` містить вхідні поля. `case["expected"]` містить очікуване значення або `None` |
+| `output`    | Що точка входу `[run]` повернула для кейсу, або `None`, якщо у файлі немає `[run]` |
 
-Якщо ваша функція приймає лише один аргумент, Skynet викликає `score(repo_path)`. Використовуйте цю форму, коли оцінювач запускає власні тести й не потребує кейсів.
+Файл `optimize.toml` репозиторію має містити секцію `[run]` або етап `[target.<name>]`. Точка входу `[run]` (`entry`) запускає одну версію на одному кейсі у власній окремій пісочниці. Skynet відхиляє файл, у якому немає ні того, ні іншого, бо всі версії отримали б однакову оцінку.
 
-Оцінювач виконується в пісочниці, у папці версії. Він може імпортувати код із репозиторію, запустити команду або викликати `serve()` з `serve.py`. Прочитайте [Як працює оптимізація](/docs/concepts/optimization).
+- Точка входу-функція, наприклад `entry = "serve.py:serve"`, отримує `case["input"]` як аргумент. `output` — це значення, яке вона повертає.
+- Точка входу-команда, наприклад `entry = ["python", "-m", "pytest", "-q"]`, отримує вхідні дані як JSON у stdin. `output` — це `{"exit_code": ..., "stdout": "..."}`.
+
+Оцінювач виконується в окремій пісочниці. У ній є лише ваші файли метрики. Оцінювач не може імпортувати чи запускати код версії. Він бачить версію лише через `output` або через `call()` до етапу `[target.<name>]`. Імпортуйте `call` так: `from skynet import call`. Прочитайте [Як працює оптимізація](/docs/concepts/optimization).
 
 ## Значення, яке повертає функція
 
@@ -58,54 +62,63 @@ GEPA і Auto читають текст відгуку, щоб написати �
 
 ### Точний збіг
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` — це словник, ключем у якому є назва вашого стовпця виводу. Прочитайте [Набори даних і розбиття](/docs/concepts/datasets).
 
 ### Запуск тестів репозиторію
 
-```python tab="scorer.py"
-import subprocess
+Точка входу `[run]` запускає тести. Оцінювач читає код виходу й вивід тестів.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
+```
+
+Коли точка входу `[run]` завершується збоєм на випадку, цей випадок не має оцінки. Якщо точка входу не запускається, перевищує тайм-аут або її зупиняє сигнал, або якщо точка входу-функція викидає виняток чи завершується до повернення значення, відгук — `Run failed: …`, і Skynet не викликає оцінювач. Ненульовий код виходу точки входу-команди — не збій: оцінювач отримує його в `output`. Версія з таким випадком не має оцінки. Вона не може бути найкращою версією, не досягає жодного `[outcome] target` і не відкриває pull request. Якщо збій має рахуватися як число, перехопіть збій у своїй програмі, запишіть вивід і дайте оцінювачу його оцінити. Прочитайте [правила репозиторію](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Модель як суддя
 
 Оцінювач може викликати модель. Імпортуйте `llm` з допоміжного модуля `skynet`. Виклик іде через шлюз моделей Skynet до моделі оцінювача запуску.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -118,7 +131,7 @@ def score(repo_path, case):
 ## Виклики моделей і секрети
 
 - Виклики на ключах Skynet враховуються в бюджеті запуску. З вашим власним ключем (BYOK) виклик іде на ключ вашого провайдера, без плати Skynet за модель. Прочитайте [Бюджети й оплата](/docs/concepts/billing).
-- Секрети запуску потрапляють в оцінювач як змінні середовища. Назва змінної — це назва секрету, наприклад `os.environ["SEARCH_API_KEY"]`.
+- Оцінювач не отримує секрети запуску як змінні середовища. Секрет потрапляє в оцінювач лише через таблицю `[services.<name>]`, яку перелічує `[metric] services`, або через сервер із файлу `[metric] mcp`. Запишіть секрет у `headers` таблиці як `${NAME}`. Оцінювач надсилає запити на URL з `SKYNET_SERVICE_<NAME>_URL`. Skynet додає секрет поза пісочницею.
 - Skynet приховує значення секретів у виводі оцінювача й у журналах.
 
 ## Обмеження

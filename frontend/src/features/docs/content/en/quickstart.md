@@ -55,26 +55,27 @@ Read [Engines](/docs/concepts/engines) to pick a specific engine.
 
 ## 5. Metric & run
 
-The last step is **Metric & run**. The assistant writes the scorer for you. You can edit it. The scorer gets the path of one version of the repository and one case:
+The last step is **Metric & run**. The assistant writes the scorer and the `optimize.toml` file for you. You can edit them. The `[run]` entry runs one version of the repository on one case. The scorer gets the output of the entry and the case:
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
         return 1.0, {"feedback": "Correct label."}
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` holds the Input columns of one case. `case["expected"]` holds the Output column, keyed by its column name. The repository has a `serve.py` file with `def serve(input)`. Skynet uses the same function to serve the best version after the run.
+`case["input"]` holds the Input columns of one case. `case["expected"]` holds the Output column, keyed by its column name. The repository has a `serve.py` file with `def serve(input)`. The `[run]` entry calls it, and `output` is its return value. The scorer runs in a separate sandbox box with only your metric files and no version code, so it cannot import `serve.py`. Skynet uses the same function to serve the best version after the run.
 
-Then run the check. The check runs your setup and your scorer on the starting version in the sandbox. You can start the run only after the check passes.
+Then run the check. The check runs your setup, the `[run]` entry and your scorer on the starting version in the sandbox. You can start the run only after the check passes.
 
 ## 6. Start and watch
 

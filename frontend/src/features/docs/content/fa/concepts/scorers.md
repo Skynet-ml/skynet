@@ -3,19 +3,23 @@
 ## قرارداد
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | آرگومان     | محتوای آن                                                                        |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | پوشهٔ یک نسخه از مخزن، پس از اجرای دستور راه‌اندازی                                |
+| `repo_path` | پوشه‌ای که فقط فایل‌های معیار شما را نگه می‌دارد. هیچ فایل دیگری از مخزن و هیچ کدی از نسخه در آن نیست |
 | `case`      | یک dict. `case["input"]` فیلدهای ورودی را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا `None` است |
+| `output`    | آنچه `entry` بخش `[run]` برای این مورد برگرداند، یا `None` وقتی فایل `[run]` ندارد |
 
-اگر تابع شما فقط یک آرگومان بگیرد، Skynet آن را به شکل `score(repo_path)` فراخوانی می‌کند. وقتی امتیازدهنده آزمون‌های خودش را اجرا می‌کند و به مورد نیاز ندارد، از این شکل استفاده کنید.
+فایل `optimize.toml` مخزن باید یک بخش `[run]` یا یک مرحلهٔ `[target.<name>]` داشته باشد. `entry` بخش `[run]` یک نسخه را روی یک مورد، در جعبهٔ ایزولهٔ خودش اجرا می‌کند. Skynet فایلی را که هیچ‌کدام را ندارد رد می‌کند، چون هر نسخه همان امتیاز را می‌گرفت.
 
-امتیازدهنده در محیط اجرای ایزوله و در پوشهٔ همان نسخه اجرا می‌شود. می‌تواند کد را از مخزن import کند، یک دستور اجرا کند یا `serve()` را از `serve.py` فراخوانی کند. صفحهٔ [بهینه‌سازی چگونه کار می‌کند](/docs/concepts/optimization) را بخوانید.
+- یک entry تابعی، مثلاً `entry = "serve.py:serve"`، مقدار `case["input"]` را به‌عنوان آرگومان می‌گیرد. `output` مقدار بازگشتی آن است.
+- یک entry دستوری، مثلاً `entry = ["python", "-m", "pytest", "-q"]`، ورودی را به‌صورت JSON روی stdin می‌گیرد. `output` برابر `{"exit_code": ..., "stdout": "..."}` است.
+
+امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را نگه می‌دارد. امتیازدهنده نمی‌تواند کد نسخه را import یا اجرا کند. نسخه را فقط از طریق `output`، یا از طریق `call()` به یک مرحلهٔ `[target.<name>]` می‌بیند. تابع `call` را با `from skynet import call` import کنید. صفحهٔ [بهینه‌سازی چگونه کار می‌کند](/docs/concepts/optimization) را بخوانید.
 
 ## مقدار بازگشتی
 
@@ -58,54 +62,63 @@ GEPA و Auto متن بازخورد را می‌خوانند تا نسخهٔ بع
 
 ### تطابق دقیق
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` یک dict است که کلیدهای آن نام ستون «خروجی» شما هستند. صفحهٔ [مجموعه‌داده‌ها و تقسیم](/docs/concepts/datasets) را بخوانید.
 
 ### اجرای آزمون‌های مخزن
 
-```python tab="scorer.py"
-import subprocess
+`entry` بخش `[run]` آزمون‌ها را اجرا می‌کند. امتیازدهنده کد خروج و خروجی آزمون‌ها را می‌خواند.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
+```
+
+وقتی `entry` بخش `[run]` روی یک مورد شکست می‌خورد، آن مورد امتیاز ندارد. اگر `entry` شروع نشود، از مهلت بگذرد یا یک سیگنال آن را متوقف کند، یا اگر یک `entry` از نوع تابع خطا بدهد یا پیش از برگرداندن مقدار خارج شود، بازخورد `Run failed: …` است و Skynet امتیازدهنده را فراخوانی نمی‌کند. کد خروج غیرصفر یک `entry` از نوع فرمان شکست نیست: امتیازدهنده آن را در `output` می‌گیرد. نسخه‌ای که چنین موردی دارد امتیاز ندارد. آن نسخه نمی‌تواند بهترین نسخه باشد، به هیچ `[outcome] target` نمی‌رسد و هیچ pull request باز نمی‌کند. اگر شکست باید به‌صورت یک عدد حساب شود، شکست را در برنامهٔ خودتان بگیرید، یک خروجی بنویسید و بگذارید امتیازدهنده به آن امتیاز بدهد. صفحهٔ [قواعد مخزن](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) را بخوانید.
 
 ### مدل به‌عنوان داور
 
 امتیازدهنده می‌تواند یک مدل را فراخوانی کند. `llm` را از ماژول کمکی `skynet` وارد کنید. فراخوانی از طریق دروازهٔ مدل Skynet به مدل امتیازدهندهٔ اجرا می‌رود.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -118,7 +131,7 @@ def score(repo_path, case):
 ## فراخوانی‌های مدل و رازها
 
 - فراخوانی‌هایی که از کلیدهای Skynet استفاده می‌کنند از بودجهٔ اجرا اندازه‌گیری و کسر می‌شوند. با کلید خودتان (BYOK)، فراخوانی به کلید ارائه‌دهندهٔ شما می‌رود و Skynet کارمزد مدل دریافت نمی‌کند. صفحهٔ [صورت‌حساب](/docs/concepts/billing) را بخوانید.
-- رازهای اجرا به‌صورت متغیرهای محیطی به امتیازدهنده می‌رسند. نام متغیر همان نام راز است، برای مثال `os.environ["SEARCH_API_KEY"]`.
+- امتیازدهنده رازهای اجرا را به‌صورت متغیرهای محیطی نمی‌گیرد. یک راز فقط از راه یک جدول `[services.<name>]` که `[metric] services` آن را فهرست می‌کند، یا از راه یک سرور در فایل `[metric] mcp`، به امتیازدهنده می‌رسد. راز را در `headers` جدول به‌صورت `${NAME}` بنویسید. امتیازدهنده درخواست‌هایش را به URL موجود در `SKYNET_SERVICE_<NAME>_URL` می‌فرستد. Skynet راز را بیرون از محیط اجرای ایزوله اضافه می‌کند.
 - ‏Skynet مقدار رازها را در خروجی امتیازدهنده و در لاگ‌ها پنهان می‌کند.
 
 ## محدودیت‌ها

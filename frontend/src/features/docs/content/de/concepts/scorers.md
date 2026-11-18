@@ -3,19 +3,23 @@ Der Scorer sagt Skynet, wie gut eine Version Ihres Repositorys ist. Er ist eine 
 ## Der Vertrag
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
     return score_value, {"feedback": "..."}
 ```
 
 | Argument    | Was es enthält                                                                   |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | Der Ordner einer Version des Repositorys, nachdem der Setup-Befehl gelaufen ist  |
+| `repo_path` | Ein Ordner, der nur Ihre Metrikdateien enthält. Er enthält keine andere Datei des Repositorys und keinen Code der Version |
 | `case`      | Ein Dict. `case["input"]` enthält die Eingabefelder. `case["expected"]` enthält den erwarteten Wert oder `None` |
+| `output`    | Was der `[run]`-Eintrag für den Fall zurückgegeben hat, oder `None`, wenn die Datei kein `[run]` hat |
 
-Nimmt Ihre Funktion nur ein Argument, ruft Skynet `score(repo_path)` auf. Verwenden Sie diese Form, wenn der Scorer eigene Tests ausführt und keine Fälle braucht.
+Die Datei `optimize.toml` des Repositorys muss einen Abschnitt `[run]` oder eine Stufe `[target.<name>]` haben. Der `entry` von `[run]` führt eine Version auf einem Fall aus, in einer eigenen Sandbox-Box. Skynet lehnt eine Datei ohne beides ab, weil sonst jede Version dieselbe Bewertung erhält.
 
-Der Scorer läuft in der Sandbox, im Ordner der Version. Er kann Code aus dem Repository importieren, einen Befehl ausführen oder `serve()` aus `serve.py` aufrufen. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
+- Ein Funktionseintrag, zum Beispiel `entry = "serve.py:serve"`, erhält `case["input"]` als Argument. `output` ist sein Rückgabewert.
+- Ein Befehlseintrag, zum Beispiel `entry = ["python", "-m", "pytest", "-q"]`, erhält die Eingabe als JSON auf stdin. `output` ist `{"exit_code": ..., "stdout": "..."}`.
+
+Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien. Der Scorer kann den Code der Version weder importieren noch ausführen. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from skynet import call`. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
 
 ## Der Rückgabewert
 
@@ -58,54 +62,63 @@ GEPA und Auto lesen den Feedback-Text, um die nächste Version zu schreiben. Sag
 
 ### Exakte Übereinstimmung
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
+    if output == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` ist ein Dict, dessen Schlüssel der Name Ihrer Ausgabespalte ist. Lesen Sie [Datensätze und Aufteilungen](/docs/concepts/datasets).
 
 ### Die Tests des Repositorys ausführen
 
-```python tab="scorer.py"
-import subprocess
+Der `[run]`-Eintrag führt die Tests aus. Der Scorer liest den Exit-Code und die Testausgabe.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": output["stdout"][-2000:]}
+```
+
+Wenn der `[run]`-Eintrag bei einem Fall fehlschlägt, hat dieser Fall keine Bewertung. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, oder wenn ein Funktionseintrag eine Ausnahme auslöst oder sich beendet, bevor er zurückgibt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Exit-Code ungleich null eines Befehlseintrags ist kein Fehlschlag: Der Scorer erhält ihn in `output`. Eine Version mit einem solchen Fall hat keine Bewertung. Sie kann nicht die beste Version sein, erreicht kein `[outcome] target` und öffnet keinen Pull Request. Wenn ein Fehlschlag als Zahl zählen soll, fangen Sie den Fehlschlag in Ihrem Programm ab, schreiben Sie eine Ausgabe und lassen Sie den Scorer sie bewerten. Lesen Sie die [Repository-Regeln](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modell als Bewerter
 
 Der Scorer kann ein Modell aufrufen. Importieren Sie `llm` aus dem Hilfsmodul `skynet`. Der Aufruf geht über das Modell-Gateway von Skynet an das Scorer-Modell des Durchlaufs.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
@@ -118,7 +131,7 @@ Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen 
 ## Modellaufrufe und Secrets
 
 - Aufrufe über die Schlüssel von Skynet werden auf das Laufbudget angerechnet. Mit Ihrem eigenen Schlüssel (BYOK) geht der Aufruf an Ihren Anbieterschlüssel, ohne Modellgebühr von Skynet. Lesen Sie [Abrechnung](/docs/concepts/billing).
-- Die Secrets des Durchlaufs erreichen den Scorer als Umgebungsvariablen. Der Variablenname ist der Name des Secrets, zum Beispiel `os.environ["SEARCH_API_KEY"]`.
+- Der Scorer erhält keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht den Scorer nur über eine Tabelle `[services.<name>]`, die `[metric] services` nennt, oder über einen Server in der Datei `[metric] mcp`. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Der Scorer sendet seine Anfragen an die URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet fügt das Secret außerhalb der Sandbox hinzu.
 - Skynet verbirgt Secret-Werte in der Ausgabe des Scorers und in den Logs.
 
 ## Limits
