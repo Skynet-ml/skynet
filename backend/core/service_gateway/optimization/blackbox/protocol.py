@@ -335,7 +335,7 @@ def safe_tool_call(call: ToolCall) -> ToolCall:
     if isinstance(arguments, str):
         arguments = escape_surrogates(arguments)
     elif _has_surrogate(arguments):
-        arguments = json.dumps(arguments, default=str)
+        arguments = escape_surrogates(json.dumps(arguments, default=str, ensure_ascii=False))
     return {
         "id": escape_surrogates(call["id"]) if isinstance(call["id"], str) else call["id"],
         "name": escape_surrogates(call["name"]) if isinstance(call["name"], str) else call["name"],

@@ -457,7 +457,7 @@ def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, ex
     assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
 
 
-# Compact JSON, since its parsed object would give other text with spaces.
+# Compact JSON: json.dumps adds spaces, so the test fails if the code dumps the parsed object again.
 @pytest.mark.parametrize("arguments", ['{"text":"\\ud800"}', '{"k\\udfff":1}', '{"a":[{"b":"\\udc00"}]}', "\ud800"])
 def test_tool_calls_from_openai_keeps_raw_text_when_the_parsed_arguments_hold_a_lone_surrogate(arguments: str) -> None:
     """A lone surrogate in a key or a value, at any depth, keeps the raw text, escaped, so the step log stores it."""
@@ -481,6 +481,8 @@ def test_safe_tool_call_escapes_surrogates_and_keeps_a_safe_call() -> None:
         "name": "b\\udfff",
         "arguments": '{"k": ["\\ud83d"]}',
     }
+    hebrew = safe_tool_call({"id": "c", "name": "b", "arguments": {"a": "\ud800 שלום"}})
+    assert hebrew["arguments"] == '{"a": "\\ud800 שלום"}'
 
 
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
