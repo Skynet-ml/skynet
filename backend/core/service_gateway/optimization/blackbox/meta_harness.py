@@ -36,15 +36,13 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
 from .... import run_log
-from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
-from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BlackboxProposer
+from ....models.blackbox import BlackboxProposer
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
-from . import native_engines, sandbox_log
+from . import loop_tools, native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
 from .native_runtime import (
-    NativeOptions,
     assert_metric_absent,
     native_task_payload,
     run_native_engine,
@@ -227,28 +225,6 @@ def _clip(text: str) -> str:
     return f"{text[:head]}\n[... {len(text) - head - tail} characters cut ...]\n{text[len(text) - tail :]}"
 
 
-class _Budget:
-    """The ``budget`` view of the gepa.oa server, read from the host eval server."""
-
-    def __init__(self, server: EvalServer) -> None:
-        """Bind the view to the host eval server.
-
-        Args:
-            server: The host eval server.
-        """
-        self._server = server
-
-    @property
-    def remaining(self) -> int:
-        """Return the scorer calls left."""
-        return self._server.remaining
-
-    @property
-    def used(self) -> int:
-        """Return the scorer calls spent."""
-        return self._server.used
-
-
 class _UpstreamServer:
     """Answer the gepa.oa server calls that Meta-Harness makes with the host eval server.
 
@@ -274,7 +250,7 @@ class _UpstreamServer:
         # The server records a metric error only for a scorer crash, so the adapter keeps the versions that
         # scored NaN or infinite on a case: those crashed too, and must get no score (SKY-751).
         self._non_finite: set[str] = set()
-        self.budget = _Budget(server)
+        self.budget = loop_tools.Budget(server)
         self.eval_log: list[dict[str, Any]] = []
 
     def iter_split(self, split: str) -> Iterator[tuple[str, Any]]:
@@ -770,7 +746,7 @@ class MetaHarnessEngine:
         options = ctx.native_options
         if options is not None:
             # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
-            _refuse_unsupported_proposer(options)
+            loop_tools.refuse_unsupported_proposer(options, "Meta-Harness")
         if not task.str_mode:
             raise ServiceError("Native agent engines require a single text candidate.")
         # The native runtime checks the same document before it writes it into the box.
@@ -802,39 +778,4 @@ class MetaHarnessEngine:
             best_score=upstream.best_score if scored else None,
             total_evals=server.used,
             metadata={**upstream.metadata, "upstream_revision": native_engines.META_HARNESS_REVISION},
-        )
-
-
-def _refuse_unsupported_proposer(options: NativeOptions) -> None:
-    """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
-
-    The tool loop is the only proposer here: a file proposer command, a host CLI, ``[proposer] mcp`` servers and a
-    reasoning effort would be silently dropped. SKY-816 brings the file proposer command back.
-
-    Args:
-        options: The run's native options.
-
-    Raises:
-        ServiceError: When the options name a proposer setting that the tool loop does not run.
-    """
-    proposer = options.proposer
-    refused = [
-        name
-        for name, value in (
-            ("run_command", proposer.run_command),
-            ("install_command", proposer.install_command),
-            ("host_cli", proposer.host_cli),
-        )
-        if value
-    ]
-    if proposer.harness != BLACKBOX_HARNESS_CODEX:
-        refused.append("harness")
-    if ((options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}).get("servers"):
-        refused.append("mcp")
-    if options.reasoning_effort:
-        refused.append("reasoning_effort")
-    if refused:
-        raise ServiceError(
-            "Meta-Harness in the worker engine loop runs only its built-in proposer, so it cannot apply these "
-            f"settings: {', '.join(refused)}. Remove them, or choose another engine."
         )
