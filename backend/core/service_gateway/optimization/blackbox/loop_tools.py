@@ -164,20 +164,20 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     value = call.get("arguments")
-    # ``run_bash`` refuses arguments past the depth or length bound or not valid UTF-8, so the transcript holds an
-    # empty object in their place.
-    if isinstance(value, str):
-        if _refused_text(value) or _too_deep_text(value):
+    # The transcript holds an empty object for every argument that ``refused_arguments`` refuses. ``_parse`` measures
+    # compact text after it dumps it again with spaces, so a check on the text alone would keep some refused text.
+    if _parse(call)[1]:
+        value = _REFUSED_ARGUMENTS
+    elif isinstance(value, str):
+        # Text that is not JSON passes ``_parse``, but a lone surrogate in it would still break the UTF-8 prompt.
+        if _refused_text(value):
             value = _REFUSED_ARGUMENTS
     else:
         # Sorted keys give the same text for a live reply and for its replay from the step log. ``_parse`` measures
         # the arguments with no escapes, so Hebrew text does not count six characters a letter.
-        if _too_deep(value):
+        value = json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if _refused_text(value):
             value = _REFUSED_ARGUMENTS
-        else:
-            value = json.dumps(value, sort_keys=True, ensure_ascii=False)
-            if _refused_text(value):
-                value = _REFUSED_ARGUMENTS
     return {
         "id": call.get("id"),
         "type": "function",

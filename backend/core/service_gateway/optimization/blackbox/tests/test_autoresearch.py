@@ -2258,7 +2258,8 @@ def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
     _run(loop)
 
     assert _tool_result(model, 1)["error"].startswith("Send the bash tool arguments as JSON")
-    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == text
+    # The arguments are refused, so the transcript holds an empty object, as for every refused argument.
+    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
     assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
     assert boxes.opened == 2
 
@@ -2517,7 +2518,21 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
     in_string = json.dumps({"command": "echo " + '[{\\"' * 1000})
     # Many shallow lists side by side: the depth goes down at each close, so the text stays inside the bound.
     wide = "[" + "[]," * 40 + "[]]"
-    texts = ["[" * 990, "[" * 900 + "]" * 900, "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1), at_bound, in_string, wide]
+    # A closing brace also takes the depth down, so many shallow objects side by side stay inside the bound.
+    wide_objects = "[" + "{}," * 40 + "{}]"
+    # The escape ends after one character, so the string closes and the deep brackets after it count. The text is
+    # not JSON, so only the text count, not the parsed-value check, can refuse it.
+    after_escape = '["a\\nb", ' + "[" * loop_tools.MAX_ARGUMENT_DEPTH
+    texts = [
+        "[" * 990,
+        "[" * 900 + "]" * 900,
+        "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1),
+        at_bound,
+        in_string,
+        wide,
+        wide_objects,
+        after_escape,
+    ]
 
     def results() -> list[tuple[Any, bool]]:
         """Give each text's transcript arguments and whether the tool loop refuses it.
@@ -2546,8 +2561,31 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
         return results() if levels == 0 else deep(levels - 1)
 
     top = results()
-    assert top == [("{}", True), ("{}", True), ("{}", True), (at_bound, False), (in_string, False), (wide, False)]
+    assert top == [
+        ("{}", True),
+        ("{}", True),
+        ("{}", True),
+        (at_bound, False),
+        (in_string, False),
+        (wide, False),
+        (wide_objects, False),
+        ("{}", True),
+    ]
     assert deep(sys.getrecursionlimit() - 200) == top
+
+
+def test_compact_text_that_grows_past_the_bound_gives_an_empty_transcript_object() -> None:
+    """Compact JSON text inside the length bound grows past it when dumped with spaces, so the tool loop refuses it.
+
+    The transcript must then hold ``{}``, not the refused text, as for every other refused argument.
+    """
+    compact = json.dumps({f"k{i}": i for i in range(14_000)}, separators=(",", ":"))
+    assert len(compact) <= loop_tools.MAX_ARGUMENT_CHARS
+    assert len(json.dumps(json.loads(compact), ensure_ascii=False)) > loop_tools.MAX_ARGUMENT_CHARS
+    call = {"id": "c", "name": "bash", "arguments": compact}
+
+    assert loop_tools.refused_arguments(call, "bash") is not None
+    assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
 
 
 def test_an_evaluation_of_the_lab_parent_is_refused(
