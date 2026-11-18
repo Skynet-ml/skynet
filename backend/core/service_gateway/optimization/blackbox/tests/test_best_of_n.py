@@ -674,6 +674,21 @@ def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_pa
     assert "OPTIMIZE-SECRET" not in text
 
 
+def test_a_repository_brief_skips_a_single_read_only_file_under_an_editable_root(brief: Callable[..., str]) -> None:
+    """A read-only path that names one file keeps that file out of the brief, and its neighbors stay in.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
+    files = {"src/fixed.py": b"FIXED-SOURCE", "src/free.py": b"FREE-SOURCE"}
+
+    text = brief(files, (".",), readonly=("src/fixed.py",))
+
+    assert "Do not change: `src/fixed.py`." in text
+    assert "FREE-SOURCE" in text
+    assert "FIXED-SOURCE" not in text
+
+
 def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_their_files(
     brief: Callable[..., str],
 ) -> None:
@@ -1006,6 +1021,24 @@ def test_an_empty_context_line_written_without_its_space_counts_inside_the_last_
     apply_patch(checkout, _as_patch(sample))
     assert (checkout / "README.md").read_text() == "a\n\nB\n\n"
     assert _as_patch(sample) == diff
+
+
+def test_a_last_hunk_header_without_an_old_count_counts_one_old_line(tmp_path: Path) -> None:
+    """An omitted old count means one line, so the stripped bare empty context line comes back and applies.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    diff = _HEAD + "@@ -3 +3,2 @@\n+new\n\n"
+    sample = _parse_candidate(f"```diff\n{diff}```")
+    assert sample is not None
+
+    assert _as_patch(sample) == diff
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "README.md").write_text("a\nb\n\n")
+    apply_patch(checkout, _as_patch(sample))
+    assert (checkout / "README.md").read_text() == "a\nb\nnew\n\n"
 
 
 @pytest.mark.parametrize(("count", "padding"), [("17", 16), ("18", 0), ("999999999", 0), ("9999999999999", 0)])
