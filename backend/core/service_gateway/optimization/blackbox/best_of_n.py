@@ -375,8 +375,6 @@ def _stripped_context_lines(patch: str) -> int:
     new_missing = 1 if last.group(2) is None else int(last.group(2))
     # The first part is the rest of the header line, and the last is the empty text after the final newline.
     for line in patch[last.end() :].split("\n")[1:-1]:
-        if line.startswith("\\"):
-            continue
         if line == "" or line.startswith(" "):
             old_missing -= 1
             new_missing -= 1
@@ -385,6 +383,8 @@ def _stripped_context_lines(patch: str) -> int:
         elif line.startswith("+"):
             new_missing -= 1
         else:
+            # A "\\ No newline at end of file" marker lands here: no context line can follow it in a real diff,
+            # so the strip never took a line from a hunk that holds one.
             return 0
     return old_missing if old_missing == new_missing and 0 < old_missing <= _MAX_STRIPPED_LINES else 0
 

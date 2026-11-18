@@ -1013,6 +1013,7 @@ _HEAD = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n"
         _HEAD + "@@ -1,4 +1,3 @@\n a\n",
         _HEAD + "@@ -1,3 +1,3 @@\n a\ndiff --git a/x b/x\n",
         _HEAD + "@@ -1,3 +1,3 @@\n a\n" + _HEAD + "@@ -1,3 +1,3 @@\n a\n-b\n+B\nnot a diff line\n",
+        _HEAD + "@@ -1,3 +1,3 @@\n-a\n\\ No newline at end of file\n+a\n",
     ],
 )
 def test_a_hunk_that_empty_lines_cannot_complete_gets_no_padding(patch: str) -> None:
@@ -1025,6 +1026,45 @@ def test_a_hunk_that_empty_lines_cannot_complete_gets_no_padding(patch: str) -> 
         patch: A diff that ends with a newline.
     """
     assert _as_patch(patch) == patch
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "hunk"),
+    [
+        (
+            "x\n\nlast",
+            "x\n\nlast\nmore\n",
+            "@@ -1,3 +1,4 @@\n x\n \n-last\n\\ No newline at end of file\n+last\n+more\n",
+        ),
+        (
+            "x\n\nlast\n",
+            "x\n\nlast\nmore",
+            "@@ -1,3 +1,4 @@\n x\n \n last\n+more\n\\ No newline at end of file\n",
+        ),
+    ],
+)
+def test_a_diff_with_a_no_newline_marker_comes_back_whole_and_applies(
+    old: str, new: str, hunk: str, tmp_path: Path
+) -> None:
+    """A marker that ``git diff`` writes for a file with no final newline keeps the patch exact.
+
+    Each hunk is the real ``git diff`` output for the two texts. The marker ends one side of the file,
+    so no context line follows it and the strip takes only the final newline.
+
+    Args:
+        old: The README text before the change.
+        new: The README text after the change.
+        hunk: The ``git diff`` hunk from ``old`` to ``new``.
+        tmp_path: Pytest's temporary folder.
+    """
+    diff = _HEAD + hunk
+    sample = _parse_candidate(diff)
+    assert sample is not None
+
+    assert _as_patch(sample) == diff
+    (tmp_path / "README.md").write_text(old)
+    apply_patch(tmp_path, _as_patch(sample))
+    assert (tmp_path / "README.md").read_text() == new
 
 
 def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
