@@ -3,8 +3,8 @@
 :class:`BoxLease` is a :class:`~core.sandbox.trees.BoxSource`. ``acquire``
 gives the agent its warm box, and a healthy ``release`` keeps the box for the
 agent's next step. A box stays disposable: an unhealthy release, a failed
-health check or a new grant list drops the box, and the next acquire opens a
-new one. The step log stays the truth, so the step re-runs from its last
+health check, a new grant list, or a healthy release whose clock read or
+reaper start fails drops the box, and the next acquire opens a new one. The step log stays the truth, so the step re-runs from its last
 committed tree.
 
 A warm box sleeps when it is idle, as a Cloudflare sandbox does after its
@@ -315,8 +315,12 @@ class BoxLease(Generic[BoxT]):
 
         Raises:
             ValueError: When this lease does not hold the box, or no caller holds it.
-            Exception: The closer's error, raw.
+            Exception: The closer's error, raw. In a healthy release, also the
+                clock's error or the reaper thread's start error, such as
+                ``RuntimeError("can't start new thread")``; the release then
+                closes and drops the box, as an unhealthy release does.
         """
+        error: BaseException | None = None
         with self._cond:
             key = self._holders.get(id(box))
             if key is None:
@@ -327,22 +331,35 @@ class BoxLease(Generic[BoxT]):
                 raise ValueError("No caller holds the box.")
             if healthy and self._keep_warm and not self._closed:
                 # Only an idle box sleeps, so the release starts its idle time; an acquire holds the box.
-                # The clock and the thread start come before any change, so a failure leaves the caller
-                # holding the box, not a box that is neither held nor idle.
-                released_at = self._clock()
-                if self._reaper is None:
-                    reaper = threading.Thread(target=self._reap, name="box-lease-reaper", daemon=True)
-                    # The reaper waits for this lock, so it sees the idle box set below.
-                    reaper.start()
-                    self._reaper = reaper
-                lease.busy = False
-                lease.released_at = released_at
-                lease.context = contextvars.copy_context()
-                self._idle[key] = None
-                self._cond.notify_all()
-                return
+                try:
+                    released_at = self._clock()
+                    if self._reaper is None:
+                        reaper = threading.Thread(target=self._reap, name="box-lease-reaper", daemon=True)
+                        # The reaper waits for this lock, so it sees the idle box set below.
+                        reaper.start()
+                        self._reaper = reaper
+                except BaseException as exc:
+                    # The caller does not retry a failed release, so a box left held would block the agent's
+                    # next acquire forever and stay open. A box is disposable, so the release drops it.
+                    error = exc
+                else:
+                    lease.busy = False
+                    lease.released_at = released_at
+                    lease.context = contextvars.copy_context()
+                    self._idle[key] = None
+                    self._cond.notify_all()
+                    return
             _, provider = self._drop(key)
-        self._close_and_free(box, provider)
+        if error is None:
+            self._close_and_free(box, provider)
+            return
+        try:
+            self._close_and_free(box, provider)
+        except BaseException as close_error:
+            # The same rule as in acquire: a close error replaces the release error only when it stops the run.
+            if isinstance(close_error, self.stop_errors) and not isinstance(error, self.stop_errors):
+                raise
+        raise error
 
     def close(self) -> None:
         """Close every idle box, stop the reaper and stop new acquires; a held box closes at its release.

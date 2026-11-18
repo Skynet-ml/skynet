@@ -1575,8 +1575,10 @@ def test_a_release_right_after_a_reaper_failure_still_gets_a_reaper(
         _stop(lease, ticker)
 
 
-def test_a_reaper_start_failure_leaves_the_box_held_and_close_safe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the reaper thread cannot start, the release raises with no change, and a later release and close work."""
+def test_a_reaper_start_failure_drops_the_box_and_the_next_acquire_opens_a_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the reaper thread cannot start, the release closes the box, so the step's re-run does not block."""
     provider = _Provider()
     ticker = _Ticker()
     lease = provider.lease(sleep_after_seconds=600, idle_wait=ticker)
@@ -1602,21 +1604,26 @@ def test_a_reaper_start_failure_leaves_the_box_held_and_close_safe(monkeypatch: 
     with pytest.raises(RuntimeError, match="can't start new thread"):
         lease.release(box, healthy=True)
     try:
+        assert box.closed, "A box that the failed release keeps stays open and held forever."
+        assert provider.closed == [box]
         assert lease._reaper is None, "A thread that never started blocks every new reaper."
-        assert lease._leases["agent-1"].busy
+        assert not lease._leases
         assert not lease._idle
 
-        lease.release(box, healthy=True)
+        new = _acquire_within(lease, "agent-1")
+        assert new is not box
+        assert provider.opened == [box, new]
+        lease.release(new, healthy=True)
         ticker.passes(1)
         assert lease._reaper is not None
         assert lease._reaper.is_alive()
     finally:
         _stop(lease, ticker)
-    assert box.closed
+    assert new.closed
 
 
-def test_a_clock_failure_in_a_release_leaves_the_box_held() -> None:
-    """A release whose clock read fails changes nothing, so the box is not lost between held and idle."""
+def test_a_clock_failure_in_a_release_drops_the_box_and_the_next_acquire_opens_a_new_one() -> None:
+    """A release whose clock read fails closes the box, so the step's re-run opens a new box and does not block."""
     provider = _Provider()
     broken: list[bool] = []
 
@@ -1641,15 +1648,20 @@ def test_a_clock_failure_in_a_release_leaves_the_box_held() -> None:
         lease.release(box, healthy=True)
     broken.clear()
     try:
-        assert lease._leases["agent-1"].busy
+        assert box.closed, "A box that the failed release keeps stays open and held forever."
+        assert provider.closed == [box]
+        assert not lease._leases
         assert not lease._idle
         assert lease._reaper is None
 
-        lease.release(box, healthy=True)
+        new = _acquire_within(lease, "agent-1")
+        assert new is not box
+        assert provider.opened == [box, new]
+        lease.release(new, healthy=True)
         ticker.passes(1)
         provider.clock.now = 600.0
         ticker.tick_to_end()
-        assert box.closed
+        assert new.closed
     finally:
         _stop(lease, ticker)
 
