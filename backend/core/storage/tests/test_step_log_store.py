@@ -192,6 +192,22 @@ def _step_rows(engine: Engine) -> int:
         return int(session.scalar(select(func.count()).select_from(AgentStepModel)) or 0)
 
 
+def _marked_packs(engine: Engine) -> int:
+    """Return the number of packs marked ``needs_rewrite``.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        The pack count.
+    """
+    with Session(engine) as session:
+        return int(
+            session.scalar(select(func.count()).select_from(StoragePackModel).where(StoragePackModel.needs_rewrite))
+            or 0
+        )
+
+
 def _set_generation(engine: Engine, generation: int, run_id: str = "job-1") -> None:
     """Move a job to another execution generation, as a resume does.
 
@@ -1754,6 +1770,7 @@ def test_a_batch_above_the_sqlite_bind_limit_lands_in_one_flush(make_store, engi
     assert objects.puts == 1
     assert len(commits) == 1
     assert _step_rows(engine) == 3_001
+    assert _marked_packs(engine) == 0
 
 
 def test_each_flush_statement_splits_into_chunks_under_the_bind_limit(make_store, engine, monkeypatch) -> None:
@@ -1796,6 +1813,33 @@ def test_each_flush_statement_splits_into_chunks_under_the_bind_limit(make_store
     assert all(len(params) <= limit for params in step_inserts + object_inserts + id_queries)
     assert [value for params in object_inserts for value in params if value in ids] == sorted(ids)
     assert _step_rows(engine) == 30
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(TreeObjectModel)) == 9
+    assert _marked_packs(engine) == 0
+
+
+def test_a_known_object_in_an_early_chunk_marks_the_pack(make_store, engine, monkeypatch) -> None:
+    """An object that already has a row and lands in a chunk before the last one marks the pack (SKY-733, SKY-807).
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr("core.storage.step_log_store.SQL_PARAMS_MAX", 28)
+    ids = [f"{number:064x}" for number in range(1, 10)]
+    store = make_store()
+    store.put_object("job-1", ids[0], b"blob\0" + ids[0].encode())
+    store.flush()
+    assert _marked_packs(engine) == 0
+
+    # A new store, so its buffer does not skip the object that the first store already wrote.
+    store = make_store()
+    for object_id in ids:
+        store.put_object("job-1", object_id, b"blob\0" + object_id.encode())
+    store.flush()
+
+    assert _marked_packs(engine) == 1
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(TreeObjectModel)) == 9
 
