@@ -603,10 +603,10 @@ def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str
 
     AutoResearch and Meta-Harness call the proposer from their lab folder and
     read their own protocol files there, so the files the command changes do
-    not become their versions (SKY-753; Gilad, 2026-11-18). ShinkaEvolve runs
-    the command only on the engine loop, with the user's own model key, and no
-    production run builds that loop until SKY-728. The check refuses it here,
-    before a paid box starts, and not at the engine's start (SKY-815).
+    not become their versions (SKY-753; Gilad, 2026-11-18). The ShinkaEvolve
+    engine refuses the command on every route. The check refuses it here,
+    before a paid box starts, and not at the engine's start (SKY-815). SKY-828
+    lifts this refusal: it wires the command after the SKY-728 cutover.
 
     Args:
         environment: The run's rules, with the file's proposer command.

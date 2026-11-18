@@ -2306,6 +2306,23 @@ def test_the_command_editor_reads_the_ignore_rules_of_the_version(tmp_path: Path
     assert shinka_bundle.decode_bundle(written) == files
 
 
+def test_the_command_editor_writes_the_files_before_the_ignore_check(tmp_path: Path) -> None:
+    """Refuse a file that the version's own ``.gitignore`` un-ignores, so no check reads stale rules (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"other/.gitignore": "!secret.log\n", "other/secret.log": "s\n", "src/util.py": "SCALE = 5\n"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore=".*\n*.log\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is False
+    assert "Cannot change 'other/secret.log': it is outside the editable paths." in str(meta["last_error_msg"])
+
+
 def test_the_ignore_check_raises_when_git_fails(tmp_path: Path) -> None:
     """Raise on a ``git check-ignore`` failure, such as a folder that is no checkout (SKY-815).
 
