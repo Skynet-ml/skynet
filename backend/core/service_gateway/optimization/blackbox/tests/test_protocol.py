@@ -430,6 +430,19 @@ def test_tool_calls_from_openai_keeps_raw_text_that_is_no_json_object(arguments:
     assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": arguments}]
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [({"command": "ls"}, {"command": "ls"}), (["ls"], ["ls"]), (7, 7)],
+)
+def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, expected: Any) -> None:
+    """A dict stays as it is, and a value that is no text stays raw instead of raising, so no reply is lost."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
+
+
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
     """A flat definition sent in OpenAI form, and the OpenAI call it gets, convert back to the flat shapes."""
     definition = {"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}

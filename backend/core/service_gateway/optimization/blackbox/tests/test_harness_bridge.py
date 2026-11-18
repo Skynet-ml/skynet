@@ -2020,3 +2020,18 @@ def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_
     done = subprocess.run(["pp"], env=env, capture_output=True, timeout=10, check=False)
 
     assert (done.returncode, done.stdout, done.stderr) == (0, b"status 141 0\n", b"")
+
+
+def test_a_name_that_starts_with_two_dots_can_be_hidden(tmp_path: Path) -> None:
+    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots."""
+    hashes = harness_bridge.hidden_hashes(["..data"])
+
+    assert harness_bridge.hashed_kind(hashes, "..data/answers.csv") is not None
+    assert harness_bridge.hashed_kind(hashes, "../..data/answers.csv") is None
+    assert harness_bridge.hashed_kind(hashes, "..") is None
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    policy = harness_bridge.guard_policy(workspace, ["..data"], tmp_path / "refusals.jsonl")
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "..data/answers.csv"}) is not None
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": f"{workspace}/..data/answers.csv"}) is not None
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "../outside.csv"}) is None

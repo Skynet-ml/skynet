@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
-from core.storage.tree_store import TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore
 
 from .. import exec_shim, harness_bridge, harness_capture
 from ..harness_bridge import SESSIONS_DIR, install_shim
@@ -1262,6 +1262,67 @@ def test_restore_writes_the_workspace_and_session_folder_without_following_links
     assert (home / SESSIONS_DIR / "s1" / "native.json").read_text() == '{"turn": 3}'
     with pytest.raises(ValueError, match="missing"):
         restore_session(trees, RUN, "f" * 64, fresh, home)
+
+
+@pytest.mark.parametrize("confine", [False, True])
+def test_a_confined_restore_drops_links_that_leave_their_folder(step_log, tmp_path, confine) -> None:
+    """A worker-side restore drops absolute links and links that leave the workspace or the session folder.
+
+    A link loop reaches no file, so it stays, and the check does not fail on it.
+    """
+    trees = TreeStore(step_log)
+
+    def entry(name: str, mode: str, data: bytes) -> TreeEntry:
+        """Store one blob and name it in a tree entry.
+
+        Args:
+            name: The entry name.
+            mode: ``file`` or ``symlink``.
+            data: The file bytes or the link target.
+
+        Returns:
+            The entry.
+        """
+        return TreeEntry(name, mode, trees.put_blob(RUN, data))
+
+    session = trees.put_tree(
+        RUN,
+        [
+            entry("native.json", "file", b"{}"),
+            entry("state.json", "symlink", b"/proc/self/environ"),
+            entry("same", "symlink", b"native.json"),
+            entry("up", "symlink", b"../../outside"),
+        ],
+    )
+    sessions = trees.put_tree(RUN, [TreeEntry("s1", "tree", session)])
+    src = trees.put_tree(RUN, [entry("a.py", "file", b"a = 1\n")])
+    tree_id = trees.put_tree(
+        RUN,
+        [
+            TreeEntry("src", "tree", src),
+            TreeEntry(SESSIONS_DIR, "tree", sessions),
+            entry("ok", "symlink", b"src/a.py"),
+            entry("abs", "symlink", b"/etc/hosts"),
+            entry("up", "symlink", b"../outside"),
+            entry("dot", "symlink", b"."),
+            # Lexically inside the workspace, but ``dot`` is the workspace, so ``dot/..`` is its parent.
+            entry("esc", "symlink", b"dot/.."),
+            entry("loop", "symlink", b"loop"),
+        ],
+    )
+    fresh, home = tmp_path / "fresh", tmp_path / "home"
+    restore_session(trees, RUN, tree_id, fresh, home, confine_links=confine)
+
+    links = {path.relative_to(fresh).as_posix() for path in fresh.rglob("*") if path.is_symlink()}
+    session_links = {path.name for path in (home / SESSIONS_DIR / "s1").iterdir() if path.is_symlink()}
+    if confine:
+        assert links == {"ok", "dot", "loop"}
+        assert session_links == {"same"}
+    else:
+        assert links == {"ok", "abs", "up", "dot", "esc", "loop"}
+        assert session_links == {"same", "state.json", "up"}
+    assert (fresh / "ok").read_text() == "a = 1\n"
+    assert (home / SESSIONS_DIR / "s1" / "native.json").read_text() == "{}"
 
 
 def test_restore_deletes_what_the_tree_does_not_name_without_following_links(step_log, tmp_path) -> None:

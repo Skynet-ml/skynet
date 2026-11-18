@@ -274,7 +274,8 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw text instead, so the same reply always gives the same calls.
+    call keeps the raw value instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -286,11 +287,15 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     for call in message.get("tool_calls") or []:
         function = call["function"]
         raw = function.get("arguments") or "{}"
-        try:
-            parsed = json.loads(raw)
-        except ValueError:
-            parsed = None
-        arguments = parsed if isinstance(parsed, dict) else raw
+        if isinstance(raw, dict):
+            # Some clients parse the arguments already.
+            arguments: dict[str, Any] | str = raw
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                parsed = None
+            arguments = parsed if isinstance(parsed, dict) else raw
         calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
     return calls
 
@@ -327,6 +332,71 @@ class RepoSeed:
     hidden_hashes: Mapping[str, str] = field(default_factory=dict)
 
 
+class CallModel(Protocol):
+    """Call the model once, as one step of the worker engine loop."""
+
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None = None) -> ModelReply:
+        """Call the model with a prompt and optional tool definitions.
+
+        Args:
+            prompt: The prompt text or messages.
+            tools: The tool definitions that the model may call; ``None`` for no tools.
+
+        Returns:
+            The reply, its tool calls and its cost in cents.
+        """
+        ...
+
+
+class RunCommand(Protocol):
+    """Run one command in a box over a tree, as one step of the worker engine loop."""
+
+    def __call__(self, tree_id: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+        """Run a command over a tree.
+
+        Args:
+            tree_id: The tree the command starts from.
+            command: The shell command.
+            grants: The box's network grants; empty means no network.
+
+        Returns:
+            The command's result and the tree id after it.
+        """
+        ...
+
+
+class PutFiles(Protocol):
+    """Write files over a tree with no box."""
+
+    def __call__(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+        """Write files over a base tree.
+
+        Args:
+            files: The file bytes by ``/``-separated path.
+            base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+
+        Returns:
+            The new tree id.
+        """
+        ...
+
+
+class ListFiles(Protocol):
+    """List the files under one folder of a tree with no box."""
+
+    def __call__(self, tree_id: str, path: str = "") -> list[str] | None:
+        """List the files below a folder.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated folder; ``""`` is the tree's root.
+
+        Returns:
+            The sorted file paths, or ``None`` when the folder is missing or hidden.
+        """
+        ...
+
+
 @dataclass
 class EngineContext:
     """Run-scoped resources every engine receives alongside the task."""
@@ -352,11 +422,11 @@ class EngineContext:
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
     # The worker engine loop (SKY-719) sets these; each model call and command is one step there.
-    call_model: Callable[[str | list[dict[str, Any]], list[ToolDefinition] | None], ModelReply] | None = None
-    run_command: Callable[[str, str, tuple[Grant, ...]], tuple[CommandResult, str]] | None = None
-    put_files: Callable[[Mapping[str, bytes], str | None], str] | None = None
+    call_model: CallModel | None = None
+    run_command: RunCommand | None = None
+    put_files: PutFiles | None = None
     read_file: Callable[[str, str], bytes | None] | None = None
-    list_files: Callable[[str, str], list[str] | None] | None = None
+    list_files: ListFiles | None = None
     repo_seed: RepoSeed | None = None
 
 

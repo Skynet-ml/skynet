@@ -508,7 +508,8 @@ def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[
     hashes = {}
     for path in hidden_paths:
         normalized = os.path.normpath(str(path).strip().strip("/"))
-        if normalized in ("", ".") or normalized.startswith(".."):
+        # Only a ``..`` part leaves the repository: ``..data`` is a plain name.
+        if normalized in ("", ".", "..") or normalized.startswith(f"..{os.sep}"):
             continue
         key = normalized.replace(os.sep, "/")
         hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
@@ -526,7 +527,7 @@ def hashed_kind(hashes: Mapping[str, str], path: str) -> str | None:
         The hidden kind, or ``None`` when no hidden path covers ``path``.
     """
     normalized = posixpath.normpath(path.strip().strip("/"))
-    if normalized in ("", ".") or normalized.startswith(".."):
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
         return None
     parts = normalized.split("/")
     for end in range(1, len(parts) + 1):
@@ -760,7 +761,7 @@ def _hidden_match(
             for root in roots:
                 # On a disk that ignores case, /USERS/... names the same file as /Users/....
                 relative = os.path.relpath(full.casefold(), root.casefold()) if fold else os.path.relpath(full, root)
-                if relative == "." or relative.startswith(".."):
+                if relative in (".", "..") or relative.startswith(f"..{os.sep}"):
                     continue
                 parts = PurePosixPath(Path(relative).as_posix()).parts
                 for end in range(1, len(parts) + 1):

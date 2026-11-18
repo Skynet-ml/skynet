@@ -231,14 +231,13 @@ class _Model:
         self.fail_at = fail_at
         self.cost = Decimal(1)
         self.error: Exception | None = None
-        # When set, every call returns these tool calls, as a real provider reply converts to.
         self.reply_calls: list[ToolCall] | None = None
         self.prompts: list[str] = []
         self.tools: list[list[ToolDefinition] | None] = []
         self.open_boxes: list[int] = []
 
     def __call__(self, prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None) -> ModelReply:
-        """Answer one prompt, and call each tool once with the reply.
+        """Answer one prompt, and return one tool call for each tool, or ``reply_calls`` when it is set.
 
         Args:
             prompt: The prompt text.
@@ -252,7 +251,6 @@ class _Model:
             ConnectionError: In the call at ``fail_at``.
             Exception: ``error``, in every call, when it is set.
         """
-        # The lane tag names the calling agent, as in the loop.
         self.open_boxes.append(self.boxes.open[current_tags().get(LANE_KEY) or ROOT_AGENT_ID])
         if len(self.prompts) == self.die_at:
             raise _WorkerDiedError
@@ -867,11 +865,12 @@ def test_a_workspace_that_does_not_restore_stops_the_loop(
     first.run(_tree(trees, "README", "seed"), "printf a > answer.txt")
     restores: list[Any] = []
 
-    def missing(*args: Any) -> None:
+    def missing(*args: Any, **kwargs: Any) -> None:
         """Fail as a restore with a missing object does.
 
         Args:
             *args: The restore's arguments.
+            **kwargs: The restore's keyword arguments.
 
         Raises:
             ValueError: Always.
@@ -903,11 +902,12 @@ def test_a_slow_agent_open_does_not_block_a_stop(
     first.run(_tree(trees, "README", "seed"), "printf a > answer.txt")
     entered, release = threading.Event(), threading.Event()
 
-    def slow(*args: Any) -> None:
+    def slow(*args: Any, **kwargs: Any) -> None:
         """Restore slowly: wait until the test lets the restore end.
 
         Args:
             *args: The restore's arguments.
+            **kwargs: The restore's keyword arguments.
         """
         entered.set()
         release.wait(10)
@@ -1330,11 +1330,12 @@ def test_two_calls_open_one_agent_once(
     entered, release = threading.Event(), threading.Event()
     restores: list[Any] = []
 
-    def slow(*args: Any) -> None:
+    def slow(*args: Any, **kwargs: Any) -> None:
         """Restore slowly: wait until the test lets the restore end.
 
         Args:
             *args: The restore's arguments.
+            **kwargs: The restore's keyword arguments.
         """
         restores.append(args)
         entered.set()
@@ -2095,3 +2096,146 @@ def test_a_run_output_with_more_linked_paths_than_the_limit_does_not_stop_the_lo
     many = _store(trees, {"src/a.py": b"a"}, {f"link{n}": "src" for n in range(5)})
     with pytest.raises(LoopStoppedError, match="reaches more than 3 paths"):
         loop.read_file(many, "src/a.py")
+
+
+@pytest.mark.parametrize("stop", ["fence", "close"])
+def test_tree_calls_after_a_stop_raise_the_kept_stop_and_touch_no_tree(
+    stop: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a fence loss or a close, put_files, read_file and list_files raise the stop and read or write nothing."""
+    seed_tree = _store(trees, {"src/a.py": b"a = 1\n"})
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    assert loop.read_file(seed_tree, "src/a.py") == b"a = 1\n"
+    if stop == "fence":
+        _new_generation(engine)
+        with pytest.raises(LoopStoppedError):
+            loop.model("improve seed")
+    else:
+        loop.close()
+    touched: list[str] = []
+
+    def record(name: str) -> Any:
+        """Return a tree-store method that records its use and fails.
+
+        Args:
+            name: The method name.
+
+        Returns:
+            The fake method.
+        """
+
+        def fake(*args: Any, **kwargs: Any) -> Any:
+            """Record the use, and fail.
+
+            Args:
+                *args: Not used.
+                **kwargs: Not used.
+
+            Raises:
+                AssertionError: Always.
+            """
+            touched.append(name)
+            raise AssertionError(f"{name} ran after the stop")
+
+        return fake
+
+    for name in ("put_tree", "put_blob", "get_tree", "get_blob"):
+        monkeypatch.setattr(trees, name, record(name))
+
+    for call in (
+        lambda: loop.put_files({"b.py": b"b"}, seed_tree),
+        lambda: loop.read_file(seed_tree, "src/a.py"),
+        lambda: loop.list_files(seed_tree, "src"),
+    ):
+        with pytest.raises(LoopStoppedError):
+            call()
+    assert touched == []
+
+
+def test_a_prompt_that_is_no_json_is_a_kept_stop_and_a_stop_comes_before_the_hash(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A prompt that does not hash stops the loop with no step, and after a stop the kept stop comes first."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    with pytest.raises(LoopStoppedError, match="cannot be hashed"):
+        loop.call_model([{"role": "user", "content": object()}])
+    with pytest.raises(LoopStoppedError, match="cannot be hashed"):
+        loop.model("improve seed")
+    assert model.prompts == []
+    assert _steps(engine) == []
+
+    closed, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    closed.close()
+    with pytest.raises(LoopStoppedError, match="is closed"):
+        closed.call_model([{"role": "user", "content": object()}])
+
+
+def test_grants_that_fail_to_resolve_are_a_kept_stop_and_a_stop_comes_before_them(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Grants of the wrong type stop the loop with no box, and after a stop the kept stop comes first."""
+    seed_tree = _tree(trees, "README", "seed")
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    with pytest.raises(LoopStoppedError, match="grants do not resolve"):
+        loop.run(seed_tree, "true", (object(),))  # type: ignore[arg-type]
+    with pytest.raises(LoopStoppedError, match="grants do not resolve"):
+        loop.run(seed_tree, "true")
+    assert boxes.opened == 0
+
+    closed, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    closed.close()
+    with pytest.raises(LoopStoppedError, match="is closed"):
+        closed.run(seed_tree, "true", (object(),))  # type: ignore[arg-type]
+
+
+def test_a_replayed_record_with_an_unknown_error_diverges_and_stays_in_the_replay(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A box record whose error the loop cannot raise again is a divergence, and the replay does not pass it."""
+    outputs, metric = _tree(trees, "answer.txt", "a"), _tree(trees, "metric.txt", "len")
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    with pytest.raises(MetricFailedError):
+        first.score(outputs, metric, "exit 3")
+
+    _new_generation(engine)
+    monkeypatch.setattr(
+        engine_loop,
+        "_BOX_ERRORS",
+        {name: error for name, error in engine_loop._BOX_ERRORS.items() if name != "MetricFailedError"},
+    )
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(StepDivergedError, match="unknown error 'MetricFailedError'"):
+        loop.score(outputs, metric, "exit 3")
+    assert len(loop._logs[ROOT_AGENT_ID].replay) == 1
+    with pytest.raises(LoopStoppedError):
+        loop.score(outputs, metric, "exit 3")
+    assert boxes.opened == 0
+
+
+def test_a_metric_source_that_is_not_a_fresh_box_source_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Each score must run in its own new box, so the loop takes only a source that opens one for each call."""
+    loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    with pytest.raises(TypeError, match="RuntimeBoxSource"):
+        EngineLoop(
+            loop._run,
+            engine=engine,
+            trees=trees,
+            candidates=_CountingSource(boxes),
+            metrics=object(),  # type: ignore[arg-type]
+            model=model,
+            model_max_cents=2,
+            run_dir=tmp_path / "other",
+        )

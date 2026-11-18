@@ -125,7 +125,12 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ToolDefinition,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
-from ..service_gateway.optimization.blackbox.tree_sandbox import StepCommittedError, StepRef, TreeSandbox
+from ..service_gateway.optimization.blackbox.tree_sandbox import (
+    RuntimeBoxSource,
+    StepCommittedError,
+    StepRef,
+    TreeSandbox,
+)
 from ..storage.step_log_store import StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore
 from .actors import Agent, LeaseExhaustedError, Run, StepResult
@@ -238,7 +243,7 @@ class EngineLoop:
         engine: Engine,
         trees: TreeStore,
         candidates: BoxSource[SandboxSession],
-        metrics: BoxSource[SandboxSession],
+        metrics: RuntimeBoxSource,
         model: ModelCall,
         model_max_cents: Decimal | int | str,
         run_dir: Path,
@@ -252,7 +257,7 @@ class EngineLoop:
             engine: Engine with the step log and job tables, for the resume read and the owner check.
             trees: The tree store of the run's step log.
             candidates: Gives the boxes that run candidate commands.
-            metrics: Gives the metric boxes.
+            metrics: Opens a new metric box for each score, so no score runs in a box that another step used.
             model: Calls the model with a prompt and the tool definitions (``None`` for no tools), and returns its
                 reply with the cost in cents.
             model_max_cents: The most that one model call can cost; at most one lease.
@@ -266,9 +271,13 @@ class EngineLoop:
                 first read, listing or run of such a tree, or in :meth:`context` for a seed tree.
 
         Raises:
+            TypeError: When ``metrics`` is not a :class:`RuntimeBoxSource`.
             ValueError: When ``model_max_cents`` is below 0, above one lease, or not an amount the ledger can hold
                 exactly, so no model call could ever start.
         """
+        # Each score must run in its own new box: a pooled box could hold files of an earlier step.
+        if not isinstance(metrics, RuntimeBoxSource):
+            raise TypeError(f"metrics must be a RuntimeBoxSource, not {type(metrics).__name__}")
         bound = Decimal(str(model_max_cents))
         if bound < 0 or bound > run.chunk_cents:
             raise ValueError(f"model_max_cents {model_max_cents} is not between 0 and one lease of {run.chunk_cents}")
@@ -402,14 +411,19 @@ class EngineLoop:
 
         Raises:
             StepDivergedError: When the committed step at this place is not this call, also with other tools.
-            LoopStoppedError: When the loop stopped, the run is fenced or closed, no lease or budget covers the
-                call, the call cost more than its bound, or the agent cannot open.
+            LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
+                closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
+                open.
             ModelCallFailedError: When the model call fails; a replay raises a committed failure again.
         """
-        # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
-        hashed = prompt if tools is None else {"prompt": prompt, "tools": tools}
-        digest = hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
         with self._stops():
+            # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
+            hashed = prompt if tools is None else {"prompt": prompt, "tools": tools}
+            try:
+                digest = hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+            except (TypeError, ValueError) as error:
+                # A prompt that does not hash fails the same way on a replay, so it is a kept stop, not a step.
+                raise LoopStoppedError(f"The prompt cannot be hashed: {type(error).__name__}: {error}") from error
             log = self._log()
             with log.lock:
                 record = self._replayed(log, "model", {"prompt_sha256": digest})
@@ -479,14 +493,16 @@ class EngineLoop:
                 or when a write would change a hidden path. The message names only the written path, so it does not
                 name another hidden path.
             LookupError: When the run cannot see the base tree or one of its folders.
+            LoopStoppedError: When the loop stopped; it writes nothing.
         """
-        for path in files:
-            if hashed_kind(self._hidden, path) is not None:
-                raise ValueError(f"path {path} may not be changed")
-        tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
-        if base_tree_id in self._run_outputs:
-            self._run_outputs.add(tree_id)
-        return tree_id
+        with self._stops():
+            for path in files:
+                if hashed_kind(self._hidden, path) is not None:
+                    raise ValueError(f"path {path} may not be changed")
+            tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
+            if base_tree_id in self._run_outputs:
+                self._run_outputs.add(tree_id)
+            return tree_id
 
     def read_file(self, tree_id: str, path: str) -> bytes | None:
         """Read one file of a tree with no box, unless the loop hides it.
@@ -499,18 +515,20 @@ class EngineLoop:
             The file bytes, or ``None`` when the path is hidden or is not a file or executable in the tree.
 
         Raises:
-            LoopStoppedError: When a symlink of the tree is, lies below or holds a hidden path; the loop keeps it.
+            LoopStoppedError: When the loop stopped, or a symlink of the tree is, lies below or holds a hidden
+                path; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
         """
-        self._check_links(tree_id)
-        if hashed_kind(self._hidden, path) is not None:
-            return None
-        *folders, name = path.split("/")
-        folder = self._folder(tree_id, folders)
-        entry = None if folder is None else self._entries(folder).get(name)
-        if entry is None or entry.mode not in {"file", "exec"}:
-            return None
-        return self._trees.get_blob(self._run.run_id, entry.object_id)
+        with self._stops():
+            self._check_links(tree_id)
+            if hashed_kind(self._hidden, path) is not None:
+                return None
+            *folders, name = path.split("/")
+            folder = self._folder(tree_id, folders)
+            entry = None if folder is None else self._entries(folder).get(name)
+            if entry is None or entry.mode not in {"file", "exec"}:
+                return None
+            return self._trees.get_blob(self._run.run_id, entry.object_id)
 
     def list_files(self, tree_id: str, path: str = "") -> list[str] | None:
         """List the files under one folder of a tree with no box, and leave out the paths that the loop hides.
@@ -525,21 +543,23 @@ class EngineLoop:
             folder in the tree.
 
         Raises:
-            LoopStoppedError: When a symlink of the tree is, lies below or holds a hidden path; the loop keeps it.
+            LoopStoppedError: When the loop stopped, or a symlink of the tree is, lies below or holds a hidden
+                path; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
         """
-        self._check_links(tree_id)
-        # A hidden folder gives the same answer as a missing one, so the answer does not show that it exists.
-        if hashed_kind(self._hidden, path) is not None:
-            return None
-        parts = [] if path in {"", "."} else path.split("/")
-        folder = self._folder(tree_id, parts)
-        prefix = "".join(f"{part}/" for part in parts)
-        # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
-        if folder is None or (parts and not self._has_visible(folder, prefix)):
-            return None
-        files = self._files(folder, prefix)
-        return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
+        with self._stops():
+            self._check_links(tree_id)
+            # A hidden folder gives the same answer as a missing one, so the answer does not show that it exists.
+            if hashed_kind(self._hidden, path) is not None:
+                return None
+            parts = [] if path in {"", "."} else path.split("/")
+            folder = self._folder(tree_id, parts)
+            prefix = "".join(f"{part}/" for part in parts)
+            # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
+            if folder is None or (parts and not self._has_visible(folder, prefix)):
+                return None
+            files = self._files(folder, prefix)
+            return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
 
     def remaining_cost_usd(self) -> float:
         """Read the run budget's room, and commit it as one step with no cost and no box.
@@ -619,8 +639,8 @@ class EngineLoop:
                 command writes a hidden path: a tree id is a content hash, so that tree would confirm a guess
                 of the hidden content. The refusal confirms that the path is hidden, but gives no hidden content.
         """
-        grant_list_id = self._grant_list_id(grants)
         with self._stops():
+            grant_list_id = self._grant_list_id(grants)
             log = self._log()
             with log.lock:
                 record = self._replayed(log, "run", {"command": command}, grant_list_id=grant_list_id)
@@ -664,8 +684,8 @@ class EngineLoop:
             GrantDeniedError, BoxFailureError, TreeRejectedError, MetricFailedError: The box errors of
                 :meth:`TreeSandbox.score`; each commits a record, and a replay raises it again.
         """
-        grant_list_id = self._grant_list_id(METRIC_BOX_GRANTS)
         with self._stops():
+            grant_list_id = self._grant_list_id(METRIC_BOX_GRANTS)
             log = self._log()
             with log.lock:
                 record = self._replayed(
@@ -1122,11 +1142,17 @@ class EngineLoop:
 
         Returns:
             The grant-list id; the run's id when the grants do not resolve, since a denied step has no other.
+
+        Raises:
+            LoopStoppedError: When the grants fail with another error than a refusal, such as a grant of the wrong
+                type; a replay fails the same way, so the loop keeps the stop.
         """
         try:
             return resolve_grants(grants, self._registry).grant_list_id
         except GrantError:
             return self._run.grant_list_id
+        except Exception as error:
+            raise LoopStoppedError(f"The grants do not resolve: {type(error).__name__}: {error}") from error
 
     def _log(self) -> _AgentLog:
         """Return the agent of the calling lane, and open it on its first call.
@@ -1193,7 +1219,8 @@ class EngineLoop:
         if tree_id is not None:
             # SKY-715: the tree holds the harness session folder, so a harness that resumes here finds its state.
             folder = self.run_dir / "agents" / agent_id
-            restore_session(self._trees, run_id, tree_id, folder / "workspace", folder / "home")
+            # The tree's links are model-written, and this folder is on the worker, not in a box.
+            restore_session(self._trees, run_id, tree_id, folder / "workspace", folder / "home", confine_links=True)
         return _AgentLog(self._run.spawn(agent_id, next_seq=len(records)), deque(records))
 
     def _replayed(
@@ -1220,7 +1247,8 @@ class EngineLoop:
             The committed step, or ``None`` when the replay is over.
 
         Raises:
-            StepDivergedError: When the committed step is another call.
+            StepDivergedError: When the committed step is another call, or a box step that records an error that
+                is not a box error.
             ModelCallFailedError: When the committed model step records a failure.
             TreeSandboxError: The error that the committed box step records.
         """
@@ -1235,6 +1263,9 @@ class EngineLoop:
             or (grant_list_id is not None and record["grant_list_id"] != grant_list_id)
         ):
             raise StepDivergedError(f"step {record['step_id']} is not the engine's {call} call")
+        if "error" in body and call != "model" and body["error"] not in _BOX_ERRORS:
+            # The step stays in the replay, so a later call cannot read past a record that the loop cannot raise.
+            raise StepDivergedError(f"step {record['step_id']} records an unknown error {body['error']!r}")
         log.replay.popleft()
         if "error" in body:
             if call == "model":
