@@ -4046,13 +4046,32 @@ def test_suite_scratch_git_reads_no_config_from_the_scratch_root(tmp_path: Path)
     assert not marker.exists()
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
-def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path) -> None:
+def _git_knows_safe_bare_repository() -> bool:
+    """Return whether a local git exists that reads ``safe.bareRepository`` (git 2.38 or later).
+
+    Returns:
+        True when the bare-repository test can run.
+    """
+    if shutil.which("git") is None:
+        return False
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
+    found = re.search(r"(\d+)\.(\d+)", version)
+    return found is not None and (int(found[1]), int(found[2])) >= (2, 38)
+
+
+@pytest.mark.skipif(not _git_knows_safe_bare_repository(), reason="git 2.38 or later not installed")
+def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The suite scratch git does not treat a bare-repository layout as a repository (SKY-812).
+
+    The control run reads no global or system config, so a developer's own
+    ``safe.bareRepository`` cannot change it.
 
     Args:
         tmp_path: Pytest fixture.
+        monkeypatch: Pytest fixture.
     """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     bare = tmp_path / "bare"
     subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True, capture_output=True)
     assert subprocess.run(["git", "rev-parse", "--git-dir"], cwd=bare, check=True, capture_output=True).stdout

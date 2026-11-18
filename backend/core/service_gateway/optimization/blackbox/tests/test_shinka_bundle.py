@@ -461,10 +461,12 @@ def test_bundle_git_reads_nothing_from_a_bare_repository_layout(
         monkeypatch: Pytest fixture.
     """
     repo, marker = planted_bare_repo
+    safe = repo_tree.SAFE_GIT
     monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     bundle = RepoBundle(repo, ["."], [])
     assert bundle.paths() == ["x"]
-    monkeypatch.undo()
+    # Not ``monkeypatch.undo()``: that would also drop the fixture's git config isolation.
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", safe)
 
     assert bundle.start_text("x") is None
     assert not bundle.exists_at_start("x")

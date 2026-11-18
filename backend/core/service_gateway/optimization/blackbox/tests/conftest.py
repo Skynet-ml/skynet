@@ -33,15 +33,18 @@ def local_scorer_runtime(request: pytest.FixtureRequest) -> Iterator[None]:
 
 
 @pytest.fixture
-def planted_bare_repo(tmp_path: Path) -> tuple[Path, Path]:
+def planted_bare_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """Make a tree folder shaped as a bare repository whose config runs a command (SKY-812).
 
     The folder is a real bare clone, so plain git treats it as a repository.
     Its ``info/attributes`` sends every file through a filter, and the filter
-    creates the marker file when git runs it.
+    creates the marker file when git runs it. Git in the test reads no global
+    or system config, so a developer's own ``safe.bareRepository`` cannot
+    change the control runs.
 
     Args:
         tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest fixture that sets the git config variables.
 
     Returns:
         The bare folder, which holds one commit with ``x``, and the marker path.
@@ -51,6 +54,8 @@ def planted_bare_repo(tmp_path: Path) -> tuple[Path, Path]:
     found = re.search(r"(\d+)\.(\d+)", version)
     if found is None or (int(found[1]), int(found[2])) < (2, 38):
         pytest.skip("git 2.38 or later not installed")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     source = tmp_path / "source"
     source.mkdir()
     (source / "x").write_text("hi\n")

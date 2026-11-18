@@ -28,9 +28,11 @@ _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 # A stored tree may hold a folder shaped as a bare repository (``HEAD``,
 # ``objects/``, ``refs/``, ``config``). Git would read that folder's config, and
 # a filter, hook or fsmonitor in it would run code when git runs there. Every
-# git call Skynet makes over a stored tree sets this, so git refuses such a
-# folder. Git reads ``safe.bareRepository`` only from protected config, so a
-# repository's own config cannot turn it off (SKY-812).
+# Skynet git call that can run in a tree with no ``.git`` of its own sets this,
+# so git refuses such a folder. A ``git -C repo`` call on a checkout with its
+# own ``.git`` does not need it: git finds that ``.git`` first. Git reads
+# ``safe.bareRepository`` only from protected config, so a repository's own
+# config cannot turn it off (SKY-812).
 SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 
 # A run with a constraints file answers every refused action with this fixed
