@@ -38,7 +38,7 @@ from core.storage.models import (
 )
 from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
-from core.storage.shard_map import ShardMap
+from core.storage.shard_map import ShardMap, UnroutableRunError
 from core.storage.step_log_store import StepFenceError, StepLogStore
 from core.worker.checkpoint_compat import checkpoint_manifest
 from core.worker.step_recovery import last_committed_step, open_step_log, park_run, still_owns_run
@@ -309,6 +309,29 @@ def test_a_run_on_another_shard_resumes_at_its_last_committed_step(tmp_path: Pat
     assert last is not None
     assert last["seq"] == 1
     shard.dispose()
+
+
+def test_a_resume_of_a_run_on_a_shard_this_pod_lacks_raises_unroutable(tmp_path: Path) -> None:
+    """A resume of a run that records a shard the pod does not have raises ``UnroutableRunError`` and leaves the row."""
+    store = make_sqlite_store(tmp_path)
+    store._step_log_shards = ShardMap(store.engine)
+    _funded_run(store)
+    _claim(store, "pod-a")
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(step_log_shard="s9"))
+        session.commit()
+    _kill(store)
+    before = store.get_job(RUN)
+
+    with pytest.raises(UnroutableRunError, match="s9"):
+        store.requeue_for_resume(RUN, automatic=True)
+
+    after = store.get_job(RUN)
+    assert (after["status"], after["attempts"], after["execution_generation"]) == (
+        before["status"],
+        before["attempts"],
+        before["execution_generation"],
+    )
 
 
 def test_a_kill_mid_step_drops_the_step_that_was_not_durable(store: StepJobStore, step_logs: Any) -> None:

@@ -1302,9 +1302,9 @@ class JobModel(Base):
         String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # The step log shard of the run (SKY-731). The shard map sets it once, on the run's
-    # first step log use, and never changes it, so a new shard never moves a run.
-    # NULL means the main database.
+    # The step log shard of the run (SKY-731). The shard map or the first step log flush
+    # sets it once, and nothing changes it later, so a new shard never moves a run.
+    # NULL and ``main`` both mean the main database.
     step_log_shard: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
@@ -1318,13 +1318,14 @@ class JobModel(Base):
         # the alembic migration so two concurrent submits with the same key
         # cannot both create rows.
         Index("ix_jobs_username_idempotency_key", "username", "idempotency_key"),
-        # Each new shard map with no extra shard looks for a job that records a shard (SKY-731).
-        # Partial, so the lookup does not scan ``jobs``, and the index is empty while no run records a shard.
+        # Each new shard map with no extra shard looks for a job that records a shard other than
+        # ``main`` (SKY-731). Almost every run records ``main``, so the index leaves those rows out:
+        # it stays empty while no run uses an extra shard, and the lookup does not scan ``jobs``.
         Index(
             "ix_jobs_step_log_shard",
             "step_log_shard",
-            postgresql_where=text("step_log_shard IS NOT NULL"),
-            sqlite_where=text("step_log_shard IS NOT NULL"),
+            postgresql_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+            sqlite_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
         ),
     )
 

@@ -3,10 +3,11 @@
 Revision ID: 66cae09708d3
 Revises: c4f1a7e9d2b6
 
-The shard map writes the column once, on the run's first step log use. NULL
-means the main database, so existing runs keep their steps where they are.
-A partial index on the set values lets a shard map with no extra shard find a
-recorded shard with no scan of ``jobs``.
+The shard map or the first step log flush writes the column once. NULL and
+``main`` both mean the main database, so existing runs keep their steps where
+they are. Almost every run records ``main``, so the partial index holds only
+the other shards. A shard map with no extra shard uses it to find a run on an
+extra shard with no scan of ``jobs``.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ def upgrade() -> None:
         "ix_jobs_step_log_shard",
         "jobs",
         ["step_log_shard"],
-        postgresql_where=sa.text("step_log_shard IS NOT NULL"),
-        sqlite_where=sa.text("step_log_shard IS NOT NULL"),
+        postgresql_where=sa.text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+        sqlite_where=sa.text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
     )
 
 

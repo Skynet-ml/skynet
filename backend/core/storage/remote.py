@@ -71,7 +71,7 @@ from .models import (
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
-from .shard_map import MAIN, ShardMap
+from .shard_map import MAIN, ShardMap, UnroutableRunError
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -1802,6 +1802,10 @@ class RemoteDBJobStore:
             # the bound can be a flush window late (SKY-711 follow-up).
             # The jobs row lock stays held while the shard answers, as in a step log flush, so no step lands in between.
             shard = job.step_log_shard or MAIN
+            if shard not in self.step_log_shards.names():
+                raise UnroutableRunError(
+                    f"run {optimization_id} records step log shard {shard!r}, which this pod does not have"
+                )
             if shard == MAIN:
                 step_resume_at = _step_resume_at(session, optimization_id)
             else:

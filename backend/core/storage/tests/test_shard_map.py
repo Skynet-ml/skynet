@@ -541,11 +541,34 @@ def test_a_step_log_with_no_shard_map_does_not_start_when_a_job_records_a_shard(
     StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=ShardMap(main)).close()
 
 
+def _job_rows(count: int) -> list[dict[str, Any]]:
+    """Return ``jobs`` rows for the index tests: nine in ten record ``main``, as most runs do, the rest no shard.
+
+    Args:
+        count: The number of rows.
+
+    Returns:
+        The rows, each with an id that starts with ``plan-``.
+    """
+    return [
+        {
+            "optimization_id": f"plan-{index}",
+            "username": "ada",
+            "execution_generation": 1,
+            "step_log_shard": MAIN if index % 10 else None,
+        }
+        for index in range(count)
+    ]
+
+
 def test_the_jobs_lookup_of_a_map_with_no_shard_has_a_partial_index(main: Engine) -> None:
-    """The check of a map with no extra shard reads the partial index, not every ``jobs`` row."""
+    """The partial index leaves out ``main`` and NULL rows, and the check of a map with no extra shard reads it."""
+    with main.begin() as connection:
+        connection.execute(JobModel.__table__.insert(), _job_rows(2000))
     indexes = {index["name"]: index for index in inspect(main).get_indexes("jobs")}
 
     assert indexes["ix_jobs_step_log_shard"]["column_names"] == ["step_log_shard"]
+    assert "<> 'main'" in str(indexes["ix_jobs_step_log_shard"]["dialect_options"]["sqlite_where"])
     with main.connect() as connection:
         plan = " ".join(
             str(row[-1])
@@ -557,6 +580,51 @@ def test_the_jobs_lookup_of_a_map_with_no_shard_has_a_partial_index(main: Engine
             )
         )
     assert "ix_jobs_step_log_shard" in plan
+    ShardMap(main).check()
+
+
+@needs_postgres
+def test_the_check_of_a_map_with_no_shard_reads_the_partial_index_on_postgres() -> None:
+    """On PostgreSQL the check query reads the partial index, not every ``jobs`` row, when most runs record ``main``."""
+    engine = create_engine(MAIN_DB_URL or "", poolclass=NullPool)
+    index = next(index for index in JobModel.__table__.indexes if index.name == "ix_jobs_step_log_shard")
+    queries: list[tuple[str, Any]] = []
+
+    def keep_query(conn, cursor, statement, parameters, context, executemany) -> None:
+        """Keep the SQL and parameters of each ``jobs`` lookup that the check sends.
+
+        Args:
+            conn: The connection.
+            cursor: The DBAPI cursor.
+            statement: The SQL text.
+            parameters: The bound parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        if "step_log_shard" in statement and statement.lstrip().upper().startswith("SELECT"):
+            queries.append((statement, parameters))
+
+    try:
+        Base.metadata.create_all(engine, tables=[t for t in Base.metadata.sorted_tables if "embedding" not in t.name])
+        # An earlier test can leave the index of an older migration; this test checks the model's index.
+        index.drop(engine, checkfirst=True)
+        index.create(engine)
+        with engine.begin() as connection:
+            connection.execute(JobModel.__table__.insert(), _job_rows(20000))
+            connection.execute(text("ANALYZE jobs"))
+        event.listen(engine, "before_cursor_execute", keep_query)
+        ShardMap(engine).check()
+        event.remove(engine, "before_cursor_execute", keep_query)
+
+        assert len(queries) == 1
+        with engine.connect() as connection:
+            plan = "\n".join(row[0] for row in connection.exec_driver_sql("EXPLAIN " + queries[0][0], queries[0][1]))
+        assert "ix_jobs_step_log_shard" in plan
+        assert "Seq Scan" not in plan
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM jobs WHERE optimization_id LIKE 'plan-%'"))
+        engine.dispose()
 
 
 def test_a_run_with_a_shard_this_pod_lacks_fails_alone_and_the_other_runs_land(

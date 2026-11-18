@@ -232,7 +232,15 @@ def test_run_calls_fold_into_optimization_footprint(store: _SQLiteJobStore) -> N
 
 
 def _insert_dataset(store: _SQLiteJobStore, *, dataset_id: str, owner: str, name: str, byte_size: int) -> None:
-    """Insert a minimal dataset row directly for storage-items ranking tests."""
+    """Insert a minimal dataset row directly for storage-items ranking tests.
+
+    Args:
+        store: The job store.
+        dataset_id: The dataset id.
+        owner: The owner username.
+        name: The dataset name.
+        byte_size: The stored size in bytes.
+    """
     with store._session_factory() as session:
         session.add(
             DatasetModel(
@@ -300,7 +308,15 @@ def test_storage_items_honours_limit(store: _SQLiteJobStore) -> None:
 
 
 def _insert_staged(store: _SQLiteJobStore, *, staged_id: str, username: str, filename: str, rows: list) -> None:
-    """Insert a staged (pending) upload row directly for category-listing tests."""
+    """Insert a staged (pending) upload row directly for category-listing tests.
+
+    Args:
+        store: The job store.
+        staged_id: The staged upload id.
+        username: The owner username.
+        filename: The uploaded file name.
+        rows: The staged rows.
+    """
     with store._session_factory() as session:
         session.add(
             AgentStagedDatasetModel(
@@ -399,7 +415,15 @@ def test_category_items_lists_staged_uploads(store: _SQLiteJobStore) -> None:
 
 
 def _insert_tagging_session(store: _SQLiteJobStore, *, session_id: str, username: str, name: str, rows: list) -> None:
-    """Insert a labeling session row directly for storage-accounting tests."""
+    """Insert a labeling session row directly for storage-accounting tests.
+
+    Args:
+        store: The job store.
+        session_id: The labeling session id.
+        username: The owner username.
+        name: The session name.
+        rows: The session rows.
+    """
     with store._session_factory() as session:
         session.add(
             TaggingSessionModel(
@@ -606,6 +630,15 @@ def test_local_postgres_free_bytes_reads_df_and_fails_soft(monkeypatch: pytest.M
     calls: list[list[str]] = []
 
     def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        """Keep the command and answer as ``df`` does with 30 GiB free.
+
+        Args:
+            args: The command.
+            **_: The other ``subprocess.run`` arguments.
+
+        Returns:
+            A completed process with the ``df`` output.
+        """
         calls.append(args)
         return SimpleNamespace(returncode=0, stdout="   Avail\n32212254720\n")
 
