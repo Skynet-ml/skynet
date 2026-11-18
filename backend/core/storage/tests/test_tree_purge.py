@@ -447,6 +447,49 @@ def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
         assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
 
 
+def test_a_row_that_points_at_the_pack_during_the_object_delete_keeps_the_pack_row(
+    engine: Engine, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """A tree object row that points at the pack while its object goes keeps the pack's row.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
+    deleted: list[str] = []
+    delete_local = _deleter(tmp_path / "objects", deleted)
+
+    def delete_and_point(keys: list[str]) -> None:
+        """Delete the objects, then add a row that points at the first pack.
+
+        Args:
+            keys: The object keys.
+        """
+        delete_local(keys)
+        with Session(engine) as session:
+            session.add(
+                TreeObjectModel(
+                    username="bob",
+                    object_id="0" * 64,
+                    byte_size=1,
+                    pack_key=keys[0],
+                    pack_offset=0,
+                    pack_length=1,
+                )
+            )
+            session.commit()
+
+    with Session(engine) as session:
+        summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_and_point, grace_seconds=0.0)
+        session.commit()
+
+    assert delete_unused_packs(engine, summary) == 1
+    assert deleted == [packs["ada"]]
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == set(packs.values())
+
+
 def test_the_compactor_rewrites_a_marked_full_pack_without_the_deleted_bytes(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
