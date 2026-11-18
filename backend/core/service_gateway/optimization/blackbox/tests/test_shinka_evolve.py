@@ -61,6 +61,20 @@ owner = loop_tests.owner
 step_log = loop_tests.step_log
 trees = loop_tests.trees
 
+
+@pytest.fixture(autouse=True)
+def _short_reply_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound a real child's wait for a reply, so a broken stop fails a test instead of hanging it.
+
+    The engine lets a child wait days for a reply. A regression that leaves the
+    worker waiting on such a child would then hang the suite.
+
+    Args:
+        monkeypatch: Sets the child's reply wait.
+    """
+    monkeypatch.setattr(shinka_evolve, "_TIMEOUT_SECONDS", 60.0)
+
+
 _FAKE_UPSTREAM = {
     "shinka/__init__.py": "",
     "shinka/core/__init__.py": "from .runner import EvolutionConfig, ShinkaEvolveRunner\n",
