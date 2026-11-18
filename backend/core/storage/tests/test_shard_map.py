@@ -9,12 +9,15 @@ test that migrates a shard, ``APP_TEST_SHARD_DB_URL`` (shard).
 from __future__ import annotations
 
 import contextlib
+import json
+import logging
 import threading
 import time
 import zlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from alembic.config import CommandLine, Config
@@ -25,19 +28,30 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from alembic import command
 from core.config import app_env, settings
 from core.storage import migrate as migrate_mod
 from core.storage import shard_map as shard_map_mod
+from core.storage import tree_compactor
 from core.storage.migrate import sync_migration_head, upgrade_step_log_shards
 from core.storage.models import AgentStepModel, Base, JobModel, StoragePackModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
+from core.storage.remote import RemoteDBJobStore
 from core.storage.schema_lock import SCHEMA_BOOTSTRAP_LOCK_KEY
 from core.storage.shard_map import MAIN, ShardMap, UnroutableRunError
-from core.storage.step_log_store import StepFenceError, StepLogStore
+from core.storage.step_log_store import _FOOTER, CLAIM_BYTE_SIZE, StepFenceError, StepLogStore, _read_manifest
+from core.storage.tree_compactor import TreeCompactor
+from core.storage.tree_purge import (
+    TreePurgeError,
+    delete_unused_packs,
+    mark_run_packs,
+    purge_run_shards,
+    purge_user,
+    purge_user_shards,
+)
 from core.worker.step_recovery import last_committed_step, open_step_log
 
 BACKEND_DIR = Path(__file__).resolve().parents[3]
@@ -1044,7 +1058,7 @@ def test_the_alembic_upgrade_steps_of_the_shard_chain_still_resolve() -> None:
 
     steps = script._upgrade_revs("head", ())
 
-    assert [step.revision.revision for step in steps] == ["3c4a41ece580"]
+    assert [step.revision.revision for step in steps] == ["3c4a41ece580", "96693ab0b019"]
 
 
 def _wipe(engine: Engine) -> None:
@@ -1128,6 +1142,10 @@ def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migra
         with main.begin() as connection:
             connection.execute(text("DROP INDEX IF EXISTS ix_jobs_step_log_shard"))
             connection.execute(text("ALTER TABLE jobs DROP COLUMN step_log_shard"))
+            # e3b7d1f5a9c2 (SKY-733) comes after the merge, so the boot adds its column again.
+            connection.execute(text("ALTER TABLE storage_packs DROP COLUMN needs_rewrite"))
+            # a7c3e5f9b1d4 also comes after e8b2d4f6a9c1, so the boot adds this column again too.
+            connection.execute(text("ALTER TABLE jobs DROP COLUMN automatic_resumes"))
             # The head merges two parents (SKY-819). Only the shard column's branch rolls back, so main
             # stays at the other parent and the boot runs the shard column revision and the merge.
             connection.execute(text("UPDATE alembic_version SET version_num = :rev"), {"rev": "e8b2d4f6a9c1"})
@@ -1253,3 +1271,573 @@ def test_the_alembic_cli_upgrades_the_shards_only_on_upgrade(
         run()
 
     assert calls == (["shards"] if upgrades else [])
+
+
+def _table_rows(engine: Engine) -> tuple[int, int, int]:
+    """Count the step, tree object and pack rows of one database.
+
+    Args:
+        engine: The database.
+
+    Returns:
+        The step, tree object and pack row counts.
+    """
+    with Session(engine) as session:
+        return tuple(
+            len(session.scalars(select(column)).all())
+            for column in (AgentStepModel.step_id, TreeObjectModel.object_id, StoragePackModel.pack_key)
+        )
+
+
+def _unlinker(root: Path, deleted: list[str]) -> Any:
+    """Return a pack delete function over the local store folder that records each key.
+
+    Args:
+        root: The object store folder.
+        deleted: Collects the deleted keys.
+
+    Returns:
+        The delete function.
+    """
+
+    def delete_objects(keys: list[str]) -> None:
+        """Delete local objects; a missing object is not an error.
+
+        Args:
+            keys: The object keys.
+        """
+        deleted.extend(keys)
+        for key in keys:
+            (root / key).unlink(missing_ok=True)
+
+    return delete_objects
+
+
+def _write_account(store: StepLogStore) -> None:
+    """Commit one step for every test run and one tree object on each shard, then flush.
+
+    Args:
+        store: The step log over the two shards.
+    """
+    for run_id in RUNS:
+        _commit(store, run_id, 0)
+    store.put_object(_a_run_on(store._shards, "s2"), "c" * 64, b"tree on s2")
+    store.put_object(_a_run_on(store._shards, MAIN), "d" * 64, b"tree on main")
+    store.flush()
+
+
+def _purge_ada(main: Engine, shards: ShardMap, delete_objects: Any) -> Any:
+    """Purge ``ada`` in one committed main transaction, as the account delete does.
+
+    Args:
+        main: The main database.
+        shards: The shard map.
+        delete_objects: The pack delete function.
+
+    Returns:
+        The purge summary.
+    """
+    with Session(main) as session:
+        summary = purge_user(session, "ada", RUNS, delete_objects=delete_objects, grace_seconds=0.0, shards=shards)
+        purge_user_shards(summary)
+        session.commit()
+    return summary
+
+
+def test_an_account_purge_deletes_the_rows_and_packs_on_every_shard_once(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """The purge deletes the account's steps, tree objects and packs on the other shard too; a second purge finds none.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+    """
+    _write_account(two_shard_log)
+    assert _table_rows(shard)[:2] != (0, 0)
+    deleted: list[str] = []
+
+    summary = _purge_ada(main, two_shard_log._shards, _unlinker(tmp_path / "objects", deleted))
+
+    assert delete_unused_packs(main, summary) == 2
+    assert _table_rows(main) == _table_rows(shard) == (0, 0, 0)
+    assert objects.list("packs/") == []
+    assert len(deleted) == 2
+    again = _purge_ada(main, two_shard_log._shards, _unlinker(tmp_path / "objects", deleted))
+    assert (again.deleted_rows, again.unused_packs) == (0, [])
+
+
+def test_a_shard_that_fails_fails_the_purge_with_its_name_and_main_keeps_its_rows(
+    main: Engine, two_shard_log: StepLogStore, tmp_path: Path
+) -> None:
+    """A shard that cannot connect stops the purge with an error that names it; the main rollback keeps the rows.
+
+    Args:
+        main: The main database.
+        two_shard_log: The step log over both shards.
+        tmp_path: Pytest's temporary folder.
+    """
+    _write_account(two_shard_log)
+    before = _table_rows(main)
+    down = ShardMap(main, {"s2": create_engine(f"sqlite:///{tmp_path / 'missing' / 's2.sqlite'}")})
+
+    with pytest.raises(TreePurgeError, match="step log shard 's2'"):
+        _purge_ada(main, down, _unlinker(tmp_path / "objects", []))
+
+    assert _table_rows(main) == before
+
+
+def test_a_run_delete_deletes_the_runs_steps_on_its_shard_and_the_compactor_rewrites_the_shared_pack(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """The run delete removes the run's steps on the other shard and marks the pack; a pass rewrites it there.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+    """
+    shards = two_shard_log._shards
+    gone, kept = [run for run in RUNS if shards.shard_of(run) == "s2"][:2]
+    _commit(two_shard_log, gone, 0)
+    kept_step = _commit(two_shard_log, kept, 0)
+    two_shard_log.flush()
+    with Session(shard) as session:
+        (old,) = session.scalars(select(StoragePackModel.pack_key)).all()
+
+    with Session(main) as session:
+        mark_run_packs(session, [gone], shards)
+        purge_run_shards([gone], shards)
+        session.commit()
+
+    assert _step_runs(shard) == {kept}
+    with Session(shard) as session:
+        assert session.scalar(select(StoragePackModel.needs_rewrite).where(StoragePackModel.pack_key == old))
+    compactor = TreeCompactor(main, objects, _delete_one(tmp_path / "objects"), min_age_seconds=0.0, shards=shards)
+    assert compactor.run_once()[0] == 1
+    with Session(shard) as session:
+        assert session.scalar(select(AgentStepModel.pack_key)).startswith(f"{tree_compactor.COMPACTED_PREFIX}/")
+    assert two_shard_log.get_step(kept_step)["body"] == {"command": f"echo {kept} 0"}
+
+
+def _delete_one(root: Path) -> Any:
+    """Return a one-key delete function over the local store folder, as the compactor takes.
+
+    Args:
+        root: The object store folder.
+
+    Returns:
+        The delete function.
+    """
+
+    def delete_object(key: str) -> None:
+        """Delete one local object; a missing object is not an error.
+
+        Args:
+            key: The object key.
+        """
+        (root / key).unlink(missing_ok=True)
+
+    return delete_object
+
+
+def test_the_sweep_keeps_a_pack_that_another_shard_records_and_claims_an_orphan_on_its_shard(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path, monkeypatch
+) -> None:
+    """Old packs with a row on any shard stay; an orphan flush pack goes after a claim on the shard its manifest names.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    _write_account(two_shard_log)
+    recorded = sorted(objects.list("packs/"))
+    with Session(shard) as session:
+        (on_shard,) = session.scalars(select(StoragePackModel.pack_key)).all()
+    orphan = f"packs/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, objects.get(on_shard))
+    merged = f"{tree_compactor.COMPACTED_PREFIX}/{1:020d}-b.pack"
+    objects.put(merged, b"x")
+    with Session(shard) as session:
+        session.add(StoragePackModel(pack_key=merged, worker_id=tree_compactor.COMPACTOR_ID, byte_size=1))
+        session.commit()
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
+
+    assert compactor.remove_unrecorded() == 1
+
+    assert sorted(objects.list("packs/")) == recorded
+    assert objects.list(f"{tree_compactor.COMPACTED_PREFIX}/") == [merged]
+    with Session(shard) as session:
+        assert session.scalar(select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == orphan)) == (
+            CLAIM_BYTE_SIZE
+        )
+
+
+@needs_two_postgres
+def test_the_run_delete_merge_and_account_purge_work_on_two_postgres_databases(
+    objects: LocalObjectStore, tmp_path: Path, monkeypatch
+) -> None:
+    """On PostgreSQL the shard merge locks the jobs on main, and the purge leaves no account row on either database.
+
+    Args:
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(SHARD_DB_URL or "")})
+    main = create_engine(MAIN_DB_URL or "")
+    shard = create_engine(SHARD_DB_URL or "")
+    try:
+        _wipe(main)
+        _wipe(shard)
+        Base.metadata.create_all(main, tables=[t for t in Base.metadata.sorted_tables if "embedding" not in t.name])
+        upgrade_step_log_shards()
+        with Session(main) as session:
+            for run_id in RUNS:
+                session.add(JobModel(optimization_id=run_id, username="ada", execution_generation=1))
+            session.commit()
+        shards = ShardMap(main, {"s2": shard})
+        store = StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=shards)
+        try:
+            _write_account(store)
+        finally:
+            store.close()
+        gone = _a_run_on(shards, "s2")
+        with Session(main) as session:
+            mark_run_packs(session, [gone], shards)
+            purge_run_shards([gone], shards)
+            session.commit()
+        assert gone not in _step_runs(shard)
+        compactor = TreeCompactor(main, objects, _delete_one(tmp_path / "objects"), min_age_seconds=0.0, shards=shards)
+        assert compactor.run_once()[0] == 1
+
+        summary = _purge_ada(main, shards, _unlinker(tmp_path / "objects", []))
+        delete_unused_packs(main, summary)
+
+        assert _table_rows(main)[:2] == _table_rows(shard)[:2] == (0, 0)
+        again = _purge_ada(main, shards, _unlinker(tmp_path / "objects", []))
+        assert (again.deleted_rows, again.unused_packs) == (0, [])
+    finally:
+        _wipe(main)
+        _wipe(shard)
+        main.dispose()
+        shard.dispose()
+
+
+def test_the_sweep_claims_an_old_flush_pack_with_no_shard_in_its_manifest_on_main(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path, monkeypatch
+) -> None:
+    """A flush pack from before the shard map names no shard; a multi-shard sweep claims it on main and deletes it.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    _write_account(two_shard_log)
+    recorded = sorted(objects.list("packs/"))
+    with Session(main) as session:
+        (on_main,) = session.scalars(select(StoragePackModel.pack_key)).all()
+    pack = objects.get(on_main)
+    manifest = _read_manifest(pack)
+    (length,) = _FOOTER.unpack(pack[-_FOOTER.size :])
+    del manifest["shard"]
+    footer = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    old = f"packs/gone-pod/{1:020d}-a.pack"
+    objects.put(old, pack[: -_FOOTER.size - length] + footer + _FOOTER.pack(len(footer)))
+    assert "shard" not in _read_manifest(objects.get(old))
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
+
+    assert compactor.remove_unrecorded() == 1
+
+    assert sorted(objects.list("packs/")) == recorded
+    with Session(main) as session:
+        assert session.scalar(select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == old)) == (
+            CLAIM_BYTE_SIZE
+        )
+    with Session(shard) as session:
+        assert session.get(StoragePackModel, old) is None
+
+
+def test_the_sweep_keeps_an_old_flush_pack_that_names_a_shard_its_map_does_not_have(
+    main: Engine,
+    shard: Engine,
+    two_shard_log: StepLogStore,
+    objects: LocalObjectStore,
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """An orphan flush pack of an unknown shard that no job records stays with a warning; the other orphan goes.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+        caplog: Pytest's log capture fixture.
+    """
+    _write_account(two_shard_log)
+    recorded = sorted(objects.list("packs/"))
+    swept = _orphan_pack(objects, shard)
+    pack = objects.get(swept)
+    manifest = _read_manifest(pack)
+    (length,) = _FOOTER.unpack(pack[-_FOOTER.size :])
+    manifest["shard"] = "s9"
+    footer = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    unknown = f"packs/gone-pod/{1:020d}-c.pack"
+    objects.put(unknown, pack[: -_FOOTER.size - length] + footer + _FOOTER.pack(len(footer)))
+    assert _read_manifest(objects.get(unknown))["shard"] == "s9"
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
+
+    with caplog.at_level(logging.WARNING, logger=tree_compactor.__name__):
+        assert compactor.remove_unrecorded() == 1
+
+    assert sorted(objects.list("packs/")) == sorted([*recorded, unknown])
+    assert [record.getMessage() for record in caplog.records] == [
+        f"The unrecorded pack {unknown} names step log shard 's9', which this map does not have"
+    ]
+    for engine in (main, shard):
+        with Session(engine) as session:
+            assert session.get(StoragePackModel, unknown) is None
+
+
+def _orphan_pack(objects: LocalObjectStore, shard: Engine) -> str:
+    """Put an old flush pack with no row that names shard ``s2`` in its manifest.
+
+    Args:
+        objects: The object store.
+        shard: The shard database ``s2``; it holds the pack that the orphan copies.
+
+    Returns:
+        The orphan pack key.
+    """
+    with Session(shard) as session:
+        (on_shard,) = session.scalars(select(StoragePackModel.pack_key)).all()
+    orphan = f"packs/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, objects.get(on_shard))
+    return orphan
+
+
+@pytest.mark.parametrize("map_shards", [{}, {"s2"}])
+def test_the_sweep_deletes_nothing_when_a_job_records_a_shard_that_its_map_does_not_have(
+    main: Engine,
+    shard: Engine,
+    two_shard_log: StepLogStore,
+    objects: LocalObjectStore,
+    tmp_path: Path,
+    monkeypatch,
+    map_shards: set[str],
+) -> None:
+    """A compactor with an empty or partial map keeps every pack: the other shards' rows are not read.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+        map_shards: The extra shards of the compactor's map.
+    """
+    _write_account(two_shard_log)
+    _orphan_pack(objects, shard)
+    _set_shard(main, RUNS[0], "s3")
+    packs = sorted(objects.list("packs/"))
+    rows = _table_rows(shard)
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main,
+        objects,
+        _delete_one(tmp_path / "objects"),
+        grace_seconds=0.0,
+        shards=ShardMap(main, dict.fromkeys(map_shards, shard)),
+    )
+
+    assert compactor.remove_unrecorded() == 0
+
+    assert sorted(objects.list("packs/")) == packs
+    assert _table_rows(shard) == rows
+
+
+def test_start_tree_compactor_refuses_an_empty_map_when_a_job_records_a_shard(main: Engine, monkeypatch) -> None:
+    """The worker does not start a compactor whose map lacks a shard that a job records.
+
+    Args:
+        main: The main database.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    _set_shard(main, RUNS[0], "s2")
+    monkeypatch.setattr(settings, "tree_bucket", "trees-test")
+    monkeypatch.setattr(settings, "step_log_shards", {})
+    monkeypatch.setattr(tree_compactor, "boto3", type("Boto", (), {"client": staticmethod(lambda name: object())}))
+
+    with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS is empty"):
+        tree_compactor.start_tree_compactor(main)
+
+
+def test_a_purge_or_run_delete_of_a_run_on_a_shard_that_the_map_lacks_fails_and_deletes_nothing(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, tmp_path: Path
+) -> None:
+    """The account purge and the run delete name the missing shard and keep every row on both databases.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        tmp_path: Pytest's temporary folder.
+    """
+    _write_account(two_shard_log)
+    before = (_table_rows(main), _table_rows(shard))
+    no_s2 = ShardMap(main)
+
+    with Session(main) as session, pytest.raises(TreePurgeError, match="step log shard 's2'"):
+        purge_user(session, "ada", RUNS, delete_objects=_unlinker(tmp_path / "objects", []), shards=no_s2)
+    with Session(main) as session, pytest.raises(TreePurgeError, match="step log shard 's2'"):
+        mark_run_packs(session, RUNS, no_s2)
+
+    assert (_table_rows(main), _table_rows(shard)) == before
+
+
+def test_a_missing_bucket_fails_the_purge_before_any_shard_deletes_a_row(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, monkeypatch
+) -> None:
+    """With rows only on the other shard and no bucket, the purge fails before that shard deletes them.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    shards = two_shard_log._shards
+    for run_id in [run for run in RUNS if shards.shard_of(run) == "s2"]:
+        _commit(two_shard_log, run_id, 0)
+    two_shard_log.put_object(_a_run_on(shards, "s2"), "c" * 64, b"tree on s2")
+    two_shard_log.flush()
+    assert _table_rows(main) == (0, 0, 0)
+    before = _table_rows(shard)
+    monkeypatch.setattr(settings, "tree_bucket", None)
+
+    with Session(main) as session, pytest.raises(TreePurgeError, match="SKYNET_TREE_BUCKET"):
+        purge_user(session, "ada", RUNS, grace_seconds=0.0, shards=shards)
+
+    assert _table_rows(shard) == before
+
+
+def test_the_account_purge_touches_the_other_shards_only_in_purge_user_shards(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, tmp_path: Path
+) -> None:
+    """``purge_user`` leaves the other shards as they are; ``purge_user_shards`` purges them once.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        tmp_path: Pytest's temporary folder.
+    """
+    _write_account(two_shard_log)
+    before = _table_rows(shard)
+    with Session(main) as session:
+        summary = purge_user(
+            session,
+            "ada",
+            RUNS,
+            delete_objects=_unlinker(tmp_path / "objects", []),
+            grace_seconds=0.0,
+            shards=two_shard_log._shards,
+        )
+        assert _table_rows(shard) == before
+        main_packs = list(summary.unused_packs)
+
+        assert purge_user_shards(summary) == before[0] + before[1]
+        assert purge_user_shards(summary) == 0
+        session.commit()
+
+    assert _table_rows(shard)[:2] == (0, 0)
+    assert len(summary.unused_packs) == len(main_packs) + 1
+    assert set(summary.pack_engines) == set(summary.unused_packs) - set(main_packs)
+
+
+def test_a_run_delete_deletes_the_shard_steps_after_the_job_delete_and_before_the_commit(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore
+) -> None:
+    """``delete_job`` and ``delete_jobs`` purge the other shards after their last main statement.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+    """
+    shards = two_shard_log._shards
+    first, second, third = [run for run in RUNS if shards.shard_of(run) == "s2"][:3]
+    for run_id in (first, second, third):
+        _commit(two_shard_log, run_id, 0)
+    two_shard_log.flush()
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = main
+    store._session_factory = sessionmaker(bind=main)
+    store._step_log_shards = shards
+    events: list[str] = []
+
+    def _record_statement(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        """Record one main statement.
+
+        Args:
+            conn: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        events.append(statement.split("(")[0].strip())
+
+    def _purge(run_ids: list[str], shard_map: ShardMap) -> int:
+        """Record the shard purge, then run it.
+
+        Args:
+            run_ids: The deleted runs.
+            shard_map: The shard map.
+
+        Returns:
+            The count of deleted step rows.
+        """
+        events.append("shard purge")
+        return purge_run_shards(run_ids, shard_map)
+
+    event.listen(main, "before_cursor_execute", _record_statement)
+    try:
+        with patch("core.storage.remote.purge_run_shards", _purge):
+            store.delete_job(first)
+            assert events[-1] == "shard purge"
+            assert any(statement.startswith("DELETE FROM jobs") for statement in events)
+            events.clear()
+            assert store.delete_jobs([second, third]) == 2
+            assert events[-1] == "shard purge"
+            assert any(statement.startswith("DELETE FROM jobs") for statement in events)
+    finally:
+        event.remove(main, "before_cursor_execute", _record_statement)
+
+    assert not _step_runs(shard) & {first, second, third}

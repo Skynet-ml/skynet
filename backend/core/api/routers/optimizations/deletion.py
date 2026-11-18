@@ -14,12 +14,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from ....i18n_en import t_en
 from ....models import (
     BulkDeleteRequest,
     BulkDeleteResponse,
     BulkDeleteSkipped,
     JobDeleteResponse,
 )
+from ....storage.tree_purge import TreePurgeError
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import status_to_job_status
 from ...errors import DomainError
@@ -63,7 +65,8 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
         Raises:
             DomainError: 404 if unknown or inaccessible, 403 if the caller is
                 not an ``owner`` (admins and the creator qualify), 409 if still
-                active.
+                active, 503 if the run's stored tree data cannot be deleted now
+                (the run stays, so a retry can delete it).
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.owner)
 
@@ -75,7 +78,11 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
                 params={"status": status.value},
             )
 
-        job_store.delete_job(optimization_id)
+        try:
+            job_store.delete_job(optimization_id)
+        except TreePurgeError as exc:
+            logger.exception("Optimization %s not deleted: its stored tree data was not deleted", optimization_id)
+            raise DomainError("optimization.deletion_storage_unavailable", status=503) from exc
         logger.info("Optimization %s deleted", optimization_id)
         return JobDeleteResponse(optimization_id=optimization_id, deleted=True)
 
@@ -143,6 +150,15 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
         if deletable:
             try:
                 job_store.delete_jobs(deletable)
+            except TreePurgeError:
+                # The purge error names shard hosts and SQL, so the reason is the fixed message.
+                logger.exception(
+                    "Bulk delete of %d ids not done: their stored tree data was not deleted", len(deletable)
+                )
+                reason = t_en("optimization.deletion_storage_unavailable")
+                skipped.extend(
+                    BulkDeleteSkipped(optimization_id=optimization_id, reason=reason) for optimization_id in deletable
+                )
             except Exception as exc:
                 # Batch DB failure is reported as per-id skip reason instead of 500.
                 logger.exception("Bulk delete failed for %d ids", len(deletable))

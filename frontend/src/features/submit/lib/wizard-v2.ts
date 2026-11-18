@@ -199,9 +199,9 @@ export function initialWizardV2State(
       budget: { max_scorer_runs: maxScorerRuns ?? 200, max_iterations: null },
       maxCostCents: null,
       budgetUncapped: false,
-      // Same defaults as the legacy wizard's DEFAULT_PROPOSER.
+      // DEFAULT_PROPOSER without the harness: a harness the user did not pick
+      // would replace the repository's [proposer] entry (SKY-753).
       proposer: {
-        harness: "codex",
         max_candidates_per_iter: 3,
         ralph: true,
         max_no_eval_seconds: 1_800,

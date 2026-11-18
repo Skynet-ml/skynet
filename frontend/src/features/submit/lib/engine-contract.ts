@@ -1,4 +1,4 @@
-import type { BlackboxProposer } from "@/shared/types/api";
+import type { BlackboxHarness, BlackboxProposer } from "@/shared/types/api";
 import { resolveOptimizer, type OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
@@ -17,18 +17,57 @@ export function usesNativeProposer(choice: OptimizerChoice): boolean {
 }
 
 /**
- * What a fresh wizard sends when the user never touches the proposer settings.
+ * The default proposer settings: the effort fallback and the candidate
+ * defaults. wizard-v2.ts keeps its own copy without `harness`, so change both.
  *
  * The stall timeout has no control: half an hour without a new score covers a
  * slow scorer pass while still cutting a wedged agent loose.
  */
-export const DEFAULT_PROPOSER: BlackboxProposer = {
+export const DEFAULT_PROPOSER: BlackboxProposer & { harness: BlackboxHarness } = {
   harness: "codex",
   max_candidates_per_iter: 3,
   ralph: true,
   max_no_eval_seconds: 1_800,
   max_tool_calls: 100,
 };
+
+/**
+ * The proposer picker's value. It stays empty until the user picks a harness,
+ * so the picker shows a placeholder. Radix fires no change for the current
+ * value, so a picker that showed Codex could never send a pick of Codex.
+ */
+export function harnessPickerValue(proposer: BlackboxProposer): BlackboxHarness | "" {
+  return proposer.harness ?? "";
+}
+
+/** The harness picker's first item: no harness, so the repository proposer or the server default runs. */
+export const HARNESS_DEFAULT_PICK = "default";
+
+/**
+ * The proposer after a harness pick. The default item drops `harness` and
+ * `host_cli`, so the repository's `[proposer] entry` applies again (SKY-753).
+ */
+export function pickHarness(
+  proposer: BlackboxProposer,
+  value: BlackboxHarness | typeof HARNESS_DEFAULT_PICK,
+): BlackboxProposer {
+  if (value !== HARNESS_DEFAULT_PICK) return { ...proposer, harness: value };
+  const { harness: _harness, host_cli: _hostCli, ...rest } = proposer;
+  return rest;
+}
+
+/**
+ * What the closed proposer header shows: the picked harness with its logo,
+ * or the default text, because an unset harness is not sent: the repository's
+ * `[proposer] entry` runs if it has one, else the server default (SKY-753).
+ */
+export function proposerHeader(
+  proposer: BlackboxProposer,
+): { harness: BlackboxHarness } | { labelKey: "submit.v2.optimizer.proposer.harness_default" } {
+  return proposer.harness
+    ? { harness: proposer.harness }
+    : { labelKey: "submit.v2.optimizer.proposer.harness_default" };
+}
 
 /** The inclusive range the backend accepts for `max_tool_calls`. */
 export const MAX_TOOL_CALLS_LIMITS = { min: 1, max: 1_000 } as const;
