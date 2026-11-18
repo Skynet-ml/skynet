@@ -32,7 +32,8 @@ network = ["docs.python.org"]
 # Optional. Your own proposer command. Used only when the run names no
 # proposer of its own. See "Your own proposer" below.
 entry = ["node", "agent/my-agent.js"]
-# Optional. Runs once before entry, for example to install the command.
+# Optional. Runs before the first session in each checkout, for example to
+# install the command.
 setup = ["npm", "ci"]
 
 [data]
@@ -101,6 +102,11 @@ empty part fails the setup check, and the message names the key.
   adds never join a version. It has 30 minutes. If it fails or runs out of
   time, the run stops, and the message names the command and its output.
   When `setup` ends, the run stops every process that it left running.
+  When the run stops a proposer session, it also stops a `setup` that runs.
+- `setup` can write only files that git does not track. If it changes,
+  adds to the index or removes a tracked file, the run stops. The message
+  names the command and the changed files, because the change would join
+  every version. Edits that the version made before `setup` ran do not count.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
@@ -108,6 +114,10 @@ empty part fails the setup check, and the message names the key.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
+- The command runs only in a repository checkout. AutoSaddler also starts
+  reflect sessions in a plain folder, which edit no repository. The default
+  proposer agent answers those sessions, without `setup`, and the box
+  installs that agent beside your command.
 - The run record names the command in a note: "The run uses the proposer
   command in the contract file: ...". The run page shows the command as the
   proposer.

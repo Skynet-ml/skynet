@@ -21,6 +21,7 @@ import json
 import os
 import posixpath
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -53,6 +54,9 @@ SETUP_TIMEOUT_SECONDS = 1_800.0
 SETUP_MARKER = ".ascent-proposer-setup"
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
+# The setup and harness processes this bridge runs now, by pid, with their
+# start times. A stop signal to the bridge kills their groups (SKY-753).
+_OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
@@ -404,20 +408,70 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
         except OSError as error:
             raise RuntimeError(f"{label} could not start: {error}") from error
         root_start = _start_time(process.pid)
+        _OWNED_GROUPS[process.pid] = (process, root_start)
         try:
-            process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            # A package install leaves children behind; the stop reaches them with the setup.
+            finished = _wait_unreaped(process.pid, timeout_seconds)
+            # A process the setup left in the background (a watcher, a server)
+            # must not run beside the proposer sessions, so the group stops
+            # after a finished setup too. The setup is not reaped yet, so its
+            # pid, and the group id, cannot belong to another process.
             _stop_group(process, signal.SIGKILL, root_start)
             process.wait()
-            raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.") from None
-        # A process the setup left in the background (a watcher, a server) must not
-        # run beside the proposer sessions, so the group stops after a finished setup too.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        finally:
+            _OWNED_GROUPS.pop(process.pid, None)
+        if not finished:
+            raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.")
         if process.returncode != 0:
             detail = (_tail(stderr_file) or _tail(stdout_file)).strip()[-2000:]
             raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
+
+
+def _wait_unreaped(pid: int, timeout_seconds: float) -> bool:
+    """Wait for a child to end, and leave it unreaped so its pid stays its own.
+
+    Args:
+        pid: The child's process id.
+        timeout_seconds: How long to wait.
+
+    Returns:
+        True when the child ended, False when the time ran out.
+    """
+    if not hasattr(os, "waitid"):
+        # macOS has no waitid. Its kqueue reports the exit without reaping the
+        # child, and reports an already ended child at once, with an error flag.
+        queue = select.kqueue()
+        try:
+            event = select.kevent(
+                pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT
+            )
+            return bool(queue.control([event], 1, timeout_seconds))
+        finally:
+            queue.close()
+    deadline = time.monotonic() + timeout_seconds
+    while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _stop_owned_groups(signum: int, _frame: Any) -> None:
+    """Kill the setup and session groups this bridge started, then exit.
+
+    The upstream drivers stop a session with SIGTERM to the bridge alone.
+    The setup and the harness run in their own sessions, so without this
+    they would outlive a cancelled run, and the next session would start a
+    second setup in the same checkout (SKY-753).
+
+    Args:
+        signum: The signal that stops the bridge.
+        _frame: The interrupted frame.
+    """
+    for process, root_start in list(_OWNED_GROUPS.values()):
+        # Without /proc (macOS) nothing proves a reaped pid is still ours.
+        if process.returncode is None or root_start is not None:
+            _stop_group(process, signal.SIGKILL, root_start)
+    os._exit(128 + signum)
 
 
 def _tail(file: IO[bytes]) -> str:
@@ -496,6 +550,35 @@ def _setup_output(checkout: Path, before: set[str]) -> set[str]:
     return added
 
 
+def _tracked_state(checkout: Path, path: str) -> str:
+    """Describe the current content of one tracked path.
+
+    Args:
+        checkout: The checkout or worktree.
+        path: A checkout-relative path that git tracks.
+
+    Returns:
+        A hash of the file, or ``"missing"`` when the path is gone.
+    """
+    file = checkout / path
+    if file.is_symlink():
+        return f"link:{file.readlink()}"
+    return hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else "missing"
+
+
+def _tracked_changes(checkout: Path) -> dict[str, str]:
+    """List the tracked paths that differ from the checkout's commit, with their content.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Each changed path and its :func:`_tracked_state`.
+    """
+    paths = _checkout_git(["diff", "--name-only", "--no-renames", "-z", "HEAD"], checkout).split("\0")
+    return {path: _tracked_state(checkout, path) for path in paths if path}
+
+
 def ensure_setup(command: list[str], checkout: Path) -> None:
     """Run ``[proposer] setup`` in a checkout unless its output is still there.
 
@@ -515,7 +598,19 @@ def ensure_setup(command: list[str], checkout: Path) -> None:
         return
     # Files the parent version added are untracked too; only the setup's new paths are excluded.
     before = _untracked(checkout, folders=False)
+    tracked = _tracked_changes(checkout)
     run_setup(command, checkout)
+    changed = sorted(
+        path
+        for path in tracked.keys() | _tracked_changes(checkout).keys()
+        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
+    )
+    if changed:
+        raise RuntimeError(
+            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+            f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+            " files that git does not track."
+        )
     added = sorted(_setup_output(checkout, before) | {SETUP_MARKER})
     exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
     exclude = (exclude if exclude.is_absolute() else checkout / exclude) / "info" / "exclude"
@@ -1392,7 +1487,8 @@ def _stop_group(process: subprocess.Popen[Any], signum: int, root_start: int | N
         # killpg already reaches the members of the shell's group.
         descendants = [pid for pid in _descendants(stats, process.pid) if stats[pid][1] != process.pid]
     # Signalling only the shell would leave a child holding the stdout pipe open.
-    with contextlib.suppress(ProcessLookupError):
+    # macOS answers EPERM, not ESRCH, when the group holds only an unreaped leader.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signum)
     for pid in descendants:
         with contextlib.suppress(OSError):
@@ -1565,7 +1661,9 @@ def run_session(
             ``setup`` (the contract file's ``[proposer] setup``, run by
             :func:`ensure_setup` before a session in a checkout) and
             ``file_command`` (``run_command`` is the contract file's exact
-            ``[proposer] entry``, so no key token is filled into it).
+            ``[proposer] entry``, so no key token is filled into it) and
+            ``outside_checkout`` (the default agent's launch, which answers
+            a ``file_command`` session in a folder that is not a checkout).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1578,11 +1676,24 @@ def run_session(
 
     Returns:
         The parsed answer, raw transcript, usage and exit status.
+
+    Raises:
+        RuntimeError: When the setup fails, or a ``file_command`` session
+            outside a checkout has no ``outside_checkout`` launch.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
-    # A session outside a checkout (an AutoSaddler diagnosis folder) edits no repository, so it needs no setup.
-    if proposer.get("setup") and (workspace / ".git").exists():
+    if proposer.get("file_command") and not (workspace / ".git").exists():
+        # The file's command and its setup need the repository checkout. An
+        # AutoSaddler reflect session runs in a plain folder and edits no
+        # repository, so the default agent answers it (SKY-753).
+        fallback = proposer.get("outside_checkout")
+        if not fallback:
+            raise RuntimeError(
+                f"The [proposer] entry command in optimize.toml runs only in a repository checkout, not in {workspace}."
+            )
+        proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    if proposer.get("setup"):
         ensure_setup(list(proposer["setup"]), workspace)
     if api_key is None:
         api_key = _env(KEY_ENV)
@@ -1650,28 +1761,32 @@ def run_session(
             int(max_tool_calls) if max_tool_calls else None,
             _start_time(process.pid),
         )
-        reader = threading.Thread(target=monitor.pump, daemon=True)
-        reader.start()
-        timed_out = False
+        _OWNED_GROUPS[process.pid] = (process, monitor.root_start)
         try:
-            process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _stop_group(process, signal.SIGKILL, monitor.root_start)
-            process.wait()
-        else:
-            # A job the shell left in its group would outlive the session, and
-            # the native runtime runs many sessions in one box. Without /proc
-            # (macOS) nothing proves the reaped pid is still ours, so skip it.
-            if monitor.root_start is not None:
+            reader = threading.Thread(target=monitor.pump, daemon=True)
+            reader.start()
+            timed_out = False
+            try:
+                process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
                 _stop_group(process, signal.SIGKILL, monitor.root_start)
-        # A child forked while the first signal landed can outlive the shell and
-        # keep the pipe open, so keep sweeping the group until the reader sees EOF.
-        deadline = time.monotonic() + 5.0
-        while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
-            _stop_group(process, signal.SIGKILL, monitor.root_start)
-            reader.join(timeout=0.2)
-        reader.join(timeout=30)
+                process.wait()
+            else:
+                # A job the shell left in its group would outlive the session, and
+                # the native runtime runs many sessions in one box. Without /proc
+                # (macOS) nothing proves the reaped pid is still ours, so skip it.
+                if monitor.root_start is not None:
+                    _stop_group(process, signal.SIGKILL, monitor.root_start)
+            # A child forked while the first signal landed can outlive the shell and
+            # keep the pipe open, so keep sweeping the group until the reader sees EOF.
+            deadline = time.monotonic() + 5.0
+            while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
+                _stop_group(process, signal.SIGKILL, monitor.root_start)
+                reader.join(timeout=0.2)
+            reader.join(timeout=30)
+        finally:
+            _OWNED_GROUPS.pop(process.pid, None)
     stdout = "".join(monitor.chunks)
     (session_dir / f"run-{attempt}.stdout").write_text(stdout, encoding="utf-8")
     output_format = proposer.get("output_format", "plain")
@@ -1935,6 +2050,7 @@ def main(argv: list[str]) -> int:
         return guard_main(argv[1:])
     if argv[:1] == ["reaper"]:
         return reaper_main(argv[1:])
+    signal.signal(signal.SIGTERM, _stop_owned_groups)
     args, unknown = _cli_parser().parse_known_args(argv)
     if args.output_format not in (None, "json"):
         print(f"claude bridge: unsupported --output-format {args.output_format}", file=sys.stderr)

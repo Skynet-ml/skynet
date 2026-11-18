@@ -2095,13 +2095,12 @@ def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) ->
         tmp_path: The workspace and the session folder.
     """
     proposer = {**_PLAIN, "run_command": f"echo {harness_bridge.KEY_TOKEN}"}
+    checkout = _git_checkout(tmp_path / "w")
 
-    filled = run_session(
-        proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s1", api_key="k"
-    )
+    filled = run_session(proposer, workspace=checkout, prompt="x", model="m", session_dir=tmp_path / "s1", api_key="k")
     exact = run_session(
         {**proposer, "file_command": True},
-        workspace=tmp_path / "w",
+        workspace=checkout,
         prompt="x",
         model="m",
         session_dir=tmp_path / "s2",
@@ -2224,3 +2223,160 @@ def test_the_setups_files_in_a_folder_of_the_parent_version_stay_out_of_the_vers
     assert status == "?? out/parent.txt\n"
     exclude = (checkout / ".git/info/exclude").read_text().splitlines()
     assert {"/build/", "/out/cache.bin"} <= set(exclude)
+
+
+def _git_checkout(checkout: Path) -> Path:
+    """Make a one-commit repository with one tracked file, ``a.txt``.
+
+    Args:
+        checkout: The folder to make.
+
+    Returns:
+        The checkout.
+    """
+    checkout.mkdir()
+    (checkout / "a.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    return checkout
+
+
+def test_a_setup_that_edits_a_tracked_file_stops_with_its_command_and_the_file(tmp_path: Path) -> None:
+    """A setup may write only untracked files, because a tracked edit would join every version (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("the parent version's edit")
+    command = [sys.executable, "-c", "open('a.txt', 'a').write('!'); open('new.txt', 'w')"]
+
+    with pytest.raises(
+        RuntimeError, match=r"(?s)setup command in optimize.toml \(.*a\.txt.*\) changed tracked files: a\.txt\."
+    ):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert not (checkout / harness_bridge.SETUP_MARKER).exists()
+
+
+def test_a_setup_that_leaves_the_parent_versions_tracked_edits_alone_passes(tmp_path: Path) -> None:
+    """A tracked edit that the parent version made before the setup is not the setup's change (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("the parent version's edit")
+
+    harness_bridge.ensure_setup([sys.executable, "-c", "open('new.txt', 'w')"], checkout)
+
+    assert (checkout / harness_bridge.SETUP_MARKER).exists()
+
+
+def test_a_files_command_outside_a_checkout_runs_the_default_agent(tmp_path: Path) -> None:
+    """An AutoSaddler reflect folder is no checkout, so the shipped default agent answers there (SKY-753).
+
+    Args:
+        tmp_path: The plain folder and the session folder.
+    """
+    log = tmp_path / "setup.log"
+    proposer = {
+        **_PLAIN,
+        "run_command": "echo file-entry",
+        "file_command": True,
+        "setup": [sys.executable, "-c", f"open({str(log)!r}, 'w')"],
+        "outside_checkout": {**_PLAIN, "run_command": "echo default-agent"},
+    }
+
+    outcome = run_session(
+        proposer, workspace=tmp_path / "plain", prompt="x", model="m", session_dir=tmp_path / "s", api_key="k"
+    )
+
+    assert outcome.stdout.strip() == "default-agent"
+    assert not log.exists()
+
+
+def test_a_files_command_outside_a_checkout_without_a_default_agent_stops(tmp_path: Path) -> None:
+    """Without the default agent's launch, a session outside a checkout fails with a clear error (SKY-753).
+
+    Args:
+        tmp_path: The plain folder and the session folder.
+    """
+    proposer = {**_PLAIN, "run_command": "echo file-entry", "file_command": True}
+
+    with pytest.raises(RuntimeError, match=r"entry command in optimize.toml runs only in a repository checkout"):
+        run_session(proposer, workspace=tmp_path / "plain", prompt="x", model="m", session_dir=tmp_path / "s")
+
+
+def test_the_setup_group_stops_before_the_setup_is_reaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The group kill comes while the ended setup is not reaped, so its pid cannot belong to another process (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Group kill spy.
+    """
+    seen: list[int | None] = []
+    real = harness_bridge._stop_group
+
+    def spy(process: subprocess.Popen[Any], signum: int, root_start: int | None) -> None:
+        """Record whether the setup was reaped, then stop the group.
+
+        Args:
+            process: The setup.
+            signum: The signal.
+            root_start: The setup's start time.
+        """
+        seen.append(process.returncode)
+        os.kill(process.pid, 0)
+        real(process, signum, root_start)
+
+    monkeypatch.setattr(harness_bridge, "_stop_group", spy)
+
+    harness_bridge.run_setup([sys.executable, "-c", "pass"], tmp_path)
+
+    assert seen == [None]
+
+
+def test_sigterm_to_the_bridge_stops_the_setup_it_runs(tmp_path: Path) -> None:
+    """Upstream stops a session with SIGTERM to the bridge alone, so the bridge kills the setup group (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the bridge config and the setup's pid file.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    pid_file = tmp_path / "setup.pid"
+    setup = [
+        sys.executable,
+        "-c",
+        f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)",
+    ]
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "file_command": True, "setup": setup}))
+    bridge = subprocess.Popen(
+        [sys.executable, str(Path(harness_bridge.__file__).resolve()), "--print", "x"],
+        cwd=checkout,
+        env={**os.environ, "HOME": str(tmp_path / "home"), harness_bridge.CONFIG_ENV: str(config)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    setup_pid = None
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the setup did not start"
+            time.sleep(0.05)
+        setup_pid = int(pid_file.read_text())
+        bridge.send_signal(signal.SIGTERM)
+
+        assert bridge.wait(timeout=10) == 128 + signal.SIGTERM
+        deadline = time.monotonic() + 10
+        while _running(setup_pid):
+            assert time.monotonic() < deadline, "the setup outlived the bridge"
+            time.sleep(0.05)
+    finally:
+        bridge.kill()
+        if setup_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(setup_pid, signal.SIGKILL)

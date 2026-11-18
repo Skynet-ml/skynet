@@ -756,6 +756,44 @@ def test_a_files_proposer_keeps_a_placeholder_in_its_command_as_text(
     assert document["proposer"]["run_command"] == "node agent.js {model}"
 
 
+@pytest.mark.parametrize(("engine_id", "fallback"), [("autosaddler", True), ("gepa_repo", False)])
+def test_only_autosaddler_ships_the_default_agent_for_sessions_outside_a_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine_id: str, fallback: bool
+) -> None:
+    """AutoSaddler reflects in a plain folder, so its box also gets and installs the default agent (SKY-753).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture and gateway stop.
+        engine_id: The engine of the run.
+        fallback: Whether the engine runs sessions outside a checkout.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    session = FakeSession()
+    session.candidate = {"system": "seed"} if fallback else ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="custom", run_command="node agent.js"),
+        repo={"chunks": [], "editable_paths": ["."], "readonly_paths": [], "file_proposer": True},
+    )
+    seed: Any = {"system": "seed"} if fallback else ""
+
+    run_native_engine(engine_id, Task(seed, cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    proposer = json.loads(session.files["native_input.json"])["proposer"]
+    assert proposer["run_command"] == "node agent.js"
+    if fallback:
+        assert "codex exec" in proposer["outside_checkout"]["run_command"]
+        assert "codex --version" in session.calls[0][0]
+        assert session.requirements
+    else:
+        assert "outside_checkout" not in proposer
+        assert "codex --version" not in session.calls[0][0]
+        assert session.requirements == []
+
+
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
 def test_repository_only_engines_refuse_a_text_run(tmp_path: Path, engine_id: str) -> None:
     """GEPA's and Best-of-N's agent samplers edit a checkout, so a text run never reaches them."""

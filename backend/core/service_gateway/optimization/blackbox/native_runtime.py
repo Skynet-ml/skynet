@@ -311,6 +311,7 @@ def _bootstrap_command(
     harness: str = BLACKBOX_HARNESS_CODEX,
     install_command: str | None = None,
     shinka_agent: bool = False,
+    fallback: tuple[str, str | None] | None = None,
 ) -> str:
     """Build installation and preflight commands with immutable package versions.
 
@@ -322,6 +323,9 @@ def _bootstrap_command(
         install_command: Install step of the proposer harness.
         shinka_agent: ShinkaEvolve writes versions with Pi (its agent editor),
             so Pi and Node are prepared as for a Pi proposer.
+        fallback: The harness and install step of the default agent that
+            answers the sessions outside a checkout of a ``[proposer] entry``
+            run, prepared beside the proposer harness.
 
     Returns:
         Shell command that prepares the isolated source and runtime.
@@ -333,6 +337,9 @@ def _bootstrap_command(
     harness_install, harness_check = (
         ("", "") if harnessless else _harness_setup(harness, install_command, protected=protected)
     )
+    if fallback is not None:
+        fallback_install, fallback_check = _harness_setup(*fallback, protected=protected)
+        harness_install, harness_check = harness_install + fallback_install, harness_check + fallback_check
     floor = AUTOSADDLER_PYTHON_FLOOR if own_venv else PYTHON_FLOOR
     prepare = (
         "set -eu; mkdir -p .claude .cache .local native_vendor rpc; "
@@ -1135,6 +1142,16 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         mcp_servers=tuple(mcp_route.get("servers") or ()),
         exact_commands=bool((options.repo or {}).get("file_proposer")),
     )
+    # An AutoSaddler reflect session runs in a plain folder, where the file's
+    # command has no checkout, so the default agent answers it (SKY-753).
+    fallback = None
+    if engine_id == "autosaddler" and (options.repo or {}).get("file_proposer"):
+        fallback = build_launch(
+            BlackboxTarget(kind="agent", harness=BlackboxProposer().harness, model=options.model),
+            GatewayConfig(url=options.gateway.url, api_key=harness_bridge.KEY_TOKEN),
+            protected=options.budget_route is not None,
+            reasoning_effort=options.reasoning_effort,
+        )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
     # limits end them, and only the sandbox's platform lifetime bounds the box.
@@ -1199,6 +1216,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             # lacks its output, also in a protected run, where the bootstrap installs nothing.
             payload["proposer"]["file_command"] = True
             payload["proposer"]["setup"] = list(options.repo.get("proposer_setup") or ())
+        if fallback is not None:
+            payload["proposer"]["outside_checkout"] = launch_payload(fallback)
         if shinka:
             payload["shinka"] = dict(options.shinka or {})
             payload["shinka_models"] = [
@@ -1250,6 +1269,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 harness=BLACKBOX_HARNESS_PI if editor else proposer.harness,
                 install_command=editor["launches"][0]["install_command"] if editor else launch.install_command,
                 shinka_agent=editor is not None,
+                fallback=None if fallback is None else (BlackboxProposer().harness, fallback.install_command),
             ),
             timeout_seconds=min(_INSTALL_ALLOWANCE, lifetime - 1.0),
         )
@@ -1258,7 +1278,10 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             raise ServiceError(f"Native optimizer runtime setup failed: {detail}")
         # A host_cli proposer runs the host-agent shim, not Codex in this box, so it
         # needs no requirements file (the parent's _starts_codex skips it too).
-        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None:
+        codex_fallback = fallback is not None and BlackboxProposer().harness == BLACKBOX_HARNESS_CODEX
+        if not editor and (
+            (proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None) or codex_fallback
+        ):
             _require_codex_requirements(runtime, session)
         env = {
             "ANTHROPIC_BASE_URL": (relay or options.gateway.url).removesuffix("/v1"),
