@@ -116,10 +116,11 @@ class WizardPreflightResponse(BaseModel):
     # A repository run's effective environment: what versions may change,
     # what stays protected, and which network and services each step gets.
     environment: dict[str, Any] | None = None
-    # The proposer CLI this check ran on. A submit sends it back so the server
-    # does not pick another CLI from changed readiness and refuse the evidence.
-    # It sends it with ``host_cli_auto: true``: without the mark it is a picked
-    # CLI, which replaces a repository's [proposer] entry (SKY-753).
+    # The proposer CLI this check ran on. A client may send it back with
+    # ``host_cli_auto: true``, so that changed readiness does not make the
+    # server pick another CLI and refuse the evidence. Without the mark it is
+    # a picked CLI, which replaces a repository's [proposer] entry (SKY-753).
+    # The web wizard does not send it back; the submit fills the CLI again.
     proposer_host_cli: Literal["codex", "claude"] | None = None
 
     @model_serializer(mode="wrap")
