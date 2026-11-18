@@ -28,9 +28,12 @@ _MAX_FINALISTS = 3
 _BRIEF_MAX_BYTES = 64_000
 # Upstream's reply parser ends the candidate at the first run of three
 # backticks anywhere in the reply, also inside a line, so a repository diff
-# spells each such run as a token that Skynet turns back before scoring.
-_BACKTICK_RUN = re.compile("`{3,}")
-_BACKTICK_TOKEN = re.compile(r"<<(\d{1,4}) backticks>>")
+# spells each such run as a token that Skynet turns back before scoring. A
+# literal ``<<`` is doubled, so file text that looks like a token stays text
+# and the round trip is exact. Both patterns share one run bound, so each
+# token the encoder writes decodes; a longer run splits into several tokens.
+_ESCAPE = re.compile("<<|`{3,9999}")
+_UNESCAPE = re.compile(r"<<<<|<<(\d{1,4}) backticks>>")
 
 
 class _SampleStream:
@@ -249,7 +252,8 @@ def _repository_brief(
         "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
         "repository root; an empty diff keeps the repository as it is.",
         "Inside the diff, write each run of three or more backticks as `<<N backticks>>`, where N is the "
-        "length of the run, as the file contents below do. Skynet turns each token back into backticks.",
+        "length of the run, and write each literal `<<` as `<<<<`, as the file contents below do. Skynet "
+        "turns each token back into backticks and each `<<<<` back into `<<`.",
         f"You may change: {editable or 'nothing'}.",
     ]
     if fixed:
@@ -291,19 +295,19 @@ def _repository_brief(
 
 
 def _escape_backticks(text: str) -> str:
-    """Spell each run of three or more backticks as its token.
+    """Spell each run of three or more backticks as its token, and each literal ``<<`` as ``<<<<``.
 
     Args:
         text: File text.
 
     Returns:
-        The text with no run of three backticks.
+        The text with no run of three backticks; :func:`_unescape_backticks` gives back the exact text.
     """
-    return _BACKTICK_RUN.sub(lambda match: f"<<{len(match.group())} backticks>>", text)
+    return _ESCAPE.sub(lambda match: "<<<<" if match.group() == "<<" else f"<<{len(match.group())} backticks>>", text)
 
 
 def _unescape_backticks(text: str) -> str:
-    """Turn each backtick token back into its run of backticks.
+    """Turn each backtick token back into its run of backticks, and each ``<<<<`` back into ``<<``.
 
     Args:
         text: A repository sample as upstream parsed it.
@@ -311,7 +315,7 @@ def _unescape_backticks(text: str) -> str:
     Returns:
         The sample as a real diff.
     """
-    return _BACKTICK_TOKEN.sub(lambda match: "`" * int(match.group(1)), text)
+    return _UNESCAPE.sub(lambda match: "<<" if match.group(1) is None else "`" * int(match.group(1)), text)
 
 
 def _visible(seed: RepoSeed, path: str) -> bool:

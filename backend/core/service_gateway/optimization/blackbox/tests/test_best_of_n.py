@@ -31,7 +31,8 @@ from core.worker.actors import User
 from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop
 
 from .. import best_of_n
-from ..best_of_n import BestOfNEngine, _repository_brief
+from ..best_of_n import BestOfNEngine, _escape_backticks, _repository_brief, _unescape_backticks
+from ..feedback import STR_CANDIDATE_KEY
 from ..harness import GatewayConfig
 from ..harness_bridge import hidden_hashes
 from ..native_runtime import NativeOptions
@@ -697,29 +698,109 @@ def test_upstream_cuts_a_raw_diff_at_its_first_backtick_run() -> None:
 def test_a_repository_sample_with_backtick_tokens_reaches_the_scorer_as_the_whole_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The model spells 3- and 4-backtick runs as tokens; the scorer and the result get the real, whole diff."""
+    """The model spells 3- and 4-backtick runs as tokens; the scorer, the tree and the result get the whole diff."""
     repo_tree = _repo(trees)
     reply = _README_DIFF.replace("````", "<<4 backticks>>").replace("```", "<<3 backticks>>")
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [f"```diff\n{reply}\n```"], generation=1)
-    scored: list[Any] = []
+    scored: list[tuple[Any, Any]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+    ctx = _context(loop, repo_tree)
+    ctx.progress_callback = lambda name, payload: events.append((name, payload))
+
+    result = BestOfNEngine().run(Task("", cases=list(_CASES)), loop.server(_recording(scored), max_evals=2), ctx)
+
+    assert scored == [(_README_DIFF, case) for case in _CASES]
+    assert result.best_candidate == _README_DIFF
+    assert [payload["prompt"] for name, payload in events if name == "candidate"] == [{STR_CANDIDATE_KEY: _README_DIFF}]
+
+
+def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With a validation split, the finalist re-score gets the real diff, and so does the validated result."""
+    repo_tree = _repo(trees)
+    reply = _escape_backticks(_README_DIFF)
+    replies = [f"```diff\n{reply}\n```"] * 2
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, replies, generation=1)
+    scored: list[tuple[Any, Any]] = []
+    valset = [{"id": "v"}]
+
+    result = BestOfNEngine().run(
+        Task("", cases=list(_CASES), valset=valset),
+        loop.server(_recording(scored), max_evals=5),
+        _context(loop, repo_tree),
+    )
+
+    assert (_README_DIFF, valset[0]) in scored
+    assert {candidate for candidate, _ in scored} == {_README_DIFF}
+    assert result.metadata["selection_scope"] == "validation"
+    assert result.best_candidate == _README_DIFF
+
+
+def _recording(scored: list[tuple[Any, Any]]) -> Any:
+    """Return a scorer that records each candidate and case it gets.
+
+    Args:
+        scored: The list that receives ``(candidate, case)`` for each scorer run.
+
+    Returns:
+        The scorer; it gives each run a fixed score and no side information.
+    """
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
-        """Record the candidate the scorer gets.
+        """Record the candidate and the case the scorer gets.
 
         Args:
             loop: Not used.
             candidate: The patch text.
-            case: Not used.
+            case: The case scored.
 
         Returns:
             A fixed score and no side information.
         """
-        scored.append(candidate)
+        scored.append((candidate, case))
         return 1.0, {}
 
+    return score
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<<3 backticks>>",
+        "x << y <<<< z <<<3 backticks>> <",
+        "<```<<```<<<```<<<<````",
+        "`" * 10_002 + "<<" + "`" * 10_000,
+        "plain `a` ``b``",
+    ],
+)
+def test_backtick_escaping_round_trips_exactly(text: str) -> None:
+    """Escape then unescape gives back the exact text, also text that looks like a token, and leaves no fence."""
+    escaped = _escape_backticks(text)
+
+    assert "```" not in escaped
+    assert _unescape_backticks(escaped) == text
+
+
+def test_a_backtick_run_longer_than_one_token_splits_into_tokens_that_decode() -> None:
+    """A run of more than 9,999 backticks becomes several tokens within the bound, never a raw fence."""
+    assert _escape_backticks("`" * 10_002) == "<<9999 backticks>><<3 backticks>>"
+    assert _escape_backticks("`" * 10_001) == "<<9999 backticks>>``"
+
+
+def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A diff whose context line is the literal text ``<<3 backticks>>`` keeps that text, not three backticks."""
+    diff = "--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,3 @@\n <<3 backticks>> and a << b\n ```\n+new"
+    repo_tree = _repo(trees)
+    reply = _escape_backticks(diff)
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [f"```diff\n{reply}\n```"], generation=1)
+    scored: list[tuple[Any, Any]] = []
+
     result = BestOfNEngine().run(
-        Task("", cases=list(_CASES)), loop.server(score, max_evals=2), _context(loop, repo_tree)
+        Task("", cases=list(_CASES)), loop.server(_recording(scored), max_evals=2), _context(loop, repo_tree)
     )
 
-    assert scored == [_README_DIFF] * len(_CASES)
-    assert result.best_candidate == _README_DIFF
+    assert scored == [(diff, case) for case in _CASES]
+    assert result.best_candidate == diff
