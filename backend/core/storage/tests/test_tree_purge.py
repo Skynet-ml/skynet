@@ -33,7 +33,7 @@ from core.storage.models import (
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_compactor import TreeCompactor
-from core.storage.tree_purge import TreePurgeError, TreePurgeSummary, purge_user
+from core.storage.tree_purge import TreePurgeError, delete_unused_packs, purge_user
 from core.storage.tree_store import TreeEntry, TreeStore
 
 ADA_RUNS = ["job-1", "job-2"]
@@ -177,21 +177,42 @@ def _deleter(root: Path, deleted: list[str]) -> Any:
     return delete_objects
 
 
-def _purge(engine: Engine, delete_objects: Any, grace_seconds: float = 0.0) -> TreePurgeSummary:
-    """Purge ``ada`` in one committed transaction.
+def _purge(engine: Engine, delete_objects: Any, grace_seconds: float = 0.0) -> tuple[int, int]:
+    """Purge ``ada`` in one committed transaction, then delete its unused packs, as the account delete does.
 
     Args:
         engine: The test engine.
         delete_objects: The pack delete function.
-        grace_seconds: The age a pack needs before the purge deletes it at once.
+        grace_seconds: The age a pack needs before the purge lists it for deletion.
 
     Returns:
-        The purge summary.
+        The counts of deleted rows and deleted packs.
     """
     with Session(engine) as session:
         summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_objects, grace_seconds=grace_seconds)
         session.commit()
-    return summary
+    return summary.deleted_rows, delete_unused_packs(engine, summary)
+
+
+def _delete_local(root: Path) -> Any:
+    """Return a one-key delete function over the local store folder, as the compactor takes.
+
+    Args:
+        root: The object store folder.
+
+    Returns:
+        The delete function.
+    """
+
+    def delete_object(key: str) -> None:
+        """Delete one local object; a missing object is not an error.
+
+        Args:
+            key: The object key.
+        """
+        (root / key).unlink(missing_ok=True)
+
+    return delete_object
 
 
 def _marked(engine: Engine) -> set[str]:
@@ -245,7 +266,7 @@ def test_purge_deletes_the_account_rows_and_its_own_pack(
     assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
     assert _rows(engine, "bob", [BOB_RUN]) == bob_before
     # Two runs in two packs: four steps, eight tree objects (a blob and a tree each), one workspace.
-    assert summary == TreePurgeSummary(deleted_rows=4 + 8 + 1, deleted_packs=1)
+    assert summary == (4 + 8 + 1, 1)
     assert deleted == [packs["ada"]]
     assert objects.list("") == [packs["shared"]]
     with Session(engine) as session:
@@ -270,21 +291,21 @@ def test_a_second_purge_deletes_nothing(engine: Engine, packs: dict[str, str], t
     deleted: list[str] = []
     _purge(engine, _deleter(tmp_path / "objects", deleted))
 
-    assert _purge(engine, _deleter(tmp_path / "objects", deleted)) == TreePurgeSummary(0, 0)
+    assert _purge(engine, _deleter(tmp_path / "objects", deleted)) == (0, 0)
     assert deleted == [packs["ada"]]
 
 
-def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
-    engine: Engine, objects: LocalObjectStore, packs: dict[str, str]
+def test_a_failed_pack_delete_after_the_commit_keeps_the_pack_for_the_compactor(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
-    """A failed S3 delete raises, and the rollback keeps every row of the account.
+    """A failed S3 delete after the commit raises and keeps the pack and its row; the compactor deletes both.
 
     Args:
         engine: The test engine.
         objects: The test object store.
         packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
     """
-    before = _rows(engine, "ada", ADA_RUNS)
 
     def fail(keys: list[str]) -> None:
         """Fail like an S3 outage.
@@ -300,9 +321,47 @@ def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
     with pytest.raises(TreePurgeError, match=packs["ada"]):
         _purge(engine, fail)
 
-    assert _rows(engine, "ada", ADA_RUNS) == before
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
     assert sorted(objects.list("")) == sorted(packs.values())
-    assert _marked(engine) == set()
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == set(packs.values())
+    assert TreeCompactor(engine, objects, _delete_local(tmp_path / "objects"), grace_seconds=0).remove_retired() == 1
+    assert objects.list("") == [packs["shared"]]
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
+
+
+def test_a_rollback_after_the_purge_keeps_the_pack_objects_and_rows(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """A failure after the purge and before the commit deletes no pack object, and every row stays.
+
+    A late call of delete_unused_packs with the rolled-back summary deletes nothing either, because
+    the rows still point at the pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
+    before = _rows(engine, "ada", ADA_RUNS)
+    deleted: list[str] = []
+
+    with Session(engine) as session:
+        summary = purge_user(
+            session, "ada", ADA_RUNS, delete_objects=_deleter(tmp_path / "objects", deleted), grace_seconds=0.0
+        )
+        assert summary.unused_packs == [packs["ada"]]
+        session.rollback()
+
+    assert deleted == []
+    assert sorted(objects.list("")) == sorted(packs.values())
+    assert _rows(engine, "ada", ADA_RUNS) == before
+    assert delete_unused_packs(engine, summary) == 0
+    assert deleted == []
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == set(packs.values())
 
 
 def test_a_purge_with_packs_and_no_bucket_fails(
@@ -330,14 +389,14 @@ def test_a_purge_with_no_trees_needs_no_bucket(engine: Engine, monkeypatch: pyte
     """
     monkeypatch.setattr(settings, "tree_bucket", None)
 
-    assert _purge(engine, None) == TreePurgeSummary(deleted_rows=1, deleted_packs=0)
+    assert _purge(engine, None) == (1, 0)
     assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
 
 
 def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
-    """The second of two pack deletes fails; the retry deletes the rows, both packs and their rows.
+    """The second of two pack deletes after the commit fails; a retry deletes both packs and their rows.
 
     The first pack object is already gone when the retry deletes it again, and that is no error.
 
@@ -368,16 +427,21 @@ def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
         (root / keys[0]).unlink()
         raise OSError(f"S3 could not delete {keys[1]}")
 
+    with Session(engine) as session:
+        summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_first_then_fail, grace_seconds=0.0)
+        session.commit()
     with pytest.raises(TreePurgeError):
-        _purge(engine, delete_first_then_fail)
+        delete_unused_packs(engine, summary)
     assert objects.list("") == sorted([packs["shared"], own[1]])
-    assert _rows(engine, "ada", ADA_RUNS) != (0, 0, 0)
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
 
     deleted: list[str] = []
-    assert _purge(engine, _deleter(root, deleted)).deleted_packs == 2
+    summary.delete_objects = _deleter(root, deleted)
+    assert delete_unused_packs(engine, summary) == 2
 
     assert deleted == own
-    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
     assert objects.list("") == [packs["shared"]]
     with Session(engine) as session:
         assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
@@ -649,7 +713,7 @@ def test_the_purge_keeps_a_young_unused_pack_until_the_grace_time_ends(
 
     summary = _purge(engine, _deleter(tmp_path / "objects", deleted), grace_seconds=tree_compactor.GRACE_SECONDS)
 
-    assert summary.deleted_packs == 0
+    assert summary[1] == 0
     assert deleted == []
     assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
     assert sorted(objects.list("")) == sorted([shared, packs["ada"], new])
@@ -1060,7 +1124,7 @@ def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: di
     finally:
         stop()
 
-    assert summary == TreePurgeSummary(deleted_rows=4 + 8 + 1, deleted_packs=1)
+    assert summary == (4 + 8 + 1, 1)
     deletes = [sql for sql, _ in statements if sql.startswith("DELETE")]
     assert deletes
     assert not any("RETURNING" in sql for sql in deletes)

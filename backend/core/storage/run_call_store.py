@@ -21,7 +21,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from ..billing.usage_tags import LANE_KEY
-from .models import RunCallModel, RunCandidateModel
+from .models import JobModel, RunCallModel, RunCandidateModel
 
 BODY_CAP_BYTES = 64 * 1024
 # A failure reason can carry a whole stage error or exception text; every polling page reads it.
@@ -241,12 +241,17 @@ class PostgresRunCallStore:
     def _lock_candidate(
         self, session: Session, optimization_id: str, candidate_id: str, role: str, state: str
     ) -> RunCandidateModel:
-        """Create the candidate row when it is missing, then lock it until the session commits.
+        """Share-lock the job, create the candidate row when it is missing, then lock it until the session commits.
 
         The lock serializes every write of one candidate, so ``last_seq`` grows
         in commit order: a reader that holds ``seq`` N can never later see a
         call with ``seq`` N or lower commit. Parallel candidates do not wait on
         each other. SQLite ignores ``FOR UPDATE``; it allows only one writer.
+
+        The job lock comes first. The call insert needs a key share lock on the job, and a run
+        or account delete locks the job and then deletes the candidate. With the candidate
+        locked first, the two would wait for each other (SKY-733). SQLite has no row locks, so
+        only PostgreSQL takes the job lock.
 
         Args:
             session: The open write session.
@@ -258,7 +263,14 @@ class PostgresRunCallStore:
         Returns:
             The locked candidate row, read fresh from the database.
         """
-        insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
+        postgres = self._engine.dialect.name == "postgresql"
+        if postgres:
+            session.execute(
+                select(JobModel.optimization_id)
+                .where(JobModel.optimization_id == optimization_id)
+                .with_for_update(read=True, key_share=True)
+            ).all()
+        insert = postgres_insert if postgres else sqlite_insert
         session.execute(
             insert(RunCandidateModel)
             .values(optimization_id=optimization_id, candidate_id=candidate_id, role=role, state=state)

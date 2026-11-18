@@ -1127,7 +1127,15 @@ def _offsets_on(engine: Engine, pack_key: str) -> list[int]:
 def test_a_marked_pack_over_the_row_cap_moves_in_parts_until_it_is_empty(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """A marked pack with more rows than the cap moves cap - 1 rows per pass, by offset, and stays marked until empty."""
+    """A marked pack with more rows than the cap moves cap - 1 rows per pass, by offset, and stays marked until empty.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     written = _fill(store, flushes=1)
     (marked,) = objects.list("packs/w1/")
     offsets = _offsets_on(engine, marked)
@@ -1154,7 +1162,15 @@ def test_a_marked_pack_over_the_row_cap_moves_in_parts_until_it_is_empty(
 
 
 def test_a_marked_pack_that_breaks_logs_an_error(engine, objects, store, make_compactor, caplog) -> None:
-    """A marked pack with no object leaves the candidates with the deleted bytes, so the pass logs an error."""
+    """A marked pack with no object leaves the candidates with the deleted bytes, so the pass logs an error.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
     _fill(store, flushes=1)
     (marked,) = objects.list("packs/w1/")
     objects._path(marked).unlink()
@@ -1457,7 +1473,13 @@ def test_remove_unrecorded_skips_a_key_with_no_write_time(engine, objects, make_
 
 
 def test_remove_unrecorded_deletes_only_an_old_flush_pack_with_no_row(engine, objects, make_compactor) -> None:
-    """A flush pack with no row goes after the long age; a young orphan and an old recorded pack stay."""
+    """A flush pack with no row goes after the long age; a young orphan and an old recorded pack stay.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
     old_orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
     young_orphan = f"{PACK_PREFIX}/gone-pod/{time.time_ns():020d}-b.pack"
     recorded = f"{PACK_PREFIX}/w1/{2:020d}-c.pack"
@@ -1473,7 +1495,13 @@ def test_remove_unrecorded_deletes_only_an_old_flush_pack_with_no_row(engine, ob
 
 
 def test_a_flush_pack_younger_than_the_long_age_stays_also_with_no_grace_time(engine, objects, make_compactor) -> None:
-    """The grace time of compacted packs does not apply to flush packs: an apply may still be in flight."""
+    """The grace time of compacted packs does not apply to flush packs: an apply may still be in flight.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
     age_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
     almost = f"{PACK_PREFIX}/gone-pod/{time.time_ns() - age_ns + 60 * 10**9:020d}-a.pack"
     objects.put(almost, b"x")
@@ -1539,7 +1567,15 @@ def _orphan_an_old_flush_pack(
 def test_the_sweep_claims_a_flush_pack_that_recovery_read_before_the_delete(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """Recovery GETs an old pack, the sweep deletes it, then recovery applies: the claim row keeps the apply out."""
+    """Recovery GETs an old pack, the sweep deletes it, then recovery applies: the claim row keeps the apply out.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
     original_get = objects.get
     swept: list[int] = []
@@ -1581,7 +1617,15 @@ def test_the_sweep_claims_a_flush_pack_that_recovery_read_before_the_delete(
 def test_recovery_skips_a_flush_pack_that_the_sweep_deleted_after_the_list(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """Recovery lists an old pack, the sweep claims and deletes it, then recovery's GET finds nothing and skips it."""
+    """Recovery lists an old pack, the sweep claims and deletes it, then recovery's GET finds nothing and skips it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
     original_list = objects.list
     sweeping: list[bool] = []
@@ -1617,7 +1661,15 @@ def test_recovery_skips_a_flush_pack_that_the_sweep_deleted_after_the_list(
 def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """Recovery applies the young pack first; once it is old, the sweep's claim conflicts, and the pack and rows stay."""
+    """Recovery applies the young pack first; once it is old, the sweep's claim conflicts, and the pack and rows stay.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     old, step_id = _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
@@ -1638,7 +1690,15 @@ def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
 def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(
     engine, objects, store, make_compactor, monkeypatch
 ) -> None:
-    """The sweep reads which old flush packs have a row and sends no claim INSERT for them."""
+    """The sweep reads which old flush packs have a row and sends no claim INSERT for them.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     _orphan_an_old_flush_pack(engine, objects, store, written_ns=time.time_ns())
     recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
@@ -1654,7 +1714,14 @@ def test_the_sweep_sends_no_claim_for_an_old_flush_pack_that_has_a_row(
 
 
 def test_a_late_apply_after_the_claim_row_went_is_refused(engine, objects, store, make_compactor) -> None:
-    """A flush that retries past the sweep and the claim row's removal cannot record the deleted pack."""
+    """A flush that retries past the sweep and the claim row's removal cannot record the deleted pack.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
     pack = objects.get(old)
     assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
@@ -1672,7 +1739,14 @@ def test_a_late_apply_after_the_claim_row_went_is_refused(engine, objects, store
 def test_an_apply_refuses_a_flush_pack_a_little_younger_than_the_sweep_age(
     engine, objects, store, make_compactor
 ) -> None:
-    """Inside the clock skew margin, the sweep keeps the pack, but the apply already refuses it."""
+    """Inside the clock skew margin, the sweep keeps the pack, but the apply already refuses it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
     sweep_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
     margin_ns = int(SWEEP_AGE_MARGIN_SECONDS * 1e9)
     old, step_id = _orphan_an_old_flush_pack(
@@ -1691,7 +1765,13 @@ def test_an_apply_refuses_a_flush_pack_a_little_younger_than_the_sweep_age(
 
 
 def test_a_pass_sweeps_the_packs_with_no_row_at_most_once_an_interval(engine, objects, make_compactor) -> None:
-    """Two passes inside the sweep interval list the prefixes once; with no interval, each pass sweeps."""
+    """Two passes inside the sweep interval list the prefixes once; with no interval, each pass sweeps.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        make_compactor: The factory of compactors.
+    """
     for interval, expected in ((3600.0, 1), (0.0, 2)):
         compactor = make_compactor(sweep_interval_seconds=interval)
         sweeps: list[int] = []
@@ -1909,7 +1989,14 @@ def test_postgres_the_merge_locks_jobs_then_packs_in_key_order_with_nowait(
 def test_postgres_the_broken_mark_locks_packs_in_key_order_with_nowait(
     tmp_path, postgres_engine, objects, postgres_store
 ) -> None:
-    """The broken mark locks its packs sorted by key and with NOWAIT before its UPDATE, as an account purge locks them."""
+    """The broken mark locks its packs sorted by key and with NOWAIT before its UPDATE, as an account purge locks them.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     _fill(postgres_store)
     missing = sorted(objects.list("packs/w1/"))[:2]
     for key in missing:
@@ -1935,7 +2022,14 @@ def test_postgres_the_broken_mark_locks_packs_in_key_order_with_nowait(
 def test_postgres_the_broken_mark_does_not_wait_for_a_locked_pack(
     tmp_path, postgres_engine, objects, postgres_store
 ) -> None:
-    """A broken pack that another transaction holds stays unmarked, and the pass does not wait for the lock."""
+    """A broken pack that another transaction holds stays unmarked, and the pass does not wait for the lock.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+        postgres_store: The step log store on PostgreSQL that the test flushes by hand.
+    """
     _fill(postgres_store)
     missing = min(objects.list("packs/w1/"))
     objects._path(missing).unlink()
@@ -2044,7 +2138,13 @@ def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
 
 @needs_postgres
 def test_postgres_only_one_replica_sweeps_the_packs_with_no_row(tmp_path, postgres_engine, objects) -> None:
-    """A replica that finds the sweep lock held skips the sweep; once the lock is free, it sweeps."""
+    """A replica that finds the sweep lock held skips the sweep; once the lock is free, it sweeps.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the disposable PostgreSQL schema.
+        objects: The test object store.
+    """
     orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
     objects.put(orphan, b"x")
     compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)

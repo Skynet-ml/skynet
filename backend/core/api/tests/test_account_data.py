@@ -60,6 +60,7 @@ from ...storage.models import (
     ProgressEventModel,
     PushSubscriptionModel,
     RunCallModel,
+    RunCandidateModel,
     SetupDraftModel,
     SlackConnectionModel,
     StoragePackModel,
@@ -71,7 +72,8 @@ from ...storage.models import (
     WorkspaceModel,
 )
 from ...storage.remote import RemoteDBJobStore
-from ...storage.tree_purge import TreePurgeError, mark_run_packs
+from ...storage.run_call_store import PostgresRunCallStore
+from ...storage.tree_purge import TreePurgeError, delete_unused_packs, mark_run_packs
 from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -383,7 +385,11 @@ def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespac
 
 
 def test_delete_answers_503_and_keeps_the_account_when_the_tree_purge_fails(harness: SimpleNamespace) -> None:
-    """A failed tree purge is a 503 with its own code, and the account and its rows stay (SKY-733)."""
+    """A failed tree purge is a 503 with its own code, and the account and its rows stay (SKY-733).
+
+    Args:
+        harness: The client and seeded data of the account-data routers.
+    """
     with patch("core.api.account_data_service.tree_purge.purge_user", side_effect=TreePurgeError("packs/w1/p1 failed")):
         resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
 
@@ -921,12 +927,16 @@ def test_refund_that_resolved_the_email_before_deletion_reverses_the_closure(ful
         ]
 
 
-def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_schema_engine: Engine) -> None:
-    """Account deletion purges the trees, workspaces and own packs; a failed pack delete fails it (SKY-733)."""
-    with Session(full_schema_engine) as session:
+def _seed_tree_pack(engine: Engine) -> None:
+    """Add the user, a workspace, and a tree object in a pack older than the grace time.
+
+    Args:
+        engine: Engine holding the full schema.
+    """
+    with Session(engine) as session:
         session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
         session.add(WorkspaceModel(id="ws-1", username=_EMAIL))
-        # Older than the grace time, so the purge deletes the pack at once.
+        # Older than the grace time, so the purge lists the pack for deletion after the commit.
         session.add(
             StoragePackModel(
                 pack_key="packs/w1/p1",
@@ -942,33 +952,101 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
         )
         session.commit()
 
-    def _fail(keys: list[str]) -> None:
-        """Fail like an S3 outage.
 
-        Args:
-            keys: The object keys.
+def _fail(keys: list[str]) -> None:
+    """Fail like an S3 outage.
 
-        Raises:
-            OSError: Always.
-        """
-        raise OSError("S3 is down")
+    Args:
+        keys: The object keys.
 
-    with patch("core.storage.tree_purge.bucket_deleter", return_value=_fail), pytest.raises(TreePurgeError):
-        _delete(full_schema_engine)
-    with Session(full_schema_engine) as session:
-        assert session.get(UserModel, _EMAIL) is not None
-        assert session.scalars(select(TreeObjectModel)).one().pack_key == "packs/w1/p1"
+    Raises:
+        OSError: Always.
+    """
+    raise OSError("S3 is down")
 
-    deleted: list[str] = []
-    with patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.extend):
-        _delete(full_schema_engine)
 
-    assert deleted == ["packs/w1/p1"]
+def test_deletion_purges_the_tree_rows_and_deletes_the_packs_after_the_commit(full_schema_engine: Engine) -> None:
+    """Account deletion purges the trees and workspaces, and deletes the own packs after the commit (SKY-733).
+
+    A failed pack delete after the commit keeps the pack row, which no row points at, and a retry deletes it.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
+    _seed_tree_pack(full_schema_engine)
+
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=_fail):
+        with Session(full_schema_engine) as session:
+            summary = delete_account(session, _EMAIL)
+            session.commit()
+        with pytest.raises(TreePurgeError):
+            delete_unused_packs(full_schema_engine, summary.trees)
     with Session(full_schema_engine) as session:
         assert session.get(UserModel, _EMAIL) is None
         assert session.scalars(select(TreeObjectModel)).all() == []
         assert session.scalars(select(WorkspaceModel)).all() == []
+        assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
+
+    deleted: list[str] = []
+    summary.trees.delete_objects = deleted.extend
+    assert delete_unused_packs(full_schema_engine, summary.trees) == 1
+
+    assert deleted == ["packs/w1/p1"]
+    with Session(full_schema_engine) as session:
         assert session.scalars(select(StoragePackModel)).all() == []
+
+
+def test_a_failure_after_the_purge_and_before_the_commit_keeps_the_pack_objects(full_schema_engine: Engine) -> None:
+    """A deletion step after the tree purge fails; no pack object is deleted, and every row stays (SKY-733).
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
+    _seed_tree_pack(full_schema_engine)
+    deleted: list[str] = []
+
+    with (
+        patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.extend),
+        patch.object(BudgetService, "close_for_deleted_account", side_effect=RuntimeError("database is gone")),
+        Session(full_schema_engine) as session,
+        pytest.raises(RuntimeError, match="database is gone"),
+    ):
+        delete_account(session, _EMAIL)
+
+    assert deleted == []
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.scalars(select(TreeObjectModel.pack_key)).all() == ["packs/w1/p1"]
+        assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
+
+
+def test_delete_answers_200_when_the_pack_delete_after_the_commit_fails(harness: SimpleNamespace) -> None:
+    """The account is gone after the commit, so a failed pack delete is logged and the pack row stays (SKY-733).
+
+    Args:
+        harness: The test client and its engine.
+    """
+    with Session(harness.engine) as session:
+        session.add(
+            StoragePackModel(
+                pack_key="packs/w1/p1", worker_id="w1", byte_size=10, created_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        session.add(
+            TreeObjectModel(
+                username=_EMAIL, object_id="o1", byte_size=10, pack_key="packs/w1/p1", pack_offset=0, pack_length=10
+            )
+        )
+        session.commit()
+
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=_fail):
+        resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+        assert session.scalars(select(TreeObjectModel)).all() == []
+        assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
 
 
 def _waits_for_a_lock(engine: Engine) -> bool:
@@ -1216,3 +1294,160 @@ def test_a_job_lock_holder_and_a_delete_of_its_run_at_once_do_not_deadlock(
         assert session.scalars(select(GepaCheckpointModel)).all() == []
         budget = session.get(ExecutionBudgetModel, budget_id)
         assert (budget.generation, budget.job_id) == (1 if writer == "resume" else 0, None)
+
+
+@pytest.mark.parametrize("deleted", ["account", "run"])
+def test_a_relay_call_write_and_a_delete_of_its_run_at_once_do_not_deadlock(
+    full_schema_engine: Engine, deleted: str
+) -> None:
+    """A relay call write that holds its candidate lock and a delete of its run finish together (SKY-733).
+
+    The call write locks its candidate row, waits until the delete waits for a
+    lock, then inserts the call row, which needs a key share lock on the job.
+    The delete locks the job, then deletes the candidate row. If the call write
+    took the candidate lock before the job lock, each would wait for the other
+    and PostgreSQL would abort one.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        deleted: Whether the account delete or the run delete races the call write.
+    """
+    if full_schema_engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    run_id = "job-race"
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="running"))
+        session.flush()
+        # The candidate exists, so its insert does nothing and takes no key share lock on the job.
+        session.add(RunCandidateModel(optimization_id=run_id, candidate_id="c", role="candidate", state="running"))
+        session.commit()
+    # The full constructor opens its own engine from a URL; delete_job needs only the session factory and engine.
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = full_schema_engine
+    store._session_factory = sessionmaker(bind=full_schema_engine)
+    calls = PostgresRunCallStore(full_schema_engine)
+    real_lock = PostgresRunCallStore._lock_candidate
+    candidate_locked = threading.Event()
+    errors: list[BaseException] = []
+    seqs: list[int] = []
+
+    def _lock_then_wait(self: PostgresRunCallStore, session: Session, *args: Any) -> RunCandidateModel:
+        """Lock the candidate, then hold the call write until the delete waits for a lock.
+
+        Args:
+            self: The call store.
+            session: The call write's open session.
+            *args: The other arguments of ``_lock_candidate``.
+
+        Returns:
+            The locked candidate row.
+
+        Raises:
+            AssertionError: When the delete never waits for a lock.
+        """
+        candidate = real_lock(self, session, *args)
+        candidate_locked.set()
+        deadline = time.monotonic() + 30
+        while not _waits_for_a_lock(full_schema_engine):
+            if time.monotonic() > deadline:
+                raise AssertionError("the delete never waited for a lock of the call write")
+            time.sleep(0.05)
+        return candidate
+
+    def _write() -> None:
+        """Record one relay call and keep its seq or any error."""
+        try:
+            seqs.append(
+                calls.record_call(
+                    run_id,
+                    {"candidate_id": "c", "kind": "model", "status": "ok", "started_at": datetime.now(UTC).isoformat()},
+                    [],
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def _delete_run_or_owner() -> None:
+        """Delete the run or the account, and keep any error."""
+        try:
+            if deleted == "run":
+                store.delete_job(run_id)
+            else:
+                _delete(full_schema_engine)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with patch.object(PostgresRunCallStore, "_lock_candidate", _lock_then_wait):
+        write = threading.Thread(target=_write)
+        write.start()
+        assert candidate_locked.wait(timeout=30)
+        delete_thread = threading.Thread(target=_delete_run_or_owner)
+        delete_thread.start()
+        write.join(timeout=60)
+        delete_thread.join(timeout=60)
+
+    assert not write.is_alive()
+    assert not delete_thread.is_alive()
+    assert errors == []
+    assert seqs == [1]
+    with Session(full_schema_engine) as session:
+        assert session.get(JobModel, run_id) is None
+        assert session.scalars(select(RunCallModel)).all() == []
+        assert session.scalars(select(RunCandidateModel)).all() == []
+
+
+def test_a_progress_publish_locks_its_two_jobs_in_key_order(full_schema_engine: Engine) -> None:
+    """A child's progress publish locks the target and source jobs in key order, as a delete does (SKY-733).
+
+    Another session holds the target job, whose key sorts first. The publish
+    waits for it before it locks the source job, so the source job stays free.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
+    if full_schema_engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    target_id, source_id = "job-a", "job-b"
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        for run_id in (target_id, source_id):
+            session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="running", execution_generation=1))
+        session.commit()
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = full_schema_engine
+    store._session_factory = sessionmaker(bind=full_schema_engine)
+    published: list[bool] = []
+    errors: list[BaseException] = []
+
+    def _publish() -> None:
+        """Publish one progress event of the source job to the target job, and keep the outcome or any error."""
+        try:
+            published.append(
+                store.record_progress_for_generation(
+                    target_id, "progress", {"score": 1}, source_optimization_id=source_id, generation=1
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    with full_schema_engine.connect() as holder, full_schema_engine.connect() as probe:
+        holder.execute(select(JobModel.optimization_id).where(JobModel.optimization_id == target_id).with_for_update())
+        publish = threading.Thread(target=_publish)
+        publish.start()
+        deadline = time.monotonic() + 30
+        while not _waits_for_a_lock(full_schema_engine):
+            assert time.monotonic() < deadline, "the publish never waited for the target job"
+            time.sleep(0.05)
+        assert probe.execute(
+            select(JobModel.optimization_id).where(JobModel.optimization_id == source_id).with_for_update(nowait=True)
+        ).all() == [(source_id,)]
+        probe.rollback()
+        holder.rollback()
+        publish.join(timeout=60)
+
+    assert not publish.is_alive()
+    assert errors == []
+    assert published == [True]
+    with Session(full_schema_engine) as session:
+        assert session.get(JobModel, target_id).latest_metrics == {"score": 1}

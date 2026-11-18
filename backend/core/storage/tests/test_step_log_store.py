@@ -929,7 +929,14 @@ def test_durable_returns_when_the_flusher_records_the_kept_pack(make_store, engi
 
 
 def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine, objects, monkeypatch) -> None:
-    """A retry that finds the sweep's claim row opens its waiters with an error and does not report the step as landed."""
+    """A retry that finds the sweep's claim row opens its waiters with an error and does not report the step as landed.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     apply = store._apply
 
@@ -997,7 +1004,14 @@ def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine
 
 
 def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, objects, monkeypatch) -> None:
-    """The sweep claims a kept pack: the agent's pending step does not land, and its next commit raises."""
+    """The sweep claims a kept pack: the agent's pending step does not land, and its next commit raises.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        objects: The test object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     apply = store._apply
     later: list[str] = []
@@ -1042,7 +1056,13 @@ def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, ob
 
 
 def test_a_caller_that_waits_on_a_dropped_step_gets_the_fence_error(make_store, engine, monkeypatch) -> None:
-    """A caller already blocked in ``durable`` on a later step of a lost agent gets the fence error, not the lost error."""
+    """A caller already blocked in ``durable`` on a later step of a lost agent gets the fence error, not the lost error.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     store = make_store()
     apply = store._apply
     later: list[str] = []
@@ -1123,6 +1143,12 @@ def test_the_objects_of_a_lost_pack_go_into_the_next_pack(make_store, engine, mo
     """A later step of another agent names an object of the lost pack: the next pack records the object too.
 
     With ``put_again``, the other agent puts the object while the lost pack is in flight, and the put is skipped.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The SQLite engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+        put_again: Whether the other agent puts the object again while the lost pack is in flight.
     """
     store = make_store()
     apply = store._apply

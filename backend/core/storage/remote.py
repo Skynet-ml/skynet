@@ -2945,19 +2945,22 @@ class RemoteDBJobStore:
         """
         session = self._get_session()
         try:
-            source = (
-                session.query(JobModel)
-                .filter(
-                    JobModel.optimization_id == source_optimization_id,
-                    JobModel.execution_generation == generation,
-                    JobModel.status.in_(["running", "validating"]),
-                )
+            # Both jobs lock in key order, as a run or account delete locks its jobs (SKY-733).
+            jobs = {
+                job.optimization_id: job
+                for job in session.query(JobModel)
+                .filter(JobModel.optimization_id.in_(sorted({source_optimization_id, optimization_id})))
+                .order_by(JobModel.optimization_id)
                 .with_for_update()
-                .one_or_none()
-            )
-            if source is None:
+            }
+            source = jobs.get(source_optimization_id)
+            if (
+                source is None
+                or source.execution_generation != generation
+                or source.status not in {"running", "validating"}
+            ):
                 return False
-            target = source if source_optimization_id == optimization_id else session.get(JobModel, optimization_id)
+            target = jobs.get(optimization_id)
             if target is None or target.status not in {"running", "validating"}:
                 return False
             session.add(

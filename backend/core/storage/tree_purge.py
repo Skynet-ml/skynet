@@ -30,10 +30,14 @@ of a pack's rows set ``created_at`` to the move time, and a reader of a
 moved row can still GET the old pack inside the grace time. The compactor
 deletes a younger pack that no row points at once the grace time ends.
 
-The S3 delete happens before the transaction commits, so a failed delete
-fails the whole account deletion. A rollback after the delete leaves rows
-that point at a deleted pack; the next deletion of the account removes them,
-and S3 does not fail on a key that is already gone.
+The S3 delete happens only after the transaction commits, in
+:func:`delete_unused_packs`. A rollback after the purge then keeps every
+pack that the account's rows still point at. Before the commit, the purge
+only checks that it can open the bucket, so a deletion with packs to delete
+and no bucket fails. The unused packs keep their ``storage_packs`` rows,
+which no row points at, until their objects are gone. If the delete after
+the commit fails, the compactor deletes those packs in its next pass
+(:meth:`TreeCompactor.remove_retired`).
 
 A run that is deleted before its account goes the same way:
 :func:`mark_run_packs` runs in the job delete's transaction, before the
@@ -50,11 +54,12 @@ shards (SKY-731) in one place.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import ColumnElement, delete, select, update
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from ..billing.budgets import BudgetService
@@ -96,12 +101,15 @@ class TreePurgeSummary:
 
     Attributes:
         deleted_rows: ``tree_objects``, ``workspaces`` and ``agent_steps`` rows deleted.
-        deleted_packs: Pack objects deleted at once, with their ``storage_packs`` rows. The
+        unused_packs: Packs that no row points at any more and that are older than the grace
+            time, in key order. :func:`delete_unused_packs` deletes them after the commit. The
             compactor deletes the unused packs that are younger than the grace time.
+        delete_objects: Deletes pack objects; ``None`` only when ``unused_packs`` is empty.
     """
 
     deleted_rows: int
-    deleted_packs: int
+    unused_packs: list[str] = field(default_factory=list)
+    delete_objects: Callable[[list[str]], None] | None = field(default=None, compare=False, repr=False)
 
 
 def _chunks(items: list[str]) -> Iterable[list[str]]:
@@ -311,26 +319,30 @@ def purge_user(
     delete_objects: Callable[[list[str]], None] | None = None,
     grace_seconds: float = GRACE_SECONDS,
 ) -> TreePurgeSummary:
-    """Delete an account's tree rows, its runs' steps, and the packs that only they used.
+    """Delete an account's tree rows and its runs' steps, and list the packs that only they used.
 
-    Packs that other accounts also use get ``needs_rewrite``. A second call
-    finds no rows and deletes nothing.
+    Packs that other accounts also use get ``needs_rewrite``. The unused packs
+    are not deleted here: the caller passes the summary to
+    :func:`delete_unused_packs` after the commit. A second call finds no rows
+    and lists no pack.
 
     Args:
         session: The account deletion's open session; the caller commits.
         username: The account's lowercased-email identity.
         run_ids: The job ids of the account. Call this before their jobs go,
             because the jobs' cascade deletes the steps without their pack keys.
-        delete_objects: Deletes pack objects; a missing object is not an
-            error. ``None`` uses the bucket that ``SKYNET_TREE_BUCKET`` names.
-        grace_seconds: An unused pack is deleted at once only when its
-            ``created_at`` is older than this; the compactor deletes the others.
+        delete_objects: Deletes pack objects after the commit; a missing
+            object is not an error. ``None`` uses the bucket that
+            ``SKYNET_TREE_BUCKET`` names.
+        grace_seconds: An unused pack is listed for deletion after the commit
+            only when its ``created_at`` is older than this; the compactor
+            deletes the others.
 
     Returns:
-        The counts of deleted rows and packs.
+        The count of deleted rows, the unused packs, and the delete function for them.
 
     Raises:
-        TreePurgeError: When a pack must go and no bucket is set, or its delete fails.
+        TreePurgeError: When a pack must go and the bucket is not set or does not open.
     """
     run_ids = sorted(run_ids)
     # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the
@@ -389,26 +401,67 @@ def purge_user(
             update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
             execution_options={"synchronize_session": False},
         )
-    if unused:
-        try:
-            deleter = delete_objects or bucket_deleter()
-        except Exception as exc:
-            raise TreePurgeError("could not open the tree bucket") from exc
-        if deleter is None:
-            raise TreePurgeError(f"{len(unused)} tree packs must be deleted, but SKYNET_TREE_BUCKET is not set")
-        # The objects go before their rows: recovery applies a pack object that has no row.
-        try:
-            deleter(unused)
-        except TreePurgeError:
-            raise
-        except Exception as exc:
-            raise TreePurgeError(f"could not delete {_describe(unused)}") from exc
+    if not unused:
+        return TreePurgeSummary(deleted_rows=deleted_rows)
+    # The bucket opens before the commit, so a deletion whose packs no bucket can delete fails.
+    try:
+        deleter = delete_objects or bucket_deleter()
+    except Exception as exc:
+        raise TreePurgeError("could not open the tree bucket") from exc
+    if deleter is None:
+        raise TreePurgeError(f"{len(unused)} tree packs must be deleted, but SKYNET_TREE_BUCKET is not set")
+    return TreePurgeSummary(deleted_rows=deleted_rows, unused_packs=unused, delete_objects=deleter)
+
+
+def delete_unused_packs(engine: Engine, summary: TreePurgeSummary) -> int:
+    """Delete the unused packs of a committed purge: first their objects, then their rows.
+
+    Call this only after the purge's transaction commits. A pack that a row
+    points at again, for example after a rollback, stays. A second call
+    deletes the objects again, and S3 does not fail on a key that is gone.
+
+    Args:
+        engine: The shared database engine.
+        summary: The summary of the committed purge.
+
+    Returns:
+        The count of deleted packs.
+
+    Raises:
+        TreePurgeError: When an object delete fails. The pack rows stay, so the
+            compactor deletes the packs in its next pass.
+    """
+    if not summary.unused_packs:
+        return 0
+    if summary.delete_objects is None:
+        raise TreePurgeError(f"no delete function for {_describe(summary.unused_packs)}")
+    with Session(engine) as session:
+        unused: list[str] = []
+        for chunk in _chunks(summary.unused_packs):
+            unused.extend(
+                session.scalars(
+                    select(StoragePackModel.pack_key)
+                    .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
+                    .order_by(StoragePackModel.pack_key)
+                )
+            )
+    if not unused:
+        return 0
+    # The objects go before their rows: recovery applies a pack object that has no row.
+    try:
+        summary.delete_objects(unused)
+    except TreePurgeError:
+        raise
+    except Exception as exc:
+        raise TreePurgeError(f"could not delete {_describe(unused)}") from exc
+    with Session(engine) as session:
         for chunk in _chunks(unused):
             session.execute(
-                delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)),
+                delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED),
                 execution_options={"synchronize_session": False},
             )
-    return TreePurgeSummary(deleted_rows=deleted_rows, deleted_packs=len(unused))
+        session.commit()
+    return len(unused)
 
 
 def mark_run_packs(session: Session, run_ids: list[str]) -> None:

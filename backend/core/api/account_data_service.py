@@ -103,10 +103,13 @@ class AccountDeletionSummary:
         deleted_rows: Rows hard-deleted across every table the account owned.
         anonymized_rows: Retained rows whose identity link was severed
             (financial, audit, and telemetry records).
+        trees: The tree purge, whose unused packs
+            :func:`tree_purge.delete_unused_packs` deletes after the commit.
     """
 
     deleted_rows: int
     anonymized_rows: int
+    trees: tree_purge.TreePurgeSummary
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -528,7 +531,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         Counts of hard-deleted and anonymized rows.
 
     Raises:
-        TreePurgeError: When a tree pack of the account cannot be deleted.
+        TreePurgeError: When the account has tree packs to delete and the
+            tree bucket is not set or does not open.
     """
     deleted = 0
     anonymized = 0
@@ -561,7 +565,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
     # Before the jobs go: their cascade would delete the steps without their pack keys.
-    deleted += tree_purge.purge_user(session, username, job_ids).deleted_rows
+    # The pack objects go after the commit (delete_unused_packs): a rollback must keep the packs its rows point at.
+    trees = tree_purge.purge_user(session, username, job_ids)
+    deleted += trees.deleted_rows
     if job_ids:
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))
     _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.created_by == username))
@@ -713,4 +719,4 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
-    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized)
+    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)
