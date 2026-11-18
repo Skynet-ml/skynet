@@ -1615,7 +1615,8 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
             a list of top-level bullets, or when the ``[data] cases`` file is
             missing, too large, empty, or has a line that is not one case,
             or when the ``[sandbox] compose`` file is missing or not a
-            compose file the box can run.
+            compose file the box can run, or when a ``[proposer] entry`` or
+            ``setup`` argument names a symbolic link or a path inside one.
     """
     raw = read_constraints_file(archive)
     if raw is None:
@@ -1633,8 +1634,7 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
     file or a symbolic link of the snapshot, such as ``agent/run.js``, or a
     folder that holds one, such as ``agent`` in ``npm ci --prefix agent``.
     The checkout root (``.``) is never one, and a protected folder covers all
-    its files. A link is protected by its own path, so a version cannot point
-    it at other code.
+    its files.
 
     Args:
         constraints: The parsed proposal.
@@ -1642,15 +1642,37 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
 
     Returns:
         The proposal with ``proposer_command_files`` filled, unchanged without an entry.
+
+    Raises:
+        ConstraintsError: When an argument names a symbolic link of the
+            snapshot or a path inside a linked folder.
     """
     if constraints.proposer_entry is None:
         return constraints
     with tarfile.open(archive, "r:gz") as packed:
-        files = {PurePosixPath(member.name) for member in packed.getmembers() if member.isfile() or member.issym()}
+        members = [member for member in packed.getmembers() if member.isfile() or member.issym()]
+    files = {PurePosixPath(member.name) for member in members}
+    links = {str(PurePosixPath(member.name)) for member in members if member.issym()}
     paths = {str(path) for file in files for path in (file, *file.parents)} - {"."}
-    parts = (*constraints.proposer_entry, *(constraints.proposer_setup or ()))
-    named = (posixpath.normpath(part) for part in parts if not part.startswith("/"))
-    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(path for path in named if path in paths)))
+    named: list[str] = []
+    for key, command in (("entry", constraints.proposer_entry), ("setup", constraints.proposer_setup or ())):
+        for part in command:
+            if part.startswith("/"):
+                continue
+            path = posixpath.normpath(part)
+            # Protection matches paths, so a link would leave the code it
+            # points at open to a version; refuse it, as for hidden paths.
+            link = next((str(p) for p in (PurePosixPath(path), *PurePosixPath(path).parents) if str(p) in links), None)
+            if link is not None:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: [proposer] {key} names '{part}', which goes through the symbolic"
+                    f" link '{link}'. Name the real path, so that no version can change the proposer.",
+                    section="proposer",
+                    key=key,
+                )
+            if path in paths:
+                named.append(path)
+    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(named)))
 
 
 def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:

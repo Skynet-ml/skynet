@@ -144,6 +144,9 @@ empty part fails the setup check, and the message names the key.
   files, and so change the proposer of the next versions. To prevent this,
   put your proposer's folder in `[paths] protected`, for example
   `protected = ["agent"]`.
+- An `entry` or `setup` argument that names a symbolic link, or a path in a
+  linked folder, fails the setup check. Protection matches paths, so a
+  version could change the file that the link points at. Name the real path.
 - `entry` and `setup` cannot contain `__APP_API_KEY__` or
   `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup

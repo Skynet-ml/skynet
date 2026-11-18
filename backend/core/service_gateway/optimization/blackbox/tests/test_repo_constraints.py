@@ -249,23 +249,44 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
 
 
-def test_an_entry_that_names_a_tracked_link_protects_the_link(tmp_path: Path) -> None:
-    """A version cannot point a linked entry script at its own code (SKY-753).
+@pytest.mark.parametrize(
+    ("key", "command", "files", "link", "link_name", "through"),
+    [
+        (
+            "entry",
+            '["node", "agent/run.js"]',
+            {"agent/real.js": b"// agent"},
+            "real.js",
+            "agent/run.js",
+            "agent/run.js",
+        ),
+        ("entry", '["node", "agent/run.js"]', {"tools/agent/run.js": b"// agent"}, "tools/agent", "agent", "agent"),
+        ("setup", '["sh", "./agent/setup.sh"]', {"tools/agent/setup.sh": b"#"}, "tools/agent", "agent", "agent"),
+    ],
+    ids=["linked-file", "linked-folder", "setup-in-linked-folder"],
+)
+def test_a_command_path_through_a_tracked_link_is_refused(
+    tmp_path: Path, key: str, command: str, files: dict[str, bytes], link: str, link_name: str, through: str
+) -> None:
+    """Protection matches paths, so a link would leave the proposer's real code open to a version (SKY-753).
 
     Args:
         tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that names the path.
+        command: The TOML command list.
+        files: The real files of the snapshot.
+        link: Where the link points.
+        link_name: The path of the link.
+        through: The link the error names.
     """
-    raw = b'version = 1\n[proposer]\nentry = ["node", "agent/run.js"]\n'
-    archive = _archive(
-        tmp_path, {CONSTRAINTS_FILE: raw, "agent/real.js": b"// agent"}, link="real.js", link_name="agent/run.js"
-    )
-    constraints = read_constraints(archive)
-    assert constraints is not None
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = f"version = 1\n[proposer]\n{entry}{key} = {command}\n".encode()
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, **files}, link=link, link_name=link_name)
 
-    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    with pytest.raises(ConstraintsError, match=f"symbolic link '{through}'") as caught:
+        read_constraints(archive)
 
-    assert constraints.proposer_command_files == ("agent/run.js",)
-    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
 
 
 def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_path: Path) -> None:
