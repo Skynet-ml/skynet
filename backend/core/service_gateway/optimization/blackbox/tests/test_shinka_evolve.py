@@ -1745,3 +1745,32 @@ def test_a_line_at_the_limit_with_its_newline_is_read(monkeypatch: pytest.Monkey
     assert shinka_evolve._read_line(io.StringIO("")) is None
     with pytest.raises(shinka_evolve._OverlongLineError):
         shinka_evolve._read_line(io.StringIO("abcd\n"))
+
+
+def test_an_overlong_line_in_the_drain_keeps_the_budget_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End the drain at an overlong line, and raise the budget stop with the version reported before it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request and sets a short line limit.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0"})
+        sys.stdin.read()
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 1, "candidate": "late", "score": 3.0})
+        print("y" * 1000, flush=True)
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+    monkeypatch.setattr(shinka_evolve, "_LINE_CHARS", 300)
+    server = EvalServer(lambda candidate, case: (3.0, {}), max_evals=5)
+    server.evaluate("late", None)
+
+    with pytest.raises(BudgetReached) as stopped:
+        ShinkaEvolveEngine(python).run(Task("seed"), server, _context(tmp_path))
+
+    assert stopped.value.result is not None
+    assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
