@@ -131,7 +131,13 @@ def test_adapted_prompts_replace_the_upstream_domains() -> None:
 def test_meta_harness_benchmarks_seed_then_proposed_candidates(
     tmp_path: Path, fake_home: Path, server: EvalServer
 ) -> None:
-    """Phase 0 scores the seed, each iteration scores the proposer's files, and the frontier tracks the best."""
+    """Phase 0 scores the seed, each iteration scores the proposer's files, and the frontier tracks the best.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(
         fake_home,
         "assert '--tools' in args and '--append-system-prompt' in args and '--session-id' in args\n"
@@ -196,7 +202,13 @@ def test_meta_harness_refuses_a_candidate_file_over_its_byte_cap(
 def test_autoresearch_runs_directed_rounds_on_engine_recorded_evidence(
     tmp_path: Path, fake_home: Path, server: EvalServer
 ) -> None:
-    """Each round is a fresh session steered by STATE.md, which the engine fills from the evaluator's answers."""
+    """Each round is a fresh session steered by STATE.md, which the engine fills from the evaluator's answers.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(
         fake_home,
         "state = pathlib.Path('STATE.md').read_text()\n"
@@ -245,7 +257,11 @@ def test_autoresearch_runs_directed_rounds_on_engine_recorded_evidence(
 
 
 def test_autoresearch_directives_follow_the_evidence(tmp_path: Path) -> None:
-    """Complementary frontier members trigger a combine round; stalls trigger a pivot."""
+    """Complementary frontier members trigger a combine round; stalls trigger a pivot.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     engine = native_engines.AutoResearchEngine(_config("autoresearch"))
     engine.work_dir = tmp_path
     (tmp_path / "archive").mkdir()
@@ -270,7 +286,13 @@ def test_autoresearch_directives_follow_the_evidence(tmp_path: Path) -> None:
 def test_autoresearch_eval_sh_reports_budget_exhaustion_and_ends_the_run(
     tmp_path: Path, fake_home: Path, server: EvalServer
 ) -> None:
-    """HTTP 429 from the evaluator surfaces the marker, and no further round starts."""
+    """HTTP 429 from the evaluator surfaces the marker, and no further round starts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(
         fake_home,
         "pathlib.Path('work/c.txt').write_text('better')\n"
@@ -289,7 +311,13 @@ def test_autoresearch_eval_sh_reports_budget_exhaustion_and_ends_the_run(
 
 
 def test_autoresearch_single_round_when_multi_round_is_off(tmp_path: Path, fake_home: Path, server: EvalServer) -> None:
-    """With ``ralph`` off the engine runs exactly one research round."""
+    """With ``ralph`` off the engine runs exactly one research round.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(fake_home, "subprocess.run(['./eval.sh', 'work/seed.txt'], check=True, capture_output=True)\n")
     config = _config("autoresearch", ralph=False)
     config.run_dir = str(tmp_path / "run")
@@ -298,7 +326,11 @@ def test_autoresearch_single_round_when_multi_round_is_off(tmp_path: Path, fake_
 
 
 def test_autoresearch_checkpoints_every_single_task_answer(tmp_path: Path) -> None:
-    """Without cases each scored version becomes a checkpoint, so the run view can chart it."""
+    """Without cases each scored version becomes a checkpoint, so the run view can chart it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     task = Task(name="single", seed_candidate="seed", objective="be better")
     single = EvalServer(
         task, lambda candidate, example=None: (len(candidate) / 10, {"feedback": "ok"}), BudgetTracker(max_evals=5)
@@ -326,7 +358,13 @@ def test_autoresearch_checkpoints_every_single_task_answer(tmp_path: Path) -> No
 def test_autoresearch_without_any_evaluation_fails_instead_of_guessing(
     tmp_path: Path, fake_home: Path, server: EvalServer
 ) -> None:
-    """A session that never called the evaluator leaves nothing verified to return."""
+    """A session that never called the evaluator leaves nothing verified to return.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(fake_home, "pathlib.Path('work/c.txt').write_text('unscored')\n")
     config = _config("autoresearch")
     config.run_dir = str(tmp_path / "run")
@@ -359,7 +397,12 @@ def _repo_checkout(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def test_autoresearch_edits_a_repository_checkout_and_scores_its_patch(tmp_path: Path, fake_home: Path) -> None:
-    """The agent edits ``repo/`` in place; eval.sh sends the diff, and refuses edits outside the editable paths."""
+    """The agent edits ``repo/`` in place; eval.sh sends the diff, and refuses edits outside the editable paths.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     task = Task(name="repo", seed_candidate="", objective="make it better")
     seen: list[str] = []
 
@@ -425,7 +468,12 @@ def test_autoresearch_edits_a_repository_checkout_and_scores_its_patch(tmp_path:
 def test_autoresearch_applies_a_non_empty_starting_patch_before_the_first_round(
     tmp_path: Path, fake_home: Path
 ) -> None:
-    """A repository run that starts from a patch puts it in ``repo/`` and names it in the brief."""
+    """A repository run that starts from a patch puts it in ``repo/`` and names it in the brief.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n", "README.md": "hi\n"})
     (checkout / "src" / "app.py").write_text("seeded\n")
     seed = subprocess.run(
@@ -510,7 +558,12 @@ def _repo_config(tmp_path: Path, checkout: Path, **knobs: Any) -> OptimizeAnythi
 
 
 def test_gepa_drives_an_agent_proposer_over_repository_versions(tmp_path: Path, fake_home: Path) -> None:
-    """GEPA picks the parent and cases; the agent edits a checkout of it and the diff becomes the next version."""
+    """GEPA picks the parent and cases; the agent edits a checkout of it and the diff becomes the next version.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     task = Task(
         name="repo",
         seed_candidate="",
@@ -578,7 +631,12 @@ def _repo_task_server(seen: list[str], max_evals: int) -> EvalServer:
 
 
 def test_best_of_n_samples_independent_repository_versions(tmp_path: Path, fake_home: Path) -> None:
-    """Each sample is a fresh agent session on the starting checkout; every patch is scored and the best wins."""
+    """Each sample is a fresh agent session on the starting checkout; every patch is scored and the best wins.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     seen: list[str] = []
     server = _repo_task_server(seen, max_evals=5)
     try:
@@ -617,7 +675,12 @@ def test_best_of_n_repo_engine_needs_a_checkout() -> None:
 
 
 def test_meta_harness_proposes_repository_patches(tmp_path: Path, fake_home: Path) -> None:
-    """The proposer edits ``repo/`` and saves patches; only patches inside the editable paths reach the parent."""
+    """The proposer edits ``repo/`` and saves patches; only patches inside the editable paths reach the parent.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     seen: list[str] = []
     server = _repo_task_server(seen, max_evals=10)
     readme_patch = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-hi\n+x\n"
@@ -681,7 +744,13 @@ def _rule_blocks(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 def test_autoresearch_blocks_a_constrained_path_edit_with_the_illegal_action_message(
     tmp_path: Path, fake_home: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Under a constraints file, eval.sh gives the fixed message, logs the block and spends no budget."""
+    """Under a constraints file, eval.sh gives the fixed message, logs the block and spends no budget.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        caplog: Captured log records.
+    """
     caplog.set_level(logging.INFO, logger=native_engines.run_log.name)
     task = Task(name="repo", seed_candidate="", objective="make it better")
     seen: list[str] = []
@@ -737,7 +806,13 @@ def test_autoresearch_blocks_a_constrained_path_edit_with_the_illegal_action_mes
 def test_meta_harness_blocks_a_constrained_path_edit_with_the_illegal_action_message(
     tmp_path: Path, fake_home: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Under a constraints file, save.sh and the candidate check give the fixed message and log each block."""
+    """Under a constraints file, save.sh and the candidate check give the fixed message and log each block.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        caplog: Captured log records.
+    """
     caplog.set_level(logging.INFO, logger=native_engines.run_log.name)
     seen: list[str] = []
     server = _repo_task_server(seen, max_evals=10)
@@ -781,7 +856,13 @@ def test_meta_harness_blocks_a_constrained_path_edit_with_the_illegal_action_mes
 def test_agent_proposer_keeps_the_parent_when_its_diff_is_too_large(
     tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A diff too large to ship as one sandbox file never becomes a version."""
+    """A diff too large to ship as one sandbox file never becomes a version.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        monkeypatch: Pytest's monkeypatch.
+    """
     _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('y' * 4096)\n")
     checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n"})
     engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, checkout))
@@ -800,7 +881,12 @@ def test_gepa_repo_engine_needs_a_checkout() -> None:
 
 
 def test_single_candidate_tasks_use_the_whole_candidate_route(tmp_path: Path, fake_home: Path) -> None:
-    """Without a dataset the evaluator scores the candidate as a whole and the server's best is the answer."""
+    """Without a dataset the evaluator scores the candidate as a whole and the server's best is the answer.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     task = Task(name="single", seed_candidate="seed")
     single = EvalServer(
         task,
@@ -852,7 +938,12 @@ def _named_single_scorer(candidate: str, example: Any = None) -> tuple[float, di
 
 
 def test_autoresearch_shows_named_scores_and_their_feedback_without_cases(tmp_path: Path, fake_home: Path) -> None:
-    """Without cases, named scores are the leaderboard's columns and the dossier quotes each one's feedback."""
+    """Without cases, named scores are the leaderboard's columns and the dossier quotes each one's feedback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     task = Task(name="single", seed_candidate="seed")
     single = EvalServer(task, _named_single_scorer, BudgetTracker(max_evals=4))
     single.start()
@@ -879,7 +970,12 @@ def test_autoresearch_shows_named_scores_and_their_feedback_without_cases(tmp_pa
 
 
 def test_meta_harness_records_named_scores_without_cases(tmp_path: Path, fake_home: Path) -> None:
-    """Meta-Harness writes each named score and its feedback to ``val.json`` and leads the frontier per name."""
+    """Meta-Harness writes each named score and its feedback to ``val.json`` and leads the frontier per name.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     task = Task(name="single", seed_candidate="seed")
     single = EvalServer(task, _named_single_scorer, BudgetTracker(max_evals=4))
     single.start()
@@ -910,7 +1006,13 @@ def test_meta_harness_records_named_scores_without_cases(tmp_path: Path, fake_ho
 def test_the_proposer_never_inherits_a_raw_anthropic_key(
     fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Drop any raw provider key so the proposer authenticates only through its harness."""
+    """Drop any raw provider key so the proposer authenticates only through its harness.
+
+    Args:
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-raw")
     _install_fake(
         fake_home,
@@ -976,7 +1078,14 @@ _FAILING_CLI = "sys.stderr.write('Error: Invalid API key\\n')\nsys.exit(1)\n"
 def test_autoresearch_fails_when_its_cli_fails_instead_of_returning_the_seed(
     tmp_path: Path, fake_home: Path, server: EvalServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A CLI that cannot start fails the run with its own stderr, not a success built from the seed."""
+    """A CLI that cannot start fails the run with its own stderr, not a success built from the seed.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+        capsys: Pytest's captured output.
+    """
     _install_fake(fake_home, _FAILING_CLI)
     config = _config("autoresearch")
     config.run_dir = str(tmp_path / "run")
@@ -986,7 +1095,13 @@ def test_autoresearch_fails_when_its_cli_fails_instead_of_returning_the_seed(
 
 
 def test_meta_harness_fails_when_its_cli_fails(tmp_path: Path, fake_home: Path, server: EvalServer) -> None:
-    """Meta-Harness stops at the first failed CLI session instead of iterating on nothing."""
+    """Meta-Harness stops at the first failed CLI session instead of iterating on nothing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        server: The evaluation server for the two-example task.
+    """
     _install_fake(fake_home, _FAILING_CLI)
     config = _config("meta_harness")
     config.run_dir = str(tmp_path / "run")
@@ -998,7 +1113,12 @@ def test_meta_harness_fails_when_its_cli_fails(tmp_path: Path, fake_home: Path, 
 def test_gepa_repo_fails_when_its_cli_fails_even_though_gepa_swallows_proposer_errors(
     tmp_path: Path, fake_home: Path
 ) -> None:
-    """GEPA keeps iterating past a proposer exception, so the engine stops it and re-raises."""
+    """GEPA keeps iterating past a proposer exception, so the engine stops it and re-raises.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     server = _repo_task_server([], max_evals=12)
     try:
         _install_fake(fake_home, _FAILING_CLI)
@@ -1011,7 +1131,12 @@ def test_gepa_repo_fails_when_its_cli_fails_even_though_gepa_swallows_proposer_e
 
 
 def test_best_of_n_repo_fails_when_its_cli_fails(tmp_path: Path, fake_home: Path) -> None:
-    """Best-of-N does not score an untouched checkout as a sample when the agent never ran."""
+    """Best-of-N does not score an untouched checkout as a sample when the agent never ran.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+    """
     seen: list[str] = []
     server = _repo_task_server(seen, max_evals=5)
     try:
@@ -1036,7 +1161,11 @@ def test_a_budget_stop_is_not_a_cli_failure() -> None:
 
 
 def test_proposer_refusals_reach_the_run_log_as_tool_and_kind_only(caplog: pytest.LogCaptureFixture) -> None:
-    """Log each hidden-path refusal of a session as a warning run event, with no path."""
+    """Log each hidden-path refusal of a session as a warning run event, with no path.
+
+    Args:
+        caplog: Captured log records.
+    """
     caplog.set_level(logging.INFO, logger=native_engines.run_log.name)
 
     native_engines.log_refusals([{"tool": "Read", "kind": "config"}, {"tool": "bash", "kind": "scoring"}], session="s1")
@@ -1061,7 +1190,14 @@ def test_every_native_engine_publishes_an_incumbent() -> None:
 def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
     tmp_path: Path, fake_home: Path, stop_at_call: int, expected: tuple[str, float] | None
 ) -> None:
-    """A parent budget stop mid-run leaves GEPA's best fully scored version, not an AttributeError (SKY-529)."""
+    """A parent budget stop mid-run leaves GEPA's best fully scored version, not an AttributeError (SKY-529).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
+        stop_at_call: The scorer call that the budget refuses.
+        expected: The incumbent and its score after the stop, or ``None``.
+    """
     task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
     calls: list[str] = []
 
