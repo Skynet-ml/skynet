@@ -2414,6 +2414,8 @@ def test_swarm_steady_part_runs_from_the_last_first_round_to_the_first_done_agen
     assert figures["steady_steps"] == 4
     assert figures["steady_seconds"] == 2.0
     assert figures["commits_per_second"] == 2.0
+    # The drain rate counts the 7 steps after 2.0 s, not the step at 2.0 s, up to the last step at 5.5 s.
+    assert figures["commits_per_second_with_drain"] == 2.0
     keys = list(figures)
     assert keys.index("commits_per_second") == keys.index("steady_steps") + 1
 
