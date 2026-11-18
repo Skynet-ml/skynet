@@ -210,11 +210,12 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
   assert.deepEqual(slices.inputs, { mode: "single" });
 });
 
-test("a clone of a run without a stored harness gets a new run's default harness", () => {
+test("a clone of a run without a stored harness picks none, so the file's proposer still applies", () => {
   const { harness: _harness, ...proposer } = LEGACY_REPO_RUN.proposer;
   const slices = cloneToSlices({ ...LEGACY_REPO_RUN, proposer });
-  assert.equal(slices.optimizer.proposer?.harness, "codex");
-  assert.equal(slices.optimizer.proposer?.max_tool_calls, 100);
+  assert.ok(slices.optimizer.proposer);
+  assert.equal("harness" in slices.optimizer.proposer, false);
+  assert.equal(slices.optimizer.proposer.max_tool_calls, 100);
 });
 
 test("a repository run clone keeps the setup draft's files", () => {

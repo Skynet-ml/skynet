@@ -1,4 +1,4 @@
-import type { BlackboxProposer } from "@/shared/types/api";
+import type { BlackboxHarness, BlackboxProposer } from "@/shared/types/api";
 import { resolveOptimizer, type OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
@@ -17,12 +17,13 @@ export function usesNativeProposer(choice: OptimizerChoice): boolean {
 }
 
 /**
- * What a fresh wizard sends when the user never touches the proposer settings.
+ * The proposer settings a fresh wizard starts from. It sends every one but
+ * `harness`, which only shows the server's default until the user picks one.
  *
  * The stall timeout has no control: half an hour without a new score covers a
  * slow scorer pass while still cutting a wedged agent loose.
  */
-export const DEFAULT_PROPOSER: BlackboxProposer = {
+export const DEFAULT_PROPOSER: BlackboxProposer & { harness: BlackboxHarness } = {
   harness: "codex",
   max_candidates_per_iter: 3,
   ralph: true,

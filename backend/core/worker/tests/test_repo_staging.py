@@ -40,6 +40,7 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
     BlackboxProposer,
@@ -486,6 +487,24 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run's own proposer replaces the one in the contract file."
     ]
+
+
+def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_default_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wizard run that picks no harness gets the server's default when the file names no proposer (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": "version = 1\n"}
+    payload = {**_payload("c" * 40), "proposer": {"max_tool_calls": 100}}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+    assert BlackboxProposer.model_validate(staged_payload["proposer"]).harness == BLACKBOX_HARNESS_CODEX
 
 
 @pytest.mark.parametrize("proposer", [{"run_command": "my-agent"}, {"install_command": "npm ci"}])

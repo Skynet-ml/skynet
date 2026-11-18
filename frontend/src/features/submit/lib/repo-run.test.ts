@@ -94,6 +94,17 @@ test("a repository run sends the chosen sandbox provider and omits it when none 
   assert.equal("sandbox_provider" in repoRunRequest(older, options)!, false);
 });
 
+test("a repository run sends no harness until the user picks one (SKY-753)", () => {
+  const fresh = repoRunRequest(repoState(), options);
+  assert.ok(fresh?.proposer);
+  assert.equal("harness" in fresh.proposer, false);
+  assert.equal(fresh.proposer.max_tool_calls, 100);
+
+  const state = repoState();
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
 test("a repository Skynet created is flagged in the run request", () => {
   const state = repoState();
   state.task.repo = { ...state.task.repo!, createdBySkynet: true };

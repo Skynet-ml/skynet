@@ -423,7 +423,9 @@ export interface BlackboxStrategy {
 
 /** The coding agent that drives a harness-based engine's optimization loop. */
 export interface BlackboxProposer {
-  harness: BlackboxHarness;
+  // Sent only when the user picked one (SKY-753): without it, a repository's
+  // [proposer] entry applies, else the server runs its default harness.
+  harness?: BlackboxHarness;
   install_command?: string | null;
   run_command?: string | null;
   max_candidates_per_iter?: number | null;
