@@ -1059,6 +1059,15 @@ export function canCancelRun(canEdit: boolean, status: string): boolean {
   return canEdit && (isActiveStatus(status) || status === "paused");
 }
 
+/** Whether a sidebar row offers Pause: only an active run can pause, even if `pausable` is still set. */
+export function canPauseRun(
+  canEdit: boolean,
+  status: string,
+  pausable: boolean | undefined,
+): boolean {
+  return canEdit && isActiveStatus(status) && !!pausable;
+}
+
 function JobRow({
   job,
   isShared,
@@ -1418,7 +1427,7 @@ function JobRow({
                     </PopoverPrimitive.Close>
                   ))}
 
-                {canEdit && isActiveStatus(job.status) && job.pausable && (
+                {canPauseRun(canEdit, job.status, job.pausable) && (
                   <PopoverPrimitive.Close asChild>
                     <button
                       type="button"

@@ -211,4 +211,23 @@ void it("the header shows CancelRunButton exactly when canCancel is true (SKY-82
   const guards = [...source.matchAll(/\{([^{}]+?) && \( <CancelRunButton /g)].map((m) => m[1]);
   assert.deepEqual(guards, ["canCancel"]);
   assert.equal(source.split("<CancelRunButton ").length - 1, 1);
+  // A paused run is terminal, so polling stops: only this refetch shows the cancelled state.
+  assert.match(
+    source,
+    /<CancelRunButton id=\{id\} source=\{source\} onCancelled=\{\(\) => void fetchJob\(\)\} \/>/,
+  );
+});
+
+void it("the header shows Pause exactly when canPause is true off phones (SKY-827)", () => {
+  // The full view needs the job fetch, session and router, so check the call site.
+  const source = readFileSync(
+    new URL("./OptimizationDetailView.tsx", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  const guards = [
+    ...source.matchAll(
+      /\{([^{}]+?) && \( <TooltipButton tooltip=\{msg\("optimization\.pause_tooltip"\)\}> <Button [^>]*?onClick=\{handlePause\}/g,
+    ),
+  ].map((m) => m[1]);
+  assert.deepEqual(guards, ["!isPhone && canPause"]);
 });

@@ -41,5 +41,6 @@ void it("bulk Stop and its button use stoppableJobIds (SKY-827)", () => {
   const ids = [...source.matchAll(/const stoppableSelectedIds = ([^;]+);/g)].map((m) => m[1]);
   assert.deepEqual(ids, ["canEditSelection ? stoppableJobIds(selectedJobs) : []"]);
   assert.match(source, /bulkCancelJobs\(stoppableSelectedIds\)/);
+  assert.match(source, /if \(stoppableSelectedIds\.length === 0 \|\| selectionAction\) return;/);
   assert.match(source, /canStop=\{stoppableSelectedIds\.length > 0\}/);
 });
