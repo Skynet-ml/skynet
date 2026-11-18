@@ -1404,7 +1404,11 @@ def test_a_cancel_stops_retrying_when_the_run_ends(store: StepJobStore, monkeypa
 @pytest.mark.parametrize("route", ["single", "bulk"])
 @pytest.mark.parametrize(
     ("final_status", "code"),
-    [("running", "optimization.cancel_conflict"), ("success", "optimization.already_terminal")],
+    [
+        ("running", "optimization.cancel_conflict"),
+        ("paused", "optimization.cancel_conflict"),
+        ("success", "optimization.already_terminal"),
+    ],
 )
 def test_the_cancel_routes_report_a_missed_cancel_by_the_status_now(
     store: StepJobStore, monkeypatch: pytest.MonkeyPatch, route: str, final_status: str, code: str
