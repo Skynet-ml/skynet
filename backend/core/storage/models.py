@@ -1536,7 +1536,8 @@ class StoragePackModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
-    # An account deletion left bytes of the deleted account in this pack; the compactor rewrites it (SKY-733).
+    # An entry in this pack has no row (account deletion, stale step, duplicate, gone job); the compactor
+    # rewrites the pack without its bytes (SKY-733).
     needs_rewrite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
 
 

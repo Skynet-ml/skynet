@@ -177,18 +177,19 @@ def _deleter(root: Path, deleted: list[str]) -> Any:
     return delete_objects
 
 
-def _purge(engine: Engine, delete_objects: Any) -> TreePurgeSummary:
+def _purge(engine: Engine, delete_objects: Any, grace_seconds: float = 0.0) -> TreePurgeSummary:
     """Purge ``ada`` in one committed transaction.
 
     Args:
         engine: The test engine.
         delete_objects: The pack delete function.
+        grace_seconds: The age a pack needs before the purge deletes it at once.
 
     Returns:
         The purge summary.
     """
     with Session(engine) as session:
-        summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_objects)
+        summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_objects, grace_seconds=grace_seconds)
         session.commit()
     return summary
 
@@ -480,6 +481,116 @@ def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
     assert [length for key, length in rows if key == new_key] == [len(objects.get(new_key))]
     assert set(objects.list("")) == {first, new_key}
     assert _marked(engine) == set()
+
+
+def test_a_pack_with_a_stale_step_is_marked_and_rewritten_without_it(
+    engine: Engine, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """A step with an old generation gets no row, so its pack gets the mark and a rewrite drops its bytes."""
+    step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        for generation, output in ((0, "stale bytes"), (1, "live bytes")):
+            step_log.commit(
+                run_id=BOB_RUN,
+                agent_id=f"agent-{generation}",
+                seq=1,
+                kind="model",
+                execution_generation=generation,
+                grant_list_id="grants-1",
+                body={"output": output},
+            )
+        step_log.flush()
+    finally:
+        step_log.close()
+    (pack,) = objects.list("")
+    assert b"stale bytes" in objects.get(pack)
+    assert _marked(engine) == {pack}
+
+    assert _compact(engine, objects, tmp_path / "objects") == 1
+
+    (new_key,) = objects.list("")
+    rewritten = objects.get(new_key)
+    assert b"live bytes" in rewritten
+    assert b"stale bytes" not in rewritten
+    assert _marked(engine) == set()
+
+
+def test_a_pack_with_a_step_that_already_has_a_row_is_marked(engine: Engine, objects: LocalObjectStore) -> None:
+    """A second store commits a step id that already landed: the first commit wins and the copy marks its pack."""
+    step = {
+        "run_id": BOB_RUN,
+        "agent_id": "agent-a",
+        "kind": "model",
+        "execution_generation": 1,
+        "grant_list_id": "grants-1",
+    }
+    first_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        first_log.commit(seq=1, body={"output": "first"}, **step)
+        first_log.flush()
+    finally:
+        first_log.close()
+    (first,) = objects.list("")
+    second_log = StepLogStore(engine, objects, "w2", flush_window_seconds=60.0)
+    try:
+        second_log.commit(seq=1, body={"output": "again"}, **step)
+        second_log.commit(seq=2, body={"output": "new"}, **step)
+        second_log.flush()
+        assert second_log.get_step(f"{BOB_RUN}:agent-a:1")["body"] == {"output": "first"}
+    finally:
+        second_log.close()
+    (second,) = set(objects.list("")) - {first}
+    assert _marked(engine) == {second}
+
+
+def test_the_purge_keeps_a_young_unused_pack_until_the_grace_time_ends(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """After a merge moves bob's rows off the shared pack, a reader may still GET it inside the grace time.
+
+    The purge leaves the young unused packs; the compactor deletes them once the grace time ends.
+    """
+    shared = packs["shared"]
+    new = f"{tree_compactor.COMPACTED_PREFIX}/{uuid4().hex}.pack"
+    objects.put(new, objects.get(shared))
+    with Session(engine) as session:
+        session.add(StoragePackModel(pack_key=new, worker_id=tree_compactor.COMPACTOR_ID, byte_size=1))
+        session.execute(
+            update(AgentStepModel)
+            .where(AgentStepModel.pack_key == shared, AgentStepModel.run_id == BOB_RUN)
+            .values(pack_key=new)
+        )
+        session.execute(
+            update(TreeObjectModel)
+            .where(TreeObjectModel.pack_key == shared, TreeObjectModel.username == "bob")
+            .values(pack_key=new)
+        )
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key == shared).values(created_at=datetime.now(UTC))
+        )
+        session.commit()
+    deleted: list[str] = []
+
+    summary = _purge(engine, _deleter(tmp_path / "objects", deleted), grace_seconds=tree_compactor.GRACE_SECONDS)
+
+    assert summary.deleted_packs == 0
+    assert deleted == []
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
+    assert sorted(objects.list("")) == sorted([shared, packs["ada"], new])
+    assert _marked(engine) == set()
+    root = tmp_path / "objects"
+
+    def delete_object(key: str) -> None:
+        """Delete one local object; a missing object is not an error.
+
+        Args:
+            key: The object key.
+        """
+        (root / key).unlink(missing_ok=True)
+
+    assert TreeCompactor(engine, objects, delete_object).remove_retired() == 0
+    assert TreeCompactor(engine, objects, delete_object, grace_seconds=0).remove_retired() == 2
+    assert objects.list("") == [new]
 
 
 def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engine, packs: dict[str, str]) -> None:

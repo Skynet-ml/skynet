@@ -23,7 +23,12 @@ never locks a pack after a delete.
 
 Only a pack that a deleted row pointed at can be deleted. A locked pack with
 no rows was retired by a merge, and the compactor deletes it after its grace
-time, so a reader that read a row before the merge can still read it.
+time, so a reader that read a row before the merge can still read it. For
+the same reason, the purge deletes a pack at once only when its
+``created_at`` is older than the grace time. A merge that moved only a part
+of a pack's rows set ``created_at`` to the move time, and a reader of a
+moved row can still GET the old pack inside the grace time. The compactor
+deletes a younger pack that no row points at once the grace time ends.
 
 The S3 delete happens before the transaction commits, so a failed delete
 fails the whole account deletion. A rollback after the delete leaves rows
@@ -38,12 +43,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel, WorkspaceModel
-from .tree_compactor import REFERENCED, tree_bucket_client
+from .tree_compactor import GRACE_SECONDS, REFERENCED, tree_bucket_client
 
 # Keys in one IN query, far below the SQLite bind limit.
 CHUNK_SIZE = 200
@@ -63,7 +69,8 @@ class TreePurgeSummary:
 
     Attributes:
         deleted_rows: ``tree_objects``, ``workspaces`` and ``agent_steps`` rows deleted.
-        deleted_packs: Pack objects deleted, with their ``storage_packs`` rows.
+        deleted_packs: Pack objects deleted at once, with their ``storage_packs`` rows. The
+            compactor deletes the unused packs that are younger than the grace time.
     """
 
     deleted_rows: int
@@ -188,6 +195,7 @@ def purge_user(
     run_ids: list[str],
     *,
     delete_objects: Callable[[list[str]], None] | None = None,
+    grace_seconds: float = GRACE_SECONDS,
 ) -> TreePurgeSummary:
     """Delete an account's tree rows, its runs' steps, and the packs that only they used.
 
@@ -201,6 +209,8 @@ def purge_user(
             because the jobs' cascade deletes the steps without their pack keys.
         delete_objects: Deletes pack objects; a missing object is not an
             error. ``None`` uses the bucket that ``SKYNET_TREE_BUCKET`` names.
+        grace_seconds: An unused pack is deleted at once only when its
+            ``created_at`` is older than this; the compactor deletes the others.
 
     Returns:
         The counts of deleted rows and packs.
@@ -245,16 +255,27 @@ def purge_user(
 
     # Only the packs that the deleted rows pointed at: a locked pack that no row points at was
     # retired by a merge, and the compactor deletes it after the grace time.
-    unused: list[str] = []
+    unreferenced: list[str] = []
     for chunk in _chunks(sorted(returned)):
-        unused.extend(
+        unreferenced.extend(
             session.scalars(
                 select(StoragePackModel.pack_key)
                 .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
                 .order_by(StoragePackModel.pack_key)
             )
         )
-    for chunk in _chunks(sorted(returned - set(unused))):
+    # A part move sets created_at, and its readers may still GET the old pack until the grace time ends.
+    retired_before = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    unused: list[str] = []
+    for chunk in _chunks(unreferenced):
+        unused.extend(
+            session.scalars(
+                select(StoragePackModel.pack_key)
+                .where(StoragePackModel.pack_key.in_(chunk), StoragePackModel.created_at < retired_before)
+                .order_by(StoragePackModel.pack_key)
+            )
+        )
+    for chunk in _chunks(sorted(returned - set(unreferenced))):
         session.execute(
             update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
             execution_options={"synchronize_session": False},

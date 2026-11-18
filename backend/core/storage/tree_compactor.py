@@ -27,7 +27,9 @@ The order makes a kill at any point safe:
    first and the ``storage_packs`` row last.
 
 Only packs with a ``storage_packs`` row are merged, so a pack that a flush
-wrote but did not apply yet stays for :meth:`StepLogStore.recover`. The new
+wrote but did not apply yet stays for :meth:`StepLogStore.recover`. A flush
+pack that still has no row after ``UNRECORDED_FLUSH_PACK_AGE_SECONDS`` is
+deleted: no worker applies it any more. The new
 packs are outside ``packs/``, where recovery never lists them, and their
 rows commit in the same transaction as the moved rows.
 
@@ -42,8 +44,10 @@ only to compacted packs: a compacted pack with more than half of
 such mark, so a pass skips a flush pack whose rows do not fit and goes on.
 Size tiers are a later change if the copy volume shows a need.
 
-An account deletion leaves the bytes of the deleted account in each pack that
-other accounts also use (:mod:`core.storage.tree_purge`). The purge sets
+A pack can hold entries that no row points at: an account deletion leaves the
+bytes of the deleted account in each pack that other accounts also use
+(:mod:`core.storage.tree_purge`), and a flush can write a stale step, a
+duplicate, or an entry of a job that is gone. The purge and the flush set
 ``needs_rewrite`` on such a pack. A marked pack is a candidate at any size and
 comes first, and a pass may rewrite it alone. The rewrite copies only the
 entries that rows still point at, so the deleted bytes go when the old pack is
@@ -71,6 +75,7 @@ from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from .object_store import S3ObjectStore
+from .step_log_store import PACK_PREFIX
 
 try:
     import boto3
@@ -107,6 +112,12 @@ MAX_ROWS_PER_PASS = 100_000
 # Rows in one UPDATE or keys in one IN query; at most 6 binds a row stays far below the SQLite bind limit.
 CHUNK_SIZE = 200
 INTERVAL_SECONDS = 60.0
+# A flush pack with no row is deleted only after this age. A flush keeps retrying the apply of its
+# written pack while its pod lives, a job lease is 60 seconds, and a pod that restarts under its name
+# applies its own packs at start. Seven days is far past all of them, so no apply is still in flight.
+# A pod that comes back under a new name never applies its packs, so without this sweep their bytes,
+# also those of a deleted account, would stay forever (SKY-733).
+UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
 
 # A pack is in use while a row points at it. The step log shards (SKY-731) add their reference here.
 REFERENCED = or_(
@@ -115,7 +126,6 @@ REFERENCED = or_(
 )
 _STEPS = AgentStepModel.__table__
 _OBJECTS = TreeObjectModel.__table__
-_KEY_TIME_START = len(COMPACTED_PREFIX) + 1
 
 
 def _chunks(items: list[Any]) -> list[list[Any]]:
@@ -262,7 +272,8 @@ class TreeCompactor:
                     StoragePackModel.byte_size != BROKEN_BYTE_SIZE,
                     REFERENCED,
                     or_(
-                        # An account deletion left dead bytes in the pack: it is rewritten at any size.
+                        # An entry with no row (account deletion, stale step, duplicate, gone job) left dead
+                        # bytes in the pack: it is rewritten at any size.
                         StoragePackModel.needs_rewrite,
                         # Over half the target is full: any two candidates fit in one pass.
                         and_(
@@ -367,8 +378,8 @@ class TreeCompactor:
             self._mark_broken(broken)
             if broken & rewrite:
                 logger.error(
-                    "Packs %s have needs_rewrite but are broken: they leave the candidates, and the bytes of a "
-                    "deleted account stay in them until someone repairs them",
+                    "Packs %s have needs_rewrite but are broken: they leave the candidates, and their bytes "
+                    "that no row points at stay until someone repairs them",
                     ", ".join(sorted(broken & rewrite)),
                 )
             keys = [key for key in keys if key not in broken]
@@ -548,25 +559,33 @@ class TreeCompactor:
         return len(deleted)
 
     def remove_unrecorded(self) -> int:
-        """Delete the new packs that a pass wrote and did not commit, once they are older than the grace time.
+        """Delete the packs with no ``storage_packs`` row that no writer applies any more.
+
+        A new pack that a pass wrote and did not commit goes once it is older than the grace time. A
+        flush pack goes once it is older than ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
 
         Returns:
             The number of packs deleted.
         """
-        # List before the row read: a new pack that commits between the two has its row in the read.
-        # The whole prefix is listed each pass: ObjectStore.list has no start-after option.
-        listed = self._objects.list(f"{COMPACTED_PREFIX}/")
-        # The key starts with its write time, so a pass that is still before its commit keeps its new pack.
-        cutoff_ns = time.time_ns() - int(self._grace_seconds * 1e9)
+        now_ns = time.time_ns()
         old: list[str] = []
-        for key in listed:
-            try:
-                written_ns = int(key[_KEY_TIME_START : _KEY_TIME_START + 20])
-            except ValueError:
-                logger.warning("Skipping %s: its key does not start with a write time", key)
-                continue
-            if written_ns < cutoff_ns:
-                old.append(key)
+        for prefix, age_seconds in (
+            (COMPACTED_PREFIX, self._grace_seconds),
+            (PACK_PREFIX, UNRECORDED_FLUSH_PACK_AGE_SECONDS),
+        ):
+            # List before the row read: a pack that commits between the two has its row in the read.
+            # The whole prefix is listed each pass: ObjectStore.list has no start-after option.
+            listed = self._objects.list(f"{prefix}/")
+            # The key starts with its write time, so a writer that is still before its commit keeps its pack.
+            cutoff_ns = now_ns - int(age_seconds * 1e9)
+            for key in listed:
+                try:
+                    written_ns = int(key.rsplit("/", 1)[-1][:20])
+                except ValueError:
+                    logger.warning("Skipping %s: its key does not start with a write time", key)
+                    continue
+                if written_ns < cutoff_ns:
+                    old.append(key)
         if not old:
             return 0
         recorded: set[str] = set()

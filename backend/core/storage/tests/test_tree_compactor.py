@@ -40,7 +40,7 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.step_log_store import StepLogStore
+from core.storage.step_log_store import PACK_PREFIX, StepLogStore
 from core.storage.tree_compactor import (
     BROKEN_BYTE_SIZE,
     COMPACTED_PREFIX,
@@ -1448,6 +1448,32 @@ def test_remove_unrecorded_skips_a_key_with_no_write_time(engine, objects, make_
 
     assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
     assert objects.list(f"{COMPACTED_PREFIX}/") == [bad]
+
+
+def test_remove_unrecorded_deletes_only_an_old_flush_pack_with_no_row(engine, objects, make_compactor) -> None:
+    """A flush pack with no row goes after the long age; a young orphan and an old recorded pack stay."""
+    old_orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    young_orphan = f"{PACK_PREFIX}/gone-pod/{time.time_ns():020d}-b.pack"
+    recorded = f"{PACK_PREFIX}/w1/{2:020d}-c.pack"
+    for key in (old_orphan, young_orphan, recorded):
+        objects.put(key, b"x")
+    with Session(engine) as session:
+        session.add(StoragePackModel(pack_key=recorded, worker_id="w1", byte_size=1))
+        session.commit()
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+
+    assert sorted(objects.list(f"{PACK_PREFIX}/")) == sorted([young_orphan, recorded])
+
+
+def test_a_flush_pack_younger_than_the_long_age_stays_also_with_no_grace_time(engine, objects, make_compactor) -> None:
+    """The grace time of compacted packs does not apply to flush packs: an apply may still be in flight."""
+    age_ns = int(tree_compactor.UNRECORDED_FLUSH_PACK_AGE_SECONDS * 1e9)
+    almost = f"{PACK_PREFIX}/gone-pod/{time.time_ns() - age_ns + 60 * 10**9:020d}-a.pack"
+    objects.put(almost, b"x")
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+    assert objects.list(f"{PACK_PREFIX}/") == [almost]
 
 
 def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, make_compactor, monkeypatch) -> None:

@@ -3,9 +3,9 @@
 Revision ID: e3b7d1f5a9c2
 Revises: c4f1a7e9d2b6
 
-An account deletion marks each pack that also holds entries of other
-accounts. The compactor rewrites a marked pack at any size, so the bytes of
-the deleted account leave the tree bucket.
+A pack gets the mark when an entry in it has no row: an account deletion,
+a stale step, a duplicate, or an entry of a job that is gone. The compactor
+rewrites a marked pack at any size, so those bytes leave the tree bucket.
 """
 
 from __future__ import annotations

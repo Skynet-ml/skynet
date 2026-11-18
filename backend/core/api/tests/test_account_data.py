@@ -16,7 +16,7 @@ import pickle
 import runpy
 import zipfile
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -918,7 +918,15 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
     with Session(full_schema_engine) as session:
         session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
         session.add(WorkspaceModel(id="ws-1", username=_EMAIL))
-        session.add(StoragePackModel(pack_key="packs/w1/p1", worker_id="w1", byte_size=10))
+        # Older than the grace time, so the purge deletes the pack at once.
+        session.add(
+            StoragePackModel(
+                pack_key="packs/w1/p1",
+                worker_id="w1",
+                byte_size=10,
+                created_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
         session.add(
             TreeObjectModel(
                 username=_EMAIL, object_id="o1", byte_size=10, pack_key="packs/w1/p1", pack_offset=0, pack_length=10
