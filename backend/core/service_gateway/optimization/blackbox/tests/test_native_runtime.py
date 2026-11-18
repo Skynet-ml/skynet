@@ -2434,6 +2434,10 @@ def _run_fails_on(fails: dict[str, set[str]]) -> _RecordingMailbox:
             candidate: The version to score.
             example: The case to score, or ``None`` for a whole sweep.
             **kwargs: Other mailbox options, not used.
+
+        Returns:
+            Negative infinity and the run-failed status for a failed case, else
+            the vowel density and empty side info.
         """
         if example is not None and example["id"] in fails.get(candidate, set()):
             return float("-inf"), {"status": native_engines.RUN_FAILED_STATUS, "feedback": "Run failed: boom"}
@@ -2606,6 +2610,59 @@ def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_pat
     assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", "metric_error", None]
     assert [sample.get("score") for sample in result.metadata["samples"]] == [None, None, 0.25]
     assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
+
+
+def _best_of_n_repo(patches: list[str]) -> Any:
+    """Build a Best-of-N repository engine whose agent returns ``patches`` in order.
+
+    Args:
+        patches: The version text each sample's agent session returns.
+
+    Returns:
+        The engine, with no target score and no token budget.
+    """
+    drawn = iter(patches)
+    engine = native_engines.BestOfNRepoEngine.__new__(native_engines.BestOfNRepoEngine)
+    engine.proposer = lambda *_: {"candidate": next(drawn)}  # type: ignore[assignment]
+    engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
+    engine.proposer.session_ids = []  # type: ignore[attr-defined]
+    engine.max_token_cost = None
+    engine.stop_at_score = None
+    engine.samples = []
+    engine.best = None
+    return engine
+
+
+def test_best_of_n_repo_keeps_the_seed_when_every_sample_fails_its_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every sample with a failed [run] case leaves the seed with no score, not a failed run (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+        caplog: Captures the engine's run log.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}, "axyz": {"a"}}), tmp_path, max_evals=4)
+    engine = _best_of_n_repo(["aeio", "axyz"])
+
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        result = engine.run(replace(server.task, seed_candidate="base"), server)
+
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["run_failed", "run_failed"]
+    assert (result.best_candidate, result.best_score) == ("base", None)
+    assert native_engines.NO_VERSION_SCORED_MESSAGE in caplog.messages
+
+
+def test_best_of_n_repo_fails_when_no_sample_was_scored(tmp_path: Path) -> None:
+    """A budget too small for one sample stops the run before any scoring, so it still fails.
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_run_fails_on({}), tmp_path, max_evals=1)
+
+    with pytest.raises(RuntimeError, match="before any repository version"):
+        _best_of_n_repo(["aeio"]).run(replace(server.task, seed_candidate="base"), server)
 
 
 def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:

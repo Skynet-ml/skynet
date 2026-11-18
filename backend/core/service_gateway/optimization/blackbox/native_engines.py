@@ -412,6 +412,10 @@ TEXT_CANDIDATE_KEY = "current_candidate"
 # Mirrors protocol.RUN_FAILED_STATUS: guest modules import no app code. The
 # status marks a case whose [run] entry failed (SKY-751).
 RUN_FAILED_STATUS = "run_failed"
+# Mirrors the parent's and shinka_runner's warning, so every engine says the same (SKY-751).
+NO_VERSION_SCORED_MESSAGE = (
+    "No version has a score: each one failed on at least one case. The run keeps the starting version."
+)
 
 
 def run_failed(info: Any) -> bool:
@@ -424,6 +428,25 @@ def run_failed(info: Any) -> bool:
         Whether its ``status`` is the run-failed status.
     """
     return isinstance(info, dict) and info.get("status") == RUN_FAILED_STATUS
+
+
+def _sample_run_failed(info: Any) -> bool:
+    """Tell whether a scored sample has a failed ``[run]`` entry on any case.
+
+    Args:
+        info: The side info of one sample: a single case's, or a sweep's with ``infos`` by case.
+
+    Returns:
+        Whether that side info, or the side info of a case with no score, marks a failed ``[run]`` entry.
+    """
+    if not isinstance(info, dict):
+        return False
+    scores = info.get("scores") if isinstance(info.get("scores"), dict) else {}
+    infos = info.get("infos") if isinstance(info.get("infos"), dict) else {}
+    return run_failed(info) or any(
+        run_failed(infos.get(case)) and not (isinstance(score, int | float) and math.isfinite(score))
+        for case, score in scores.items()
+    )
 
 
 def fill_unscored(keys: list[str], scores: list[float], infos: list[Any] | None = None) -> list[float]:
@@ -2782,10 +2805,11 @@ class BestOfNRepoEngine:
             server: Evaluation server that scores each version through the parent.
 
         Returns:
-            The best fully scored sample.
+            The best fully scored sample, or the seed with no score when every
+            scored sample failed a case.
 
         Raises:
-            RuntimeError: When no sample was fully scored.
+            RuntimeError: When the loop stopped before any sample finished scoring.
         """
         self.proposer.objective = task.objective
         self.proposer.background = task.background
@@ -2814,7 +2838,7 @@ class BestOfNRepoEngine:
             if not math.isfinite(score) or info.get(UNSCORED_CASES_KEY):
                 # SKY-367: a sample with a crashed case has no score, so it is
                 # never best and cannot reach stop_at_score on its filled mean.
-                sample["outcome"] = "metric_error"
+                sample["outcome"] = RUN_FAILED_STATUS if _sample_run_failed(info) else "metric_error"
                 continue
             server.log_progress(score, candidate=patch["candidate"])
             sample["score"] = score
@@ -2823,10 +2847,16 @@ class BestOfNRepoEngine:
             if _reached(self.stop_at_score, self.best[1]):
                 break
         if self.best is None:
-            raise RuntimeError("Best-of-N stopped before any repository version was fully scored.")
+            # SKY-751: samples that ran but failed a case have no score. The
+            # run keeps the seed with no score, as the other engines do.
+            if task.seed_candidate is None or not any(
+                sample.get("outcome") in (RUN_FAILED_STATUS, "metric_error") for sample in self.samples
+            ):
+                raise RuntimeError("Best-of-N stopped before any repository version was fully scored.")
+            log_event("search.no_score", NO_VERSION_SCORED_MESSAGE, level=logging.WARNING)
         return Result(
-            best_candidate=self.best[0],
-            best_score=self.best[1],
+            best_candidate=seed if self.best is None else self.best[0],
+            best_score=None if self.best is None else self.best[1],
             total_evals=server.budget.used,
             eval_log=list(server.eval_log),
             metadata={
