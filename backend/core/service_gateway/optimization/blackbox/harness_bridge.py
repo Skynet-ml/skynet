@@ -400,7 +400,8 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
             exits with an error, so no session starts without its setup.
     """
     label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
-    if sys.platform == "linux" and sys.executable:
+    reaped = sys.platform == "linux" and bool(sys.executable)
+    if reaped:
         # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     # Files, not pipes: a background child keeps an inherited pipe open, and a
@@ -434,6 +435,8 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
             raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.")
         if process.returncode != 0:
             detail = (_tail(stderr_file) or _tail(stdout_file)).strip()[-2000:]
+            if reaped and process.returncode in (_REAPER_NOT_FOUND, _REAPER_NOT_EXECUTABLE):
+                raise RuntimeError(f"{label} could not start: {detail}")
             raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
 
 
@@ -558,7 +561,8 @@ def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[s
         "--others",
         *(["--ignored"] if ignored else []),
         "--exclude-standard",
-        *(["--directory"] if folders else []),
+        # An empty folder holds no file of the version or of the setup, so it is no output either.
+        *(["--directory", "--no-empty-directory"] if folders else []),
     ]
     return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
 
@@ -849,6 +853,9 @@ _GUARD_DEADLINE_SECONDS = 5.0
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
 # Linux prctl option that makes a process adopt the orphans of its descendants.
 _PR_SET_CHILD_SUBREAPER = 36
+# The shell's exit codes for a command it cannot find or cannot run.
+_REAPER_NOT_FOUND = 127
+_REAPER_NOT_EXECUTABLE = 126
 # The reaper stops sweeping after this many rounds, so a descendant that keeps
 # forking cannot hold the session open.
 _REAPER_SWEEPS = 50
@@ -1756,7 +1763,8 @@ def reaper_main(command: list[str]) -> int:
         command: The harness shell and its arguments.
 
     Returns:
-        The shell's exit code, or 128 plus the signal number when a signal ended it.
+        The shell's exit code, or 128 plus the signal number when a signal ended it,
+        or 127 (no such file) or 126 (cannot run it) when the command cannot start.
     """
     ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
     # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
@@ -1769,7 +1777,13 @@ def reaper_main(command: list[str]) -> int:
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, _arm_stop_grace)
     signal.signal(signal.SIGALRM, _kill_descendants)
-    returncode = subprocess.Popen(command, restore_signals=True).wait()
+    try:
+        child = subprocess.Popen(command, restore_signals=True)
+    except OSError as error:
+        # The caller reads these shell codes as "could not start"; a traceback would hide the one-line reason.
+        print(error, file=sys.stderr, flush=True)
+        return _REAPER_NOT_FOUND if isinstance(error, FileNotFoundError) else _REAPER_NOT_EXECUTABLE
+    returncode = child.wait()
     for _ in range(_REAPER_SWEEPS):
         left = _descendants(_proc_stats() or {}, os.getpid())
         if not left:
@@ -1831,7 +1845,8 @@ def run_session(
             ``exec_commands`` (command names the exec shim records), and
             ``resume_command`` (:func:`main` runs it in place of
             ``run_command`` for a ``--resume`` of a known session, so a
-            harness with native resume continues its own session state),
+            harness with native resume continues its own session state;
+            never for a ``file_command``),
             ``setup`` (the contract file's ``[proposer] setup``, run by
             :func:`ensure_setup` before a session in a checkout) and
             ``file_command`` (``run_command`` is the contract file's exact
@@ -2261,7 +2276,8 @@ def main(argv: list[str]) -> int:
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
     opening = session_dir / "opening-prompt.md"
-    if resumed and opening.exists() and proposer.get("resume_command"):
+    # The file's own command has no resume protocol, so its session restates the task, as a fallback harness does.
+    if resumed and opening.exists() and proposer.get("resume_command") and not proposer.get("file_command"):
         # The harness continues its own session from the session folder, so it gets only the follow-up.
         proposer = {**proposer, "run_command": proposer["resume_command"]}
     elif resumed and opening.exists():

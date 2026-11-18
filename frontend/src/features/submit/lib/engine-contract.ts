@@ -42,7 +42,8 @@ export function harnessPickerValue(proposer: BlackboxProposer): BlackboxHarness 
 
 /**
  * What the closed proposer header shows: the picked harness with its logo,
- * or the server-default text, because an unset harness is not sent (SKY-753).
+ * or the default text, because an unset harness is not sent: the repository's
+ * `[proposer] entry` runs if it has one, else the server default (SKY-753).
  */
 export function proposerHeader(
   proposer: BlackboxProposer,

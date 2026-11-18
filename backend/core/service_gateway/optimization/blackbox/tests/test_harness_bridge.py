@@ -2435,6 +2435,134 @@ def test_sigterm_to_the_bridge_stops_the_setup_it_runs(tmp_path: Path) -> None:
                 os.kill(setup_pid, signal.SIGKILL)
 
 
+# Runs the bridge file as the reaper with a no-op prctl, so the Linux-only reaper path also runs on macOS.
+_REAPER_PRELUDE = """
+import ctypes, runpy, sys
+
+class _Libc:
+    def prctl(self, *args):
+        return 0
+
+ctypes.CDLL = lambda *args, **kwargs: _Libc()
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+@pytest.mark.parametrize(
+    ("make_command", "reason"),
+    [
+        (lambda folder: [str(folder / "missing-tool")], "No such file or directory"),
+        (lambda folder: [str(folder / "not-executable")], "Permission denied"),
+    ],
+    ids=["missing", "not-executable"],
+)
+def test_a_setup_the_reaper_cannot_start_says_so_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_command: Any, reason: str
+) -> None:
+    """A missing or non-executable setup command under the reaper gives the "could not start" error (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the fake interpreter and the setup command.
+        monkeypatch: Forces the reaper path.
+        make_command: Builds the setup command in ``tmp_path``.
+        reason: The start error the message must name.
+    """
+    (tmp_path / "not-executable").write_text("#!/bin/sh\necho never\n")
+    prelude = tmp_path / "prelude.py"
+    prelude.write_text(_REAPER_PRELUDE)
+    interpreter = tmp_path / "python"
+    # The reaper command passes ``-I`` first; the fake interpreter moves it before the prelude.
+    interpreter.write_text(
+        f'#!/bin/sh\nshift\nexec {shlex.quote(sys.executable)} -I {shlex.quote(str(prelude))} "$@"\n'
+    )
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+
+    with pytest.raises(RuntimeError) as raised:
+        harness_bridge.run_setup(make_command(tmp_path), tmp_path, timeout_seconds=20)
+
+    message = str(raised.value)
+    assert "could not start" in message
+    assert reason in message
+    assert "Traceback" not in message
+
+
+def test_an_empty_untracked_folder_is_no_setup_output(tmp_path: Path) -> None:
+    """An empty folder before the setup stays out of the excludes; a folder the setup fills is excluded (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "untouched").mkdir()
+    (checkout / "out").mkdir()
+
+    harness_bridge.ensure_setup([sys.executable, "-c", "open('out/x', 'w')"], checkout)
+    (checkout / "untouched/proposed.txt").write_text("a later session's file")
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert status == "?? untouched/proposed.txt\n"
+    exclude = set((checkout / ".git/info/exclude").read_text().splitlines())
+    assert "/out/" in exclude
+    assert not any(line.startswith("/untouched") for line in exclude)
+    record = json.loads((checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").read_text())
+    assert record["output"] == ["out/"]
+
+
+@pytest.mark.parametrize("in_checkout", [True, False])
+def test_a_resumed_files_command_session_restates_the_task(tmp_path: Path, in_checkout: bool) -> None:
+    """The file's command has no resume protocol, so a resume restates the task, also for the default agent (SKY-753).
+
+    Args:
+        tmp_path: The workspace, the bridge config and the home folder.
+        in_checkout: Run in a checkout (the file's command) or a plain folder (the default agent).
+    """
+    workspace = _git_checkout(tmp_path / "checkout") if in_checkout else tmp_path / "plain"
+    workspace.mkdir(exist_ok=True)
+    config = tmp_path / "proposer.json"
+    config.write_text(
+        json.dumps(
+            {
+                **_PLAIN,
+                "file_command": True,
+                "resume_command": "echo native-resume",
+                "outside_checkout": {**_PLAIN, "resume_command": "echo native-resume"},
+            }
+        )
+    )
+    env = {**os.environ, "HOME": str(tmp_path / "home"), harness_bridge.CONFIG_ENV: str(config)}
+    bridge = [sys.executable, str(Path(harness_bridge.__file__).resolve()), "--print"]
+
+    def result(*args: str) -> str:
+        """Run the bridge once and return its answer.
+
+        Args:
+            *args: Prompt and session arguments.
+
+        Returns:
+            The result document's ``result``.
+        """
+        done = subprocess.run(
+            [*bridge, *args], cwd=workspace, env=env, capture_output=True, text=True, check=True, timeout=30
+        )
+        return json.loads(done.stdout)["result"]
+
+    assert result("first task", "--session-id", "s1") == "first task"
+    resumed = result("--resume", "s1", "keep going")
+
+    assert resumed.startswith("first task")
+    assert harness_bridge._RESUME_NOTE.strip() in resumed
+    assert resumed.endswith("keep going")
+
+
 def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(tmp_path: Path) -> None:
     """GEPA and Best-of-N leave a parent version's new files untracked; the setup may not touch them (SKY-753).
 
