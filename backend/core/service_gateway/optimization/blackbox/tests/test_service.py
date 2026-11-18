@@ -289,12 +289,45 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert optimizer_events[-1][TQDM_N_KEY] == response.total_scorer_runs
 
 
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        {"mode": "auto"},
+        {"mode": "single", "engine": "gepa"},
+        {"mode": "single", "engine": "best_of_n"},
+        {"mode": "single", "engine": "autoresearch"},
+        {"mode": "single", "engine": "meta_harness"},
+        {"mode": "single", "engine": "autosaddler"},
+        {"mode": "single", "engine": "shinka_evolve"},
+    ],
+)
+@pytest.mark.parametrize(
+    "answer",
+    ['{"score": 0.8}', '{"score": 0.8, "scores": {"a": {"score": 0.5}}}'],
+)
 def test_a_metric_without_feedback_completes_and_warns_once(
-    fake_lm: FakeReflectionLM, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    strategy: dict[str, str],
+    answer: str,
 ) -> None:
-    """A metric that gives only ``{"score": 0.8}`` finishes the run, and the run log warns one time (SKY-769)."""
+    """A metric with no feedback finishes the run on every engine, and the run log warns one time (SKY-769).
+
+    Args:
+        fake_lm: Metered model fake used by the in-process engines.
+        tmp_path: Per-test artifact directory.
+        caplog: Pytest log capture.
+        fake_native_proposers: Native engines without paid model calls.
+        strategy: The engine or recipe that runs.
+        answer: The metric answer, with no feedback, with or without named scores.
+    """
     payload = _payload(
-        scorer={"kind": "python", "metric_code": 'def score(candidate, case=None):\n    return {"score": 0.8}\n'}
+        strategy=strategy,
+        budget={"max_scorer_runs": 24},
+        max_cost_cents=100,
+        scorer={"kind": "python", "metric_code": f"def score(candidate, case=None):\n    return {answer}\n"},
     )
 
     with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):

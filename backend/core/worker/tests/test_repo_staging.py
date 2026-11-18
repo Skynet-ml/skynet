@@ -3502,7 +3502,7 @@ _OUTPUT_METRIC = """
 import json
 
 def score(repo_path, case, output=None):
-    return 1.0, json.dumps({"case": case, "output": output}, sort_keys=True)
+    return {"score": 1.0, "feedback": json.dumps({"case": case, "output": output}, sort_keys=True)}
 """
 
 
