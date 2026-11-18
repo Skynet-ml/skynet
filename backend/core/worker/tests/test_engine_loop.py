@@ -2913,6 +2913,45 @@ def test_put_files_drops_git_entries_from_folders_it_does_not_change(
     assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
 
 
+def test_put_files_drops_git_entries_two_levels_below_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A ``.git`` entry deep in an unchanged folder goes too, so the id matches a base without it."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["b.py", "file", blob]])
+    sub = _put_raw_tree(trees, [["a.py", "file", blob], ["x", "tree", x]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed", "sub/x/b.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_keeps_hidden_paths_in_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Dropping ``.git`` from an unchanged folder keeps its hidden files, which the proposer never wrote."""
+    hidden = hidden_hashes(["eval/x/answer.txt"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["answer.txt", "file", blob]])
+    evals = _put_raw_tree(trees, [["score.py", "file", blob], ["x", "tree", x]])
+    base = _put_raw_tree(trees, [["README", "file", blob], ["eval", "tree", evals]])
+
+    tree = loop.put_files({"README": b"y"}, base)
+
+    def stored(tree_id: str) -> dict[str, str]:
+        """Return the ids of a stored tree's entries by name."""
+        return {entry.name: entry.object_id for entry in trees.get_tree(RUN_ID, tree_id)}
+
+    folder = stored(tree)["eval"]
+    assert sorted(stored(folder)) == ["score.py", "x"]
+    assert sorted(stored(stored(folder)["x"])) == ["answer.txt"]
+
+
 def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
     owner: tuple[User, int],
     engine: Engine,
