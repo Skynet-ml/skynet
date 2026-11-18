@@ -16,7 +16,7 @@ resource "aws_s3_bucket_public_access_block" "trees" {
   restrict_public_buckets = true
 }
 
-# The AWS-managed S3 key is enough here; a CMK adds cost and key admin.
+# SSE-S3 is enough here; KMS would add a KMS request to each pack read.
 #trivy:ignore:AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "trees" {
   bucket = aws_s3_bucket.trees.id

@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -666,6 +666,10 @@ class StepLogStore:
         whose id has a row is done and not inserted again, so the first
         commit of a step id wins.
 
+        When an entry gets no row (a stale step, a step or object that
+        already has a row, or an object of a job that is gone), the pack
+        gets ``needs_rewrite``, so the compactor drops the entry's bytes.
+
         Args:
             pack_key: The pack's object key.
             byte_size: The pack's size.
@@ -713,8 +717,9 @@ class StepLogStore:
                 session.rollback()
                 # The store that applied this pack inserted every current step that had no row.
                 return False, stale + fresh
+            landed = 0
             if fresh:
-                session.execute(
+                landed += session.execute(
                     insert(AgentStepModel)
                     .values(
                         [
@@ -729,7 +734,7 @@ class StepLogStore:
                         ]
                     )
                     .on_conflict_do_nothing()
-                )
+                ).rowcount
             owned = {
                 (jobs[entry["run_id"]].username or "", entry["object_id"]): entry
                 for entry in objects
@@ -737,7 +742,7 @@ class StepLogStore:
             }
             if owned:
                 # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
-                session.execute(
+                landed += session.execute(
                     insert(TreeObjectModel)
                     .values(
                         [
@@ -754,6 +759,12 @@ class StepLogStore:
                         ]
                     )
                     .on_conflict_do_nothing()
+                ).rowcount
+            if landed < len(steps) + len(objects):
+                # No row points at those bytes. A pack over half the merge target is a candidate only with
+                # the mark, so without it the bytes of a deleted account could stay forever (SKY-733).
+                session.execute(
+                    update(StoragePackModel).where(StoragePackModel.pack_key == pack_key).values(needs_rewrite=True)
                 )
             session.commit()
         return True, stale

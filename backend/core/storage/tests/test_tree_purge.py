@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select, text, update
+from sqlalchemy import create_engine, delete, event, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -387,6 +387,99 @@ def test_the_compactor_rewrites_a_marked_full_pack_without_the_deleted_bytes(
         assert step_log.get_step(f"{BOB_RUN}:agent-a:1")["body"] == {"output": "a"}
     finally:
         step_log.close()
+
+
+def _compact(engine: Engine, objects: LocalObjectStore, root: Path) -> int:
+    """Run one merge pass with every pack full, then delete the retired packs at once.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        root: The object store folder.
+
+    Returns:
+        The number of packs merged.
+    """
+
+    def delete_object(key: str) -> None:
+        """Delete one local object; a missing object is not an error.
+
+        Args:
+            key: The object key.
+        """
+        (root / key).unlink(missing_ok=True)
+
+    # A target of one byte makes every pack full, so only the mark makes a pack a candidate.
+    merged = TreeCompactor(engine, objects, delete_object, min_age_seconds=0, target_bytes=1).merge()
+    TreeCompactor(engine, objects, delete_object, grace_seconds=0).remove_retired()
+    return merged
+
+
+def test_a_pack_where_every_entry_lands_is_not_marked(engine: Engine, packs: dict[str, str]) -> None:
+    """Each step and object of both packs gets its row, so no pack gets ``needs_rewrite``."""
+    assert _marked(engine) == set()
+
+
+def test_a_mixed_pack_applied_after_an_account_is_gone_is_marked_and_rewritten(
+    engine: Engine, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """A pack written before the account deletion and applied after it loses the deleted account's bytes.
+
+    The deleted account's entries get no row, so only the mark makes the compactor drop their bytes.
+    """
+    step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        trees = TreeStore(step_log)
+        for run_id in [*ADA_RUNS, BOB_RUN]:
+            trees.put_blob(run_id, f"{run_id} late".encode())
+        with Session(engine) as session:
+            session.execute(delete(JobModel).where(JobModel.optimization_id.in_(ADA_RUNS)))
+            session.commit()
+        step_log.flush()
+    finally:
+        step_log.close()
+    (pack,) = objects.list("")
+    assert b"job-1 late" in objects.get(pack)
+    assert _rows(engine, "ada", ADA_RUNS)[0] == 0
+    assert _marked(engine) == {pack}
+
+    assert _compact(engine, objects, tmp_path / "objects") == 1
+
+    (new_key,) = objects.list("")
+    rewritten = objects.get(new_key)
+    assert b"job-3 late" in rewritten
+    assert b"job-1" not in rewritten
+    assert b"job-2" not in rewritten
+    assert _marked(engine) == set()
+
+
+def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
+    engine: Engine, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """A second run stores the same blob again: the copy gets no row, the pack gets the mark, and a rewrite drops it."""
+    step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        trees = TreeStore(step_log)
+        blob = trees.put_blob("job-1", b"same bytes")
+        step_log.flush()
+        (first,) = objects.list("")
+        assert trees.put_blob("job-2", b"same bytes") == blob
+        trees.put_blob("job-2", b"new bytes")
+        step_log.flush()
+    finally:
+        step_log.close()
+    (second,) = set(objects.list("")) - {first}
+    assert _marked(engine) == {second}
+
+    assert _compact(engine, objects, tmp_path / "objects") == 1
+
+    with Session(engine) as session:
+        rows = session.execute(select(TreeObjectModel.pack_key, TreeObjectModel.pack_length)).all()
+    (new_key,) = {key for key, _ in rows} - {first}
+    # The new pack holds only the bytes of its one row: the duplicate copy is gone.
+    assert [length for key, length in rows if key == new_key] == [len(objects.get(new_key))]
+    assert set(objects.list("")) == {first, new_key}
+    assert _marked(engine) == set()
 
 
 def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engine, packs: dict[str, str]) -> None:

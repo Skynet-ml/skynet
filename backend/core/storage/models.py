@@ -1576,9 +1576,9 @@ class TreeObjectModel(Base):
 
     ``object_id`` is the SHA-256 of the stored bytes, so the same content has
     one row for each account. ``byte_size`` counts toward the owner's storage
-    footprint. No job foreign key: a tree outlives its run. Nothing deletes
-    tree objects yet; the tree retention issue (SKY-733) adds deletion,
-    also on account deletion.
+    footprint. No job foreign key: a tree outlives its run. The account
+    deletion purge deletes an account's rows (see
+    :mod:`core.storage.tree_purge`).
     """
 
     __tablename__ = "tree_objects"
