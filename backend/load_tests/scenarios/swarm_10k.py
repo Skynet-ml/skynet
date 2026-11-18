@@ -1043,11 +1043,6 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             shard_runs = [run for position, run in enumerate(runs) if position % shard_count == index]
             objects, s3 = _object_store(shard_folder / "objects")
             shards.append(Shard(url, shard_folder, engine, objects, s3, shard_runs, worker_ids[index]))
-        if config.db_url is None:
-            for shard in shards:
-                with Session(shard.engine) as session:
-                    session.execute(delete(JobModel).where(JobModel.optimization_id.notin_(shard.runs)))
-                    session.commit()
         barrier = context.Barrier(shard_count)
         results = context.Queue()
         for shard in shards:

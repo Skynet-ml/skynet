@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from core.service_gateway.optimization.blackbox.sandbox_runtime import LocalSubprocessRuntime
 from core.storage.models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
-from core.storage.step_log_store import StepLogStore
+from core.storage.step_log_store import StepFenceError, StepLogStore
 from core.worker.engine_loop import EngineLoop
 
 # The scenario modules set this at import and need it only then (a spawned shard sets it again). Put it back, so
@@ -2874,6 +2874,57 @@ def test_run_all_starts_no_stack_for_in_process_scenarios(monkeypatch: pytest.Mo
     assert ran == ["reference_shapes", "chaos_gate", "swarm_10k"]
 
 
+def test_run_all_starts_the_stack_once_for_a_mixed_scenario_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check that ``run_all`` starts, waits for, warms and stops the stack once when one scenario needs it.
+
+    Args:
+        monkeypatch: Sets the command line, and counts each stack step.
+        tmp_path: The report folder.
+    """
+    monkeypatch.setattr(
+        sys, "argv", ["run_all", "--scenarios=submission_burst,chaos_gate", f"--results-dir={tmp_path}"]
+    )
+    monkeypatch.setattr(run_all, "_ensure_env", lambda args: None)
+    calls: list[str] = []
+    monkeypatch.setattr(run_all, "_bring_up", lambda args: calls.append("up"))
+    monkeypatch.setattr(run_all, "_wait_for_http", lambda url: calls.append(f"wait {url.rsplit('/', 1)[-1]}"))
+    monkeypatch.setattr(run_all, "_bring_down", lambda args: calls.append("down"))
+
+    async def warm(api_url: str) -> dict[str, Any]:
+        """Record the warm-up and return empty figures.
+
+        Args:
+            api_url: Not used.
+
+        Returns:
+            Figures with no calls.
+        """
+        calls.append("warm")
+        return {"calls": 0, "failures": 0, "elapsed_seconds": 0.0, "latencies_ms": []}
+
+    async def run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> list[Any]:
+        """Return one passed result.
+
+        Args:
+            names: Not used.
+            api_url: Not used.
+            mock_lm_url: Not used.
+
+        Returns:
+            The passed result.
+        """
+        result = ScenarioMetrics("chaos_gate").finish()
+        result.slo_passed = True
+        return [result]
+
+    monkeypatch.setattr(run_all, "warm_validation_cache", warm)
+    monkeypatch.setattr(run_all, "_run_scenarios", run_scenarios)
+    assert asyncio.run(run_all._async_main()) == 0
+    assert calls == ["up", "wait health", "wait login", "warm", "down"]
+
+
 def test_run_all_refuses_an_unknown_scenario_before_the_stack(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3164,6 +3215,36 @@ def test_swarm_driver_fails_a_step_that_did_not_land(
     config = _swarm_config(agents=1, steps_per_agent=10)
     with pytest.raises(RuntimeError, match="step step-0 did not land"):
         swarm_10k._drive([("run-0", "agent-00000")], config, None, None, 0.0, threading.Event())
+
+
+def test_swarm_driver_waits_on_the_step_log_for_a_flushed_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a driver asks the step log for a step with no barrier, and accepts it when it is durable.
+
+    Args:
+        monkeypatch: Replaces the commit and the barrier.
+    """
+    monkeypatch.setattr(swarm_10k, "_commit_step", lambda *args: ("step-0", 0.0, 0.0))
+    monkeypatch.setattr(swarm_10k, "_waiter", lambda store, step_id: None)
+    store = mock.Mock()
+    config = _swarm_config(agents=1, steps_per_agent=1)
+    steps = swarm_10k._drive([("run-0", "agent-00000")], config, store, None, 0.0, threading.Event())
+    store.durable.assert_called_once_with("step-0", 1, timeout=swarm_10k.DURABLE_TIMEOUT_SECONDS)
+    assert len(steps[0]) == 1
+
+
+def test_swarm_driver_fails_a_flushed_step_that_failed_the_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a driver raises when a step has no barrier and the step log says it failed the fence.
+
+    Args:
+        monkeypatch: Replaces the commit and the barrier.
+    """
+    monkeypatch.setattr(swarm_10k, "_commit_step", lambda *args: ("step-0", 0.0, 0.0))
+    monkeypatch.setattr(swarm_10k, "_waiter", lambda store, step_id: None)
+    store = mock.Mock()
+    store.durable.side_effect = StepFenceError("step-0")
+    config = _swarm_config(agents=1, steps_per_agent=10)
+    with pytest.raises(StepFenceError):
+        swarm_10k._drive([("run-0", "agent-00000")], config, store, None, 0.0, threading.Event())
 
 
 def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.MonkeyPatch) -> None:
