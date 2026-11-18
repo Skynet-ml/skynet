@@ -1407,6 +1407,47 @@ def test_a_flush_that_fails_with_a_new_error_type_logs_the_full_error_again(make
     ]
 
 
+def test_a_flush_that_fails_again_after_a_success_logs_the_full_error_again(
+    make_store, engine, caplog, monkeypatch
+) -> None:
+    """A successful flush resets the count, so the next failure with the same cause logs its full trace."""
+    caplog.set_level("WARNING", logger="core.storage.step_log_store")
+    store = make_store(flush_window_seconds=0.05)
+    real_apply = store._apply
+    outcomes: list[Exception | None] = [RuntimeError("x"), None, RuntimeError("x")]
+
+    def flaky_apply(*args: Any) -> Any:
+        """Fail the database write, then write it once, then fail with the same error each time.
+
+        Args:
+            *args: The ``_apply`` arguments.
+
+        Returns:
+            The result of the real ``_apply`` on the one success.
+
+        Raises:
+            RuntimeError: On every call but the second.
+        """
+        outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if outcome is None:
+            return real_apply(*args)
+        raise outcome
+
+    monkeypatch.setattr(store, "_apply", flaky_apply)
+    _commit(store)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and _step_rows(engine) < 1:
+        time.sleep(0.01)
+    _commit(store, seq=2)
+    while time.monotonic() < deadline and len(caplog.records) < 2:
+        time.sleep(0.01)
+    monkeypatch.undo()
+
+    first, second = caplog.records[:2]
+    assert [r.exc_info[0] if r.exc_info else None for r in (first, second)] == [RuntimeError, RuntimeError]
+    assert "times in a row" not in second.getMessage()
+
+
 def test_a_flush_that_fails_with_a_new_driver_error_logs_the_full_error_again(make_store, caplog, monkeypatch) -> None:
     """Both SQLite errors are ``sqlite3.OperationalError``; a new SQLite error code still logs its full trace."""
     caplog.set_level("WARNING", logger="core.storage.step_log_store")
