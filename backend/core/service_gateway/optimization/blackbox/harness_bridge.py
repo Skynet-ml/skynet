@@ -532,12 +532,13 @@ def _tail(file: IO[bytes]) -> str:
     return file.read().decode(errors="replace")
 
 
-def _checkout_git(arguments: list[str], checkout: Path) -> str:
+def _checkout_git(arguments: list[str], checkout: Path, stdin: bytes = b"") -> str:
     """Run one git command in a checkout and return its output.
 
     Args:
         arguments: Arguments after ``git``.
         checkout: The checkout or worktree.
+        stdin: The command's standard input.
 
     Returns:
         The command's standard output.
@@ -545,7 +546,7 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, check=False)
+    done = subprocess.run(["git", *arguments], cwd=checkout, input=stdin, capture_output=True, check=False)
     # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
     stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
     if done.returncode != 0:
@@ -553,7 +554,7 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     return stdout
 
 
-def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[str]:
+def _untracked(checkout: Path, *, folders: bool, ignored: bool = False, empty: bool = False) -> set[str]:
     """List the untracked paths of a checkout, either those git ignores or those it does not.
 
     Args:
@@ -561,6 +562,7 @@ def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[s
         folders: List a folder that holds only untracked files as one path
             that ends with ``/``, in place of each file in it.
         ignored: List the ignored paths in place of the not ignored ones.
+        empty: With ``folders``, list the empty folders too.
 
     Returns:
         Checkout-relative paths.
@@ -572,17 +574,19 @@ def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[s
         *(["--ignored"] if ignored else []),
         "--exclude-standard",
         # An empty folder holds no file of the version or of the setup, so it is no output either.
-        *(["--directory", "--no-empty-directory"] if folders else []),
+        *(["--directory"] if folders else []),
+        *(["--no-empty-directory"] if folders and not empty else []),
     ]
     return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
 
 
-def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) -> set[str]:
+def _setup_output(checkout: Path, before: set[str], folders: set[str], *, ignored: bool = False) -> set[str]:
     """Find the untracked paths that a setup added to a checkout.
 
     Args:
         checkout: The checkout or worktree, after the setup.
         before: Every untracked file of the same kind before the setup, one path per file.
+        folders: :func:`_old_folders` from before the setup.
         ignored: Find the paths that git ignores in place of the not ignored ones.
 
     Returns:
@@ -595,14 +599,48 @@ def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) ->
         if not path.endswith("/"):
             if path not in before:
                 added.add(path)
-        elif any(old.startswith(path) for old in before):
-            # The parent version added this folder: its files stay in the
-            # version, so only the files the setup wrote into it are excluded.
+        elif path in folders or any(old.startswith(path) for old in before):
+            # The folder was there before the setup, empty or with files of the
+            # version, so it stays: only the files the setup wrote into it are excluded.
             files = _untracked(checkout, folders=False, ignored=ignored) if files is None else files
             added |= {file for file in files if file.startswith(path)} - before
         else:
             added.add(path)
     return added
+
+
+def _old_folders(checkout: Path) -> set[str]:
+    """List the untracked folders of a checkout, ignored and empty ones included, before a setup.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Checkout-relative folder paths that end with ``/``; a folder with only untracked content is one path.
+    """
+    listed = _untracked(checkout, folders=True, empty=True) | _untracked(
+        checkout, folders=True, ignored=True, empty=True
+    )
+    return {path for path in listed if path.endswith("/")}
+
+
+def _index_stamp(checkout: Path) -> list[int] | None:
+    """Identify the current git index file of a checkout.
+
+    Git writes a new index file with a rename, so any git command that changes the index, or
+    ``git reset --hard`` even with no change, gives it a new stamp. Reading commands keep it.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The index file's inode, modification time in nanoseconds and size, or ``None`` when it has no index.
+    """
+    try:
+        status = _index_path(checkout).stat()
+    except FileNotFoundError:
+        return None
+    return [status.st_ino, status.st_mtime_ns, status.st_size]
 
 
 def _tracked_state(checkout: Path, path: str) -> str:
@@ -664,6 +702,19 @@ def _index_path(checkout: Path) -> Path:
     return index if index.is_absolute() else checkout / index
 
 
+def _index_lock(checkout: Path) -> Path:
+    """Find the lock file that git makes beside the index while a command writes it.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of the lock file.
+    """
+    index = _index_path(checkout)
+    return index.with_name(index.name + ".lock")
+
+
 def _common_dir(checkout: Path) -> Path:
     """Find the git common dir that a checkout and its worktrees share.
 
@@ -711,7 +762,7 @@ def _save_checkout(checkout: Path, common: Path, paths: Iterable[str], saved: Pa
             _copy_path(checkout / path, saved / "files" / path, saved / "files")
 
 
-def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, Any]) -> None:
+def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, Any], *, later: bool = False) -> None:
     """Put a repository and the checkout of a setup back to their state before a setup that did not finish.
 
     Args:
@@ -721,7 +772,13 @@ def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, An
         started: The record that :func:`ensure_setup` wrote before the setup: the setup's checkout, ``head``,
             ``branch`` (``None`` when ``HEAD`` was detached), ``refs`` from :func:`_branch_refs`, ``tracked``
             from :func:`_tracked_changes`, ``version_files`` with each untracked file of the version and its
-            :func:`_tracked_state`, and ``ignored_before`` with every ignored file.
+            :func:`_tracked_state`, ``ignored_before`` with every ignored file, ``folders_before`` from
+            :func:`_old_folders`, ``index_stamp`` from :func:`_index_stamp` and ``index_lock``, whether
+            the index lock file was there.
+        later: The undo runs in a later session, so the engine can have moved the checkout to another version.
+
+    Raises:
+        RuntimeError: When git fails, or an index lock file that was there before the setup is still there.
     """
     target = Path(started["checkout"])
     try:
@@ -729,6 +786,15 @@ def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, An
         present = _common_dir(target) == common
     except (RuntimeError, OSError):
         present = False
+    # Read before the refs go back, because the restored branch would hide a move of HEAD.
+    moved = (
+        later
+        and present
+        and (
+            _checkout_git(["rev-parse", "HEAD"], target).strip() != started["head"]
+            or _index_stamp(target) != started["index_stamp"]
+        )
+    )
     git_folder = target if present else checkout
     refs = started["refs"]
     current = _branch_refs(git_folder)
@@ -752,21 +818,40 @@ def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, An
         _checkout_git(["symbolic-ref", "HEAD", started["branch"]], checkout)
     else:
         _checkout_git(["update-ref", "--no-deref", "HEAD", head], checkout)
+    if moved:
+        # The engine's reset_tree rewrites the index before it applies the next version; an undo now would put
+        # the old version over the new one. A setup's own git write looks the same, and its edits then stay.
+        print(
+            "claude bridge: the checkout holds another version than before the stopped setup, so its files and"
+            " index stay as they are",
+            file=sys.stderr,
+        )
+        return
+    lock = _index_lock(checkout)
+    if os.path.lexists(lock):
+        if started["index_lock"]:
+            raise RuntimeError(
+                f"The git index lock {lock} was there before the setup and is still there, so the checkout cannot"
+                " be restored. Remove that file when no git command runs in the checkout."
+            )
+        # The setup's process group is stopped, so a lock it left belongs to no running git command.
+        print(f"claude bridge: removed the git index lock {lock} that the stopped setup left", file=sys.stderr)
+        lock.unlink()
     if (saved / "index").exists():
         shutil.copy2(saved / "index", _index_path(checkout))
     # Listed after the index is back, so a file the setup untracked in its commit counts as tracked again.
     # Removed first, so a link the setup put in place of a folder is gone before the files below are restored.
     # A path that was there before is never output: a setup that rewrites a .gitignore can unhide an old ignored file.
     before = set(version_files) | set(started["ignored_before"])
-    for path in _setup_output(checkout, before) | _setup_output(checkout, before, ignored=True):
+    folders = set(started["folders_before"])
+    for path in _setup_output(checkout, before, folders) | _setup_output(checkout, before, folders, ignored=True):
         _remove_path(checkout / path.rstrip("/"))
     changed = _setup_changes(checkout, tracked)
-    specs = [f":(literal){path}" for path in changed]
+    # Names go through a whole-tree listing and stdin, because thousands of them would pass the argument limit.
     in_head = (
-        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head, "--", *specs], checkout).split("\0"))
-        if specs
-        else set()
+        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head], checkout).split("\0")) if changed else set()
     )
+    from_head: list[str] = []
     for path in changed:
         _check_parents(checkout / path, checkout)
         if path in tracked:
@@ -775,9 +860,12 @@ def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, An
             if os.path.lexists(saved / "files" / path):
                 _copy_path(saved / "files" / path, checkout / path, checkout)
         elif path in in_head:
-            _checkout_git(["checkout", head, "--", f":(literal){path}"], checkout)
+            from_head.append(path)
         else:
             _remove_path(checkout / path)
+    if from_head:
+        specs = "".join(f":(literal){path}\0" for path in from_head).encode("utf-8", "surrogateescape")
+        _checkout_git(["checkout", head, "--pathspec-from-file=-", "--pathspec-file-nul"], checkout, specs)
     for path, content in version_files.items():
         if _tracked_state(checkout, path) != content:
             _check_parents(checkout / path, checkout)
@@ -899,6 +987,9 @@ def ensure_setup(
     session that is killed during its setup cannot do that, so the next
     session that finds the ``started`` record and no ``done.json`` first
     does the same undo from the kept copy, and then runs the setup again.
+    When ``HEAD`` or the index file changed since that setup started, the
+    engine moved the checkout to another version, so that undo puts back
+    only the branch refs, ``HEAD`` and ``info/exclude``.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
@@ -958,7 +1049,7 @@ def ensure_setup(
         if started.exists():
             # A session killed during its setup skipped its undo; nothing may trust the checkout until it is done.
             try:
-                _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")))
+                _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")), later=True)
             except Exception as error:
                 raise RuntimeError(
                     f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) stopped in an earlier"
@@ -970,6 +1061,8 @@ def ensure_setup(
         before = _untracked(checkout, folders=False)
         # ``git clean -fdx`` and a new worktree drop ignored files too, so the setup's ignored output is kept as well.
         ignored_before = _untracked(checkout, folders=False, ignored=True)
+        # A folder that was there before, even an empty one, is never setup output.
+        folders_before = _old_folders(checkout)
         version_files = {path: _tracked_state(checkout, path) for path in before}
         head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
         branch = _checkout_git(["rev-parse", "--symbolic-full-name", "HEAD"], checkout).strip()
@@ -994,6 +1087,10 @@ def ensure_setup(
             "tracked": tracked,
             "version_files": version_files,
             "ignored_before": sorted(ignored_before),
+            "folders_before": sorted(folders_before),
+            # Taken after the last git command of this session, so only a later write changes it.
+            "index_stamp": _index_stamp(checkout),
+            "index_lock": os.path.lexists(_index_lock(checkout)),
         }
         # Written last, so a session that finds it knows the copy above is whole.
         _write_whole(started, json.dumps(start))
@@ -1025,8 +1122,8 @@ def ensure_setup(
                     f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
                     " Make the setup write only new files that git does not track."
                 )
-            added = sorted(_setup_output(checkout, before))
-            ignored = _setup_output(checkout, ignored_before, ignored=True)
+            added = sorted(_setup_output(checkout, before, folders_before))
+            ignored = _setup_output(checkout, ignored_before, folders_before, ignored=True)
             # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
             # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
             lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)

@@ -2490,7 +2490,7 @@ def test_a_setup_the_reaper_cannot_start_says_so_without_a_traceback(
 
 
 def test_an_empty_untracked_folder_is_no_setup_output(tmp_path: Path) -> None:
-    """An empty folder before the setup stays out of the excludes; a folder the setup fills is excluded (SKY-753).
+    """An empty folder before the setup stays out of the excludes; only the files the setup puts in one are (SKY-753).
 
     Args:
         tmp_path: The checkout.
@@ -2511,10 +2511,11 @@ def test_an_empty_untracked_folder_is_no_setup_output(tmp_path: Path) -> None:
 
     assert status == "?? untouched/proposed.txt\n"
     exclude = set((checkout / ".git/info/exclude").read_text().splitlines())
-    assert "/out/" in exclude
+    assert "/out/x" in exclude
+    assert "/out/" not in exclude
     assert not any(line.startswith("/untouched") for line in exclude)
     record = json.loads((checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").read_text())
-    assert record["output"] == ["out/"]
+    assert record["output"] == ["out/x"]
 
 
 @pytest.mark.parametrize("in_checkout", [True, False])
@@ -3516,6 +3517,175 @@ def test_the_next_session_undoes_a_killed_setup_and_runs_it_again(tmp_path: Path
     assert not (state / "started.json").exists()
     assert not (state / "undo").exists()
     assert (state / "done.json").exists()
+
+
+def _kill_during_setup(checkout: Path, command: list[str]) -> None:
+    """Run a setup in a session that dies right after it, before its undo, as a killed session does.
+
+    Args:
+        checkout: The checkout.
+        command: The setup's argument list.
+    """
+    script = (
+        "import os, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import harness_bridge as bridge\n"
+        "run = bridge.run_setup\n"
+        "def stop(*args, **kwargs):\n"
+        "    run(*args, **kwargs)\n"
+        "    os._exit(143)\n"
+        "bridge.run_setup = stop\n"
+        f"bridge.ensure_setup({command!r}, Path(sys.argv[2]))\n"
+    )
+    folder = str(Path(harness_bridge.__file__).resolve().parent)
+    assert subprocess.run([sys.executable, "-I", "-c", script, folder, str(checkout)], check=False).returncode == 143
+    assert (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["same-version", "engine-moved"])
+def test_a_later_undo_leaves_a_checkout_that_the_engine_moved_to_another_version(
+    tmp_path: Path, moved: bool, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """GEPA's reset_tree and apply_patch between sessions make the old undo wrong for the new version (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        moved: Whether the engine moves the checkout to another version before the next session.
+        capfd: Reads the bridge's note.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("V1")
+    (checkout / "v1.txt").write_text("v1")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && echo o > out.txt"])
+    if moved:
+        _git(checkout, "reset", "--quiet", "--hard", "HEAD")
+        _git(checkout, "clean", "--quiet", "-fdx")
+        (checkout / "a.txt").write_text("V2")
+        (checkout / "v2.txt").write_text("v2")
+
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    note = "holds another version than before the stopped setup"
+    assert (note in capfd.readouterr().err) is moved
+    assert (checkout / "a.txt").read_text() == ("V2" if moved else "V1")
+    assert (checkout / "v2.txt").exists() is moved
+    assert (checkout / "v1.txt").exists() is not moved
+    assert not (checkout / "out.txt").exists()
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert not (state / "started.json").exists()
+    assert (state / "done.json").exists()
+
+
+@pytest.mark.parametrize("lock_before", [False, True], ids=["left-by-setup", "there-before"])
+def test_a_later_undo_removes_only_an_index_lock_that_the_stopped_setup_left(tmp_path: Path, lock_before: bool) -> None:
+    """A setup killed inside a git command leaves index.lock, which would make every later undo fail (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        lock_before: Whether the lock file was there before the setup.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    lock = checkout / ".git" / "index.lock"
+    if lock_before:
+        lock.write_text("")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && touch .git/index.lock"])
+
+    if lock_before:
+        with pytest.raises(RuntimeError, match=r"git index lock .*index\.lock was there before the setup"):
+            harness_bridge.ensure_setup(["true"], checkout)
+        assert lock.exists()
+        assert (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+        return
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    assert not lock.exists()
+    assert (checkout / "a.txt").read_text() == "tracked"
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One git argument per changed file would pass the system's argument limit in a large repository (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Makes the argument limit small.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    names = [f"file-{number:03d}-{'x' * 40}.txt" for number in range(80)]
+    for name in names:
+        (checkout / name).write_text("old")
+    _git(checkout, "add", "--all")
+    _git(checkout, "commit", "--quiet", "--no-verify", "-m", "many")
+    run = subprocess.run
+
+    def small_limit(arguments: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        """Fail like the system does for a long argument list, and run any other command.
+
+        Args:
+            arguments: The command.
+            *args: The other arguments of :func:`subprocess.run`.
+            **kwargs: The keyword arguments of :func:`subprocess.run`.
+
+        Returns:
+            The finished command.
+
+        Raises:
+            OSError: When the arguments are longer than 1000 bytes.
+        """
+        if sum(len(argument) + 1 for argument in arguments) > 1000:
+            raise OSError(7, "Argument list too long")
+        return run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(harness_bridge.subprocess, "run", small_limit)
+    with pytest.raises(RuntimeError, match="changed tracked files") as failure:
+        harness_bridge.ensure_setup(["sh", "-c", "for f in file-*; do echo new > $f; done"], checkout)
+
+    assert not getattr(failure.value, "__notes__", [])
+    assert all((checkout / name).read_text() == "old" for name in names)
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+@pytest.mark.parametrize("ignored", [False, True], ids=["untracked", "ignored"])
+def test_a_failed_setup_keeps_an_empty_folder_that_was_there_before(tmp_path: Path, ignored: bool) -> None:
+    """An empty folder has no old file under it, but it is not the setup's output either (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        ignored: Whether git ignores the folder.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    if ignored:
+        (checkout / ".git" / "info" / "exclude").write_text("cache/\n")
+    (checkout / "cache" / "inner").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="failed with exit code 3"):
+        harness_bridge.ensure_setup(
+            ["sh", "-c", "touch cache/x cache/inner/y && mkdir new && touch new/z && exit 3"], checkout
+        )
+
+    assert (checkout / "cache" / "inner").is_dir()
+    assert sorted(path.name for path in (checkout / "cache").rglob("*")) == ["inner"]
+    assert not (checkout / "new").exists()
+
+
+def test_a_setup_output_in_an_old_empty_folder_excludes_its_files_and_not_the_folder(tmp_path: Path) -> None:
+    """An exclude line for the whole old folder would hide what a version later writes into it (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "cache").mkdir()
+    (checkout / "empty").mkdir()
+
+    harness_bridge.ensure_setup(["sh", "-c", "touch cache/x && mkdir new && touch new/y"], checkout)
+
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert json.loads((state / "done.json").read_text())["output"] == ["cache/x", "new/"]
+    lines = (checkout / ".git" / "info" / "exclude").read_text().splitlines()
+    assert "/cache/x" in lines
+    assert "/new/" in lines
+    assert not {"/cache/", "/empty/"} & set(lines)
 
 
 def test_the_copy_of_the_checkout_counts_toward_the_setup_time_limit(
