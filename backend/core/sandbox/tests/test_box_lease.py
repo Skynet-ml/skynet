@@ -2374,13 +2374,15 @@ def test_a_scan_that_a_stray_process_replays_as_the_box_user_cannot_keep_the_box
     try:
         sandbox.run(_step(1), empty, "true", [])
         sandbox.run(_step(2), empty, "true", [])
+        # The cleanup below closes every box, so read the first box's state here.
+        closed = runtime.boxes[0].closed
     finally:
         candidates.close()
         metrics.close()
 
     # A kept box scans before and after each of the two steps.
     assert runtime.boxes[0].scan_sudo == [capable] * (2 if capable else 4)
-    assert runtime.boxes[0].closed is capable
+    assert closed is capable
     assert len(runtime.boxes) == (2 if capable else 1)
 
 
