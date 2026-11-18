@@ -106,9 +106,9 @@ _PART_PREFIX = "<!-- APP-PART "
 _PART_SUFFIX = " -->"
 _PART_HEADER = re.compile(r"^<!-- APP-PART (.+) -->$")
 _GENERATION = re.compile(r"(?:^|/)gen_(\d+)/")
-# Mirrors upstream's local model pattern, so the ledger keys usage by the gateway model
-# whether or not upstream imports; parent-side tests run without it (SKY-820).
-_LOCAL_MODEL = re.compile(r"^local/(?P<model>[^@]+)@https?://")
+# Copies upstream's local model pattern (shinka 0.0.7), so the ledger keys usage by the gateway
+# model whether or not upstream imports; parent-side tests run without it (SKY-820).
+_LOCAL_MODEL = re.compile(r"^local/(?P<model>[^@]+)@(?P<url>https?://.+)$")
 _FEEDBACK_CHARS = 8000
 # Mirrors usage_tags in the parent; this file runs without the backend's code.
 _USAGE_TAGS_HEADER = "x-app-usage-tags"

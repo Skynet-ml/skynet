@@ -270,11 +270,15 @@ def test_usage_ledger_counts_a_routed_call_under_its_gateway_model() -> None:
 
     ledger.record(_EDITOR_MODEL, SimpleNamespace(input_tokens=100, output_tokens=50))
     ledger.record("local/claude-test@https://gw.example/v1", SimpleNamespace(input_tokens=1, output_tokens=2))
+    ledger.record("local/claude-test@http://engine-loop.invalid/v1", SimpleNamespace(input_tokens=4, output_tokens=8))
     ledger.record("gpt-test", SimpleNamespace(input_tokens=3, output_tokens=None))
+    # Upstream parses no model from a URL with nothing after the scheme, so the name stays whole.
+    ledger.record("local/m@https://", SimpleNamespace(input_tokens=5, output_tokens=6))
 
     assert ledger.usage_by_model == {
-        "claude-test": {"prompt_tokens": 101, "completion_tokens": 52, "total_tokens": 153},
+        "claude-test": {"prompt_tokens": 105, "completion_tokens": 60, "total_tokens": 165},
         "gpt-test": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+        "local/m@https://": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
     }
 
 
