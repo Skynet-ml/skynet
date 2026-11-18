@@ -1401,6 +1401,80 @@ def test_chaos_gate_fails_a_run_that_is_not_ok(monkeypatch: pytest.MonkeyPatch) 
     assert not result.slo_passed
 
 
+def test_reference_shapes_metric_counts_an_unchecked_gpu_placement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the reference run records an error when only the GPU placement check fails.
+
+    Args:
+        monkeypatch: Replaces ``run_shape`` with made-up outcomes and keeps the boxes local.
+    """
+
+    def made_run(
+        harness: Any, shape: reference_shapes.Shape, run_id: str, *, rounds: int
+    ) -> reference_shapes.RunOutcome:
+        """Return a passing outcome; a GPU shape gets no placement.
+
+        Args:
+            harness: Not used.
+            shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+
+        Returns:
+            The outcome.
+        """
+        outcome = _passing_outcome(shape)
+        assert outcome.ok
+        return outcome
+
+    monkeypatch.delenv("LOAD_TEST_BOX_IMAGE", raising=False)
+    monkeypatch.setattr(reference_shapes, "run_shape", made_run)
+    result = reference_shapes.run(reference_shapes.ReferenceShapesConfig(rounds=1, model_wait_seconds=1.0))
+    gpu_shapes = sum(1 for shape in reference_shapes.SHAPES if shape.gpu)
+    assert gpu_shapes == 1
+    assert result.errors == 1
+    assert result.status_codes.get(500) == 1
+
+
+def test_chaos_gate_metric_counts_an_unchecked_gpu_placement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the chaos gate records an error for a GPU run whose only failed check is the placement.
+
+    Args:
+        monkeypatch: Runs one made-up GPU shape run that fires each kill kind, and stops the chaos job.
+    """
+    shape = next(shape for shape in reference_shapes.SHAPES if shape.gpu)
+
+    def made_run(
+        harness: Any, made_shape: reference_shapes.Shape, run_id: str, *, rounds: int, switch: Any
+    ) -> reference_shapes.RunOutcome:
+        """Fire each kill kind on the switch and return an ok outcome with no GPU placement.
+
+        Args:
+            harness: Not used.
+            made_shape: The shape.
+            run_id: Not used.
+            rounds: Not used.
+            switch: The run's chaos switch.
+
+        Returns:
+            The outcome.
+        """
+        switch.fired.update(dict.fromkeys(reference_shapes.KILL_KINDS, 1))
+        outcome = _passing_outcome(made_shape)
+        assert outcome.ok
+        return outcome
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", (shape,))
+    monkeypatch.setattr(chaos_gate, "run_shape", made_run)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=1, rounds=1, workers=1, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    assert result.extras["runs_ok"] == 0
+    assert result.errors == 1
+    assert result.status_codes.get(500) == 1
+
+
 def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the chaos gate fails when its job fires no kill, also when every run passes.
 
