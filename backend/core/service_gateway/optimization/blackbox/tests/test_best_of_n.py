@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from gepa.oa.engines.best_of_n import _parse_candidate
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -662,11 +663,63 @@ def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_i
     notices = text.count("is not text, so it is not shown.")
     assert 0 < notices == len(reads) < 10
     assert text.endswith(f"\n{100 - len(reads)} more files are not shown.")
-    assert len(text) < 200 + 400
+    # The fixed header lines and the path rules add about 400 bytes on top of the cap.
+    assert len(text) < 200 + 600
 
 
-def test_a_repository_brief_fence_is_longer_than_any_backtick_run_in_the_file(brief: Callable[..., str]) -> None:
-    """A file that holds a fence line cannot close the brief's fence early."""
-    text = brief({"README.md": b"intro\n```\ncode\n````\nend"}, ("README.md",))
+def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_fence(
+    brief: Callable[..., str],
+) -> None:
+    """A file that holds 3- and 4-backtick fences shows them as tokens, so no fence in the brief is longer than 3."""
+    text = brief({"README.md": b"intro\n```python\ncode\n```\n````\nend `x` ``y``"}, ("README.md",))
 
-    assert "Current content of `README.md`:\n`````\nintro\n```\ncode\n````\nend\n`````" in text
+    assert (
+        "Current content of `README.md`:\n```\nintro\n<<3 backticks>>python\ncode\n<<3 backticks>>\n"
+        "<<4 backticks>>\nend `x` ``y``\n```"
+    ) in text
+    assert "````" not in text
+
+
+# A diff that edits fenced code in README.md: a 3-backtick block with a tag, and a 4-backtick fence.
+_README_DIFF = (
+    "--- a/README.md\n+++ b/README.md\n@@ -1,6 +1,7 @@\n intro\n ```python\n code\n+more code\n ```\n ````\n end"
+)
+
+
+def test_upstream_cuts_a_raw_diff_at_its_first_backtick_run() -> None:
+    """Pin the upstream parser that the token form works around: a raw fenced diff keeps only its header."""
+    assert (
+        _parse_candidate(f"```diff\n{_README_DIFF}\n```")
+        == "--- a/README.md\n+++ b/README.md\n@@ -1,6 +1,7 @@\n intro\n "
+    )
+
+
+def test_a_repository_sample_with_backtick_tokens_reaches_the_scorer_as_the_whole_diff(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The model spells 3- and 4-backtick runs as tokens; the scorer and the result get the real, whole diff."""
+    repo_tree = _repo(trees)
+    reply = _README_DIFF.replace("````", "<<4 backticks>>").replace("```", "<<3 backticks>>")
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [f"```diff\n{reply}\n```"], generation=1)
+    scored: list[Any] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate the scorer gets.
+
+        Args:
+            loop: Not used.
+            candidate: The patch text.
+            case: Not used.
+
+        Returns:
+            A fixed score and no side information.
+        """
+        scored.append(candidate)
+        return 1.0, {}
+
+    result = BestOfNEngine().run(
+        Task("", cases=list(_CASES)), loop.server(score, max_evals=2), _context(loop, repo_tree)
+    )
+
+    assert scored == [_README_DIFF] * len(_CASES)
+    assert result.best_candidate == _README_DIFF

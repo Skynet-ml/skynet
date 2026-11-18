@@ -26,6 +26,11 @@ _MAX_FINALISTS = 3
 # The file blocks and notices that a repository brief shows the model; upstream
 # sends the brief in every sample's prompt, so the cap bounds each model call.
 _BRIEF_MAX_BYTES = 64_000
+# Upstream's reply parser ends the candidate at the first run of three
+# backticks anywhere in the reply, also inside a line, so a repository diff
+# spells each such run as a token that Skynet turns back before scoring.
+_BACKTICK_RUN = re.compile("`{3,}")
+_BACKTICK_TOKEN = re.compile(r"<<(\d{1,4}) backticks>>")
 
 
 class _SampleStream:
@@ -91,6 +96,45 @@ class _SampleStream:
         )
 
 
+class _UnescapingServer:
+    """Give the scorer a repository sample with its backtick tokens turned back into backticks.
+
+    Every other attribute comes from the wrapped upstream server unchanged.
+    """
+
+    def __init__(self, server: Any) -> None:
+        """Wrap the upstream server that upstream's sampling loop scores on.
+
+        Args:
+            server: The upstream eval server.
+        """
+        self._server = server
+
+    def __getattr__(self, name: str) -> Any:
+        """Return the wrapped server's attribute.
+
+        Args:
+            name: The attribute name.
+
+        Returns:
+            The attribute.
+        """
+        return getattr(self._server, name)
+
+    def evaluate(self, candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score the sample as a real diff.
+
+        Args:
+            candidate: The sample as upstream parsed it, with backtick tokens.
+            example: The case to score on, if any.
+            **kwargs: Passed to the wrapped server.
+
+        Returns:
+            The wrapped server's score and feedback.
+        """
+        return self._server.evaluate(_unescape_backticks(candidate), example, **kwargs)
+
+
 class BestOfNEngine:
     """Adapt the upstream independent-sampling baseline without rewriting its loop."""
 
@@ -112,18 +156,15 @@ class BestOfNEngine:
         """
         if not task.str_mode:
             raise ServiceError("Best-of-N supports text starting points only.")
-        if (
-            ctx.native_options is not None
-            and ctx.native_options.repo is not None
-            and (ctx.repo_seed is None or ctx.read_file is None or ctx.list_files is None)
-        ):
+        on_loop = ctx.repo_seed is not None and ctx.read_file is not None and ctx.list_files is not None
+        if ctx.native_options is not None and ctx.native_options.repo is not None and not on_loop:
             return run_native_engine("best_of_n_repo", task, server, ctx)
         # SKY-721: on the worker engine loop a repository run samples here
         # too, so each sample is one model step with no box open, and only
         # the scorer's commands open boxes. Its candidate is the patch text.
         # Until the cutover (SKY-728), production builds no loop context, so a
         # repository run without it keeps the native coding-agent engine.
-        if ctx.repo_seed is not None and ctx.read_file is not None and ctx.list_files is not None:
+        if on_loop:
             brief = _repository_brief(ctx.repo_seed, ctx.read_file, ctx.list_files)
             task = replace(task, background="\n\n".join(part for part in (task.background, brief) if part))
         finalists = _validation_finalists(task, server)
@@ -141,7 +182,7 @@ class BestOfNEngine:
                         engine_config={"model": "openai/app-reflection", "lm_kwargs": connection},
                     )
                 )
-                result = engine.run(upstream.task, upstream)
+                result = engine.run(upstream.task, _UnescapingServer(upstream) if on_loop else upstream)
         except BudgetReached as exc:
             budget_stop = exc
         if budget_stop is None:
@@ -152,6 +193,8 @@ class BestOfNEngine:
             raise ServiceError("Best-of-N did not produce a result.")
         engine.process_result(result, upstream.output_dir)
         adapted = local_result(result, server)
+        if on_loop:
+            adapted.best_candidate = _unescape_backticks(adapted.best_candidate)
         # Upstream logs a sample with no scored case at -inf; it is not evaluated.
         evaluated = any(math.isfinite(row.get("score", -math.inf)) for row in result.metadata.get("bon_cost_log", []))
         if budget_stop is not None:
@@ -205,6 +248,8 @@ def _repository_brief(
     lines = [
         "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
         "repository root; an empty diff keeps the repository as it is.",
+        "Inside the diff, write each run of three or more backticks as `<<N backticks>>`, where N is the "
+        "length of the run, as the file contents below do. Skynet turns each token back into backticks.",
         f"You may change: {editable or 'nothing'}.",
     ]
     if fixed:
@@ -233,9 +278,8 @@ def _repository_brief(
         if text is None or "\x00" in text:
             notice = f"`{path}` is not text, so it is not shown."
         else:
-            # CommonMark: a fence longer than any backtick run in the text cannot close early.
-            fence = "`" * max(3, 1 + max(map(len, re.findall("`+", text)), default=0))
-            block = "\n".join([f"Current content of `{path}`:", fence, text, fence])
+            # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
+            block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
             if len(block.encode()) <= room:
                 room -= len(block.encode())
                 lines.append(block)
@@ -244,6 +288,30 @@ def _repository_brief(
         room -= len(notice.encode())
         lines.append(notice)
     return "\n".join(lines)
+
+
+def _escape_backticks(text: str) -> str:
+    """Spell each run of three or more backticks as its token.
+
+    Args:
+        text: File text.
+
+    Returns:
+        The text with no run of three backticks.
+    """
+    return _BACKTICK_RUN.sub(lambda match: f"<<{len(match.group())} backticks>>", text)
+
+
+def _unescape_backticks(text: str) -> str:
+    """Turn each backtick token back into its run of backticks.
+
+    Args:
+        text: A repository sample as upstream parsed it.
+
+    Returns:
+        The sample as a real diff.
+    """
+    return _BACKTICK_TOKEN.sub(lambda match: "`" * int(match.group(1)), text)
 
 
 def _visible(seed: RepoSeed, path: str) -> bool:
