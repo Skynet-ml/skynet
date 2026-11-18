@@ -1156,11 +1156,14 @@ def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_file
 def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest.MonkeyPatch) -> None:
     """Draw the same random numbers and program ids after the same seed.
 
+    The test restores the ``random`` and NumPy random states that the seeding changes.
+
     Args:
-        monkeypatch: Restores ``uuid.uuid4`` and the ``random`` state.
+        monkeypatch: Restores ``uuid.uuid4``.
     """
     monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
     state = random.getstate()
+    np_state = shinka_runner.np.random.get_state() if shinka_runner.np is not None else None
     try:
         shinka_runner.seed_randomness(5)
         first = (random.random(), _draw_a(), _draw_a())
@@ -1168,6 +1171,8 @@ def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest
         second = (random.random(), _draw_a(), _draw_a())
     finally:
         random.setstate(state)
+        if np_state is not None:
+            shinka_runner.np.random.set_state(np_state)
 
     assert first == second
     assert uuid.UUID(first[1]).version == 4
@@ -1196,13 +1201,15 @@ def test_each_seeded_id_source_repeats_its_ids_in_any_interleaving(monkeypatch: 
     """Give each call line the same ids whether another line draws before or after it.
 
     Upstream draws a proposal task id before the sequential gate, so that draw
-    can fall on either side of the previous version's program ids.
+    can fall on either side of the previous version's program ids. The test
+    restores the ``random`` and NumPy random states that the seeding changes.
 
     Args:
         monkeypatch: Restores ``uuid.uuid4``.
     """
     monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
     state = random.getstate()
+    np_state = shinka_runner.np.random.get_state() if shinka_runner.np is not None else None
     try:
         shinka_runner.seed_randomness(5)
         live = (_draw_a(), _draw_b(), _draw_a())
@@ -1211,6 +1218,8 @@ def test_each_seeded_id_source_repeats_its_ids_in_any_interleaving(monkeypatch: 
         replay = (_draw_a(), replay_b, _draw_a())
     finally:
         random.setstate(state)
+        if np_state is not None:
+            shinka_runner.np.random.set_state(np_state)
 
     assert live == replay
     assert len(set(live)) == 3

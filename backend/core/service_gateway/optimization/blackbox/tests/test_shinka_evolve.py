@@ -294,17 +294,18 @@ def test_a_feature_the_worker_does_not_run_yet_is_refused_before_any_step(
 
 @pytest.mark.parametrize(
     ("seed_hidden", "error"),
-    [({"h1": "file"}, BudgetExhaustedError), ({"h2": "file"}, ServiceError), ({}, ServiceError)],
+    [({"h1": "file"}, BudgetExhaustedError), ({"h2": "file"}, ServiceError), ({}, ServiceError), (None, ServiceError)],
 )
 def test_the_repository_options_must_hide_the_same_paths_as_the_runs_repository_seed(
-    seed_hidden: dict[str, str], error: type[Exception], tmp_path: Path
+    seed_hidden: dict[str, str] | None, error: type[Exception], tmp_path: Path
 ) -> None:
     """Refuse options whose hidden paths differ from the seed's, which the loop checks against its own (SKY-719).
 
     With the same hidden paths, the run goes on to its next check: here, an empty evaluation budget.
+    Options with no repository seed have nothing to check against, so the run refuses them too.
 
     Args:
-        seed_hidden: The repository seed's hidden path hashes.
+        seed_hidden: The repository seed's hidden path hashes, or None for a run with no repository seed.
         error: The error the run raises.
         tmp_path: Pytest's temporary folder.
     """
@@ -314,7 +315,7 @@ def test_the_repository_options_must_hide_the_same_paths_as_the_runs_repository_
         run_dir=str(tmp_path),
         call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
         native_options=SimpleNamespace(shinka={}, budget_route=None, repo=repo),  # type: ignore[arg-type]
-        repo_seed=RepoSeed("tree", hidden_hashes=seed_hidden),
+        repo_seed=None if seed_hidden is None else RepoSeed("tree", hidden_hashes=seed_hidden),
     )
 
     with pytest.raises(error):
