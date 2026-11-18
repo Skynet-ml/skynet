@@ -878,6 +878,32 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
     assert first["stderr"] == "e"
 
 
+def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The prompt cap counts each Hebrew letter of a tool result once, so two clipped outputs fit under it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    text = "('\\u05d0' * 30000).encode()"
+    script = f"import sys; sys.stdout.buffer.write({text}); sys.stderr.buffer.write({text})"
+    model = _Proposer(call={"id": "h", "name": "bash", "arguments": {"command": f'python3 -c "{script}"'}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    assert len(model.calls) >= 2
+    result = model.calls[1][-1]
+    assert result["role"] == "tool"
+    assert json.loads(result["content"])["stdout"] == "א" * OUTPUT_CHARS
+    assert "א" in result["content"]
+
+
 def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -1197,9 +1223,6 @@ def test_the_transcript_holds_tool_calls_in_the_openai_form(
     assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"a": "א"}})["function"]["arguments"] == (
         '{"a": "א"}'
     )
-    assert meta_mod._openai_call({"id": "i", "name": "bash", "arguments": {"a": "\ud800"}})["function"][
-        "arguments"
-    ] == ('{"a": "\\ud800"}')
 
 
 def test_a_best_version_with_no_finite_mean_has_no_score(
@@ -1629,8 +1652,8 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     assert result.best_candidate == "seed"
     assert boxes.opened == 0
     assert error in json.loads(model.calls[1][-1]["content"])["error"]
-    if isinstance(arguments, dict):
-        assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
+    refused = isinstance(arguments, dict) or len(arguments) > meta_mod.MAX_ARGUMENT_CHARS
+    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == ("{}" if refused else arguments)
     resumed, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=0), generation=2)
     assert _run(resumed).best_candidate == "seed"
 

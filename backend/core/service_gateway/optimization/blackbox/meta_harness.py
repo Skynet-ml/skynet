@@ -125,23 +125,19 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     arguments = call.get("arguments")
-    if not isinstance(arguments, str):
-        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_exec`` refuses
-        # arguments past the depth or length bound, so the transcript holds an empty object in their place.
-        if _too_deep(arguments):
+    # ``_exec`` refuses arguments past the depth or length bound, so the transcript holds an empty object in their
+    # place. A lone surrogate cannot get here: the step commit refuses it first (SKY-821).
+    if isinstance(arguments, str):
+        if len(arguments) > MAX_ARGUMENT_CHARS:
             arguments = _REFUSED_ARGUMENTS
-        else:
-            # ``_exec`` measures the arguments with no escapes, so Hebrew text does not count six characters a letter.
-            text = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-            if len(text) > MAX_ARGUMENT_CHARS:
-                text = _REFUSED_ARGUMENTS
-            else:
-                try:
-                    text.encode("utf-8")
-                # A lone surrogate from a JSON escape cannot encode as UTF-8 in the model request, so it stays escaped.
-                except UnicodeEncodeError:
-                    text = json.dumps(arguments, sort_keys=True)
-            arguments = text
+    elif _too_deep(arguments):
+        arguments = _REFUSED_ARGUMENTS
+    else:
+        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_exec`` measures
+        # the arguments with no escapes, so Hebrew text does not count six characters a letter.
+        arguments = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+        if len(arguments) > MAX_ARGUMENT_CHARS:
+            arguments = _REFUSED_ARGUMENTS
     return {
         "id": call.get("id"),
         "type": "function",
@@ -582,23 +578,25 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         command = arguments.get("command") if isinstance(arguments, dict) else None
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
             # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
-            return json.dumps({"error": f"Call the {BASH_TOOL['name']} tool with a command string."}), tree
-        # A lone surrogate from a JSON escape cannot encode as strict UTF-8, and the bound must not raise.
-        if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
+            return json.dumps(
+                {"error": f"Call the {BASH_TOOL['name']} tool with a command string."}, ensure_ascii=False
+            ), tree
+        if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
             error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
-            return json.dumps({"error": error}), tree
+            return json.dumps({"error": error}, ensure_ascii=False), tree
         try:
             result, tree = self._ctx.run_command(tree, command, ())
         except (TreeRejectedError, BoxFailureError) as error:
             # The step committed the failure, so a resume raises it again and gets the same result here.
-            return json.dumps({"error": f"The command failed and changed nothing: {error}"}), tree
+            return json.dumps({"error": f"The command failed and changed nothing: {error}"}, ensure_ascii=False), tree
         output = {
             "exit_code": result.exit_code,
             "stdout": _clip(result.stdout),
             "stderr": _clip(result.stderr),
             "timed_out": result.timed_out,
         }
-        return json.dumps(output), tree
+        # ``_propose`` measures the prompt with no escapes, so an escape here counts each Hebrew letter seven times.
+        return json.dumps(output, ensure_ascii=False), tree
 
     @staticmethod
     def _refuse_arguments(tree: str) -> tuple[str, str]:
@@ -614,7 +612,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             f"Send the {BASH_TOOL['name']} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
             f"nested at most {MAX_ARGUMENT_DEPTH} levels."
         )
-        return json.dumps({"error": error}), tree
+        return json.dumps({"error": error}, ensure_ascii=False), tree
 
     def _pull(self, tree: str) -> None:
         """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
