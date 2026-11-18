@@ -896,9 +896,11 @@ def test_manual_resumes_do_not_use_up_the_automatic_resume_cap(
     assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
 
 
-def test_automatic_resumes_use_up_the_manual_attempt_limit(store: StepJobStore, step_logs: Any) -> None:
-    """With default settings, automatic resumes count in attempts and use up the manual limit, not the reverse."""
-    assert settings.job_max_attempts == 3, "the flow below assumes the default job_max_attempts"
+def test_automatic_resumes_use_up_the_manual_attempt_limit(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a manual limit of three attempts, automatic resumes use up the manual limit, not the reverse."""
+    monkeypatch.setattr(remote_mod.settings, "job_max_attempts", 3)
     _funded_run(store)
     generation = _claim(store, "pod-0")
     log = step_logs("pod-0")
@@ -989,10 +991,24 @@ def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
     assert (budget.state, budget.blocked_reason) == ("closed", "job_failed")
 
 
+# A worker claim keeps the generation, so only the generation guard protects the claimed run.
+@pytest.mark.parametrize("claimed_by", [None, "pod-b"], ids=["requeued", "requeued-and-claimed"])
 def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
-    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    store: StepJobStore,
+    step_logs: Any,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    claimed_by: str | None,
 ) -> None:
-    """A sweep that loses the last automatic resume to another sweep does not fail the run that sweep requeued."""
+    """A sweep that loses the last automatic resume to another sweep does not fail the run that sweep requeued.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+        claimed_by: The worker that claimed the requeued run, or None when no worker claimed it yet.
+    """
     if "postgres" in request.node.callspec.id:
         pytest.skip("the row lock on PostgreSQL makes the other sweep wait; SQLite shows the guarded update")
     _funded_run(store)
@@ -1019,11 +1035,11 @@ def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
         fenced = int(store.get_job(RUN)["execution_generation"])
         _set_job(
             store,
-            status="pending",
+            status="running" if claimed_by else "pending",
             execution_generation=fenced + 1,
             automatic_resumes=MAX_AUTOMATIC_RESUMES,
-            claimed_by=None,
-            lease_expires_at=None,
+            claimed_by=claimed_by,
+            lease_expires_at=datetime.now(UTC) + timedelta(minutes=1) if claimed_by else None,
         )
         return result
 
@@ -1032,7 +1048,11 @@ def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
     store.recover_orphaned_jobs()
 
     job = store.get_job(RUN)
-    assert job["status"] == "pending"
+    assert job["status"] == ("running" if claimed_by else "pending")
+    with Session(store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == claimed_by
     assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
     assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
