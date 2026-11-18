@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import uuid
 from dataclasses import replace
@@ -232,6 +233,10 @@ class ShinkaEvolveEngine:
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                # Its own process group, so a stop also kills upstream's
+                # ``evaluate.py`` jobs, which would otherwise poll for days and
+                # write into the folder a resume starts again.
+                start_new_session=True,
             )
             assert child.stdin is not None
             assert child.stdout is not None
@@ -251,9 +256,9 @@ class ShinkaEvolveEngine:
                     raise
                 return child.wait()
             finally:
-                if child.poll() is None:
-                    child.kill()
-                    child.wait()
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
                 with contextlib.suppress(OSError):
                     child.stdin.close()
                 child.stdout.close()

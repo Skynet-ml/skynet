@@ -9,11 +9,15 @@ make no network and no paid call.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
+import signal
 import stat
 import sys
 import textwrap
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -38,7 +42,7 @@ from core.service_gateway.optimization.budget_stop import BudgetReached
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import ModelCallFailedError
+from core.worker.engine_loop import LoopStoppedError, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     _KINDS,
@@ -908,3 +912,151 @@ def test_with_no_valid_result_the_run_keeps_the_best_reported_version(
     result = ShinkaEvolveEngine._result(workdir, 1 if document else -9, requests)
 
     assert (result.best_candidate, result.best_score) == ("good", 2.0)
+
+
+def _scripted_child(tmp_path: Path, body: str) -> str:
+    """Write an interpreter wrapper whose child runs ``body`` in place of the runner.
+
+    The body sees ``nonce``, read from the engine's input document, and the
+    ``emit`` function that writes one framed line.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        body: The child's Python code.
+
+    Returns:
+        The wrapper's path: the engine's ``shinka-evolve`` interpreter.
+    """
+    script = tmp_path / "child.py"
+    head = """
+        import json
+        import subprocess
+        import sys
+        import time
+
+        nonce = json.load(open(sys.argv[2]))["nonce"]
+
+
+        def emit(prefix, payload):
+            print(f"{prefix}{nonce} {json.dumps(payload)}", flush=True)
+    """
+    script.write_text(textwrap.dedent(head) + textwrap.dedent(body), encoding="utf-8")
+    python = tmp_path / "shinka-python"
+    python.write_text(f'#!/bin/sh\nexec {sys.executable} {script} "$@"\n', encoding="utf-8")
+    python.chmod(python.stat().st_mode | stat.S_IXUSR)
+    return str(python)
+
+
+def _stopping_request(error: BaseException) -> Callable[[shinka_evolve._Requests, dict[str, object]], None]:
+    """Return a request handler that stops the run at the child's first request.
+
+    Args:
+        error: The stop the handler raises.
+
+    Returns:
+        The handler, in place of ``_Requests._request``.
+    """
+
+    def stop(self: shinka_evolve._Requests, request: dict[str, object]) -> None:
+        """Stop the run.
+
+        Args:
+            self: The request handler.
+            request: The child's request, ignored.
+
+        Raises:
+            BaseException: ``error``, always.
+        """
+        raise error
+
+    return stop
+
+
+def _context(tmp_path: Path) -> EngineContext:
+    """Build an engine-loop context whose model is never called.
+
+    Args:
+        tmp_path: Pytest's temporary folder, the run folder.
+
+    Returns:
+        The context.
+    """
+    return EngineContext(reflection_lm=lambda prompt: "", run_dir=str(tmp_path), call_model=lambda *args: None)  # type: ignore[arg-type]
+
+
+def test_a_stopped_run_also_kills_the_evaluation_jobs_its_child_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill the child's evaluation job too when the loop stops the run, so it cannot outlive the run.
+
+    Upstream starts ``evaluate.py`` as a child of the runner. Left alive, it
+    polls for days and writes into the folder a resume starts again.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request.
+    """
+    job_pid = tmp_path / "job.pid"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        job = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        open({str(job_pid)!r}, "w").write(str(job.pid))
+        emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0"}})
+        time.sleep(60)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(LoopStoppedError("lease lost")))
+    pid = 0
+    try:
+        with pytest.raises(LoopStoppedError):
+            ShinkaEvolveEngine(python).run(
+                Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+            )
+        pid = int(job_pid.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("The evaluation job outlived the stopped run.")
+    finally:
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_budget_stop_reports_the_best_version_the_child_reports_only_after_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read the child's progress after a budget stop, so a version it reports while it drains is the stop's result.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0"})
+        sys.stdin.read()
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 1, "candidate": "late", "score": 3.0})
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+
+    with pytest.raises(BudgetReached) as stopped:
+        ShinkaEvolveEngine(python).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+        )
+
+    assert stopped.value.result is not None
+    assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
