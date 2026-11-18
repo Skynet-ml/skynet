@@ -403,10 +403,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             if len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
                 killed = True
                 break
-            reply, _ = loop_tools.call_model(ctx, messages, [BASH_TOOL, EVALUATE_TOOL])
+            reply, failed_cents = loop_tools.call_model(ctx, messages, [BASH_TOOL, EVALUATE_TOOL])
+            spent += failed_cents
             if isinstance(reply, ModelCallFailedError):
-                # As in Meta-Harness, a billed failed call is not in ``spent`` yet: the replayed error carries no
-                # cost. The run budget still bounds the total spend (gap filed against SKY-719).
                 failed = True
                 text = str(reply)
                 break

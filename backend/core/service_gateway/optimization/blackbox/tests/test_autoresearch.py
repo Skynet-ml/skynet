@@ -39,7 +39,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop, ModelCallFailedError
+from core.worker.engine_loop import EngineLoop, ModelCallBilledError, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -118,6 +118,7 @@ class _Researcher:
         cost: str = "1",
         rest: Turn | None = None,
         fail_at: frozenset[int] = frozenset(),
+        billed_at: frozenset[int] = frozenset(),
     ) -> None:
         """Set the script.
 
@@ -127,10 +128,12 @@ class _Researcher:
             cost: The cost of each reply, in cents.
             rest: The turn after the script ends; a final reply when ``None``.
             fail_at: The indexes of the attempts, failed ones included, that fail as a rate limit does.
+            billed_at: The indexes of the attempts that fail after the provider billed one cent.
         """
         self.script = _ROUND if script is None else script
         self.die_at = die_at
         self.fail_at = fail_at
+        self.billed_at = billed_at
         self.attempts = 0
         self.cost = Decimal(cost)
         self.rest = rest
@@ -150,12 +153,15 @@ class _Researcher:
         Raises:
             _WorkerDiedError: In the call at ``die_at``.
             RuntimeError: In the attempts of ``fail_at``.
+            ModelCallBilledError: In the attempts of ``billed_at``.
         """
         if len(self.calls) == self.die_at:
             raise _WorkerDiedError
         self.attempts += 1
         if self.attempts - 1 in self.fail_at:
             raise RuntimeError("429 rate limited")
+        if self.attempts - 1 in self.billed_at:
+            raise ModelCallBilledError("1")
         assert len(self.calls) < _MAX_CALLS, "the session did not stop"
         assert isinstance(prompt, list)
         self.calls.append([dict(message) for message in prompt])
@@ -689,6 +695,46 @@ def test_the_proposer_cost_cap_stops_the_session(
     assert boxes.opened == 1
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "model"]
     assert result.metadata["rounds"] == 1
+
+
+@pytest.mark.parametrize("cap", [None, 0.03])
+def test_a_billed_failed_call_counts_in_the_proposer_cost_live_and_on_a_resume(
+    cap: float | None,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A failed call that the provider billed adds its committed cost to the total and to the cap, also on a replay.
+
+    Args:
+        cap: The proposer cost cap, in dollars, or ``None`` for no cap.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _options(max_token_cost=cap)
+    first, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(billed_at=frozenset({0})), generation=1)
+    live = _run(first, native_options=options)
+
+    _new_generation(engine)
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=2)
+    replayed = _run(loop, native_options=options)
+
+    assert model.calls == []
+    if cap is None:
+        # Six replies of one cent each and the billed failure of one cent.
+        assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == 0.07
+    else:
+        # The billed failure and the first two replies reach the cap, so the round runs their tools and then asks
+        # the model no more.
+        assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command", "model"]
+        assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == 0.03
+        assert live.metadata["rounds"] == replayed.metadata["rounds"] == 1
 
 
 def test_a_repository_run_is_refused(
