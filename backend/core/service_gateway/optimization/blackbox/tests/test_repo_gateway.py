@@ -83,7 +83,7 @@ def run(value):
 # The metric box holds no repository file, so the version's own call runs
 # in the candidate box through the [run] entry, and the metric gets its output (SKY-398).
 SCORER = f"""
-import os
+import json, os
 
 def score(repo_path, case, output):
     direct = output["direct"]
@@ -91,13 +91,13 @@ def score(repo_path, case, output):
     leaked = output["leaked"] or any(
         key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r})
     )
-    return {{
-        "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
-        "feedback": direct + " " + judged,
+    probe = {{
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
         "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
     }}
+    # The answer allows no other keys (SKY-769), so the probe travels in the feedback.
+    return {{"score": 1.0 if direct == "OK" and judged == "OK" else 0.0, "feedback": json.dumps(probe)}}
 """
 
 
@@ -274,11 +274,12 @@ def test_a_managed_call_from_the_box_is_metered(
     assert all(command.startswith(f"{sys.executable} -I -S -c ") for command in supervisors)
 
     document = result["document"]
+    probe = json.loads(document["feedback"])
     assert document["score"] == 1.0
-    assert document["leaked"] is False
-    assert document["has_key"] is True
+    assert probe["leaked"] is False
+    assert probe["has_key"] is True
     # No run secret enters the box (E38); the parent keeps it for redaction.
-    assert document["secret"] is None
+    assert probe["secret"] is None
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {MANAGED_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
@@ -303,7 +304,7 @@ def test_a_byok_call_from_the_box_uses_the_users_key_in_the_parent(
 
     document = result["document"]
     assert document["score"] == 1.0
-    assert document["leaked"] is False
+    assert json.loads(document["feedback"])["leaked"] is False
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {BYOK_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
