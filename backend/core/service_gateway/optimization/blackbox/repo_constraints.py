@@ -298,7 +298,7 @@ class RepoConstraints:
     editable_paths: tuple[str, ...] | None = None
     protected_paths: tuple[str, ...] = ()
     setup_command: str | None = None
-    # None means the file has no [run] section, so no candidate runs (E39).
+    # None means the file has no [run] section; a [target.<name>] stage then runs the version (E39, SKY-761).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
     # The candidate box runs [run] and the metric box runs [metric] (SKY-398),

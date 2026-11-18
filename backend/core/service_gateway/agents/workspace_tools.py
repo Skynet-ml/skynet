@@ -98,10 +98,11 @@ How to write the run's files:
   uses your repository files in place of the repository's own; the user's repository stays unchanged. Change
   other repository files only when the run needs it, and tell the user which files you changed.
 * Every run optimizes a repository. The run has no run.py. ``metric.py`` defines ``score(repo_path)``, or
-  ``score(repo_path, case)`` when the run has data, and scores the checkout at ``repo_path``. It returns
+  ``score(repo_path, case)`` when the run has data, and scores the output of the ``[run]`` entry or of the
+  ``[target.<name>]`` stages. The metric box holds no repository files. It returns
   ``(score, feedback)`` or ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
-  {APP_NAME} starts the candidate, never the metric. When the metric needs the candidate's output, write a
-  ``[run]`` section in optimize.toml with ``entry`` set to ``"path/to/file.py:function"`` or a command list,
+  {APP_NAME} starts the candidate, never the metric. Write a ``[run]`` section (or a ``[target.<name>]`` stage)
+  in optimize.toml. Set the ``[run]`` ``entry`` to ``"path/to/file.py:function"`` or a command list,
   for example ``entry = "geocode.py:geocode"``, and write ``score(repo_path, case, output=None)``: ``output``
   is what the entry returned for the case, and ``None`` when nothing ran, so always give it the ``None``
   default. That metric reads ``output`` and never imports or calls the candidate's code. When the repository
