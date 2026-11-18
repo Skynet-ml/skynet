@@ -47,7 +47,7 @@ try:
     from autosaddler.v2.harness.component_map import ComponentMapHarnessSpace
     from autosaddler.v2.harness.git import GitHarnessSpace, GitVerificationVerdict
     from autosaddler.v2.prompting import assets as as_assets
-    from autosaddler.v2.prompting.history import build_history_bundle
+    from autosaddler.v2.prompting.history import HISTORY_ROOT, build_history_bundle
     from autosaddler.v2.prompting.models import SessionSpec
     from autosaddler.v2.prompting.models import Usage as SessionUsage
     from autosaddler.v2.providers.base import BaseAgentProvider, TransportOutcome
@@ -56,7 +56,7 @@ try:
 except ImportError:  # Upstream needs Python 3.12; parent-side tests still import the helpers.
     as_domain = as_policies = as_ports = as_assets = None
     AutoSaddlerEngine = RunState = ComponentMapHarnessSpace = GitHarnessSpace = GitVerificationVerdict = None
-    build_history_bundle = SessionSpec = LocalRunStore = None
+    HISTORY_ROOT = build_history_bundle = SessionSpec = LocalRunStore = None
     SessionUsage = BaseAgentProvider = TransportOutcome = WorkspaceRenderer = None
 
 try:
@@ -111,6 +111,10 @@ _RUN_FAILED_STATUS = "run_failed"
 # SKY-750 (metric direction): the floor assumes that a higher score is
 # better. A minimize run must flip it to +1e300.
 _NO_SCORE_FLOOR = -1e300
+# Upstream records means and per-case means that can hold the floor, and the
+# agent reads them. Such a mean is near _NO_SCORE_FLOOR / n with n below 1.7e8
+# cases, so any number at or below this bound comes from the floor.
+_NO_SCORE_BOUND = _NO_SCORE_FLOOR / 1e9
 
 
 class EvaluationStopped(BaseException):
@@ -720,6 +724,54 @@ def _no_score(observation: Any) -> bool:
     return score is None or not math.isfinite(score) or score == _NO_SCORE_FLOOR
 
 
+def _without_floor(value: Any) -> Any:
+    """Replace every number that comes from the no-score floor with ``None``.
+
+    Args:
+        value: A JSON value from an upstream session context or history file.
+
+    Returns:
+        The value, with each floor-derived number as ``None``.
+    """
+    if isinstance(value, float) and value <= _NO_SCORE_BOUND:
+        return None
+    if isinstance(value, Mapping):
+        return {key: _without_floor(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_without_floor(item) for item in value]
+    return value
+
+
+def _history_files(store: Any, context: Mapping[str, Any]) -> dict[str, str]:
+    """Build upstream's history files with no floor-derived number in them.
+
+    Upstream writes raw aggregates and case scores into the history, so a
+    version with a case that has no score shows the floor. The app never
+    reports that floor (SKY-751), so it reads as ``None``. The manifest
+    digests then describe the files the agent gets.
+
+    Args:
+        store: Upstream run store.
+        context: Upstream session context.
+
+    Returns:
+        Workspace paths mapped to file text.
+    """
+    files = dict(build_history_bundle(store, context).workspace_files)
+    manifest_path = f"{HISTORY_ROOT}/manifest.json"
+    for path, text in files.items():
+        if path.endswith(".json") and path != manifest_path:
+            files[path] = as_domain.canonical_json(_without_floor(json.loads(text))) + "\n"
+    manifest = json.loads(files[manifest_path])
+    manifest["files"] = {
+        path: {"sha256": as_domain.sha256_digest(text), "bytes": len(text.encode("utf-8"))}
+        for path, text in sorted(files.items())
+        if path != manifest_path
+    }
+    files[manifest_path] = as_domain.canonical_json(manifest) + "\n"
+    return files
+
+
 def _scored_view(evaluation: Any) -> Any:
     """Return the evaluation with each floor observation made invalid again.
 
@@ -796,7 +848,9 @@ class NoScoreRejectedAcceptance:
     Upstream compares only the cases both versions scored, so a child that
     crashed on one case and scored high on the rest would replace a fully
     scored parent. A child with a failed entry is rejected; a child that
-    fixes its parent's failed entry is accepted.
+    fixes its parent's failed entry is accepted. Acceptance sees only the
+    training batch; ``AppPromptPack`` keeps a version that has no score on a
+    development case from becoming a parent.
     """
 
     def __init__(self, inner: Any) -> None:
@@ -1209,6 +1263,7 @@ class AppPromptPack:
         objective: str | None,
         background: str | None,
         readonly_paths: Sequence[str] | None = None,
+        no_score_candidates: set[str] | None = None,
     ) -> None:
         """Bind the prompt pack to the run store and task framing.
 
@@ -1218,8 +1273,11 @@ class AppPromptPack:
             objective: User objective text.
             background: User background notes.
             readonly_paths: Paths that stay as fetched; set only for a repository run.
+            no_score_candidates: The evaluator's live set of versions with a
+                development case that has no score.
         """
         self.store = store
+        self.no_score_candidates = set() if no_score_candidates is None else no_score_candidates
         self.component_names = tuple(component_names)
         self.objective = objective
         self.background = background
@@ -1246,8 +1304,7 @@ class AppPromptPack:
             "mutation_scope": list(self.component_names),
             **({} if self.readonly_paths is None else {"readonly_paths": list(self.readonly_paths)}),
         }
-        workspace_files = {_SESSION_CONTEXT_PATH: as_domain.canonical_json(rendered) + "\n"}
-        workspace_files.update(build_history_bundle(self.store, context).workspace_files)
+        workspace_files = _history_files(self.store, context)
         mutation_label = None
         if kind == "diagnose_patch":
             workspace_files[_TRAINING_EVIDENCE_PATH] = self._evidence(context.get("evidence"))
@@ -1258,15 +1315,27 @@ class AppPromptPack:
             mutation_label = "candidate-patch"
         elif kind == "evolve":
             candidate_ids = _strings(context.get("candidate_ids"), "candidate_ids")
-            schema = _evolve_schema(
-                candidate_ids, _source_options(context.get("component_source_options"), candidate_ids)
-            )
+            options = _source_options(context.get("component_source_options"), candidate_ids)
+            # Upstream accepts on the training batch only, so a version with no
+            # score on a development case stays in its accepted list. Only the
+            # parents the agent may name exclude it (SKY-751). When no accepted
+            # version has a score, the search keeps them all.
+            parents = [item for item in candidate_ids if item not in self.no_score_candidates] or list(candidate_ids)
+            options = {
+                name: kept
+                for name, sources in options.items()
+                if (kept := [item for item in sources if item in parents])
+            }
+            rendered["candidate_ids"], rendered["component_source_options"] = parents, options
+            schema = _evolve_schema(parents, options)
             skill_paths = _ANALYSIS_SKILLS
         elif kind == "reflect":
             schema = _reflection_schema()
             skill_paths = _ANALYSIS_SKILLS
         else:
             raise ValueError(f"Unknown app session kind: {kind}")
+        # The context holds upstream's raw aggregates, which can hold the floor.
+        workspace_files[_SESSION_CONTEXT_PATH] = as_domain.canonical_json(_without_floor(rendered)) + "\n"
         resolved = resolved_assets(kind, skill_paths, self.prefix)
         workspace_files[_PROMPT_ASSETS_PATH] = (
             as_domain.canonical_json(
@@ -1635,6 +1704,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             objective=task.get("objective"),
             background=task.get("background"),
             readonly_paths=readonly_paths,
+            no_score_candidates=evaluator.no_score_candidates,
         ),
         train_cases=train_cases,
         development_cases=development_cases,

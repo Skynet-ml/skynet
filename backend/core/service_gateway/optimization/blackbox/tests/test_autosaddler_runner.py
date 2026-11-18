@@ -1015,6 +1015,101 @@ def test_acceptance_checks_the_split_and_cases_as_upstream_does(monkeypatch: pyt
         acceptance.compare(_three(0.3, False), _evaluation({"a": 0.9}, frozenset({"a"})))
 
 
+_HISTORY = ".autosaddler/history"
+
+
+def _prompt_pack(
+    monkeypatch: pytest.MonkeyPatch, history: dict[str, str], no_score: set[str]
+) -> autosaddler_runner.AppPromptPack:
+    """Build the app prompt pack with upstream's domain, history and assets stood in.
+
+    Args:
+        monkeypatch: Stands in for the upstream modules, which need Python 3.12.
+        history: The workspace files upstream's history bundle returns.
+        no_score: Versions with a development case that has no score.
+
+    Returns:
+        The prompt pack the runner uses.
+    """
+    monkeypatch.setattr(
+        autosaddler_runner,
+        "as_domain",
+        SimpleNamespace(
+            canonical_json=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+            sha256_digest=lambda text: f"sha256:{len(text)}",
+        ),
+    )
+    monkeypatch.setattr(autosaddler_runner, "HISTORY_ROOT", _HISTORY)
+    monkeypatch.setattr(
+        autosaddler_runner, "build_history_bundle", lambda store, context: SimpleNamespace(workspace_files=history)
+    )
+    monkeypatch.setattr(autosaddler_runner, "SessionSpec", SimpleNamespace)
+    monkeypatch.setattr(
+        autosaddler_runner,
+        "resolved_assets",
+        lambda kind, skills, prefix: SimpleNamespace(system_context="", task_prompt="", skills=(), provenance=()),
+    )
+    return autosaddler_runner.AppPromptPack(
+        store=None, component_names=["prompt"], objective=None, background=None, no_score_candidates=no_score
+    )
+
+
+def test_session_context_and_history_never_show_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstream's raw means and case scores read as no score, never the floor, in every file the agent reads (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    floor = autosaddler_runner._NO_SCORE_FLOOR
+    record = {"train_after_aggregate": (0.5 + floor) / 2, "train_after_case_scores": {"a": 0.5, "b": floor}}
+    history = {
+        f"{_HISTORY}/iterations/0000.json": json.dumps({"iteration": 0, **record}) + "\n",
+        f"{_HISTORY}/diffs/x.patch": "-1e300\n",
+        f"{_HISTORY}/manifest.json": json.dumps({"files": {}, "through_sequence": 3}) + "\n",
+    }
+    pack = _prompt_pack(monkeypatch, history, set())
+
+    files = pack.session(
+        "reflect", {"candidate_ids": ["c1"], "train_before_aggregate": -0.25, **record}
+    ).workspace_files
+
+    context = json.loads(files[autosaddler_runner._SESSION_CONTEXT_PATH])
+    iteration = json.loads(files[f"{_HISTORY}/iterations/0000.json"])
+    for document in (context, iteration):
+        assert document["train_after_aggregate"] is None
+        assert document["train_after_case_scores"] == {"a": 0.5, "b": None}
+    assert context["train_before_aggregate"] == -0.25
+    assert files[f"{_HISTORY}/diffs/x.patch"] == "-1e300\n"
+    manifest = json.loads(files[f"{_HISTORY}/manifest.json"])
+    assert manifest["through_sequence"] == 3
+    assert manifest["files"] == {
+        path: {"sha256": f"sha256:{len(text)}", "bytes": len(text.encode("utf-8"))}
+        for path, text in files.items()
+        if path.startswith(_HISTORY) and not path.endswith("manifest.json")
+    }
+
+
+def test_a_version_with_no_development_score_is_never_offered_as_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstream accepts on the training batch only; the evolve session never offers a no-score version (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for the upstream modules.
+    """
+    history = {f"{_HISTORY}/manifest.json": json.dumps({"files": {}}) + "\n"}
+    context = {"candidate_ids": ["seed", "c1"], "component_source_options": {"x": ["c1"], "y": ["seed", "c1"]}}
+
+    spec = _prompt_pack(monkeypatch, history, {"c1"}).session("evolve", context)
+
+    properties = spec.output_schema["properties"]
+    assert properties["parent_ids"]["items"]["enum"] == ["seed"]
+    assert properties["component_sources"]["properties"] == {"y": {"type": "string", "enum": ["seed"]}}
+    rendered = json.loads(spec.workspace_files[autosaddler_runner._SESSION_CONTEXT_PATH])
+    assert rendered["candidate_ids"] == ["seed"]
+    assert rendered["component_source_options"] == {"y": ["seed"]}
+    every = _prompt_pack(monkeypatch, history, {"seed", "c1"}).session("evolve", context)
+    assert every.output_schema["properties"]["parent_ids"]["items"]["enum"] == ["seed", "c1"]
+
+
 def test_mailbox_reads_a_null_parent_score_as_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The parent sends null for a case with no score; the mailbox reads it as negative infinity, not an error (SKY-751).
 
