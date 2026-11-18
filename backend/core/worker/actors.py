@@ -737,6 +737,39 @@ class Agent:
             )
             return step_id
 
+    def commit_unpaid(
+        self, kind: str, grant_list_id: str, work: Callable[[], tuple[dict[str, Any], str | None]]
+    ) -> str:
+        """Commit one step that no lease pays for, such as a read or the record of a failed box step.
+
+        Args:
+            kind: ``command`` or ``model``.
+            grant_list_id: The grant list that the step names.
+            work: Gives the step body and its tree id; it runs only after the seq check.
+
+        Returns:
+            The step id.
+
+        Raises:
+            ValueError: The agent's next seq is past ``SEQ_MAX``; the work did not start.
+        """
+        # The same lock as ``step``, so the two paths cannot take one seq, and the seq check comes before the work.
+        with self._lock:
+            _check_count("next_seq", self.next_seq, SEQ_MAX)
+            body, tree_id = work()
+            step_id = self.run.step_log.commit(
+                run_id=self.run.run_id,
+                agent_id=self.agent_id,
+                seq=self.next_seq,
+                kind=kind,
+                execution_generation=self.run.execution_generation,
+                grant_list_id=grant_list_id,
+                body=body,
+                tree_id=tree_id,
+            )
+            self.next_seq += 1
+            return step_id
+
     def _check_admission(self) -> None:
         """Refuse paid work when the run is stopped, or when the budget or the job no longer admits it.
 

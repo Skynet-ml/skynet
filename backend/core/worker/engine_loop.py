@@ -5,7 +5,9 @@ call runs with no box open and commits one ``model`` step. A command or a
 metric opens a box only through :meth:`TreeSandbox.run` and
 :meth:`TreeSandbox.score`, and each commits one ``command`` step. So every
 model response and every command is one step in the agent's log. A failed
-model call or box step also commits one step, with no cost.
+model call or box step also commits one step, with no cost; a failed model
+call that the provider billed (:class:`ModelCallBilledError`) commits and
+settles its known cost.
 
 A resume is a replay. When an agent starts, the loop reads the agent's
 committed steps. The engine runs again from its start, and each call that a
@@ -17,7 +19,10 @@ on its command and its grant list, and a score step on its command, its
 outputs tree and its grant list. The tree sandbox writes those step bodies,
 and they do not record a run step's input tree or a score step's metric tree.
 So a replay cannot see an engine that sends the same command over another
-input tree, or that scores the same outputs with another metric tree.
+input tree, or that scores the same outputs with another metric tree. The
+host calls :meth:`EngineLoop.finish` when the engine returns or raises: an
+engine that ends before it replays every committed step raises
+:class:`StepDivergedError` there.
 
 A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
@@ -97,7 +102,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
 
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from ..billing.budget_amounts import cent_units
 from ..billing.budgets import BudgetError
@@ -132,6 +139,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
     StepRef,
     TreeSandbox,
 )
+from ..storage.models import AgentStepModel
 from ..storage.step_log_store import StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore
 from .actors import Agent, LeaseExhaustedError, Run, StepResult
@@ -197,6 +205,19 @@ class ModelCallFailedError(RuntimeError):
         self.error_type = error_type
 
 
+class ModelCallBilledError(RuntimeError):
+    """A model call failed after the provider billed it, and the model client knows the cost."""
+
+    def __init__(self, cost_cents: Decimal | int | str) -> None:
+        """Keep the known cost of the failed call.
+
+        Args:
+            cost_cents: What the provider billed for the call, in cents.
+        """
+        super().__init__(f"The provider billed a failed model call {cost_cents} cents.")
+        self.cost_cents = Decimal(str(cost_cents))
+
+
 def _reply(record: dict[str, Any]) -> ModelReply:
     """Return the reply that a committed model step holds.
 
@@ -260,7 +281,9 @@ class EngineLoop:
             candidates: Gives the boxes that run candidate commands.
             metrics: Opens a new metric box for each score, so no score runs in a box that another step used.
             model: Calls the model with a prompt and the tool definitions (``None`` for no tools), and returns its
-                reply with the cost in cents.
+                reply with the cost in cents. A failed call that the provider billed raises
+                :class:`ModelCallBilledError` with the cost; a failed call whose bill is not known yet raises
+                :class:`UsagePendingError`, which stops the loop.
             model_max_cents: The most that one model call can cost; at most one lease.
             run_dir: The loop's local folder.
             registry: The capability registry that the grant lists resolve against.
@@ -389,6 +412,36 @@ class EngineLoop:
         self._stop(LoopStoppedError(f"Run {self._run.run_id} is closed."))
         self._run.close()
 
+    def finish(self) -> None:
+        """Check that the engine replayed every committed step; call it after the engine returns or raises.
+
+        A resumed engine that ends before it asks for each committed step is not deterministic, as in a durable
+        workflow whose replay skips a step: its result would not be the result of the run that the log records.
+
+        Raises:
+            LoopStoppedError: The kept stop, with its own type, when the loop stopped or was closed; or a new one
+                when the committed agents cannot be read.
+            StepDivergedError: When an agent with committed steps did not replay all of them; the loop keeps it.
+        """
+        with self._stops():
+            try:
+                with Session(self._engine) as session:
+                    committed = set(
+                        session.scalars(
+                            select(AgentStepModel.agent_id).where(AgentStepModel.run_id == self._run.run_id).distinct()
+                        )
+                    )
+            except Exception as error:
+                raise LoopStoppedError(
+                    f"The committed agents cannot be read: {type(error).__name__}: {error}"
+                ) from error
+            with self._lock:
+                logs = dict(self._logs)
+            # An agent that never opened in this loop replayed none of its committed steps.
+            left = sorted(agent_id for agent_id in committed if agent_id not in logs or logs[agent_id].replay)
+            if left:
+                raise StepDivergedError(f"The engine ended before it replayed every committed step of agents {left}.")
+
     def model(self, prompt: Prompt) -> str:
         """Call the model with no tools, as :meth:`call_model` does, and return only the reply text.
 
@@ -421,7 +474,8 @@ class EngineLoop:
             LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
-            ModelCallFailedError: When the model call fails; a replay raises a committed failure again.
+            ModelCallFailedError: When the model call fails; its step settles the cost of a
+                :class:`ModelCallBilledError`, and a replay raises a committed failure again.
         """
         with self._stops():
             # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
@@ -441,18 +495,24 @@ class EngineLoop:
                 failures: list[Exception] = []
 
                 def work() -> StepResult:
-                    """Call the model, and turn its failure into a step with no cost.
+                    """Call the model, and turn its failure into a step with its known cost.
 
                     Returns:
                         The reply or the failure as a step body, and its cost.
                     """
                     try:
                         reply = self._model(prompt, tools)
+                    # A failure whose bill is not confirmed yet comes as UsagePendingError, as the billing runtime
+                    # raises it (core/billing/runtime.py). It is a stop and commits nothing, so the runtime keeps
+                    # the call's coverage until usage reconciliation settles it. A cost of 0 here would settle the
+                    # step as free.
                     except _STOP_ERRORS:
                         raise
                     except Exception as error:
                         failures.append(error)
-                        return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, Decimal(0))
+                        # A late failure that the provider billed settles its known cost, as a reply does.
+                        cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
+                        return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
                     body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text}
                     if reply.tool_calls:
@@ -496,9 +556,9 @@ class EngineLoop:
             The new tree id.
 
         Raises:
-            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part, or is both a file and a folder;
-                or when a write would change a hidden path. The message names only the written path, so it does not
-                name another hidden path.
+            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part or a NUL byte, or is both a file
+                and a folder; or when a write would change a hidden path. A bad part is refused before any write. The
+                message names only the written path, so it does not name another hidden path.
             LookupError: When the run cannot see the base tree or one of its folders.
             LoopStoppedError: When the loop stopped; it writes nothing.
         """
@@ -506,6 +566,10 @@ class EngineLoop:
             for path in files:
                 if hashed_kind(self._hidden, path) is not None:
                     raise ValueError(f"path {path} may not be changed")
+                # The tree store refuses a bad name only when it writes the folder, after the blobs below it, so
+                # every part is checked before the first write.
+                if any(part in {"", ".", ".."} or "\0" in part for part in path.split("/")):
+                    raise ValueError(f"bad tree entry name in path {path!r}")
             tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
             if base_tree_id in self._run_outputs:
                 self._run_outputs.add(tree_id)
@@ -590,30 +654,28 @@ class EngineLoop:
                 if record is not None:
                     return float(Decimal(record["body"]["room_cents"]) / 100)
                 self._check_owner()
-                run, agent = self._run, log.agent
-                try:
+                run = self._run
+                rooms: list[str] = []
+
+                def read() -> tuple[dict[str, Any], str]:
+                    """Read the budget's room.
+
+                    Returns:
+                        The room step's body, and the empty tree that the step log needs on a command step.
+                    """
                     user = run.workspace.user
                     budget = user.budgets.get(run.budget_id, user.username)
-                    room = format(budget.available_cents + budget.reserved_cents, "f")
-                    # The step log needs a tree on a command step.
-                    empty_tree = self._trees.put_tree(run.run_id, [])
+                    rooms.append(format(budget.available_cents + budget.reserved_cents, "f"))
+                    return {"call": "room", "room_cents": rooms[0]}, self._trees.put_tree(run.run_id, [])
+
+                try:
                     # Agent.step settles each step on the ledger, and a read has nothing to settle.
-                    step_id = run.step_log.commit(
-                        run_id=run.run_id,
-                        agent_id=agent.agent_id,
-                        seq=agent.next_seq,
-                        kind="command",
-                        execution_generation=run.execution_generation,
-                        grant_list_id=run.grant_list_id,
-                        body={"call": "room", "room_cents": room},
-                        tree_id=empty_tree,
-                    )
-                    agent.next_seq += 1
+                    step_id = log.agent.commit_unpaid("command", run.grant_list_id, read)
                     # The engine acts on the room only once its step can never be lost, as for a model reply.
                     self._durable(step_id)
                 except Exception as error:
                     raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
-                return float(Decimal(room) / 100)
+                return float(Decimal(rooms[0]) / 100)
 
     def run(
         self,
@@ -1324,19 +1386,15 @@ class EngineLoop:
         try:
             outcome = work(step)
         except tuple(_BOX_ERRORS.values()) as error:
-            message = str(error).removeprefix(f"Step {step.step_id}: ")
+            body = {
+                "call": call,
+                "command": command,
+                "error": type(error).__name__,
+                "message": str(error).removeprefix(f"Step {step.step_id}: "),
+            }
             try:
-                step_id = self._run.step_log.commit(
-                    run_id=step.run_id,
-                    agent_id=step.agent_id,
-                    seq=step.seq,
-                    kind="command",
-                    execution_generation=step.execution_generation,
-                    grant_list_id=grant_list_id,
-                    body={"call": call, "command": command, "error": type(error).__name__, "message": message},
-                    tree_id=tree_id,
-                )
-                agent.next_seq += 1
+                # The agent's log lock is held, so the agent's next seq is still the seq of ``step``.
+                step_id = agent.commit_unpaid("command", grant_list_id, lambda: (body, tree_id))
                 self._durable(step_id)
             except Exception as commit_error:
                 # A closed step log fails every record, so each later call would open and bill a box again.

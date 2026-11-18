@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
-from core.billing.usage_tags import LANE_KEY, current_tags
+from core.billing.usage_tags import LANE_KEY, current_tags, usage_scope
 from core.models.blackbox import BlackboxStrategy
 from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
 from core.sandbox.trees import GrantDeniedError, MetricFailedError, TreeRejectedError
@@ -50,7 +50,7 @@ from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSo
 from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
-from core.storage.step_log_store import StepLogStore, step_id_for
+from core.storage.step_log_store import SEQ_MAX, StepLogStore, step_id_for
 from core.storage.tree_store import TreeEntry, TreeStore
 from core.storage.workspace_store import WorkspaceStore
 from core.worker import engine_loop
@@ -59,6 +59,7 @@ from core.worker.engine_loop import (
     ROOT_AGENT_ID,
     EngineLoop,
     LoopStoppedError,
+    ModelCallBilledError,
     ModelCallFailedError,
     StepDivergedError,
 )
@@ -773,7 +774,11 @@ def test_a_stop_error_from_the_model_stops_the_loop_and_commits_no_step(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A budget or lease error in a model call is no failed call: the loop stops, keeps the stop and commits nothing."""
+    """A budget or lease error in a model call is no failed call: the loop stops, keeps the stop and commits nothing.
+
+    Args:
+        error: The stop error that the model raises.
+    """
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     model.error = error
 
@@ -849,7 +854,11 @@ def test_a_run_closed_after_the_agent_opened_stops_the_model(
 def test_a_closed_loop_opens_no_box(
     call: str, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """After the loop closes its run, a box step stops before any box opens and commits no step."""
+    """After the loop closes its run, a box step stops before any box opens and commits no step.
+
+    Args:
+        call: The box step: ``run`` or ``score``.
+    """
     seed_tree, metric_tree = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     assert loop.model("improve seed") == "seedx"
@@ -869,7 +878,11 @@ def test_a_closed_loop_opens_no_box(
 def test_a_run_closed_on_the_actor_opens_no_box(
     call: str, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A run closed straight on the actor stops a box step before any box opens, and the loop keeps the stop."""
+    """A run closed straight on the actor stops a box step before any box opens, and the loop keeps the stop.
+
+    Args:
+        call: The box step: ``run`` or ``score``.
+    """
     seed_tree, metric_tree = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     assert loop.model("improve seed") == "seedx"
@@ -1315,7 +1328,11 @@ def test_a_durable_failure_after_a_box_step_commits_stops_the_loop(
 def test_a_tree_the_run_cannot_see_stops_the_loop_before_a_box(
     call: str, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A missing tree fails on every call, so the loop keeps a stop and opens no box."""
+    """A missing tree fails on every call, so the loop keeps a stop and opens no box.
+
+    Args:
+        call: The box step: ``run`` or ``score``.
+    """
     metric_tree = _tree(trees, "metric.txt", "len")
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
 
@@ -1445,7 +1462,11 @@ def test_a_resume_with_other_tools_diverges(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """The tools are part of the prompt hash, so the same prompt with other tools is another call."""
+    """The tools are part of the prompt hash, so the same prompt with other tools is another call.
+
+    Args:
+        tools: The resume's tools, which differ from the live call's tools.
+    """
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     first.call_model("improve seed", _TOOLS)
 
@@ -1648,7 +1669,11 @@ def test_a_seed_that_hides_other_paths_than_the_loop_is_refused(
     tmp_path: Path,
     seed_hidden: dict[str, str],
 ) -> None:
-    """The loop owns its hidden paths: a context seed with other hashes cannot narrow or change them."""
+    """The loop owns its hidden paths: a context seed with other hashes cannot narrow or change them.
+
+    Args:
+        seed_hidden: The seed's hidden-path hashes, which differ from the loop's.
+    """
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["metric.py"]))
     with pytest.raises(ValueError, match="hides other paths"):
         loop.context(repo_seed=RepoSeed(_tree(trees, "README", "seed"), hidden_hashes=seed_hidden))
@@ -1846,7 +1871,13 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     links: dict[str, str],
     secret: str,
 ) -> None:
-    """The filter matches paths, so a link's target would stay visible: the loop refuses the tree before any read."""
+    """The filter matches paths, so a link's target would stay visible: the loop refuses the tree before any read.
+
+    Args:
+        hidden: The run's hidden paths.
+        links: The symlink targets by path.
+        secret: The real path of the hidden file that a link would show.
+    """
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(hidden))
     tree = _store(trees, {secret: b"secret", "README": b"r"}, links)
 
@@ -1936,7 +1967,11 @@ def test_read_file_and_list_files_hide_the_exploit_suite_as_the_candidate_box_do
 def test_a_symlink_that_names_an_absolute_path_or_leaves_the_tree_stops_the_loop(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path, target: str
 ) -> None:
-    """The loop does not know where a box puts the tree, so it cannot check what such a link reaches."""
+    """The loop does not know where a box puts the tree, so it cannot check what such a link reaches.
+
+    Args:
+        target: The symlink's target.
+    """
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval"]))
     tree = _store(trees, {"eval/metric.py": b"m", "src/a.py": b"a"}, {"door": target})
 
@@ -2170,7 +2205,13 @@ def test_more_linked_paths_than_the_limit_refuse_a_tree_only_in_strict_mode_or_w
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The limit is like a link loop: a run that hides no path of its own refuses only a tree with a hidden path."""
+    """The limit is like a link loop: a run that hides no path of its own refuses only a tree with a hidden path.
+
+    Args:
+        hidden: The run's hidden paths, or ``None``.
+        files: The tree's files by path.
+        refused: Whether the loop refuses the tree.
+    """
     monkeypatch.setattr(engine_loop, "_MAX_LINKED_PATHS", 3)
     loop, _, _ = _loop(
         owner, engine, step_log, trees, tmp_path, generation=1, hidden=None if hidden is None else hidden_hashes(hidden)
@@ -2193,7 +2234,11 @@ def test_tree_calls_after_a_stop_raise_the_kept_stop_and_touch_no_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After a fence loss or a close, put_files, read_file and list_files raise the stop and read or write nothing."""
+    """After a fence loss or a close, put_files, read_file and list_files raise the stop and read or write nothing.
+
+    Args:
+        stop: How the loop stops: ``fence`` or ``close``.
+    """
     seed_tree = _store(trees, {"src/a.py": b"a = 1\n"})
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     assert loop.read_file(seed_tree, "src/a.py") == b"a = 1\n"
@@ -2253,7 +2298,11 @@ def test_a_context_after_a_stop_raises_the_kept_stop_and_writes_no_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A context after a close or a divergence raises the kept stop, with its type, and writes no visible seed."""
+    """A context after a close or a divergence raises the kept stop, with its type, and writes no visible seed.
+
+    Args:
+        stop: How the loop stops: ``close`` or ``divergence``.
+    """
     hidden = hidden_hashes(["metric.py"])
     raw = _store(trees, {"README": b"seed", "metric.py": b"secret"})
     if stop == "close":
@@ -2377,3 +2426,147 @@ def test_a_metric_source_that_is_not_a_fresh_box_source_is_refused(
             model_max_cents=2,
             run_dir=tmp_path / "other",
         )
+
+
+def _cancel(engine: Engine) -> None:
+    """Cancel the job at its generation, so the owner check fails while the budget still admits paid work.
+
+    Args:
+        engine: The database.
+    """
+    with Session(engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN_ID).values(status="cancelled"))
+        session.commit()
+
+
+def test_a_failed_owner_check_before_a_model_call_is_a_kept_stop_with_no_call_and_no_step(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Another writer owns the run: the model call stops at the owner check, before the provider and the commit."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    assert loop.model("improve seed") == "seedx"
+    _cancel(engine)
+
+    for _ in range(2):
+        with pytest.raises(LoopStoppedError, match="no longer active") as stopped:
+            loop.model("improve seedx")
+        assert type(stopped.value) is LoopStoppedError
+    assert model.prompts == ["improve seed"]
+    assert len(_steps(engine)) == 1
+
+
+def test_a_failed_owner_check_before_a_room_read_is_a_kept_stop_with_no_step(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Another writer owns the run: the room read commits no step, and the agent's next seq does not move."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    assert loop.model("improve seed") == "seedx"
+    _cancel(engine)
+
+    for _ in range(2):
+        with pytest.raises(LoopStoppedError, match="no longer active") as stopped:
+            loop.remaining_cost_usd()
+        assert type(stopped.value) is LoopStoppedError
+    assert len(_steps(engine)) == 1
+    assert loop._logs[ROOT_AGENT_ID].agent.next_seq == 1
+
+
+def test_an_unpaid_step_past_the_last_seq_is_refused_before_its_work(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room read and a box failure record past ``SEQ_MAX`` stop the loop before they read or write anything."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    assert loop.remaining_cost_usd() == pytest.approx(10.0)
+    agent = loop._logs[ROOT_AGENT_ID].agent
+    agent.next_seq = SEQ_MAX + 1
+    writes: list[Any] = []
+    monkeypatch.setattr(trees, "put_tree", lambda *args: writes.append(args))
+
+    with pytest.raises(LoopStoppedError, match="next_seq is not an int"):
+        loop.remaining_cost_usd()
+    assert writes == []
+    assert agent.next_seq == SEQ_MAX + 1
+    assert len(_steps(engine)) == 1
+
+
+def test_a_box_failure_record_past_the_last_seq_is_refused_by_the_agent(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The box failure record goes through the agent's seq check, so it commits nothing past ``SEQ_MAX``."""
+    seed = _tree(trees, "README", "seed")
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    loop.run(seed, "true")
+    agent = loop._logs[ROOT_AGENT_ID].agent
+    agent.next_seq = SEQ_MAX + 1
+
+    with pytest.raises(LoopStoppedError, match="next_seq is not an int"):
+        loop.run(seed, "true", (Grant("api.example.com", credential=True),))
+    assert agent.next_seq == SEQ_MAX + 1
+    assert len(_steps(engine)) == 1
+
+
+def test_a_billed_model_failure_settles_its_known_cost_and_records_it_in_the_step(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A failure that the provider billed is no free step: the ledger and the step both hold its cost."""
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.error = ModelCallBilledError("1.5")
+
+    with pytest.raises(ModelCallFailedError, match="ModelCallBilledError"):
+        loop.model("improve seed")
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "ModelCallBilledError"
+    assert Decimal(failed["body"]["cost_cents"]) == Decimal("1.5")
+    assert loop.remaining_cost_usd() == pytest.approx(9.985)
+
+
+def test_an_engine_that_ends_before_its_replay_is_over_diverges_at_finish(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A resume that skips committed steps, in an open agent or an agent that never opens, is a kept divergence."""
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    first.model("improve seed")
+    first.model("improve seedx")
+    with usage_scope(**{LANE_KEY: "lane-a"}):
+        first.model("improve lane")
+    first.finish()
+
+    _new_generation(engine)
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert loop.model("improve seed") == "seedx"
+    with pytest.raises(StepDivergedError) as diverged:
+        loop.finish()
+    assert "'lane-a'" in str(diverged.value)
+    assert f"'{ROOT_AGENT_ID}'" in str(diverged.value)
+    with pytest.raises(StepDivergedError):
+        loop.model("improve seedx")
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize("path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/"])
+def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
+    path: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tree store refuses a bad name only at its folder, so put_files checks each part before the first blob.
+
+    Args:
+        path: A path with an empty, ``.`` or ``..`` part, or a NUL byte.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    writes: list[Any] = []
+    monkeypatch.setattr(step_log, "put_object", lambda *args: writes.append(args))
+
+    with pytest.raises(ValueError, match="bad tree entry name"):
+        loop.put_files({"ok.txt": b"1", path: b"2"})
+    assert writes == []
