@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import path from "node:path";
 import { it } from "node:test";
@@ -29,4 +30,16 @@ void it("bulk Stop cancels active and paused runs only (SKY-827)", () => {
     status,
   }));
   assert.deepEqual(stoppableJobIds(jobs), ["running", "pending", "paused"]);
+});
+
+void it("bulk Stop and its button use stoppableJobIds (SKY-827)", () => {
+  // DashboardView needs the router, session and query context, so check the call sites.
+  const source = readFileSync(new URL("./DashboardView.tsx", import.meta.url), "utf8").replace(
+    /\s+/g,
+    " ",
+  );
+  const ids = [...source.matchAll(/const stoppableSelectedIds = ([^;]+);/g)].map((m) => m[1]);
+  assert.deepEqual(ids, ["canEditSelection ? stoppableJobIds(selectedJobs) : []"]);
+  assert.match(source, /bulkCancelJobs\(stoppableSelectedIds\)/);
+  assert.match(source, /canStop=\{stoppableSelectedIds\.length > 0\}/);
 });

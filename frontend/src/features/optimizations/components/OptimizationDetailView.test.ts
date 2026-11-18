@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Module, registerHooks } from "node:module";
 import path from "node:path";
 import { after, describe, it } from "node:test";
@@ -157,7 +158,13 @@ void describe("run page header actions (SKY-827)", () => {
       "share view of a paused run",
       { status: "paused", pausable: true, resumable: true },
       true,
-      { wide: 1, phone: null },
+      { canCancel: false, canPause: false, wide: 1, phone: null },
+    ],
+    [
+      "share view of a running run",
+      { status: "running", pausable: true },
+      true,
+      { canCancel: false, canPause: false, wide: 1, phone: null },
     ],
   ];
   for (const [name, job, isShare, want] of cases) {
@@ -193,4 +200,15 @@ void it("the Cancel button cancels the run and tells the sidebar (SKY-827)", asy
   });
   assert.deepEqual(calls, ["cancel run-1 local", "optimizations-changed", "refetch"]);
   await act(async () => root.unmount());
+});
+
+void it("the header shows CancelRunButton exactly when canCancel is true (SKY-827)", () => {
+  // The full view needs the job fetch, session and router, so check the call site.
+  const source = readFileSync(
+    new URL("./OptimizationDetailView.tsx", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  const guards = [...source.matchAll(/\{([^{}]+?) && \( <CancelRunButton /g)].map((m) => m[1]);
+  assert.deepEqual(guards, ["canCancel"]);
+  assert.equal(source.split("<CancelRunButton ").length - 1, 1);
 });

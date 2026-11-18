@@ -350,9 +350,10 @@ export function runHeaderActions({
   const showResume = canRestart && !!job.resumable;
   const showRetry = canRestart && !job.resumable && canClone;
   // A paused run has no worker, but the cancel route still cancels it (SKY-800),
-  // so Cancel stays for a manual pause and a budget pause alike.
-  const canCancel = canEditRun && (isActive || job.status === "paused");
-  const canPause = canEditRun && isActive && !!job.pausable;
+  // so Cancel stays for a manual pause and a budget pause alike. A share view
+  // carries no effective_role, so it would read as owner-level: never there.
+  const canCancel = !isShare && canEditRun && (isActive || job.status === "paused");
+  const canPause = !isShare && canEditRun && isActive && !!job.pausable;
   // The phone shell keeps only share and cancel; a share view has just the
   // clone button, on wide screens, and otherwise no action row.
   const headerActionCounts = isShare
