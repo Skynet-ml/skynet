@@ -1656,11 +1656,12 @@ def test_a_reply_whose_key_sort_recurses_is_a_failed_model_call_with_its_cost(
     assert first.call_model("improve other", _TOOLS).text == "otherx"
 
 
-def test_too_deep_arguments_is_no_json_and_nests_past_the_reply_depth_bound() -> None:
-    """The refused text must stay unreadable as JSON and deeper than the loop's bound, or an engine could act on it."""
-    assert TOO_DEEP_ARGUMENTS.count("[") > engine_loop._MAX_REPLY_DEPTH
-    with pytest.raises(ValueError):
-        json.loads(TOO_DEEP_ARGUMENTS)
+def test_too_deep_arguments_is_a_shallow_json_object_with_no_command() -> None:
+    """The text must be a flat JSON object with no ``command``, so a provider accepts it and an engine refuses it."""
+    value = json.loads(TOO_DEEP_ARGUMENTS)
+    assert isinstance(value, dict)
+    assert "command" not in value
+    assert all(not isinstance(item, (dict, list)) for item in value.values())
 
 
 def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as_refused_text(

@@ -45,8 +45,9 @@ Model output is untrusted, so a reply that nests deeper than
 ``_MAX_REPLY_DEPTH``, is larger than ``_MAX_REPLY_BYTES`` or is not UTF-8
 JSON is a failed model call too, and its step settles the reply's cost
 (SKY-817). Tool call arguments that nest too deep fail only their call: the
-step commits ``TOO_DEEP_ARGUMENTS`` in their place, which every engine refuses
-with an error result for that call.
+step commits ``TOO_DEEP_ARGUMENTS`` in their place. That text is a shallow
+JSON object with no tool fields, so an engine treats it as a bad call and
+gives an error result for that tool call only.
 Every other error of a step is a stop. It can come after the step committed,
 for example from a settle or the durable wait, so the live engine must not
 act on it: a resume would replay the committed result instead. A stop gives

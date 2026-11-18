@@ -265,10 +265,11 @@ class ModelReplyTooDeepError(ValueError):
     """A model reply nests deeper than the code that reads or stores it can follow (SKY-817)."""
 
 
-# A tool call keeps this text in place of arguments that nest too deep to read, write or commit. The text is not JSON
-# and not an object, so each engine gives that call an error result and the run goes on (SKY-817). Its brackets also
-# nest past every engine's argument depth bound (32 today) and past engine_loop._MAX_REPLY_DEPTH.
-TOO_DEEP_ARGUMENTS = "[" * 101
+# A tool call keeps this text in place of arguments that nest too deep to write or commit (SKY-817). The text is a
+# shallow JSON object with no tool fields, so an engine treats it as a bad call for that tool call only, and the run
+# goes on. It must stay valid JSON: engines put it unchanged into the next prompt, and a provider that gets text that
+# is not a JSON object can fail every later call in the session.
+TOO_DEEP_ARGUMENTS = '{"error": "tool call arguments nest too deep"}'
 
 
 class ToolDefinition(TypedDict):
@@ -286,8 +287,9 @@ class ToolCall(TypedDict):
     """One tool call that a model reply asks for, in the engine loop's flat form.
 
     ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
-    parsed JSON object, or the raw text when the model sent text that is not a JSON object. The engine gives
-    the model an error tool result for raw text, so the model can correct its call.
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object, or
+    :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model can
+    correct its call.
     """
 
     id: str
