@@ -45,6 +45,7 @@ from ...config import app_env, settings
 from ...storage.models import (
     AgentConversationModel,
     AgentFeedbackReportModel,
+    AgentStepModel,
     ApiTokenModel,
     Base,
     BillingCustomerModel,
@@ -1108,6 +1109,78 @@ def test_a_failure_after_the_purge_and_before_the_commit_keeps_the_pack_objects(
         assert session.get(UserModel, _EMAIL) is not None
         assert session.scalars(select(TreeObjectModel.pack_key)).all() == ["packs/w1/p1"]
         assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/p1"]
+
+
+def test_deletion_purges_the_tree_rows_on_the_step_log_shards_that_the_settings_name(
+    full_schema_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Account deletion deletes the account's tree object on a ``STEP_LOG_SHARDS`` shard, and its pack after the commit.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    shard_url = f"sqlite:///{tmp_path / 's2.sqlite'}"
+    shard = create_engine(shard_url)
+    Base.metadata.create_all(
+        shard, tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+    )
+    with Session(shard) as session:
+        session.add(
+            StoragePackModel(
+                pack_key="packs/w1/p1", worker_id="w1", byte_size=10, created_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        session.add(
+            TreeObjectModel(
+                username=_EMAIL, object_id="o1", byte_size=10, pack_key="packs/w1/p1", pack_offset=0, pack_length=10
+            )
+        )
+        session.commit()
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.commit()
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(shard_url)})
+    deleted: list[str] = []
+
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.extend):
+        with Session(full_schema_engine) as session:
+            summary = delete_account(session, _EMAIL)
+            session.commit()
+        assert delete_unused_packs(full_schema_engine, summary.trees) == 1
+
+    assert deleted == ["packs/w1/p1"]
+    with Session(shard) as session:
+        assert session.scalars(select(TreeObjectModel)).all() == []
+        assert session.scalars(select(StoragePackModel)).all() == []
+
+
+def test_deletion_fails_and_keeps_the_account_when_a_step_log_shard_fails(
+    full_schema_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step log shard that cannot connect fails the deletion with its name; the account and its rows stay.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    _seed_tree_pack(full_schema_engine)
+    monkeypatch.setattr(
+        settings, "step_log_shards", {"s2": SecretStr(f"sqlite:///{tmp_path / 'missing' / 's2.sqlite'}")}
+    )
+
+    with (
+        patch("core.storage.tree_purge.bucket_deleter", return_value=[].extend),
+        Session(full_schema_engine) as session,
+        pytest.raises(TreePurgeError, match="step log shard 's2'"),
+    ):
+        delete_account(session, _EMAIL)
+
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.scalars(select(TreeObjectModel.pack_key)).all() == ["packs/w1/p1"]
 
 
 def test_delete_answers_200_when_the_pack_delete_after_the_commit_fails(harness: SimpleNamespace) -> None:
