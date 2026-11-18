@@ -66,7 +66,8 @@ _FEEDBACK_RECORDS = 5
 # The error names the path, and a hidden path must not reach the proposer (SKY-353), so the note is fixed.
 _REJECTED_NOTE = "The command wrote a path that it may not write. Its output was discarded."
 # The line that opens a block. ``_blocks`` matches it one line at a time, so it does no backtracking across lines.
-_OPENING = re.compile(r"(`{3,})(sh|read|ls|file)[ \t]*(.*)")
+# A space, a tab or the line end must follow the kind, so ```shell or ```file:a.py opens no block.
+_OPENING = re.compile(r"(`{3,})(sh|read|ls|file)(?:[ \t]+(.*))?$")
 _Found = TypeVar("_Found")
 
 
@@ -617,7 +618,8 @@ class _LoopRepoProposer:
             The reason, or ``None`` when the path is editable.
         """
         parts = path.split("/")
-        if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
+        # A case-insensitive file system writes ``.GIT/config`` into the ``.git`` folder.
+        if path.startswith("/") or any(part in ("", ".", "..") or part.casefold() == ".git" for part in parts):
             return f"'{path}' is not a path inside the repository."
         # This check comes before the hidden check, so a hidden path outside the editable paths gets the same
         # answer as any other path there, and the answer does not show that it is hidden (SKY-353).
@@ -706,7 +708,7 @@ def _blocks(text: str) -> list[tuple[str, str, str]]:
             index += 1
             continue
         opening, end = openings[index]
-        blocks.append((opening[2], opening[3], "".join(f"{line}\n" for line in lines[index + 1 : end])))
+        blocks.append((opening[2], opening[3] or "", "".join(f"{line}\n" for line in lines[index + 1 : end])))
         index = end + 1
     return blocks
 

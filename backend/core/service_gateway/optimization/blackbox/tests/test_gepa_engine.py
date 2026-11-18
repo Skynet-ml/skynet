@@ -944,12 +944,16 @@ def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_
             _file("src/rules.toml"),
             _file("src/vendor/lib.py"),
             _file("../escape.txt") + "\n" + _file("README.md"),
+            _file(".git/config"),
+            _file("src/.git/HEAD"),
+            _file(".GIT/config"),
+            _file("src/.Git/HEAD"),
             "````file answer.txt\n```sh\nls\n```\n````\n" + _file("src/new.py"),
         ]
     )
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
     assert proposer is not None
-    monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 7)
+    monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 11)
 
     assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
 
@@ -962,9 +966,36 @@ def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_
     assert "read-only" in notes[4]
     assert "'../escape.txt' is not a path inside the repository." in notes[5]
     assert "'README.md' is outside the editable paths." in notes[5]
+    # A case-insensitive file system writes ``.GIT`` into the ``.git`` folder, so each letter case is refused.
+    for note, path in zip(notes[6:10], [".git/config", "src/.git/HEAD", ".GIT/config", "src/.Git/HEAD"], strict=True):
+        assert note == f"The files break the editing rules: '{path}' is not a path inside the repository."
     assert calls.writes == [({"answer.txt": b"```sh\nls\n```\n", "src/new.py": b"new\n"}, "tree-parent")]
     assert calls.commands == []
-    assert proposer.total_cost == pytest.approx(0.07)
+    assert proposer.total_cost == pytest.approx(0.11)
+
+
+def test_a_kind_with_more_letters_opens_no_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Treat ```file:path and ```shell as text, so the model gets the reply rules and nothing runs or is written.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
+    assert gepa_mod._blocks("```file:src/a.py\nnew\n```") == []
+    assert gepa_mod._blocks("```filename src/a.py\nnew\n```") == []
+    assert gepa_mod._blocks("```shell\nls\n```") == []
+    assert gepa_mod._blocks("```sh\nls\n```") == [("sh", "", "ls\n")]
+    assert gepa_mod._blocks("```file\tsrc/a.py \nnew\n```") == [("file", "src/a.py ", "new\n")]
+    calls = _FakeCalls(["```file:src/a.py\nnew\n```", "```shell\nls\n```", "no block"])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
+    assert proposer is not None
+    monkeypatch.setattr(gepa_mod, "_MAX_TURNS", 3)
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {}
+    rules = "Reply with one ```ls block, one ```read block, one ```sh block, or ```file blocks."
+    assert calls.prompts[1:3] == [rules, rules]
+    assert calls.writes == []
+    assert calls.commands == []
 
 
 def test_the_proposer_lists_and_reads_with_no_box_and_gives_no_version_when_turns_run_out(
@@ -1953,7 +1984,9 @@ def test_an_empty_folder_lists_as_empty_and_a_file_may_not_replace_it(tmp_path: 
 
 
 # The fence expression that ``_blocks`` replaced. It gives the same blocks, in time quadratic in the reply's length.
-_REFERENCE_BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
+_REFERENCE_BLOCK = re.compile(
+    r"^(`{3,})(sh|read|ls|file)(?:[ \t]+([^\n]*))?\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE
+)
 
 
 def test_the_block_parser_gives_the_blocks_of_the_fence_expression() -> None:
@@ -1978,7 +2011,7 @@ def test_the_block_parser_gives_the_blocks_of_the_fence_expression() -> None:
     ]
 
     for reply in replies:
-        expected = [(match[2], match[3], match[4]) for match in _REFERENCE_BLOCK.finditer(reply)]
+        expected = [(match[2], match[3] or "", match[4]) for match in _REFERENCE_BLOCK.finditer(reply)]
         assert gepa_mod._blocks(reply) == expected, reply
 
 
