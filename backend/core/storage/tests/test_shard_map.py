@@ -1128,9 +1128,9 @@ def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migra
         with main.begin() as connection:
             connection.execute(text("DROP INDEX IF EXISTS ix_jobs_step_log_shard"))
             connection.execute(text("ALTER TABLE jobs DROP COLUMN step_log_shard"))
-            connection.execute(
-                text("UPDATE alembic_version SET version_num = :rev"), {"rev": script.get_revision(head).down_revision}
-            )
+            # The head merges two parents (SKY-819). Only the shard column's branch rolls back, so main
+            # stays at the other parent and the boot runs the shard column revision and the merge.
+            connection.execute(text("UPDATE alembic_version SET version_num = :rev"), {"rev": "e8b2d4f6a9c1"})
         # Port 1 refuses the connection at once, so the test does not wait for the connect timeout.
         monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr("postgresql://localhost:1/none")})
 
