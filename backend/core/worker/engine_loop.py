@@ -622,9 +622,9 @@ class EngineLoop:
     def read_file(self, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
         """Read one file of a tree with no box, unless the loop hides it.
 
-        A file's bytes are model output, and a tree may hold a file of up to ``MAX_TREE_BYTES``. With
-        ``max_bytes``, the step log compares the file's stored length to the cap in the same lookup that finds the
-        bytes, and a file above the cap never loads. Like a read with no cap, this is no step: the blob id is the
+        A file can be large: a box output may hold up to ``core.sandbox.trees.MAX_TREE_BYTES``, and ``put_files``
+        has no limit. With ``max_bytes``, the tree store compares the file's length to the cap in the same lookup
+        that finds the bytes, and a file above the cap never loads. Like a read with no cap, this is no step: the blob id is the
         hash of the file's bytes, so the same tree and path give the same size and the same answer on a resume,
         before and after the flush.
 

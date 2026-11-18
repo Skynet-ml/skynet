@@ -161,7 +161,7 @@ class TreeStore:
             run_id: The job that reads the blob.
             object_id: The blob's object id.
             max_bytes: The most file bytes to load; ``None`` loads the blob at any size. The step log compares
-                the stored length to the cap before it loads, so a larger blob never loads.
+                the stored length to the cap plus the blob header before it loads, so a larger blob never loads.
 
         Returns:
             The file bytes, or ``None`` when the run cannot see such an object.
