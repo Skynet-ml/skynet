@@ -35,6 +35,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "agent_settings.invalid_value": "The value for {field} is not valid.",
     "agent_settings.missing_target": "The {action} action needs a target.",
     "agent_settings.not_writable": "The chat cannot change {key}. Change it on the {tab} tab.",
+    "accounts.deletion_storage_unavailable": (
+        "Your account was not deleted: its stored run data could not be removed right now. Try again in a few minutes."
+    ),
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",

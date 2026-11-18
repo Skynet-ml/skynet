@@ -145,6 +145,7 @@
     "connectors.hf_unreachable": "連接唔到 Hugging Face。等陣再試。",
     "connectors.reconnect_required": "你嘅 {provider} 連結已經讀取唔到。解除連結之後再連結一次。",
     "connectors.vault_not_configured": "呢個部署未設定憑證保管庫,所以連結唔到連接器。",
+    "accounts.deletion_storage_unavailable": "你嘅帳戶未有刪除：暫時刪除唔到佢儲存咗嘅運行數據。請過幾分鐘再試。",
     "accounts.email_delivery_unavailable": "此伺服器未設定電郵發送功能。",
     "accounts.email_not_verified": "請喺登入前驗證你嘅電郵地址。",
     "accounts.email_send_failed": "發送唔到驗證電郵。請再試一次。",

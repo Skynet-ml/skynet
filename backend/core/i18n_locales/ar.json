@@ -145,6 +145,7 @@
     "connectors.hf_unreachable": "تعذّر الوصول إلى Hugging Face. حاول مرة أخرى بعد قليل.",
     "connectors.reconnect_required": "لم يعد بالإمكان قراءة رابط {provider} الخاص بك. اقطع الاتصال ثم أعد الاتصال.",
     "connectors.vault_not_configured": "خزنة بيانات الاعتماد غير مُعدّة في هذا النشر، لذا لا يمكن ربط الموصّلات.",
+    "accounts.deletion_storage_unavailable": "لم يُحذف حسابك: تعذّر حذف بيانات التشغيل المخزّنة الخاصة به الآن. حاول مرة أخرى بعد بضع دقائق.",
     "accounts.email_delivery_unavailable": "لم يتم إعداد خدمة إرسال البريد الإلكتروني على هذا الخادم.",
     "accounts.email_not_verified": "يرجى تأكيد بريدك الإلكتروني قبل تسجيل الدخول.",
     "accounts.email_send_failed": "تعذّر إرسال بريد التأكيد الإلكتروني. يُرجى المحاولة مرة أخرى.",

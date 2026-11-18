@@ -41,6 +41,13 @@ only to compacted packs: a compacted pack with more than half of
 ``MAX_ROWS_PER_PASS`` rows also leaves the candidates. A flush pack has no
 such mark, so a pass skips a flush pack whose rows do not fit and goes on.
 Size tiers are a later change if the copy volume shows a need.
+
+An account deletion leaves the bytes of the deleted account in each pack that
+other accounts also use (:mod:`core.storage.tree_purge`). The purge sets
+``needs_rewrite`` on such a pack. A marked pack is a candidate at any size and
+comes first, and a pass may rewrite it alone. The rewrite copies only the
+entries that rows still point at, so the deleted bytes go when the old pack is
+retired and deleted.
 """
 
 from __future__ import annotations
@@ -99,7 +106,8 @@ MAX_ROWS_PER_PASS = 100_000
 CHUNK_SIZE = 200
 INTERVAL_SECONDS = 60.0
 
-_REFERENCED = or_(
+# A pack is in use while a row points at it. The step log shards (SKY-731) add their reference here.
+REFERENCED = or_(
     exists().where(AgentStepModel.pack_key == StoragePackModel.pack_key),
     exists().where(TreeObjectModel.pack_key == StoragePackModel.pack_key),
 )
@@ -118,6 +126,23 @@ def _chunks(items: list[Any]) -> list[list[Any]]:
         The chunks, in order.
     """
     return [items[start : start + CHUNK_SIZE] for start in range(0, len(items), CHUNK_SIZE)]
+
+
+def tree_bucket_client() -> tuple[str, Any] | None:
+    """Return the tree bucket that ``SKYNET_TREE_BUCKET`` names, with an S3 client.
+
+    Returns:
+        The bucket name and the client, or ``None`` when no bucket is set.
+
+    Raises:
+        RuntimeError: When a bucket is set and boto3 is not installed.
+    """
+    bucket = settings.tree_bucket
+    if not bucket:
+        return None
+    if boto3 is None:
+        raise RuntimeError("boto3 is not installed")
+    return bucket, boto3.client("s3")
 
 
 def _move_chunk(table: Table, id_names: tuple[str, ...], chunk: list[tuple[Any, int]], new_key: str) -> Update:
@@ -217,9 +242,11 @@ class TreeCompactor:
     def merge(self) -> int:
         """Merge the oldest small packs into one new pack, and move their rows to it in one transaction.
 
+        A pack that ``needs_rewrite`` marks comes first, and is rewritten even when it is the only pack.
+
         Returns:
-            The number of old packs merged; ``0`` when fewer than two packs qualify, when missing,
-            short or empty (broken) objects leave fewer than two packs, when another transaction
+            The number of old packs merged; ``0`` when fewer than two packs qualify and none is marked,
+            when missing, short or empty (broken) objects leave no pack that is worth a pass, when another transaction
             holds a lock that the move needs, or when another pass moved or a delete removed a row first.
 
         Raises:
@@ -227,29 +254,37 @@ class TreeCompactor:
         """
         with Session(self._engine) as session:
             candidates = session.execute(
-                select(StoragePackModel.pack_key, StoragePackModel.byte_size)
+                select(StoragePackModel.pack_key, StoragePackModel.byte_size, StoragePackModel.needs_rewrite)
                 .where(
                     StoragePackModel.created_at < datetime.now(UTC) - self._min_age,
-                    # Over half the target is full: any two candidates fit in one pass.
-                    StoragePackModel.byte_size * 2 <= self._target_bytes,
                     StoragePackModel.byte_size != BROKEN_BYTE_SIZE,
-                    StoragePackModel.worker_id != FULL_COMPACTOR_ID,
-                    _REFERENCED,
+                    REFERENCED,
+                    or_(
+                        # An account deletion left dead bytes in the pack: it is rewritten at any size.
+                        StoragePackModel.needs_rewrite,
+                        # Over half the target is full: any two candidates fit in one pass.
+                        and_(
+                            StoragePackModel.byte_size * 2 <= self._target_bytes,
+                            StoragePackModel.worker_id != FULL_COMPACTOR_ID,
+                        ),
+                    ),
                 )
-                .order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
+                .order_by(StoragePackModel.needs_rewrite.desc(), StoragePackModel.created_at, StoragePackModel.pack_key)
                 .limit(MAX_PACKS_PER_PASS)
             ).all()
+            rewrite = {key for key, _, marked in candidates if marked}
             keys: list[str] = []
             steps: list[Any] = []
             tree_objects: list[Any] = []
             total = row_count = 0
             # Rows are read one pack at a time, so a pack that does not fit uses none of the byte or row budget.
-            for key, size in candidates:
+            for key, size, _ in candidates:
                 if row_count >= MAX_ROWS_PER_PASS:
                     break
-                # The new pack is built in memory, so it never grows past the target. Each candidate is
-                # at most half the target, so the first two always fit.
-                if total + size > self._target_bytes:
+                # The new pack is built in memory, so it never grows past the target. Each unmarked
+                # candidate is at most half the target, so the first two always fit. A marked pack can be
+                # larger; as the first pack of a pass it is taken at any size, so it never waits for room.
+                if keys and total + size > self._target_bytes:
                     continue
                 pack_steps = session.execute(
                     select(
@@ -275,7 +310,7 @@ class TreeCompactor:
                 tree_objects += pack_objects
                 total += size
                 row_count += rows
-            if len(keys) < 2:
+            if not self._worth_a_pass(keys, rewrite):
                 return 0
         data = bytearray()
         step_moves: list[tuple[Any, int]] = []
@@ -320,7 +355,7 @@ class TreeCompactor:
         if broken:
             self._mark_broken(broken)
             keys = [key for key in keys if key not in broken]
-            if len(keys) < 2:
+            if not self._worth_a_pass(keys, rewrite):
                 return 0
         # The new key is made after the GETs, so slow GETs do not use the half-grace limit, and its time
         # is not older than the PUT.
@@ -368,6 +403,19 @@ class TreeCompactor:
                 raise TimeoutError(f"the merge into {new_key} took more than half the grace time")
             session.commit()
         return len(keys)
+
+    @staticmethod
+    def _worth_a_pass(keys: list[str], rewrite: set[str]) -> bool:
+        """Return whether the packs of a pass make a new pack: two or more, or one that must be rewritten.
+
+        Args:
+            keys: The pack keys of the pass.
+            rewrite: The candidate keys that ``needs_rewrite`` marks.
+
+        Returns:
+            Whether the pass goes on.
+        """
+        return len(keys) >= 2 or any(key in rewrite for key in keys)
 
     def _lock_and_move(
         self,
@@ -454,7 +502,7 @@ class TreeCompactor:
             The number of packs deleted.
         """
         retired = and_(
-            StoragePackModel.created_at < datetime.now(UTC) - timedelta(seconds=self._grace_seconds), ~_REFERENCED
+            StoragePackModel.created_at < datetime.now(UTC) - timedelta(seconds=self._grace_seconds), ~REFERENCED
         )
         # No lock: no new row ever points at a retired pack, and both deletes are idempotent.
         with Session(self._engine) as session:
@@ -551,12 +599,10 @@ def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
     Raises:
         RuntimeError: When a bucket is set and boto3 is not installed.
     """
-    bucket = settings.tree_bucket
-    if not bucket:
+    found = tree_bucket_client()
+    if found is None:
         return None
-    if boto3 is None:
-        raise RuntimeError("boto3 is not installed")
-    client = boto3.client("s3")
+    bucket, client = found
 
     def delete_object(key: str) -> None:
         """Delete one object; S3 does not fail on a missing key.

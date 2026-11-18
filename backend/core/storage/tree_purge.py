@@ -6,13 +6,22 @@ the account's ``tree_objects`` and ``workspaces`` rows and the
 row points at any more, and the pack's ``storage_packs`` row.
 
 A pack can also hold entries of other accounts. Such a pack stays, because
-their rows still point at it. The deleted account's bytes in it have no row,
-so no read can reach them, and the next merge of the compactor does not copy
-them (:mod:`core.storage.tree_compactor`).
+their rows still point at it, and no read can reach the deleted account's
+bytes in it. The purge sets the pack's ``needs_rewrite`` mark, so the next
+pass of the compactor rewrites it, at any size, with only the entries that
+rows still point at. The old pack is then retired and deleted, with the
+deleted account's bytes (:mod:`core.storage.tree_compactor`).
+
+The locks follow one global order: the account's ``jobs`` rows, then the
+``storage_packs`` rows, each in key order, and only then the deletes.
+:meth:`StepLogStore._apply` locks the jobs first too, so no flush of the
+account's runs writes a row behind the purge. The compactor takes the same
+locks with NOWAIT, so a merge of these packs gives up instead of waiting.
 
 The S3 delete happens before the transaction commits, so a failed delete
 fails the whole account deletion. A rollback after the delete leaves rows
-that point at a deleted pack; the next deletion of the account removes them.
+that point at a deleted pack; the next deletion of the account removes them,
+and S3 does not fail on a key that is already gone.
 
 The purge is one function so that a later change can add the step log
 shards (SKY-731) in one place.
@@ -23,24 +32,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import delete, exists, or_, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from ..config import settings
-from .models import AgentStepModel, StoragePackModel, TreeObjectModel, WorkspaceModel
-
-try:
-    import boto3
-except ImportError:
-    boto3 = None
+from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel, WorkspaceModel
+from .tree_compactor import REFERENCED, tree_bucket_client
 
 # Keys in one IN query, far below the SQLite bind limit.
 CHUNK_SIZE = 200
-
-_REFERENCED = or_(
-    exists().where(AgentStepModel.pack_key == StoragePackModel.pack_key),
-    exists().where(TreeObjectModel.pack_key == StoragePackModel.pack_key),
-)
+# The most keys that one S3 DeleteObjects request takes.
+S3_DELETE_BATCH = 1000
 
 
 class TreePurgeError(RuntimeError):
@@ -72,8 +73,24 @@ def _chunks(items: list[str]) -> Iterable[list[str]]:
     return (items[start : start + CHUNK_SIZE] for start in range(0, len(items), CHUNK_SIZE))
 
 
-def bucket_deleter() -> Callable[[str], None] | None:
-    """Return a function that deletes one object from the tree bucket.
+def _lock_packs(session: Session, keys: set[str]) -> None:
+    """Lock ``storage_packs`` rows FOR UPDATE in key order.
+
+    Args:
+        session: The purge transaction.
+        keys: The pack keys.
+    """
+    for chunk in _chunks(sorted(keys)):
+        session.execute(
+            select(StoragePackModel.pack_key)
+            .where(StoragePackModel.pack_key.in_(chunk))
+            .order_by(StoragePackModel.pack_key)
+            .with_for_update()
+        ).all()
+
+
+def bucket_deleter() -> Callable[[list[str]], None] | None:
+    """Return a function that deletes objects from the tree bucket in DeleteObjects batches.
 
     Returns:
         The delete function, or ``None`` when ``SKYNET_TREE_BUCKET`` is not set.
@@ -81,22 +98,31 @@ def bucket_deleter() -> Callable[[str], None] | None:
     Raises:
         RuntimeError: When a bucket is set and boto3 is not installed.
     """
-    bucket = settings.tree_bucket
-    if not bucket:
+    found = tree_bucket_client()
+    if found is None:
         return None
-    if boto3 is None:
-        raise RuntimeError("boto3 is not installed")
-    client = boto3.client("s3")
+    bucket, client = found
 
-    def delete_object(key: str) -> None:
-        """Delete one object; S3 does not fail on a missing key.
+    def delete_objects(keys: list[str]) -> None:
+        """Delete the objects; S3 does not fail on a missing key.
 
         Args:
-            key: The object key.
-        """
-        client.delete_object(Bucket=bucket, Key=key)
+            keys: The object keys.
 
-    return delete_object
+        Raises:
+            TreePurgeError: When S3 reports a key it could not delete.
+        """
+        for start in range(0, len(keys), S3_DELETE_BATCH):
+            batch = keys[start : start + S3_DELETE_BATCH]
+            response = client.delete_objects(
+                Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True}
+            )
+            # DeleteObjects answers 200 also when single keys fail; it lists them in Errors.
+            failed = sorted(error.get("Key", "?") for error in response.get("Errors") or [])
+            if failed:
+                raise TreePurgeError(f"could not delete the tree packs {', '.join(failed)}")
+
+    return delete_objects
 
 
 def purge_user(
@@ -104,18 +130,19 @@ def purge_user(
     username: str,
     run_ids: list[str],
     *,
-    delete_object: Callable[[str], None] | None = None,
+    delete_objects: Callable[[list[str]], None] | None = None,
 ) -> TreePurgeSummary:
     """Delete an account's tree rows, its runs' steps, and the packs that only they used.
 
-    A second call finds no rows and deletes nothing.
+    Packs that other accounts also use get ``needs_rewrite``. A second call
+    finds no rows and deletes nothing.
 
     Args:
         session: The account deletion's open session; the caller commits.
         username: The account's lowercased-email identity.
         run_ids: The job ids of the account. Call this before their jobs go,
             because the jobs' cascade deletes the steps without their pack keys.
-        delete_object: Deletes one pack object; a missing object is not an
+        delete_objects: Deletes pack objects; a missing object is not an
             error. ``None`` uses the bucket that ``SKYNET_TREE_BUCKET`` names.
 
     Returns:
@@ -124,48 +151,80 @@ def purge_user(
     Raises:
         TreePurgeError: When a pack must go and no bucket is set, or its delete fails.
     """
+    run_ids = sorted(run_ids)
+    # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the
+    # commit and then finds no job, so it writes no row behind the purge.
+    for chunk in _chunks(run_ids):
+        session.execute(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(chunk))
+            .order_by(JobModel.optimization_id)
+            .with_for_update()
+        ).all()
+    # The packs are locked before any row goes, so a compactor merge of them (NOWAIT) gives up and
+    # never holds a pack that the purge waits for.
     pack_keys: set[str] = set()
+    for chunk in _chunks(run_ids):
+        pack_keys.update(
+            session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.run_id.in_(chunk)).distinct())
+        )
+    pack_keys.update(
+        session.scalars(select(TreeObjectModel.pack_key).where(TreeObjectModel.username == username).distinct())
+    )
+    _lock_packs(session, pack_keys)
+
+    returned: set[str] = set()
     deleted_rows = 0
     for chunk in _chunks(run_ids):
         steps = session.scalars(
             delete(AgentStepModel).where(AgentStepModel.run_id.in_(chunk)).returning(AgentStepModel.pack_key),
             execution_options={"synchronize_session": False},
         ).all()
-        pack_keys.update(steps)
+        returned.update(steps)
         deleted_rows += len(steps)
     objects = session.scalars(
         delete(TreeObjectModel).where(TreeObjectModel.username == username).returning(TreeObjectModel.pack_key),
         execution_options={"synchronize_session": False},
     ).all()
-    pack_keys.update(objects)
+    returned.update(objects)
     deleted_rows += len(objects)
     workspaces = session.execute(
         delete(WorkspaceModel).where(WorkspaceModel.username == username),
         execution_options={"synchronize_session": False},
     )
     deleted_rows += workspaces.rowcount or 0
+    # A compactor merge that committed between the read and the lock moved rows to a new pack.
+    _lock_packs(session, returned - pack_keys)
+    pack_keys |= returned
 
-    # The lock makes a compactor merge of these packs give up: it locks them with NOWAIT.
     unused: list[str] = []
     for chunk in _chunks(sorted(pack_keys)):
         unused.extend(
             session.scalars(
                 select(StoragePackModel.pack_key)
-                .where(StoragePackModel.pack_key.in_(chunk), ~_REFERENCED)
+                .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
                 .order_by(StoragePackModel.pack_key)
-                .with_for_update()
             )
         )
+    for chunk in _chunks(sorted(pack_keys - set(unused))):
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
+            execution_options={"synchronize_session": False},
+        )
     if unused:
-        deleter = delete_object or bucket_deleter()
+        try:
+            deleter = delete_objects or bucket_deleter()
+        except Exception as exc:
+            raise TreePurgeError("could not open the tree bucket") from exc
         if deleter is None:
             raise TreePurgeError(f"{len(unused)} tree packs must be deleted, but SKYNET_TREE_BUCKET is not set")
-        # The object goes before its row: recovery applies a pack object that has no row.
-        for key in unused:
-            try:
-                deleter(key)
-            except Exception as exc:
-                raise TreePurgeError(f"could not delete the tree pack {key}") from exc
+        # The objects go before their rows: recovery applies a pack object that has no row.
+        try:
+            deleter(unused)
+        except TreePurgeError:
+            raise
+        except Exception as exc:
+            raise TreePurgeError(f"could not delete the tree packs {', '.join(unused)}") from exc
         for chunk in _chunks(unused):
             session.execute(
                 delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)),

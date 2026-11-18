@@ -3,7 +3,7 @@
 A real step log writes packs to a local object store: one pack holds the
 entries of two accounts, and one holds only the entries of the deleted
 account. Runs on a SQLite file, and on PostgreSQL when ``APP_TEST_DB_URL``
-names one.
+names one. The row lock tests need PostgreSQL.
 """
 
 from __future__ import annotations
@@ -14,12 +14,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, select, text, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from core.config import app_env, settings
-from core.storage import tree_purge
+from core.storage import tree_compactor, tree_purge
 from core.storage.models import (
     AgentStepModel,
     Base,
@@ -30,6 +31,7 @@ from core.storage.models import (
 )
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
+from core.storage.tree_compactor import TreeCompactor
 from core.storage.tree_purge import TreePurgeError, TreePurgeSummary, purge_user
 from core.storage.tree_store import TreeEntry, TreeStore
 
@@ -151,7 +153,7 @@ def packs(engine: Engine, objects: LocalObjectStore) -> dict[str, str]:
 
 
 def _deleter(root: Path, deleted: list[str]) -> Any:
-    """Return a delete function over the local store folder that records each key.
+    """Return a batch delete function over the local store folder that records each key.
 
     Args:
         root: The object store folder.
@@ -161,32 +163,46 @@ def _deleter(root: Path, deleted: list[str]) -> Any:
         The delete function.
     """
 
-    def delete_object(key: str) -> None:
-        """Delete one local object; a missing object is not an error.
+    def delete_objects(keys: list[str]) -> None:
+        """Delete local objects; a missing object is not an error.
 
         Args:
-            key: The object key.
+            keys: The object keys.
         """
-        deleted.append(key)
-        (root / key).unlink(missing_ok=True)
+        for key in keys:
+            deleted.append(key)
+            (root / key).unlink(missing_ok=True)
 
-    return delete_object
+    return delete_objects
 
 
-def _purge(engine: Engine, delete_object: Any) -> TreePurgeSummary:
+def _purge(engine: Engine, delete_objects: Any) -> TreePurgeSummary:
     """Purge ``ada`` in one committed transaction.
 
     Args:
         engine: The test engine.
-        delete_object: The pack delete function.
+        delete_objects: The pack delete function.
 
     Returns:
         The purge summary.
     """
     with Session(engine) as session:
-        summary = purge_user(session, "ada", ADA_RUNS, delete_object=delete_object)
+        summary = purge_user(session, "ada", ADA_RUNS, delete_objects=delete_objects)
         session.commit()
     return summary
+
+
+def _marked(engine: Engine) -> set[str]:
+    """Return the pack keys that ``needs_rewrite`` marks.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        The marked keys.
+    """
+    with Session(engine) as session:
+        return set(session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.needs_rewrite)))
 
 
 def _rows(engine: Engine, username: str, run_ids: list[str]) -> tuple[int, int, int]:
@@ -225,6 +241,7 @@ def test_purge_deletes_the_account_rows_and_its_own_pack(
     assert objects.list("") == [packs["shared"]]
     with Session(engine) as session:
         assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
+    assert _marked(engine) == {packs["shared"]}
     step_log = StepLogStore(engine, objects, "w2", flush_window_seconds=60.0)
     try:
         bob_step = f"{BOB_RUN}:agent-a:1"
@@ -248,11 +265,11 @@ def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
     """A failed S3 delete raises, and the rollback keeps every row of the account."""
     before = _rows(engine, "ada", ADA_RUNS)
 
-    def fail(key: str) -> None:
+    def fail(keys: list[str]) -> None:
         """Fail like an S3 outage.
 
         Args:
-            key: The object key.
+            keys: The object keys.
 
         Raises:
             OSError: Always.
@@ -264,6 +281,7 @@ def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
 
     assert _rows(engine, "ada", ADA_RUNS) == before
     assert sorted(objects.list("")) == sorted(packs.values())
+    assert _marked(engine) == set()
 
 
 def test_a_purge_with_packs_and_no_bucket_fails(
@@ -284,13 +302,196 @@ def test_a_purge_with_no_trees_needs_no_bucket(engine: Engine, monkeypatch: pyte
     assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
 
 
-def test_bucket_deleter_deletes_from_the_tree_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default delete function deletes the key from the bucket that SKYNET_TREE_BUCKET names."""
-    calls: list[dict[str, str]] = []
-    client = type("Client", (), {"delete_object": lambda self, **kwargs: calls.append(kwargs)})()
+def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """The second of two pack deletes fails; the retry deletes the rows, both packs and their rows.
+
+    The first pack object is already gone when the retry deletes it again, and that is no error.
+    """
+    step_log = StepLogStore(engine, objects, "w3", flush_window_seconds=60.0)
+    try:
+        _write(step_log, ADA_RUNS, "ccc")
+    finally:
+        step_log.close()
+    own = sorted(set(objects.list("")) - {packs["shared"]})
+    assert len(own) == 2
+    root = tmp_path / "objects"
+
+    def delete_first_then_fail(keys: list[str]) -> None:
+        """Delete the first object, then fail on the second like an S3 error.
+
+        Args:
+            keys: The object keys.
+
+        Raises:
+            OSError: On the second key.
+        """
+        (root / keys[0]).unlink()
+        raise OSError(f"S3 could not delete {keys[1]}")
+
+    with pytest.raises(TreePurgeError):
+        _purge(engine, delete_first_then_fail)
+    assert objects.list("") == sorted([packs["shared"], own[1]])
+    assert _rows(engine, "ada", ADA_RUNS) != (0, 0, 0)
+
+    deleted: list[str] = []
+    assert _purge(engine, _deleter(root, deleted)).deleted_packs == 2
+
+    assert deleted == own
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
+    assert objects.list("") == [packs["shared"]]
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
+
+
+def test_the_compactor_rewrites_a_marked_full_pack_without_the_deleted_bytes(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """A shared pack that the purge marks is rewritten alone, at any size, with only the live entries."""
+    root = tmp_path / "objects"
+    assert b"job-1 a" in objects.get(packs["shared"])
+    _purge(engine, _deleter(root, []))
+
+    def delete_object(key: str) -> None:
+        """Delete one local object; a missing object is not an error.
+
+        Args:
+            key: The object key.
+        """
+        (root / key).unlink(missing_ok=True)
+
+    # A target of one byte makes every pack full, so only the mark makes the shared pack a candidate.
+    compactor = TreeCompactor(engine, objects, delete_object, min_age_seconds=0, target_bytes=1)
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=False))
+        session.commit()
+    assert compactor.merge() == 0
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+
+    assert compactor.merge() == 1
+    assert TreeCompactor(engine, objects, delete_object, grace_seconds=0).remove_retired() == 1
+
+    (new_key,) = objects.list("")
+    assert new_key.startswith(f"{tree_compactor.COMPACTED_PREFIX}/")
+    rewritten = objects.get(new_key)
+    assert b"job-3 a" in rewritten
+    assert b"job-1" not in rewritten
+    assert b"job-2" not in rewritten
+    assert _marked(engine) == set()
+    step_log = StepLogStore(engine, objects, "w2", flush_window_seconds=60.0)
+    try:
+        assert step_log.get_step(f"{BOB_RUN}:agent-a:1")["body"] == {"output": "a"}
+    finally:
+        step_log.close()
+
+
+def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engine, packs: dict[str, str]) -> None:
+    """The first statement locks the account's jobs in key order; the packs are locked before any delete."""
+    statements: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        """Record each SQL statement.
+
+        Args:
+            conn: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        _purge(engine, lambda keys: None)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    first_pack_lock = next(i for i, sql in enumerate(statements) if "FROM storage_packs" in sql)
+    first_delete = next(i for i, sql in enumerate(statements) if sql.startswith("DELETE"))
+    assert "FROM jobs" in statements[0]
+    assert "ORDER BY jobs.optimization_id" in statements[0]
+    assert first_pack_lock < first_delete
+    if engine.dialect.name == "postgresql":
+        assert statements[0].endswith("FOR UPDATE")
+        assert statements[first_pack_lock].endswith("FOR UPDATE")
+
+
+def test_an_open_purge_holds_the_account_job_and_pack_locks(engine: Engine, packs: dict[str, str]) -> None:
+    """Until it commits, the purge holds the account's job rows and the pack rows; a flush or merge waits or gives up."""
+    if engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    with Session(engine) as purge, engine.connect() as other:
+        other.execute(text("SET lock_timeout = '200ms'"))
+        other.commit()
+        purge_user(purge, "ada", ADA_RUNS, delete_objects=lambda keys: None)
+        for locked in (
+            select(JobModel.optimization_id).where(JobModel.optimization_id == ADA_RUNS[0]).with_for_update(),
+            select(StoragePackModel.pack_key)
+            .where(StoragePackModel.pack_key == packs["shared"])
+            .with_for_update(nowait=True),
+        ):
+            with pytest.raises(OperationalError) as error:
+                other.execute(locked)
+            assert error.value.orig.pgcode == "55P03"
+            other.rollback()
+        assert other.execute(
+            select(JobModel.optimization_id).where(JobModel.optimization_id == BOB_RUN).with_for_update()
+        ).all() == [(BOB_RUN,)]
+        other.rollback()
+        purge.rollback()
+
+
+def test_bucket_deleter_deletes_from_the_tree_bucket_in_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default delete function sends DeleteObjects batches of at most 1000 keys to the tree bucket."""
+    calls: list[dict[str, Any]] = []
+
+    def delete_objects(**kwargs: Any) -> dict[str, Any]:
+        """Record one DeleteObjects call and report no error.
+
+        Args:
+            **kwargs: The call arguments.
+
+        Returns:
+            An empty response.
+        """
+        calls.append(kwargs)
+        return {}
+
+    client = type("Client", (), {"delete_objects": staticmethod(delete_objects)})()
     monkeypatch.setattr(settings, "tree_bucket", "trees")
-    monkeypatch.setattr(tree_purge, "boto3", type("Boto3", (), {"client": staticmethod(lambda name: client)}))
+    monkeypatch.setattr(tree_compactor, "boto3", type("Boto3", (), {"client": staticmethod(lambda name: client)}))
+    keys = [f"packs/w1/{index:04d}" for index in range(1001)]
 
-    tree_purge.bucket_deleter()("packs/w1/p")
+    tree_purge.bucket_deleter()(keys)
 
-    assert calls == [{"Bucket": "trees", "Key": "packs/w1/p"}]
+    assert [call["Bucket"] for call in calls] == ["trees", "trees"]
+    assert [[item["Key"] for item in call["Delete"]["Objects"]] for call in calls] == [keys[:1000], keys[1000:]]
+    assert all(call["Delete"]["Quiet"] for call in calls)
+
+
+def test_bucket_deleter_names_the_keys_that_s3_did_not_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DeleteObjects response with Errors raises TreePurgeError with the failed keys."""
+    response = {
+        "Errors": [{"Key": "packs/w1/b", "Code": "AccessDenied"}, {"Key": "packs/w1/a", "Code": "InternalError"}]
+    }
+    client = type("Client", (), {"delete_objects": lambda self, **kwargs: response})()
+    monkeypatch.setattr(settings, "tree_bucket", "trees")
+    monkeypatch.setattr(tree_compactor, "boto3", type("Boto3", (), {"client": staticmethod(lambda name: client)}))
+
+    with pytest.raises(TreePurgeError, match="packs/w1/a, packs/w1/b"):
+        tree_purge.bucket_deleter()(["packs/w1/a", "packs/w1/b", "packs/w1/c"])
+
+
+def test_a_bucket_that_cannot_open_fails_the_purge(
+    engine: Engine, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bucket with no boto3 fails the purge with TreePurgeError, not a bare RuntimeError."""
+    monkeypatch.setattr(settings, "tree_bucket", "trees")
+    monkeypatch.setattr(tree_compactor, "boto3", None)
+
+    with pytest.raises(TreePurgeError, match="tree bucket") as error:
+        _purge(engine, None)
+    assert isinstance(error.value.__cause__, RuntimeError)

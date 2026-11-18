@@ -374,6 +374,18 @@ def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespac
         assert session.get(JobModel, f"job-{_EMAIL}") is not None
 
 
+def test_delete_answers_503_and_keeps_the_account_when_the_tree_purge_fails(harness: SimpleNamespace) -> None:
+    """A failed tree purge is a 503 with its own code, and the account and its rows stay (SKY-733)."""
+    with patch("core.api.account_data_service.tree_purge.purge_user", side_effect=TreePurgeError("packs/w1/p1 failed")):
+        resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "accounts.deletion_storage_unavailable"
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.get(JobModel, f"job-{_EMAIL}") is not None
+
+
 def test_delete_purges_owned_data_and_anonymizes_records(harness: SimpleNamespace) -> None:
     """Deletion removes owned rows, anonymizes financial/telemetry rows, spares others."""
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
@@ -914,11 +926,11 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
         )
         session.commit()
 
-    def _fail(key: str) -> None:
+    def _fail(keys: list[str]) -> None:
         """Fail like an S3 outage.
 
         Args:
-            key: The object key.
+            keys: The object keys.
 
         Raises:
             OSError: Always.
@@ -932,7 +944,7 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
         assert session.scalars(select(TreeObjectModel)).one().pack_key == "packs/w1/p1"
 
     deleted: list[str] = []
-    with patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.append):
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.extend):
         _delete(full_schema_engine)
 
     assert deleted == ["packs/w1/p1"]

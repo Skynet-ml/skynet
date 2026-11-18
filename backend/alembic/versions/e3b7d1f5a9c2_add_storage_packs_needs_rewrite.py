@@ -1,0 +1,36 @@
+"""Add ``storage_packs.needs_rewrite`` (SKY-733).
+
+Revision ID: e3b7d1f5a9c2
+Revises: c4f1a7e9d2b6
+
+An account deletion marks each pack that also holds entries of other
+accounts. The compactor rewrites a marked pack at any size, so the bytes of
+the deleted account leave the tree bucket.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision: str = "e3b7d1f5a9c2"
+down_revision: str | Sequence[str] | None = "c4f1a7e9d2b6"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Add the rewrite mark; every existing pack starts unmarked."""
+    op.add_column(
+        "storage_packs",
+        sa.Column("needs_rewrite", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
+
+
+def downgrade() -> None:
+    """Drop the rewrite mark."""
+    with op.batch_alter_table("storage_packs") as batch:
+        batch.drop_column("needs_rewrite")
