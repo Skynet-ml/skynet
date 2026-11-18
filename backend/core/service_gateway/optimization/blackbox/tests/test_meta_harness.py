@@ -1559,8 +1559,8 @@ def _nested(depth: int) -> dict[str, Any]:
         ("[" * 990, "command string"),
         (json.dumps({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}), "nested at most"),
         ({"command": "x" * (meta_mod.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
-        # Deep enough that ``json.dumps`` at the tool loop's stack depth raised RecursionError, yet the engine loop
-        # still commits the reply.
+        # Close to the depth past which the engine loop cannot commit the reply. How deep ``json.dumps`` can go
+        # depends on the stack at the call, so the transcript must not depend on it.
         (_nested(900), "nested at most"),
     ],
     ids=["deep-text", "long-text", "long-command", "deep-object"],
