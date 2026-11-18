@@ -49,7 +49,7 @@ from core.worker.checkpoint_compat import checkpoint_manifest
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[3]
-# Shared by every module that migrates APP_TEST_DB_URL, so their xdist workers migrate one at a time.
+# Shared by the job store and notification test modules, so their xdist workers migrate APP_TEST_DB_URL one at a time.
 _MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-migrate.lock"
 
 pytestmark = pytest.mark.skipif(
