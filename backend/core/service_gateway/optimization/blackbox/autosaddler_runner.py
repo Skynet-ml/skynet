@@ -1761,9 +1761,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             "provider": {"type": proposer["harness"], "model": model},
             "optimization": {
                 "task_selection": {"type": "fixed", "batch_size": policies.task_selection.batch_size},
-                "acceptance": {"type": "matched_valid_strict_improvement"},
+                "acceptance": {"type": "no_score_rejected", "inner": "matched_valid_strict_improvement"},
                 "development": {"type": "full_on_accept"},
-                "ranking": {"type": "mean_development"},
+                "ranking": {"type": "no_score_last", "inner": "mean_development"},
                 "budget": {"max_rollouts": max_evals, "max_iterations": int(max_iterations)},
                 "stop_at_score": payload.get("stop_at_score"),
             },

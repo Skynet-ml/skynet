@@ -471,6 +471,130 @@ def test_a_case_with_no_score_fails_the_program_with_its_run_failure(tmp_path: P
     assert scorer.scored == {}
 
 
+def _two_case_answer(tmp_path: Path, monkeypatch: Any, second: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """Score one program on two cases: the first scores 0.5, the second gets ``second`` from the parent.
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+        second: The parent's response for the second case.
+
+    Returns:
+        The program scorer and its answer for the program.
+    """
+    monkeypatch.chdir(tmp_path)
+    ids = iter(["r0", "r1"])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": 0.5, "info": {"feedback": "fine"}}))
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps(second))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[{"id": "a"}, {"id": "b"}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+    return scorer, scorer.score_program(str(program))
+
+
+def test_a_metric_error_case_keeps_the_programs_mean_over_its_scored_cases(tmp_path: Path, monkeypatch: Any) -> None:
+    """A metric error is the metric's fault, so the program keeps its mean over the scored cases (SKY-367, SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    scorer, answer = _two_case_answer(tmp_path, monkeypatch, {"score": None, "info": {"error": "KeyError: 'x'"}})
+
+    assert answer["correct"] is True
+    assert answer["metrics"]["combined_score"] == 0.5
+    assert answer["metrics"]["private"] == {"case_0": 0.5}
+    assert "Case 1 has no score: the metric failed:\nKeyError: 'x'" in answer["metrics"]["text_feedback"]
+    assert scorer.best is not None
+    assert scorer.best["best_score"] == 0.5
+    assert scorer.scored[2]["per_example"] == [("0", 0.5)]
+
+
+def test_a_program_the_metric_fails_on_every_case_has_no_score(tmp_path: Path, monkeypatch: Any) -> None:
+    """With no scored case, a metric error leaves the program with no mean, so it fails (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r0"))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": None, "info": {"error": "KeyError: 'x'"}}))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[None],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_1" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+
+    answer = scorer.score_program(str(program))
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 1 case(s) have no score."
+    assert scorer.best is None
+
+
+class _NoProgramRunner:
+    """Stand in for upstream's runner: it finishes without one scored program."""
+
+    def __init__(self, **_: Any) -> None:
+        """Take upstream's keyword arguments.
+
+        Args:
+            **_: Upstream's constructor arguments, ignored.
+        """
+
+    def run(self) -> None:
+        """Finish at once, as when every program failed a case."""
+
+
+def test_a_run_where_no_version_scores_keeps_the_seed_and_says_why(
+    tmp_path: Path, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no scored version, the run keeps the seed with no score and logs why, never an error (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capsys: Captures the framed log lines.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", _NoProgramRunner)
+    for name in ("EvolutionConfig", "DatabaseConfig", "LocalJobConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner.UsageLedger, "install", lambda self: None)
+    payload = _payload(
+        nonce="testnonce",
+        timeout_seconds=5.0,
+        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": [{"id": "a"}]},
+    )
+
+    document = shinka_runner.execute(payload)
+
+    assert "error" not in document
+    assert (document["best_candidate"], document["best_score"]) == ("Answer.", None)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
+        "No version has a score: each one failed on at least one case. The run keeps the starting version."
+    ]
+
+
 def test_repository_mode_swaps_prompts_edits_and_novelty_input(tmp_path: Path, monkeypatch: Any) -> None:
     """Route upstream's prompt sampling, patch application and embeddings through the bundle.
 

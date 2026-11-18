@@ -1604,7 +1604,9 @@ def _run_job(
             "failed_cases": len(best_run.failures) if best_run else None,
             # SKY-751: whether the starting code's final run had a failed [run]
             # case; the pull request decision reads it with ``baseline_score``.
-            "baseline_run_failed": baseline_run.run_failed if baseline_run else None,
+            # It stays None unless both final runs finished, so a budget stop
+            # in the winner's held-out run never passes for a finished final run.
+            "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
             # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
             **({"outcome": verdict} if verdict else {}),
         },

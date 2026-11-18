@@ -62,6 +62,8 @@ class ScriptedProvider:
                 "updates": {name: text + "aaa" for name, text in components.items()},
             }
         elif kind == "evolve":
+            with Path("evolve.log").open("a") as log:
+                log.write(json.dumps(context["candidate_ids"]) + "\\n")
             output = {
                 "schema_version": "app-autosaddler-evolution/v1",
                 "parent_ids": [context["candidate_ids"][-1]],
@@ -305,6 +307,43 @@ def test_upstream_run_finishes_when_a_train_case_crashes(
     shown = [event["score"] for event in progress if "score" in event]
     shown += [score for event in progress for _, score in event.get("per_example", [])]
     assert all(0.0 <= score <= 1.0 for score in shown)
+
+
+@pytest.mark.parametrize(("info", "offered"), [({"error": "KeyError: 'x'"}, 2), ({"status": "run_failed"}, 1)])
+def test_only_a_failed_run_case_keeps_a_version_out_of_the_evolve_parents(
+    tmp_path: Path, info: dict[str, Any], offered: int
+) -> None:
+    """In a full run, only a failed ``[run]`` case keeps a version out of the evolve parents (SKY-751).
+
+    Args:
+        tmp_path: Working folder of the run.
+        info: The parent's side info for the child's unscored development case.
+        offered: How many versions the last evolve session offers as parents.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    seed = "bcd"
+
+    def respond(candidate: str, example: str) -> dict[str, Any]:
+        """Give every child no score on case "c", outside the training batch; score the rest by vowel density.
+
+        Args:
+            candidate: Candidate text.
+            example: Example id.
+
+        Returns:
+            The parent's response.
+        """
+        if example == "c" and candidate != seed:
+            return {"score": None, "info": info}
+        return {"score": _vowel_fraction(candidate), "info": {"feedback": "counted"}}
+
+    cases = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    _run_scripted(tmp_path, python, _scripted_payload(seed, cases, []), respond)
+
+    offers = [json.loads(line) for line in (tmp_path / "evolve.log").read_text().splitlines()]
+    assert len(offers[-1]) == offered
 
 
 def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> None:

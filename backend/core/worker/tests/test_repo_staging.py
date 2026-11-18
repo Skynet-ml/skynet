@@ -2204,6 +2204,15 @@ def test_a_stopped_run_still_compares_the_search_scores() -> None:
     assert repo_staging.improved_patch(result) == _EDIT
 
 
+def test_a_budget_stop_in_the_winners_held_out_run_compares_the_search_scores() -> None:
+    """The starting code's held-out run finished, the winner's did not, so the search scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(0.3, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert "Score went from 0.3 to 0.5." in repo_staging._description(result, _EDIT, "https://x/run")
+
+
 def test_a_version_whose_run_failed_is_never_published() -> None:
     """A best version with a failed ``[run]`` case has no score, so it opens no PR (SKY-751)."""
     failed = {**_RUN_FAILED_START, "candidate": _EDIT}

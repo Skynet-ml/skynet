@@ -1280,15 +1280,36 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
                 entry["candidate"] = _scored_candidate(entry["candidate"], hidden_paths)
 
 
+def _final_run_finished(result: dict[str, Any]) -> bool:
+    """Return whether the final run finished for both the starting code and the best version.
+
+    A final run where every version failed a ``[run]`` case leaves both
+    scores empty, so the boolean ``details.baseline_run_failed`` flag marks
+    a finished final run; the service sets it only when both runs finished.
+    A result without the flag finished only when it has both scores.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the final run's scores decide, ``False`` when the
+        versions' own scores must stand in.
+    """
+    if isinstance((result.get("details") or {}).get("baseline_run_failed"), bool):
+        return True
+    return result.get("baseline_score") is not None and result.get("best_score") is not None
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
     The final run's fresh scores decide, also when both are empty; a run
-    stopped before its final run compares the versions' own scores instead. A scored version beats a
-    starting version with no score only when the starting code's own
-    ``[run]`` entry failed in the run that gave that missing score: the
-    final run's ``details.baseline_run_failed`` flag, or the version list
-    for a stopped run (SKY-751).
+    stopped before its final run finished for both versions compares the
+    versions' own scores instead. A scored version beats a starting version
+    with no score only when the starting code's own ``[run]`` entry failed
+    in the run that gave that missing score: the final run's
+    ``details.baseline_run_failed`` flag, or the version list for a stopped
+    run (SKY-751).
 
     Args:
         result: Finished black-box result.
@@ -1303,10 +1324,8 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     if _version_has_no_score(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    # A final run where every version failed a [run] case leaves both scores
-    # empty; its boolean run-failed flag still marks the final run as done.
     run_failed_flag = (result.get("details") or {}).get("baseline_run_failed")
-    final_run = baseline is not None or optimized is not None or isinstance(run_failed_flag, bool)
+    final_run = _final_run_finished(result)
     if not final_run:
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, best)
     if optimized is None:
@@ -1648,7 +1667,7 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
         Markdown body.
     """
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    if baseline is None and optimized is None:
+    if not _final_run_finished(result):
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, patch)
     went = (
         f"Score went from {baseline:.4g} to {optimized:.4g}."

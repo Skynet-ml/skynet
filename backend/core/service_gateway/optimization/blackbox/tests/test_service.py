@@ -2078,6 +2078,62 @@ def test_a_scored_version_beats_a_starting_point_that_fails_some_cases(
     assert response.baseline_score is None
     assert response.metric_improvement is None
     assert response.details["failed_cases"] == 0
+    assert response.details["baseline_run_failed"] is True
+
+
+def test_a_metric_error_on_the_starting_point_never_marks_a_failed_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metric error leaves the starting point unscored, but its final run has no failed ``[run]`` case (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Makes the metric crash on the starting point.
+    """
+    _crash_metric_on(monkeypatch, {"hello world"})
+
+    response = run_blackbox_optimization(_payload(), artifact_id="job-start-crash", gepa_log_dir_path=str(tmp_path))
+
+    assert response.baseline_score is None
+    assert response.details["baseline_run_failed"] is False
+
+
+def test_a_budget_stop_in_the_winners_held_out_run_marks_no_finished_final_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The starting point's held-out run finished, the winner's did not, so no run-failed flag is set (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Stops the budget in the winner's held-out run.
+    """
+    real_final_run = service_mod._final_run
+
+    def final_run(*args: Any, **kwargs: Any) -> service_mod.FinalRun:
+        """Stop the budget in the winner's held-out run; run every other final run.
+
+        Args:
+            *args: The final run's positional arguments.
+            **kwargs: The final run's keyword arguments.
+
+        Returns:
+            The real final run.
+        """
+        if kwargs["label"] == "optimized version on held-out cases":
+            raise BudgetReached()
+        return real_final_run(*args, **kwargs)
+
+    _winner_strategy(monkeypatch)
+    monkeypatch.setattr(service_mod, "_final_run", final_run)
+    with pytest.raises(BudgetReached) as caught:
+        run_blackbox_optimization(_payload(), artifact_id="job-held-out-stop", gepa_log_dir_path=str(tmp_path))
+
+    response = caught.value.result
+    assert response.baseline_score is not None
+    assert response.best_score is None
+    assert response.details["baseline_run_failed"] is None
 
 
 def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
