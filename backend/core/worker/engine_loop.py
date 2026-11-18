@@ -157,7 +157,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
 from ..storage.models import AgentStepModel
 from ..storage.step_log_store import StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore
-from .actors import Agent, LeaseExhaustedError, Run, StepResult
+from .actors import Agent, LeaseExhaustedError, Run, StepResult, _cost_text, _ledger_cents
 from .step_recovery import last_committed_step, still_owns_run
 
 ROOT_AGENT_ID = "loop"
@@ -252,13 +252,14 @@ class ModelReplyNotJSONError(ValueError):
     """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
 
 
-def _check_reply(body: dict[str, Any]) -> None:
+def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
     """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
 
     The walk keeps its own stack, so no depth of reply can raise :class:`RecursionError` here.
 
     Args:
         body: The model step body that holds the reply; it is one level of depth.
+        cost_cents: The reply's reported cost, which :meth:`Agent.step` adds to the body as it commits.
 
     Raises:
         ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
@@ -277,9 +278,12 @@ def _check_reply(body: dict[str, Any]) -> None:
         if depth > _MAX_REPLY_DEPTH:
             raise ModelReplyTooDeepError(f"The model reply nests more than {_MAX_REPLY_DEPTH} levels.")
         stack.extend((child, depth + 1) for child in children)
+    # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
+    # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
+    cost = _ledger_cents(cost_cents)
+    committed = {**body, "cost_cents": _cost_text(Decimal(0) if cost is None else cost)}
     try:
-        # The same encoding as the step log's commit, so the bound measures the bytes that the commit writes.
-        size = len(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        size = len(json.dumps(committed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     except (TypeError, ValueError) as error:
         raise ModelReplyNotJSONError(f"The model reply is not UTF-8 JSON: {type(error).__name__}: {error}") from error
     if size > _MAX_REPLY_BYTES:
@@ -613,7 +617,7 @@ class EngineLoop:
                     if reply.tool_calls:
                         body["tool_calls"] = reply.tool_calls
                     try:
-                        _check_reply(body)
+                        _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
                         failures.append(error)
                         # The provider billed the reply, so its failed step settles the reply's cost.

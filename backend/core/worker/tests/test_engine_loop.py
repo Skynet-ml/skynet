@@ -1569,7 +1569,7 @@ def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reply whose committed JSON is exactly ``_MAX_REPLY_BYTES`` commits; one byte less of bound fails it.
+    """A reply whose committed JSON, cost field included, is exactly ``_MAX_REPLY_BYTES`` commits; one byte more fails.
 
     Args:
         owner: Alice and her budget generation.
@@ -1577,26 +1577,16 @@ def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Pytest's monkeypatch, to see the checked body and to set the bound.
+        monkeypatch: Pytest's monkeypatch, to set the bound.
     """
-    bodies: list[dict[str, Any]] = []
-    check = engine_loop._check_reply
-
-    def record(body: dict[str, Any]) -> None:
-        """Keep the body, then check it as the loop does.
-
-        Args:
-            body: The model step body.
-        """
-        bodies.append(body)
-        check(body)
-
-    monkeypatch.setattr(engine_loop, "_check_reply", record)
     first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     reply = first.call_model("improve seed", _TOOLS)
-    size = len(step_log_store._encode_body(bodies[0]))
+    committed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))["body"]
+    assert "cost_cents" in committed
+    size = len(step_log_store._encode_body(committed))
     monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size)
     assert first.call_model("improve seed", _TOOLS) == reply
+    assert step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 1))["body"] == committed
     monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size - 1)
     with pytest.raises(ModelCallFailedError, match="ModelReplyTooLargeError"):
         first.call_model("improve seed", _TOOLS)
