@@ -49,8 +49,8 @@ spec.loader.exec_module(runner)
 class ScriptedProvider:
     """Answer every upstream session with a schema-valid, vowel-adding patch."""
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, model):
+        self.model = model
         Path("sessions.log").touch()
 
     async def run(self, request):
@@ -77,7 +77,7 @@ class ScriptedProvider:
             output = {"schema_version": "app-autosaddler-reflection/v1", "lessons": []}
         with Path("sessions.log").open("a") as log:
             log.write(kind + "\\n")
-        usage = Usage(input_tokens=5, output_tokens=3, model=self.config.model)
+        usage = Usage(input_tokens=5, output_tokens=3, model=self.model)
         return SessionResult(
             status="completed",
             structured_output=output,
@@ -88,7 +88,8 @@ class ScriptedProvider:
         )
 
 
-runner.ClaudeAgentProvider = ScriptedProvider
+# The proposer harness is the only provider path; script it in place of a real harness.
+runner.harness_provider = lambda proposer, model, on_refusal=None: ScriptedProvider(model)
 original_execute = runner.execute
 
 
@@ -345,6 +346,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         "max_iterations": 2,
         "timeout_seconds": 60,
         "source": native_runtime.AUTOSADDLER_REVISION,
+        "proposer": {"harness": "custom"},
         "task": {
             "name": "test",
             "seed_candidate": "bcd",
@@ -354,12 +356,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
         },
     }
     (tmp_path / "input.json").write_text(json.dumps(payload))
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": str(tmp_path),
-        "PYTHONUNBUFFERED": "1",
-        "ANTHROPIC_BASE_URL": "http://gateway.invalid/v1",
-    }
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
     process = subprocess.Popen(
         [python, "wrapper.py", "input.json", autosaddler_runner.__file__],
         cwd=tmp_path,
@@ -393,7 +390,8 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
     assert result["best_candidate"] == "bcdaaaaaa"
     assert result["best_score"] == pytest.approx(_vowel_fraction("bcdaaaaaa"))
     assert result["total_evals"] == len(scored)
-    assert {example for _, example in scored} == {"a", "b", "c"}
+    # Both upstream splits come from the training examples; the runner does not read ``val_set``.
+    assert {example for _, example in scored} == {"a", "b"}
     assert result["metadata"]["iterations"] == 2
     sessions = (tmp_path / "sessions.log").read_text().split()
     assert sessions.count("diagnose_patch") == 2
@@ -1020,6 +1018,44 @@ def test_the_seed_tree_becomes_a_git_checkout(tmp_path: Path) -> None:
     ]
 
 
+def test_a_seed_tree_leaves_out_its_git_folder(tmp_path: Path) -> None:
+    """Seeded Git config and hooks are not read or written, so the checkout's own ``git`` calls run none of them."""
+    marker = tmp_path / "ran"
+    files = {
+        ".git/config": f"[core]\n\tfsmonitor = touch {marker}\n".encode(),
+        ".git/hooks/post-commit": f"#!/bin/sh\ntouch {marker}\n".encode(),
+        "src/.GIT/config": b"[core]\n",
+        "a.txt": b"a\n",
+    }
+    read: list[str] = []
+
+    def read_file(tree_id: str, path: str) -> bytes:
+        """Serve one seed file, and note which one was read.
+
+        Args:
+            tree_id: The seed tree.
+            path: The file path.
+
+        Returns:
+            The file bytes.
+        """
+        read.append(path)
+        return files[path]
+
+    channel = SimpleNamespace(list_files=lambda tree_id, path: list(files), read_file=read_file)
+
+    base = autosaddler_runner.checkout_seed(channel, "seed", tmp_path / "checkout")
+
+    checkout = tmp_path / "checkout"
+    assert read == ["a.txt"]
+    assert (checkout / "a.txt").read_text() == "a\n"
+    assert not (checkout / "src").exists()
+    assert (checkout / ".git" / "config").read_bytes() != files[".git/config"]
+    assert not (checkout / ".git" / "hooks" / "post-commit").exists()
+    assert not marker.exists()
+    assert autosaddler_runner._git_output(checkout, "rev-parse", "HEAD").strip() == base
+
+
 def test_a_seed_tree_the_worker_can_not_list_stops_the_run(tmp_path: Path) -> None:
     """When the seed tree is no folder the worker can list, the run has no versions to start from."""
     channel, _ = _channel({"paths": None})
@@ -1155,6 +1191,31 @@ def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> N
     with pytest.raises(autosaddler_runner.TargetReached):
         autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
     assert evaluator.best_development["best_candidate"] == "text two"
+
+
+@pytest.mark.parametrize(("cost_usd", "cost", "unit"), [(0.25, 0.25, "usd"), (0.0, None, None)])
+def test_a_harness_session_cost_carries_its_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cost_usd: float, cost: float | None, unit: str | None
+) -> None:
+    """Upstream refuses a cost with no unit, so a harness session's dollar cost goes out as ``usd``."""
+    _plain_outcomes(monkeypatch)
+    outcome = autosaddler_runner.harness_bridge.SessionOutcome(
+        text="done",
+        stdout="",
+        stderr="",
+        returncode=0,
+        usage={"input_tokens": 5, "output_tokens": 3},
+        cost_usd=cost_usd,
+        duration_seconds=1.0,
+    )
+    monkeypatch.setattr(autosaddler_runner.harness_bridge, "run_session", lambda *args, **kwargs: outcome)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    transport = autosaddler_runner.HarnessTransport({}, "m1")
+    session = SimpleNamespace(workspace=tmp_path, task_prompt="go", session_id="s1")
+
+    (usage,) = asyncio.run(transport.run(session, 1.0))["usage"]
+
+    assert (usage["provider_cost"], usage["provider_cost_unit"]) == (cost, unit)
 
 
 def test_harness_sessions_send_each_refusal_to_the_run_log(

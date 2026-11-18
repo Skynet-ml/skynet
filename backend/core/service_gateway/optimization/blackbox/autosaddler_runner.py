@@ -700,6 +700,10 @@ def checkout_seed(channel: WorkerChannel, tree_id: str, destination: Path) -> st
         raise RuntimeError("Could not list the seed tree.")
     destination.mkdir(parents=True)
     for path in paths:
+        # A seeded ``.git/config`` or hook would run its commands at the ``git`` calls below; a case-insensitive
+        # disk also takes ``.GIT`` as ``.git``.
+        if ".git" in (part.casefold() for part in PurePosixPath(path).parts):
+            continue
         data = channel.read_file(tree_id, path)
         if data is None:
             continue
@@ -1815,11 +1819,14 @@ class HarnessTransport:
         if outcome.timed_out:
             raise TimeoutError(f"Harness session {session.session_id} exceeded {timeout_seconds:.0f}s")
         failed = outcome.failed
+        cost = outcome.cost_usd or None
+        # Upstream's usage record refuses a cost with no unit; harness session costs are in US dollars.
         usage = SessionUsage(
             input_tokens=outcome.usage.get("input_tokens", 0),
             output_tokens=outcome.usage.get("output_tokens", 0),
             model=self.model,
-            provider_cost=outcome.cost_usd or None,
+            provider_cost=cost,
+            provider_cost_unit="usd" if cost is not None else None,
             duration_seconds=outcome.duration_seconds,
             status="failed" if failed else "success",
             error_type="HarnessExit" if failed else None,
