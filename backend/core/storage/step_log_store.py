@@ -91,6 +91,8 @@ SEQ_MAX = 2**31 - 1
 # Each stale step of a flush adds one verdict for its step and one for its agent, also when the agent stops after it.
 # A verdict is only a key and a step id: the two dicts keep about 0.4 KB for a stale step with a 60-character id.
 FENCE_VERDICT_MAX = 10_000
+# SQLite's default bind-variable limit since 3.32 (SKY-807); PostgreSQL's limit of 65,535 is higher.
+SQL_PARAMS_MAX = 32_766
 OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
     "step_id",
@@ -223,6 +225,20 @@ def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
     verdicts[key] = step_id
     if len(verdicts) > FENCE_VERDICT_MAX:
         del verdicts[next(iter(verdicts))]
+
+
+def _bind_chunks(rows: list[Any], columns: int) -> list[list[Any]]:
+    """Split rows into chunks whose bind variables stay within ``SQL_PARAMS_MAX``.
+
+    Args:
+        rows: The rows, or the values of an ``IN`` list.
+        columns: The bind variables of one row.
+
+    Returns:
+        The chunks, in order.
+    """
+    size = SQL_PARAMS_MAX // columns
+    return [rows[start : start + size] for start in range(0, len(rows), size)]
 
 
 @dataclass(frozen=True)
@@ -1067,7 +1083,11 @@ class StepLogStore:
             .on_conflict_do_nothing()
         ).rowcount
         ids = [entry["step_id"] for entry in steps]
-        stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
+        stored = {
+            step_id
+            for chunk in _bind_chunks(ids, 1)
+            for step_id in session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(chunk)))
+        }
         current = {(job.optimization_id, job.execution_generation) for job in jobs.values()}
         fresh, stale = [], []
         for entry in steps:
@@ -1089,50 +1109,46 @@ class StepLogStore:
             # Another store applied this pack and inserted every current step that had no row then,
             # so a current step with no row now failed its fence.
             return False, stale + fresh
+        step_rows = [
+            {
+                **{name: entry[name] for name in _STEP_FIELDS},
+                "pack_key": pack_key,
+                "pack_offset": entry["offset"],
+                "pack_length": entry["length"],
+                "created_at": now,
+            }
+            for entry in fresh
+        ]
+        # One multi-row INSERT of a large batch passes SQLite's bind limit and fails on every retry (SKY-807).
+        # The chunks share the session's one transaction, so the batch still lands whole or not at all.
         landed_steps = 0
-        if fresh:
-            landed_steps = session.execute(
-                insert(AgentStepModel)
-                .values(
-                    [
-                        {
-                            **{name: entry[name] for name in _STEP_FIELDS},
-                            "pack_key": pack_key,
-                            "pack_offset": entry["offset"],
-                            "pack_length": entry["length"],
-                            "created_at": now,
-                        }
-                        for entry in fresh
-                    ]
-                )
-                .on_conflict_do_nothing()
-            ).rowcount
+        if step_rows:
+            for chunk in _bind_chunks(step_rows, len(step_rows[0])):
+                landed_steps += session.execute(insert(AgentStepModel).values(chunk).on_conflict_do_nothing()).rowcount
         owned = {
             (jobs[entry["run_id"]].username or "", entry["object_id"]): entry
             for entry in objects
             if entry["run_id"] in jobs
         }
+        # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
+        object_rows = [
+            {
+                "username": username,
+                "object_id": object_id,
+                "byte_size": entry["length"],
+                "pack_key": pack_key,
+                "pack_offset": entry["offset"],
+                "pack_length": entry["length"],
+                "created_at": now,
+            }
+            for (username, object_id), entry in sorted(owned.items())
+        ]
         landed_objects = 0
-        if owned:
-            # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
-            landed_objects = session.execute(
-                insert(TreeObjectModel)
-                .values(
-                    [
-                        {
-                            "username": username,
-                            "object_id": object_id,
-                            "byte_size": entry["length"],
-                            "pack_key": pack_key,
-                            "pack_offset": entry["offset"],
-                            "pack_length": entry["length"],
-                            "created_at": now,
-                        }
-                        for (username, object_id), entry in sorted(owned.items())
-                    ]
-                )
-                .on_conflict_do_nothing()
-            ).rowcount
+        if object_rows:
+            for chunk in _bind_chunks(object_rows, len(object_rows[0])):
+                landed_objects += session.execute(
+                    insert(TreeObjectModel).values(chunk).on_conflict_do_nothing()
+                ).rowcount
         if landed_steps < len(steps) or landed_objects < len(objects):
             # No row points at those bytes. A pack over half the merge target is a candidate only with
             # the mark, so without it the bytes of a deleted account could stay forever (SKY-733). This
@@ -1159,7 +1175,14 @@ class StepLogStore:
         return max(0.0, self._first_at + self._window - time.monotonic())
 
     def _run(self) -> None:
-        """Flush each batch when its window ends or it reaches the size cap, until close."""
+        """Flush each batch when its window ends or it reaches the size cap, until close.
+
+        A failed flush tries again after the window. A failure with a new error
+        cause logs the full error; each repeat of the same cause logs one line
+        with only the error type and the count, because the error text can
+        hold row data.
+        """
+        failures, failed_as = 0, None
         while True:
             with self._cond:
                 while not self._closed and not self._due():
@@ -1168,8 +1191,29 @@ class StepLogStore:
                     return
             try:
                 self.flush()
-            except Exception:
-                logger.exception("step log flush failed; it tries again after the window")
+                failures, failed_as = 0, None
+            except Exception as error:
+                # A retry can get past the first cause and fail on a new one, whose trace the log must show.
+                # SQLAlchemy wraps most driver errors in one type, and one driver type covers many failures
+                # ("too many SQL variables" and "database is locked" are both sqlite3.OperationalError).
+                # So the cause also holds the driver error type and code (``orig``); none of them holds row data.
+                orig = getattr(error, "orig", None)
+                code = (
+                    getattr(orig, "sqlite_errorcode", None)
+                    or getattr(orig, "sqlstate", None)
+                    or getattr(orig, "pgcode", None)
+                )
+                cause = (type(error), type(orig), code)
+                if cause != failed_as:
+                    failures, failed_as = 1, cause
+                    logger.exception("step log flush failed; it tries again after the window")
+                else:
+                    failures += 1
+                    logger.warning(
+                        "step log flush failed %d times in a row (%s); it tries again after the window",
+                        failures,
+                        type(error).__name__,
+                    )
                 # A fixed deadline: each commit notifies, and a retry on every commit would PUT the batch again each time.
                 deadline = time.monotonic() + self._window
                 with self._cond:
