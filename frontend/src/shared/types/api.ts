@@ -397,8 +397,11 @@ interface BlackboxRepoSource {
   draft_files?: Record<string, string>;
   /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
   draft_base?: string;
-  /** What the server recorded from optimize.toml; `outcome.target` is the score that stops the search. */
-  environment?: { outcome?: { target?: number | null } } | null;
+  /**
+   * What the server recorded from optimize.toml; `outcome.target` is the score that stops the search,
+   * and `proposer_entry` is the `[proposer] entry` command when the run uses it.
+   */
+  environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;
 }
 
 export interface BlackboxTarget {
@@ -420,7 +423,9 @@ export interface BlackboxStrategy {
 
 /** The coding agent that drives a harness-based engine's optimization loop. */
 export interface BlackboxProposer {
-  harness: BlackboxHarness;
+  // Sent only when the user picked one (SKY-753): without it, a repository's
+  // [proposer] entry applies, else the server runs its default harness.
+  harness?: BlackboxHarness;
   install_command?: string | null;
   run_command?: string | null;
   max_candidates_per_iter?: number | null;
@@ -432,6 +437,9 @@ export interface BlackboxProposer {
   // Local desktop build only: run the proposer as this signed-in CLI on the
   // host, confined to the run workspace unless the user grants full access.
   host_cli?: "codex" | "claude" | null;
+  // True when the server filled in host_cli, so a repository's [proposer]
+  // entry still applies. A picked host_cli replaces it.
+  host_cli_auto?: boolean;
   host_permission?: "workspace_only" | "full_access";
 }
 

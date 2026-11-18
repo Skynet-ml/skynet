@@ -12,7 +12,9 @@ skip-check:
   - CKV_AWS_158   # CloudWatch log groups with a CMK
   - CKV_AWS_191   # ElastiCache with a CMK
   - CKV_AWS_354   # Performance Insights with a CMK
-  - CKV_AWS_145   # ALB log bucket with KMS: ALB access logs support only SSE-S3
+  # KMS on S3: ALB access logs support only SSE-S3, and the tree bucket would
+  # pay a KMS request for each pack read.
+  - CKV_AWS_145
   - CKV2_AWS_34   # SSM deploy parameter holds names and ARNs, no secrets
   # Rotation: the generated passwords are written into connection URLs and
   # the database roles by scripts/create-db-roles.sh; rotation is a manual
@@ -28,12 +30,14 @@ skip-check:
   # go through a reviewed Terraform change, not a maintenance-window surprise.
   - CKV_AWS_226
   # Single Region account (us-east-2 only): cross-Region replication is not
-  # allowed. Access logs, event notifications and versioning on the state
-  # bucket and the 30-day ALB log bucket add cost and no recovery value here.
+  # allowed. Access logs and event notifications on the state, ALB log and
+  # tree buckets add cost and no recovery value here.
   - CKV_AWS_144
   - CKV_AWS_18
   - CKV2_AWS_62
-  - CKV_AWS_21    # ALB log bucket versioning (logs expire after 30 days)
+  # Versioning: ALB logs expire after 30 days. The tree bucket must not keep
+  # old versions, because an account purge must delete the bytes (SKY-733).
+  - CKV_AWS_21
   # Port 80 stays open only to redirect to HTTPS. Before the certificate is
   # issued (enable_https = false) it forwards, so the first apply works.
   # The ALB ends TLS; targets in private subnets take HTTP inside the VPC.

