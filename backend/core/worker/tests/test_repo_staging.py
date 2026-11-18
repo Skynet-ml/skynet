@@ -6,7 +6,9 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -4287,3 +4289,68 @@ def test_a_snapshot_with_no_outcome_sets_no_rule(
         staged.cleanup()
 
     assert ("record" in result["details"]) is recorded
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_suite_scratch_git_reads_no_config_from_the_scratch_root(tmp_path: Path) -> None:
+    """A ``.gitconfig`` or ``.config/git/config`` in the suite scratch root runs nothing on the worker (SKY-812).
+
+    The control run uses the old environment, with ``HOME`` at the scratch
+    root, and fires the planted fsmonitor command, so the plant is live.
+
+    Args:
+        tmp_path: Pytest fixture.
+    """
+    marker = tmp_path / "marker"
+    root = tmp_path / "root"
+    planted = f"[core]\n\tfsmonitor = \"touch '{marker}'; false\"\n"
+    (root / ".config" / "git").mkdir(parents=True)
+    (root / ".gitconfig").write_text(planted, encoding="utf-8")
+    (root / ".config" / "git" / "config").write_text(planted, encoding="utf-8")
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    old_env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(root)}
+    for arguments in (["init", "--quiet"], ["add", "--all"]):
+        subprocess.run(["git", *arguments], cwd=root, env=old_env, check=True, capture_output=True)
+    assert marker.exists()
+    marker.unlink()
+    shutil.rmtree(root / ".git")
+
+    repo_staging._git(root, "init", "--quiet")
+    repo_staging._git(root, "add", "--all")
+    assert repo_staging._git(root, "write-tree").strip()
+
+    assert not marker.exists()
+
+
+def _git_knows_safe_bare_repository() -> bool:
+    """Return whether a local git exists that reads ``safe.bareRepository`` (git 2.38 or later).
+
+    Returns:
+        True when the bare-repository test can run.
+    """
+    if shutil.which("git") is None:
+        return False
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
+    found = re.search(r"(\d+)\.(\d+)", version)
+    return found is not None and (int(found[1]), int(found[2])) >= (2, 38)
+
+
+@pytest.mark.skipif(not _git_knows_safe_bare_repository(), reason="git 2.38 or later not installed")
+def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite scratch git does not treat a bare-repository layout as a repository (SKY-812).
+
+    The control run reads no global or system config, so a developer's own
+    ``safe.bareRepository`` cannot change it.
+
+    Args:
+        tmp_path: Pytest fixture.
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    bare = tmp_path / "bare"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True, capture_output=True)
+    assert subprocess.run(["git", "rev-parse", "--git-dir"], cwd=bare, check=True, capture_output=True).stdout
+    with pytest.raises(subprocess.CalledProcessError) as refused:
+        repo_staging._git(bare, "rev-parse", "--git-dir")
+    assert "safe.bareRepository" in refused.value.stderr

@@ -18,18 +18,31 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, text, update
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.storage.remote as remote_mod
+from core.api.auth import AuthenticatedUser, get_authenticated_user
+from core.api.routers.optimizations import create_optimizations_router
 from core.billing.budgets import BudgetService
-from core.config import app_env
+from core.config import app_env, settings
 from core.constants import WORKER_RESTART_CAUSE
-from core.storage.models import Base, BillingCustomerModel, GepaCheckpointModel, JobModel
+from core.storage.models import (
+    AgentStepModel,
+    Base,
+    BillingCustomerModel,
+    GepaCheckpointModel,
+    JobModel,
+    StoragePackModel,
+    TreeObjectModel,
+)
 from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
+from core.storage.shard_map import ShardMap, UnroutableRunError
 from core.storage.step_log_store import StepFenceError, StepLogStore
 from core.worker.checkpoint_compat import checkpoint_manifest
 from core.worker.step_recovery import last_committed_step, open_step_log, park_run, still_owns_run
@@ -264,6 +277,67 @@ def test_a_kill_between_steps_continues_after_the_last_committed_step(store: Ste
     log_b.durable(step_id, new_generation)
 
 
+def test_a_run_on_another_shard_resumes_at_its_last_committed_step(tmp_path: Path, objects: LocalObjectStore) -> None:
+    """A run whose steps are on shard ``s2`` resumes from them, not from the start (SKY-731)."""
+    store = make_sqlite_store(tmp_path)
+    shard = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(
+        shard, tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+    )
+    shards = ShardMap(store.engine, {"s2": shard})
+    store._step_log_shards = shards
+    _funded_run(store)
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(step_log_shard="s2"))
+        session.commit()
+    old_generation = _claim(store, "pod-a")
+    log_a = StepLogStore(store.engine, objects, "pod-a", flush_window_seconds=60.0, shards=shards)
+    try:
+        for seq in (0, 1):
+            _commit(log_a, seq, old_generation)
+        log_a.flush()
+    finally:
+        log_a.close()
+    with Session(store.engine) as session:
+        assert session.scalar(select(AgentStepModel.step_id)) is None
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["message"] == "Resuming after a worker restart"
+    _claim(store, "pod-b")
+    log_b = StepLogStore(store.engine, objects, "pod-b", flush_window_seconds=60.0, shards=shards)
+    try:
+        last = last_committed_step(store.engine, log_b, RUN, AGENT)
+    finally:
+        log_b.close()
+    assert last is not None
+    assert last["seq"] == 1
+    shard.dispose()
+
+
+def test_a_resume_of_a_run_on_a_shard_this_pod_lacks_raises_unroutable(tmp_path: Path) -> None:
+    """A resume of a run that records a shard the pod does not have raises ``UnroutableRunError`` and leaves the row."""
+    store = make_sqlite_store(tmp_path)
+    store._step_log_shards = ShardMap(store.engine)
+    _funded_run(store)
+    _claim(store, "pod-a")
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(step_log_shard="s9"))
+        session.commit()
+    _kill(store)
+    before = store.get_job(RUN)
+
+    with pytest.raises(UnroutableRunError, match="s9"):
+        store.requeue_for_resume(RUN, automatic=True)
+
+    after = store.get_job(RUN)
+    assert (after["status"], after["attempts"], after["execution_generation"]) == (
+        before["status"],
+        before["attempts"],
+        before["execution_generation"],
+    )
+
+
 def test_a_kill_mid_step_drops_the_step_that_was_not_durable(store: StepJobStore, step_logs: Any) -> None:
     """A step still in the dead worker's buffer is not committed, and it never lands after the bump."""
     _funded_run(store)
@@ -331,6 +405,35 @@ def test_a_crashed_pack_is_fenced_when_its_pod_restarts(
     assert last["seq"] == 0
 
 
+def test_open_step_log_closes_the_store_when_recovery_fails(
+    tmp_path: Path, objects: LocalObjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed recovery stops the store's flusher thread, so a worker that retries the open leaks no thread."""
+    opened: list[StepLogStore] = []
+
+    def fail(self: StepLogStore) -> int:
+        """Keep the store and fail its recovery, as a down object store does.
+
+        Args:
+            self: The store.
+
+        Raises:
+            OSError: Always.
+        """
+        opened.append(self)
+        raise OSError("object store down")
+
+    monkeypatch.setattr(StepLogStore, "recover", fail)
+
+    with pytest.raises(OSError, match="object store down"):
+        open_step_log(make_sqlite_store(tmp_path).engine, objects, "pod-a")
+
+    assert len(opened) == 1
+    assert not opened[0]._thread.is_alive()
+    with pytest.raises(RuntimeError, match="closed"):
+        _commit(opened[0], 0, 1)
+
+
 def test_a_stale_worker_commit_after_the_bump_fails_with_the_fence_error(store: StepJobStore, step_logs: Any) -> None:
     """A commit of the old worker after the sweep's bump fails at its flush, then at its next commit."""
     _funded_run(store)
@@ -362,6 +465,7 @@ def test_the_fifth_automatic_resume_fails_the_run(store: StepJobStore, step_logs
         job = store.get_job(RUN)
         assert job["status"] == "pending"
         assert job["attempts"] == resume
+        assert _automatic_resumes(store) == resume
         _claim(store, f"pod-{resume}")
 
     _kill(store)
@@ -481,6 +585,30 @@ def _bill(store: StepJobStore, key: str, cents: int) -> None:
     time.sleep(0.02)
 
 
+def _automatic_resumes(store: StepJobStore) -> int:
+    """Read the run's automatic resume count from its row.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The ``automatic_resumes`` column of the run.
+    """
+    with Session(store.engine) as session:
+        return int(session.query(JobModel.automatic_resumes).filter(JobModel.optimization_id == RUN).one()[0])
+
+
+def _manual_resume(store: StepJobStore) -> None:
+    """End the run as failed and resume it by hand, as the user's resume does.
+
+    Args:
+        store: The job store.
+    """
+    _set_job(store, status="failed")
+    assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) is not None
+    assert store.get_job(RUN)["status"] == "pending"
+
+
 def _set_job(store: StepJobStore, **values: Any) -> None:
     """Write job columns directly, as another worker or a race would.
 
@@ -588,6 +716,7 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     _set_job(
         store,
         attempts=MAX_AUTOMATIC_RESUMES,
+        automatic_resumes=MAX_AUTOMATIC_RESUMES,
         recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
     )
     _kill(store)
@@ -597,6 +726,7 @@ def test_a_worker_restart_does_not_count_against_the_resume_cap(store: StepJobSt
     job = store.get_job(RUN)
     assert job["status"] == "pending"
     assert job["attempts"] == MAX_AUTOMATIC_RESUMES
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
 
 
 def test_the_wake_skips_a_run_that_changed_after_the_read(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -829,3 +959,306 @@ def test_a_failed_wake_does_not_stop_the_orphan_recovery(
 
     assert store.recover_orphaned_jobs() == 1
     assert store.get_job(RUN)["status"] == "pending"
+
+
+def test_manual_resumes_do_not_use_up_the_automatic_resume_cap(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With manual resumes mixed in, the run still gets four automatic resumes, and the fifth crash fails it."""
+    monkeypatch.setattr(remote_mod.settings, "job_max_attempts", 10)
+    _funded_run(store)
+    generation = _claim(store, "pod-0")
+    log = step_logs("pod-0")
+    _commit(log, 0, generation)
+    log.flush()
+
+    _manual_resume(store)
+    assert _automatic_resumes(store) == 0
+    for resume in range(1, MAX_AUTOMATIC_RESUMES + 1):
+        _claim(store, f"pod-{resume}")
+        if resume == 3:
+            _manual_resume(store)
+            _claim(store, f"pod-{resume}-manual")
+        _kill(store)
+        assert store.recover_orphaned_jobs() == 1
+        assert store.get_job(RUN)["status"] == "pending"
+        assert _automatic_resumes(store) == resume
+
+    job = store.get_job(RUN)
+    assert job["attempts"] == MAX_AUTOMATIC_RESUMES + 2
+    _claim(store, "pod-last")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+
+
+def test_automatic_resumes_use_up_the_manual_attempt_limit(
+    store: StepJobStore, step_logs: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a manual limit of three attempts, automatic resumes use up the manual limit, not the reverse."""
+    monkeypatch.setattr(remote_mod.settings, "job_max_attempts", 3)
+    _funded_run(store)
+    generation = _claim(store, "pod-0")
+    log = step_logs("pod-0")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    _claim(store, "pod-1")
+    _manual_resume(store)
+    _claim(store, "pod-2")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["attempts"] == settings.job_max_attempts
+    assert _automatic_resumes(store) == 2
+
+    # The automatic cap counts only automatic resumes, so it still allows two more.
+    for resume in (3, MAX_AUTOMATIC_RESUMES):
+        _claim(store, f"pod-{resume}")
+        _kill(store)
+        assert store.recover_orphaned_jobs() == 1
+        assert store.get_job(RUN)["status"] == "pending"
+        assert _automatic_resumes(store) == resume
+
+    _claim(store, "pod-last")
+    # A crash stop with no worker restart cause counts against the manual limit.
+    _set_job(store, status="failed", recovery={"state": "interrupted", "interrupted_budget_generation": 0})
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    # The run's payload names no owner, so only an admin reaches it, as in the API tests.
+    admin = AuthenticatedUser(username="alice", role="admin", groups=("skynet-admins",))
+    app.dependency_overrides[get_authenticated_user] = lambda: admin
+    response = TestClient(app, raise_server_exceptions=False).post(f"/optimizations/{RUN}/resume")
+    assert response.status_code == 409
+    assert "maximum attempts" in response.json()["detail"]
+    assert store.get_job(RUN)["status"] == "failed"
+
+
+def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rerun from scratch starts the run with no automatic resumes used."""
+    # The step store creates no vector tables, so the rerun must not delete embeddings.
+    monkeypatch.setattr(remote_mod.settings, "embeddings_enabled", False)
+    _funded_run(store)
+    _set_job(store, status="failed", attempts=MAX_AUTOMATIC_RESUMES, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+
+    assert store.requeue_for_rerun(RUN)
+
+    assert store.get_job(RUN)["attempts"] == 0
+    assert _automatic_resumes(store) == 0
+
+
+def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
+) -> None:
+    """A stale sweep fails the run with the cap error when another sweep used the last resume."""
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    listed = store._checkpoints.list_for_optimization
+
+    def other_sweep_first(optimization_id: str) -> Any:
+        """Let another sweep use the last automatic resume after this sweep read the row.
+
+        Args:
+            optimization_id: The run whose checkpoints the requeue lists.
+
+        Returns:
+            The run's checkpoints.
+        """
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return listed(optimization_id)
+
+    store._checkpoints.list_for_optimization = other_sweep_first  # type: ignore[method-assign]
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+    assert store.take_ended_orphans() == [(RUN, job["execution_generation"])]
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", "job_failed")
+
+
+def test_a_stale_sweep_keeps_the_cap_error_on_a_run_whose_usage_wait_expired(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
+) -> None:
+    """A run that already waits for usage keeps the cap error, not the expired wait's interrupted end.
+
+    Args:
+        store: The job store.
+        step_logs: Factory for a worker's step log.
+        request: Pytest request, to skip the PostgreSQL case.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    _set_job(
+        store,
+        automatic_resumes=MAX_AUTOMATIC_RESUMES - 1,
+        recovery={"state": "recovering", "phase": "waiting_for_usage", "waiting_since": expired},
+    )
+    _kill(store)
+    listed = store._checkpoints.list_for_optimization
+
+    def other_sweep_first(optimization_id: str) -> Any:
+        """Let another sweep use the last automatic resume after this sweep read the row.
+
+        Args:
+            optimization_id: The run whose checkpoints the requeue lists.
+
+        Returns:
+            The run's checkpoints.
+        """
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return listed(optimization_id)
+
+    store._checkpoints.list_for_optimization = other_sweep_first  # type: ignore[method-assign]
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
+    assert job["recovery"] is None
+
+
+# A worker claim keeps the generation, so only the generation guard protects the claimed run.
+@pytest.mark.parametrize("claimed_by", [None, "pod-b"], ids=["requeued", "requeued-and-claimed"])
+def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
+    store: StepJobStore,
+    step_logs: Any,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    claimed_by: str | None,
+) -> None:
+    """A sweep that loses the last automatic resume to another sweep does not fail the run that sweep requeued.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+        claimed_by: The worker that claimed the requeued run, or None when no worker claimed it yet.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the other sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+
+    def other_sweep_requeues(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Let another sweep requeue the run with the last automatic resume after this sweep fenced it.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        result = waive(self, *args, **kwargs)
+        fenced = int(store.get_job(RUN)["execution_generation"])
+        _set_job(
+            store,
+            status="running" if claimed_by else "pending",
+            execution_generation=fenced + 1,
+            automatic_resumes=MAX_AUTOMATIC_RESUMES,
+            claimed_by=claimed_by,
+            lease_expires_at=datetime.now(UTC) + timedelta(minutes=1) if claimed_by else None,
+        )
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", other_sweep_requeues)
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == ("running" if claimed_by else "pending")
+    with Session(store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == claimed_by
+    assert _automatic_resumes(store) == MAX_AUTOMATIC_RESUMES
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert budget.blocked_reason is None
+
+
+def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that cannot count its resume does not fail a run that the user cancelled at the same generation.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the cancel wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+    held = {}
+
+    def user_cancels(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Cancel the run as the cancel route does, after this sweep fenced it.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        result = waive(self, *args, **kwargs)
+        job = store.get_job(RUN)
+        held["generation"] = int(job["execution_generation"])
+        self.stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
+        assert store.update_job_if_status(
+            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
+        )
+        # A cancel keeps the generation, so only the status guard protects the run. The count
+        # write makes this sweep take the path that ends the run.
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", user_cancels)
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == held["generation"]
+    assert store.take_ended_orphans() == []
+    # The budget is not checked here: the sweep's resume_admission reopens a budget that
+    # the user's cancel closed. That bug is older than SKY-801 (SKY-814).

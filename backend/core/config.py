@@ -768,6 +768,16 @@ class Settings(BaseSettings):
         alias="STEP_LOG_FLUSH_MAX_BYTES",
         description="Buffered step log bytes that start a flush before the window ends",
     )
+    step_log_shards: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        alias="STEP_LOG_SHARDS",
+        description=(
+            "Extra step log shard databases, as a JSON map of shard name to database URL. The main database is "
+            "always the shard named main. Give every worker the same map before any run records a shard: a run "
+            "keeps the shard it gets first, and a worker refuses to read or write each run that records a shard "
+            "that its map does not have"
+        ),
+    )
     connector_import_max_rows: int = Field(
         default=20000,
         ge=1,

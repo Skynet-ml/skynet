@@ -699,3 +699,19 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(setup_pid, signal.SIGKILL)
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        autosaddler_runner._git_output(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert autosaddler_runner._git_output(repo, "rev-parse", "--git-dir").strip() == "."

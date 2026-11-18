@@ -81,6 +81,8 @@ class EffectStore:
             StepFenceError: When the step failed the fence; ``fn`` does not run.
             TimeoutError: When the step is not durable in time; ``fn`` does not run.
             KeyError: When the step log knows no such step and holds no row for it; ``fn`` does not run.
+            UnroutableRunError: When the step log holds nothing for the step and its run records a shard
+                that this pod's map does not have; ``fn`` does not run.
             RuntimeError: When the step log closed before the step was durable; ``fn`` does not run.
             OperationalError: On SQLite, when another call holds the same key past the busy timeout.
             LookupError: When the job and its effect row went away between the conflict and the read.
