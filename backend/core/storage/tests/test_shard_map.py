@@ -1044,7 +1044,7 @@ def test_the_alembic_upgrade_steps_of_the_shard_chain_still_resolve() -> None:
 
     steps = script._upgrade_revs("head", ())
 
-    assert [step.revision.revision for step in steps] == ["3c4a41ece580"]
+    assert [step.revision.revision for step in steps] == ["3c4a41ece580", "96693ab0b019"]
 
 
 def _wipe(engine: Engine) -> None:
@@ -1128,6 +1128,8 @@ def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migra
         with main.begin() as connection:
             connection.execute(text("DROP INDEX IF EXISTS ix_jobs_step_log_shard"))
             connection.execute(text("ALTER TABLE jobs DROP COLUMN step_log_shard"))
+            # e3b7d1f5a9c2 (SKY-733) comes after the merge, so the boot adds its column again.
+            connection.execute(text("ALTER TABLE storage_packs DROP COLUMN needs_rewrite"))
             # The head merges two parents (SKY-819). Only the shard column's branch rolls back, so main
             # stays at the other parent and the boot runs the shard column revision and the merge.
             connection.execute(text("UPDATE alembic_version SET version_num = :rev"), {"rev": "e8b2d4f6a9c1"})
