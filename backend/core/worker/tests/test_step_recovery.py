@@ -962,6 +962,24 @@ def test_a_cancel_keeps_the_holds_of_a_newer_budget_generation(store: StepJobSto
     assert _budget(store).reserved_cents == 5
 
 
+def test_a_cancel_after_a_resume_frees_the_holds_of_the_run_budget_generation(store: StepJobStore) -> None:
+    """A resumed run is at budget generation 1; the cancel closes that generation and frees its holds."""
+    _funded_run(store)
+    _claim(store, "pod-a")
+    _set_job(store, status="failed", recovery={"state": "interrupted", "interrupted_budget_generation": 0})
+    assert store.requeue_for_resume(RUN, budget_service=BudgetService(engine=store.engine)) == 1
+    generation = _claim(store, "pod-b")
+    assert store.get_job(RUN)["execution_budget_generation"] == 1
+    _hold(store, "resumed", generation=1)
+    assert park_run(store.engine, RUN, expected_generation=generation, wake_at=datetime.now(UTC) + timedelta(hours=1))
+    assert _budget(store).reserved_cents == 5
+
+    _cancel(store)
+
+    assert store.get_job(RUN)["status"] == "cancelled"
+    assert _budget(store).reserved_cents == 0
+
+
 def test_a_cancel_that_loses_the_race_to_the_wake_cancels_the_woken_run(
     store: StepJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
