@@ -144,10 +144,13 @@ def upgrade_step_log_shards() -> None:
             return
     script = ScriptDirectory(str(_STEP_LOG_VERSIONS.parent), version_locations=[str(_STEP_LOG_VERSIONS)])
     for _, url in sorted(settings.step_log_shards.items()):
-        engine = create_engine(url, poolclass=pool.NullPool)
+        engine = create_engine(url.get_secret_value(), poolclass=pool.NullPool)
         try:
             with engine.begin() as connection:
                 # Not command.upgrade: a second EnvironmentContext inside this one removes the alembic.context proxy.
+                # ``_upgrade_revs`` is private, but alembic 1.18.4 (pinned in uv.lock) has no public way to get the
+                # upgrade steps, and its own command.upgrade calls the same method. An alembic upgrade can rename it:
+                # test_shard_map.py checks it, so the test fails before a boot does.
                 migration = MigrationContext.configure(
                     connection, opts={"script": script, "fn": lambda rev, _: script._upgrade_revs("head", rev)}
                 )

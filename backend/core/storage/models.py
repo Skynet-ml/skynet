@@ -1547,8 +1547,10 @@ class AgentStepModel(Base):
 
     ``step_id`` is ``<run_id>:<agent_id>:<seq>``, so a retried commit maps to
     the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
-    ``run_id`` is the job id and the shard key. Rows go with their job via the
-    cascading foreign key.
+    ``run_id`` is the job id and the shard key. On the main database, rows go
+    with their job via the cascading foreign key. Another shard has no
+    ``jobs`` table, so its rows stay after a job delete until SKY-733 (tree
+    retention and purge) removes them.
     """
 
     __tablename__ = "agent_steps"

@@ -44,6 +44,7 @@ from .models import (
     TaggingSessionModel,
     TreeObjectModel,
 )
+from .shard_map import MAIN, ShardMap
 
 logger = logging.getLogger(__name__)
 
@@ -234,18 +235,28 @@ def sweep_unsent_chat_media(engine: Engine, username: str) -> None:
         session.commit()
 
 
-def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
+def compute_user_storage(engine: Engine, username: str, shards: ShardMap | None = None) -> StorageUsage:
     """Sum every byte the user owns across the database into one budget figure.
 
     Args:
         engine: The shared SQLAlchemy engine all storage tables live on.
         username: The owner whose footprint is measured; matched
             case-insensitively against the lowercased owner columns.
+        shards: The step log shard map over ``engine``, whose shards hold
+            the tree objects; ``None`` means the main database only.
 
     Returns:
         A :class:`StorageUsage` with the per-category breakdown and total. An
         empty/blank username yields an all-zero usage rather than scanning.
+
+    Raises:
+        ValueError: When ``shards`` is ``None`` but ``STEP_LOG_SHARDS`` names shards.
     """
+    if shards is None:
+        # The main database alone would leave out the trees on the other shards.
+        if settings.step_log_shards:
+            raise ValueError("pass the step log shard map: STEP_LOG_SHARDS names shards")
+        shards = ShardMap(engine)
     normalized = (username or "").strip().lower()
     empty = StorageUsage(
         total=0,
@@ -296,10 +307,15 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 RunCallModel.optimization_id.in_(user_job_ids)
             )
         )
-        # Workspace trees belong to the account, not to one run, so they count by owner (SKY-710).
-        trees = scalar(
-            select(func.coalesce(func.sum(TreeObjectModel.byte_size), 0)).where(TreeObjectModel.username == normalized)
+        # Workspace trees belong to the account, not to one run, so they count by owner (SKY-710), on every shard.
+        trees_sum = select(func.coalesce(func.sum(TreeObjectModel.byte_size), 0)).where(
+            TreeObjectModel.username == normalized
         )
+        trees = scalar(trees_sum)
+        for name in shards.names():
+            if name != MAIN:
+                with Session(shards.engine(name)) as shard_session:
+                    trees += int(shard_session.execute(trees_sum).scalar() or 0)
         agent_chats = scalar(
             select(
                 func.coalesce(
