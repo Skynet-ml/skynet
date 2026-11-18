@@ -1240,6 +1240,8 @@ class EngineLoop:
     def _put_tree(self, tree_id: str | None, files: Mapping[tuple[str, ...], bytes], prefix: str = "") -> str:
         """Write files over one tree level, and each changed folder below it.
 
+        An unchanged folder loses its ``.git`` entries too, so the new tree holds none, as :func:`_shown` tells.
+
         Args:
             tree_id: The tree of this level; ``None`` for an empty one.
             files: The file bytes by path parts below this level.
@@ -1274,7 +1276,29 @@ class EngineLoop:
             old = entries.get(name)
             base = old.object_id if old is not None and old.mode == "tree" else None
             entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, f"{prefix}{name}/"))
+        for name, entry in entries.items():
+            if entry.mode == "tree" and name not in folders:
+                entries[name] = TreeEntry(name, "tree", self._without_git(entry.object_id))
         return self._trees.put_tree(self._run.run_id, entries.values())
+
+    def _without_git(self, tree_id: str) -> str:
+        """Return a folder without a ``.git`` entry in any letter case, at any depth, as :func:`_shown` tells.
+
+        Args:
+            tree_id: The folder.
+
+        Returns:
+            The folder's id without ``.git`` entries; the same id when it holds none.
+
+        Raises:
+            LookupError: When the run cannot see the folder or one below it.
+        """
+        stored = self._stored(tree_id)
+        kept = [
+            TreeEntry(entry.name, "tree", self._without_git(entry.object_id)) if entry.mode == "tree" else entry
+            for entry in _shown(stored).values()
+        ]
+        return tree_id if kept == stored else self._trees.put_tree(self._run.run_id, kept)
 
     def _refuse_hidden(self, folder: TreeEntry, path: str) -> None:
         """Refuse to replace a folder with a file when a path below the folder is hidden.

@@ -2869,3 +2869,45 @@ def test_a_legacy_tree_with_only_git_entries_reads_as_a_tree_without_them(
     for path in ["README", "sub/a.py", "sub/.GIT/x", ".GIT/config", ".git/config", "empty/.Git"]:
         assert loop.read_file(legacy, path) == loop.read_file(clean, path)
     assert loop.read_file(legacy, "sub/.GIT/x") is None
+
+
+def test_a_legacy_folder_with_only_a_hidden_folder_and_git_lists_as_missing(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A folder that holds only a hidden folder and a ``.git`` file lists as missing, as without the ``.git``."""
+    hidden = hidden_hashes(["d/eval"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    evals = trees.put_tree(RUN_ID, [TreeEntry("score.py", "file", blob)])
+    folder = _put_raw_tree(trees, [[".git", "file", blob], ["eval", "tree", evals]])
+    tree = _put_raw_tree(trees, [["README", "file", blob], ["d", "tree", folder]])
+
+    assert loop.list_files(tree, "d") is None
+
+
+def test_a_symlink_below_a_legacy_git_entry_does_not_stop_the_loop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The link check skips a ``.git`` entry, as the box never gets it, so a link below it stops nothing."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    readme = trees.put_blob(RUN_ID, b"x")
+    git = _put_raw_tree(trees, [["l", "symlink", trees.put_blob(RUN_ID, b"/etc")]])
+    tree = _put_raw_tree(trees, [[".git", "tree", git], ["README", "file", readme]])
+
+    assert loop.read_file(tree, "README") == b"x"
+
+
+def test_put_files_drops_git_entries_from_folders_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """An unchanged folder of the base loses its ``.git`` entries too, so the id matches a base without them."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
