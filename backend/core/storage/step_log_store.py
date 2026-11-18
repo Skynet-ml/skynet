@@ -93,14 +93,16 @@ class StepFenceError(RuntimeError):
 
 
 class ObjectTooLargeError(Exception):
-    """A capped read refused a tree object whose stored bytes are longer than the cap."""
+    """A capped read refused a tree object that is longer than the cap."""
 
     def __init__(self, object_id: str, size: int) -> None:
-        """Keep the object's stored length.
+        """Keep the length that the read compared to the cap.
 
         Args:
             object_id: The object's content hash.
-            size: The stored length in bytes.
+            size: The length in bytes that the read compared to the cap: the stored length from
+                ``StepLogStore.get_object``, and the file length without the blob header from
+                ``TreeStore.get_blob``.
         """
         super().__init__(f"object {object_id} has {size} bytes, more than the cap")
         self.size = size
