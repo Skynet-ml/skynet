@@ -759,6 +759,8 @@ def test_the_child_gets_only_its_four_environment_variables(
 ) -> None:
     """The child gets no worker secret: its environment holds PATH, HOME, LANG and PYTHONHASHSEED only.
 
+    HOME is the child's own working folder, so a tool that writes under HOME stays in the run folder.
+
     Args:
         owner: Alice and her budget generation.
         engine: The database.
@@ -769,13 +771,15 @@ def test_the_child_gets_only_its_four_environment_variables(
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     script = (
         "import json, os, sys\nsys.stdin.readline()\n"
-        'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": {"env": sorted(os.environ)}}\n'
+        'metadata = {"env": sorted(os.environ), "home": os.environ["HOME"], "cwd": os.getcwd()}\n'
+        'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": metadata}\n'
         'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
     )
 
     result = _runner(tmp_path, script).run(Task("seed"), loop.server(lambda *_: (1.0, {}), max_evals=1), loop.context())
 
     assert result.metadata["env"] == ["HOME", "LANG", "PATH", "PYTHONHASHSEED"]
+    assert Path(result.metadata["home"]).resolve() == Path(result.metadata["cwd"]).resolve()
 
 
 def test_the_child_honors_the_fixed_hash_seed_and_does_not_see_its_own_folder(tmp_path: Path) -> None:
@@ -967,6 +971,134 @@ def test_a_version_event_with_a_bad_candidate_is_dropped(
 
     assert [kind for kind, _ in events] == ["candidate"]
     assert "good" in json.dumps(events[0][1])
+
+
+def _chat_script(lines: list[dict[str, Any]]) -> str:
+    """Return a child that sends each line, keeps each reply, and returns the replies in its metadata.
+
+    Args:
+        lines: The requests that the child sends in order.
+
+    Returns:
+        The child's Python source.
+    """
+    return (
+        "import json, sys\nsys.stdin.readline()\nreplies = []\n"
+        + "".join(
+            f"print({json.dumps(line)!r}, flush=True)\nreplies.append(json.loads(sys.stdin.readline()))\n"
+            for line in lines
+        )
+        + 'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": {"replies": replies}}\n'
+        'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
+    )
+
+
+def _bare_ctx(tmp_path: Path) -> EngineContext:
+    """Return an engine context with no model, box or tree access.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The context.
+    """
+    return make_ctx(
+        str(tmp_path),
+        call_model=lambda *_: None,
+        run_command=lambda *_: None,
+        put_files=lambda *_: None,
+        read_file=lambda *_: None,
+        list_files=lambda *_: None,
+    )
+
+
+def test_a_version_with_a_crashed_case_shows_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A version event for a version with a metric error reaches the run view with no score and no cases.
+
+    The child fills a crashed case with its version's mean, so its score must not reach the run view.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the version events.
+    """
+    shown: list[dict[str, Any]] = []
+    monkeypatch.setattr(autosaddler, "emit_candidate", lambda _callback, **fields: shown.append(fields))
+
+    def scorer(_candidate: Any, case: Any) -> tuple[float, dict[str, Any]]:
+        """Score case "a", and crash on case "b".
+
+        Args:
+            _candidate: The version; not used.
+            case: The case.
+
+        Returns:
+            The score and side information.
+
+        Raises:
+            RuntimeError: On case "b".
+        """
+        if case == "b":
+            raise RuntimeError("metric crashed")
+        return 1.0, {}
+
+    lines = [
+        {"op": "evaluate", "candidate": "bad", "example": {"id": 0}, "candidate_id": 3},
+        {"op": "evaluate", "candidate": "bad", "example": {"id": 1}, "candidate_id": 3},
+        {
+            "op": "progress",
+            "event": {"candidate_id": 3, "score": 1.0, "candidate": "bad", "per_example": [["0", 1.0], ["1", 1.0]]},
+        },
+    ]
+
+    _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed", cases=["a", "b"]), EvalServer(scorer, max_evals=2), _bare_ctx(tmp_path)
+    )
+
+    assert [(fields["candidate_id"], fields["score"], fields["per_example"]) for fields in shown] == [("3", None, [])]
+
+
+def test_a_version_event_keeps_only_its_finite_case_scores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A per-case score that is NaN or not a number is dropped, and the run goes on.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the version events.
+    """
+    shown: list[dict[str, Any]] = []
+    monkeypatch.setattr(autosaddler, "emit_candidate", lambda _callback, **fields: shown.append(fields))
+    per_example = [["a", 1.0], ["b", math.nan], ["c", "x"]]
+    lines = [
+        {"op": "progress", "event": {"candidate_id": 2, "score": 1.0, "candidate": "good", "per_example": per_example}}
+    ]
+
+    result = _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), _bare_ctx(tmp_path)
+    )
+
+    assert result.best_candidate == "seed"
+    assert [(fields["score"], fields["per_example"]) for fields in shown] == [(1.0, [("a", 1.0)])]
+
+
+def test_scorer_feedback_needs_an_integer_candidate_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An evaluation with a null or boolean candidate id gets its score but sends no scorer feedback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the scorer feedback.
+    """
+    feedback: list[dict[str, Any]] = []
+    monkeypatch.setattr(autosaddler, "emit_scorer_feedback", lambda _callback, **fields: feedback.append(fields))
+    lines = [
+        {"op": "evaluate", "candidate": "seed", "example": None, "candidate_id": candidate_id}
+        for candidate_id in (None, True, 0)
+    ]
+
+    result = _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {"note": "ok"}), max_evals=3), _bare_ctx(tmp_path)
+    )
+
+    assert result.metadata["replies"] == [{"score": 1.0, "info": {"note": "ok"}}] * 3
+    assert [fields["candidate_id"] for fields in feedback] == ["0"]
 
 
 def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
