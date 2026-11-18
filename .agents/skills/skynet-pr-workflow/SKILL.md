@@ -144,9 +144,9 @@ for review until the evidence is there.
   deploy or a staging smoke failure, gate 5 applies. The reviewer or
   implementation agent that sees a red run names the failing check and the
   commit where it started, in its report. When a PR in the current batch
-  causes the failure, section 7 applies. Otherwise the orchestrator opens an Urgent Linear issue and
-  delegates the fix. The fix PR is the first PR in the next batch (SKY-625,
-  SKY-626).
+  causes the failure, section 7 applies. Otherwise the orchestrator opens an
+  Urgent Linear issue and delegates the fix. The fix PR is the first PR in
+  the next batch (SKY-625, SKY-626).
 
 ## 4. Acceptance on staging after the merge
 
