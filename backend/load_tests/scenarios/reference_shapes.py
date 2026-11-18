@@ -326,11 +326,6 @@ class ChaosSwitch:
         with self._lock:
             self.cuts.append((step_id, generation, step))
 
-    def disarm(self) -> None:
-        """Drop an armed kill that did not fire."""
-        with self._lock:
-            self._armed = None
-
 
 class WorkLog:
     """Count one run's real model calls and boxes by step, to find work that a resumed worker did again.
@@ -1140,7 +1135,6 @@ def run_shape(
     finally:
         if switch is not None:
             switch.live = False
-            switch.disarm()
     outcome.wall_seconds = time.monotonic() - started
     outcome.model_calls = model.calls
     outcome.finished = outcome.result is not None
