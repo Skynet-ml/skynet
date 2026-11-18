@@ -570,9 +570,11 @@ class TreeSandbox:
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
             # The box checks the archive bytes against the archive limit first, so a normal oversized tree stops in the box.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
+            # The tree store refuses a ``.git`` part in any letter case (SKY-810), so a command that runs
+            # ``git init`` would fail the step; the box's own ``.git`` is left out, as harness snapshots do.
             # The broker caps one read at 16 MiB, so the archive goes out in numbered base64 parts,
             # one read each, and the command prints the part count.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
+            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} --exclude='[.][gG][iI][tT]' -C {folder} .;"
             f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
             f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR}; split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
             f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part"; i=$((i + 1)); done;'
