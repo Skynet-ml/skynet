@@ -263,8 +263,11 @@ A PR merges into `staging` only when **all** of these gates pass:
    batch CI").
 5. After the merge, the staging smoke test passes. If it fails, revert that
    PR's merge commit from the batch right away (`git revert -m 1 <merge
-   commit>`) and reopen its issue with the failure. The revert goes in its
-   own PR and through the batch CI flow below.
+   commit>`). Reopen its issue with the failure. The revert goes in its own
+   PR and through the batch CI flow below. The revert PR uses the reopened
+   issue. The orchestrator moves that issue to **In Progress**. After an
+   Opus 5.5 review approves the revert PR, the orchestrator moves the issue
+   to **Ready to Merge**.
 
 After the merge reaches staging, the orchestrator runs the acceptance checks
 on staging (section 4). A failed check becomes a new bug issue.
@@ -354,8 +357,8 @@ A manual hold on a change or on a promotion still stops it.
   orchestrator must check the green batch run itself before the merge. A new
   batch commit needs a new dispatched run.
 - **No unreviewed code on the batch branch.**
-  - A conflict the orchestrator cannot resolve, a CI failure that a PR
-    causes, or a bug in a PR: remove that PR from the batch, as "Merging
+  - Some PRs cause a problem: a conflict the orchestrator cannot resolve, a
+    CI failure, or a bug. Remove each such PR from the batch, as "Merging
     into staging" says. Fix it in the PR's own branch. After a new
     approval, the PR returns to **Ready to Merge** and goes into a later
     batch.
@@ -388,8 +391,8 @@ A manual hold on a change or on a promotion still stops it.
 - A batch is in progress while its batch PR is open or its `batch/` branch
   exists. After the merge, the batch stays in progress until its staging
   smoke test (gate 5) passes or fails. After a smoke failure, the next
-  batch waits for the revert PR. It starts with the revert PR when that PR
-  is in **Ready to Merge**.
+  batch waits for the revert PR (gate 5). It starts with the revert PR when
+  its issue is in **Ready to Merge**.
 - When the orchestrator stops or rebuilds a batch, it first closes the
   batch PR and deletes the `batch/` branch.
 - After an approval, the orchestrator does not merge the PR outside a
@@ -401,8 +404,8 @@ A manual hold on a change or on a promotion still stops it.
 - The orchestrator builds one batch from every PR in **Ready to Merge**
   (see "PR tests and batch CI"). A PR branch does not need a merge from
   `staging`, because the batch starts from current `staging`.
-- A PR that the batch cannot take (a conflict it cannot resolve, a CI
-  failure that this PR causes, or a bug in this PR) leaves the batch. The
+- Some PRs leave the batch. Such a PR has a conflict the batch cannot
+  resolve, causes a CI failure, or has a bug. For each such PR, the
   orchestrator moves its issue back to **In Progress** and removes the
   `ready-to-merge` label. It sets the `agent-review/ready-to-merge` status
   on that head to failure, with the reason. It puts the reason in the PR
