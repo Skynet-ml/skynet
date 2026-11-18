@@ -695,12 +695,14 @@ def test_a_session_that_only_runs_commands_stops_at_the_tool_call_cap(
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command"] * 3
 
 
+@pytest.mark.parametrize("seconds", [60, 45])
 def test_the_no_evaluation_watchdog_counts_model_turns_since_the_budget_last_changed(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    seconds: int, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Sixty seconds is two turns: each round gets two turns after its sweep, then stops, and the run goes on.
+    """Sixty seconds is two turns, and 45 rounds up to two: each round gets two turns after its sweep, then stops.
 
     Args:
+        seconds: The ``max_no_eval_seconds`` option.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -710,7 +712,7 @@ def test_the_no_evaluation_watchdog_counts_model_turns_since_the_budget_last_cha
     model = _Researcher(rest=_bash("true"))
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
-    result = _run(loop, native_options=_options(max_no_eval_seconds=60))
+    result = _run(loop, native_options=_options(max_no_eval_seconds=seconds))
 
     assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
     assert result.metadata["rounds"] == 2
@@ -1067,6 +1069,51 @@ def test_a_prompt_past_its_cap_stops_the_session_and_the_run_goes_on(
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "model", "model", "command"] * 2
 
 
+def test_a_prompt_at_its_cap_still_calls_the_model(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the cap set to each prompt's own size, every prompt sits exactly at ``MAX_PROMPT_BYTES`` and still runs.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    measure = loop_tools.messages_bytes
+    sizes: list[int] = []
+
+    def at_cap(messages: list[dict[str, Any]]) -> int:
+        """Measure the prompt with the real measure and move the cap to that size.
+
+        Args:
+            messages: The session's messages.
+
+        Returns:
+            The prompt's size in UTF-8 bytes.
+        """
+        size = measure(messages)
+        monkeypatch.setattr(loop_tools, "MAX_PROMPT_BYTES", size)
+        sizes.append(size)
+        return size
+
+    monkeypatch.setattr(loop_tools, "messages_bytes", at_cap)
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert len(model.calls) == len(sizes) > 0
+
+
 @pytest.mark.parametrize("bad", [None, math.inf, math.nan])
 def test_a_score_that_is_not_finite_never_becomes_the_best(
     bad: float | None, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
@@ -1305,16 +1352,23 @@ def test_an_over_cap_lab_file_never_loads_for_evaluate_or_the_carried_lab(
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "kept"),
     [
-        '{"file": ' + "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "]" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "}",
-        {
-            "file": "work/c1.txt",
-            "pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH), 0),
-        },
-        {"file": "work/c1.txt", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS},
+        (
+            '{"file": ' + "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "]" * (loop_tools.MAX_ARGUMENT_DEPTH + 1) + "}",
+            True,
+        ),
+        (
+            {
+                "file": "work/c1.txt",
+                "pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH), 0),
+            },
+            False,
+        ),
+        ({"file": "work/c1.txt", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}, False),
+        ('{"file": "' + "x" * loop_tools.MAX_ARGUMENT_CHARS + '"}', False),
     ],
-    ids=["deep-text", "deep-mapping", "long-mapping"],
+    ids=["deep-text", "deep-mapping", "long-mapping", "long-text"],
 )
 def test_evaluate_arguments_past_a_bound_get_the_bound_error(
     owner: tuple[User, int],
@@ -1323,8 +1377,11 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
     trees: TreeStore,
     tmp_path: Path,
     arguments: Any,
+    kept: bool,
 ) -> None:
     """Refused evaluate arguments get the bound error, not the path error, and the transcript holds ``{}``.
+
+    Text in the length bound and valid as UTF-8 stays in the transcript as the model sent it.
 
     Args:
         owner: Alice and her budget generation.
@@ -1333,6 +1390,7 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
         arguments: The arguments past a bound, as JSON text or as a mapping.
+        kept: Whether the transcript keeps the arguments as they are.
     """
     bad: Turn = lambda n: {"id": "bad", "name": "evaluate", "arguments": arguments}  # noqa: E731
     model = _Researcher([_WRITE, bad, _evaluate()])
@@ -1344,7 +1402,7 @@ def test_evaluate_arguments_past_a_bound_get_the_bound_error(
     assert error.startswith("Send the evaluate tool arguments as JSON")
     assert f"nested at most {loop_tools.MAX_ARGUMENT_DEPTH} levels" in error
     transcript = model.calls[2][-2]["tool_calls"][0]["function"]["arguments"]
-    assert transcript == (arguments if isinstance(arguments, str) else "{}")
+    assert transcript == (arguments if kept else "{}")
     assert (result.best_candidate, result.total_evals) == ("seedx", 2)
 
 
@@ -1505,6 +1563,40 @@ def test_a_command_past_its_byte_cap_gets_an_error_result_and_opens_no_box(
     assert _tool_result(model, 1)["error"].startswith(f"Keep the command at most {loop_tools.MAX_COMMAND_BYTES} bytes")
     assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
     assert boxes.opened == 2
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_a_command_at_its_byte_cap_runs_and_one_byte_more_is_refused(
+    extra: int, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A command of exactly ``MAX_COMMAND_BYTES`` as UTF-8 runs in a box; one byte more gets the error result.
+
+    Args:
+        extra: The bytes past the cap.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    head = "true # " + "א" * 1_000
+    size = loop_tools.MAX_COMMAND_BYTES + extra
+    long = head + "x" * (size - len(head.encode("utf-8")))
+    assert len(long.encode("utf-8")) == size
+    model = _Researcher([lambda n: {"id": "long", "name": "bash", "arguments": {"command": long}}, *_ROUND])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    result = _tool_result(model, 1)
+    if extra:
+        assert result["error"].startswith(f"Keep the command at most {loop_tools.MAX_COMMAND_BYTES} bytes")
+        assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
+    else:
+        assert result["exit_code"] == 0
+        assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "command", "model"]
+    # Each of the two rounds opens a box for the write, and one more for the long command when it runs.
+    assert boxes.opened == (2 if extra else 4)
 
 
 def test_one_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
@@ -1675,9 +1767,16 @@ def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
     assert boxes.opened == 2
 
 
-def test_mapping_arguments_with_a_lone_surrogate_get_the_bound_error_and_an_empty_transcript() -> None:
-    """The step commit refuses such a reply first (SKY-821); the tool loop still refuses it with no crash."""
-    call = {"id": "bad", "name": "bash", "arguments": {"command": "echo \ud800"}}
+@pytest.mark.parametrize(
+    "arguments", [{"command": "echo \ud800"}, '{"command": "echo \ud800"}'], ids=["mapping", "raw-text"]
+)
+def test_arguments_with_a_raw_lone_surrogate_get_the_bound_error_and_an_empty_transcript(arguments: Any) -> None:
+    """The step commit refuses such a reply first (SKY-821); the tool loop still refuses it with no crash.
+
+    Args:
+        arguments: The arguments with a raw lone surrogate, as a mapping or as JSON text.
+    """
+    call = {"id": "bad", "name": "bash", "arguments": arguments}
 
     def run_command(tree: str, command: str, env: Any) -> Any:
         """Fail the test: a refused command must not run.
