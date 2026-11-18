@@ -309,6 +309,25 @@ def test_run_gives_the_output_and_the_new_tree_and_commits_one_step(trees: TreeS
     assert candidates.released == [True]
 
 
+def test_a_git_folder_the_command_makes_is_left_out_of_the_new_tree(trees: TreeStore, step_log: StepLogStore) -> None:
+    """A ``.git`` the command makes, in any letter case and at any depth, is left out; the step does not fail."""
+    sandbox, candidates, _ = _sandbox(trees, step_log, _Runtime())
+
+    _, new_tree = sandbox.run(
+        _step(),
+        _tree(trees, {}),
+        "mkdir -p .git sub/.GIT && echo c > .git/config && echo x > sub/.GIT/x && echo k > .gitignore"
+        " && echo s > sub/keep",
+        [],
+    )
+
+    top = {entry.name: entry.object_id for entry in trees.get_tree(RUN, new_tree) or []}
+    assert sorted(top) == [".gitignore", "sub"]
+    assert trees.get_blob(RUN, top[".gitignore"]) == b"k\n"
+    assert _files(trees, top["sub"]) == {"keep": b"s\n"}
+    assert candidates.released == [True]
+
+
 def test_a_failing_command_is_output_not_an_error(trees: TreeStore, step_log: StepLogStore) -> None:
     """A non-zero exit returns with the tree the command left."""
     sandbox, _, _ = _sandbox(trees, step_log, _Runtime())
