@@ -1512,7 +1512,7 @@ def test_swarm_takes_a_throwaway_database(tmp_path: Path) -> None:
 def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine, worker_id: str) -> None:
     """Make the reset also put in one swarm row in each step-log table, and one row of another worker.
 
-    The rows go in after the reset's own delete, as the shard processes' rows do, so only the cleanup removes them.
+    The rows go in after the reset, as the shard processes' rows do, so only the cleanup removes them.
 
     Args:
         monkeypatch: Wraps ``_reset``.
@@ -1779,7 +1779,7 @@ def _other_pass_rows(engine: Engine, config: swarm_10k.SwarmConfig) -> None:
 
 
 def test_swarm_pass_keeps_the_rows_of_another_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Check that a pass's reset and cleanup delete only its own rows, and keep the rows of another invocation.
+    """Check that a pass's cleanup deletes only its own rows, and keep the rows of another invocation.
 
     Args:
         monkeypatch: Replaces the engine, the shard processes and the step log read.
@@ -1881,7 +1881,7 @@ def test_swarm_pass_frees_its_lock_when_its_cleanup_fails(
     reset = swarm_10k._reset
 
     def reset_then_fail_cleanup(reset_engine: Engine, runs: list[str]) -> None:
-        """Reset the database, then make the later cleanup step fail; the reset also deletes rows.
+        """Reset the database, then make the later cleanup step fail.
 
         Args:
             reset_engine: The database to reset.
