@@ -1806,16 +1806,27 @@ def test_swarm_refuses_a_database_that_another_pass_holds(monkeypatch: pytest.Mo
     """Check that a pass refuses a database whose swarm advisory lock another pass holds, before any reset.
 
     Args:
-        monkeypatch: Replaces the engine and the shard processes, and makes a reset fail the test.
+        monkeypatch: Replaces the engine, the shard processes and the engine's dispose, and makes a reset fail the
+            test.
         tmp_path: The pass folder.
     """
     engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", lock_free=False)
     _postgres_pass(monkeypatch, engine)
     monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    checked_out: list[int] = []
+    dispose = engine.dispose
+
+    def record_dispose() -> None:
+        """Record the connections still out of the pool, then dispose the engine."""
+        checked_out.append(engine.pool.checkedout())
+        dispose()
+
+    monkeypatch.setattr(engine, "dispose", record_dispose)
     config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     with pytest.raises(RuntimeError, match="another swarm pass runs"):
         swarm_10k.run_pass(config, 1, tmp_path / "pass")
-    assert engine.pool.checkedin() == 0
+    # A dispose replaces the pool, so only a count from before it shows that the refused lock gave its connection back.
+    assert checked_out == [0]
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -1898,21 +1909,21 @@ def test_swarm_pass_that_fails_to_unlock_raises_and_disposes_every_engine(
     engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm", fails="pg_advisory_unlock")
     _postgres_pass(monkeypatch, engine)
     monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 1))
-    disposes: list[Engine] = []
+    checked_out: list[int] = []
     dispose = engine.dispose
 
     def record_dispose() -> None:
-        """Record one dispose, then dispose the engine."""
-        disposes.append(engine)
+        """Record the connections still out of the pool, then dispose the engine."""
+        checked_out.append(engine.pool.checkedout())
         dispose()
 
     monkeypatch.setattr(engine, "dispose", record_dispose)
     config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     with pytest.raises(OperationalError, match="pg_advisory_unlock"):
         swarm_10k.run_pass(config, 2, tmp_path / "pass")
-    # Both shards of the pass get the one engine, so each of its 2 places in the pass's list gets a dispose.
-    assert len(disposes) == 2
-    assert engine.pool.checkedin() == 0
+    # Both shards of the pass get the one engine, so each of its 2 places in the pass's list gets a dispose. A dispose
+    # replaces the pool, so only a count from before it shows that the failed unlock gave its connection back.
+    assert checked_out == [0, 0]
 
 
 def test_swarm_lock_that_fails_closes_its_connection(tmp_path: Path) -> None:
