@@ -3107,7 +3107,9 @@ def test_a_shard_that_a_job_records_and_the_map_lacks_is_logged_as_an_error(
 def test_a_map_with_every_recorded_shard_logs_no_error(
     engine, shard, objects, shard_store, shards, make_compactor, caplog
 ) -> None:
-    """When the map has every shard that a job records, a pass logs no error.
+    """When the map has every shard that a job records, a pass logs no error and reads the jobs' shards once.
+
+    The old pack with no row makes the sweep read the jobs' shards, so the pass must not read them again.
 
     Args:
         engine: The main database.
@@ -3119,11 +3121,16 @@ def test_a_map_with_every_recorded_shard_logs_no_error(
         caplog: Pytest's log capture fixture.
     """
     _fill(shard_store)
+    orphan = f"{COMPACTED_PREFIX}/{0:020d}-unrecorded.pack"
+    objects.put(orphan, b"x")
+    statements = _record_statements(engine)
 
     with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
-        assert make_compactor(shards=shards).run_once() == (6, 0)
+        assert make_compactor(shards=shards).run_once() == (6, 1)
 
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert len([statement for statement, _ in statements if "DISTINCT jobs.step_log_shard" in statement]) == 1
+    assert orphan not in objects.list(f"{COMPACTED_PREFIX}/")
 
 
 def _add_job_on_unknown_shard(engine: Engine) -> None:
