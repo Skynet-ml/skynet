@@ -505,3 +505,42 @@ def test_a_line_break_python_knows_but_git_does_not_stays_inside_its_hunk_line(b
 
     assert patch_paths(patch) == ["src/a.py"]
     assert patch_violations(patch, ["src"]) == []
+
+
+def test_apply_patch_runs_no_filter_from_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree folder shaped as a bare repository gives ``git apply`` no config (SKY-812).
+
+    Without ``SAFE_GIT`` the same call runs the planted filter, so the plant is live.
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, marker = planted_bare_repo
+    patch = "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+hi\n"
+    repo_tree.apply_patch(repo, patch)
+    assert (repo / "y").read_text() == "hi\n"
+    assert not marker.exists()
+
+    (repo / "y").unlink()
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    repo_tree.apply_patch(repo, patch)
+    assert marker.exists()
+
+
+def test_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``repo_tree._git`` does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        repo_tree._git(["rev-parse", "--git-dir"], repo)
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert repo_tree._git(["rev-parse", "--git-dir"], repo).strip() == "."

@@ -55,6 +55,7 @@ from ....sandbox.snapshots import snapshot_cache_key
 from ....sandbox.trees import BoxSource
 from .repo_tree import (
     MAX_PATCH_BYTES,
+    SAFE_GIT,
     _member_path,
     archive_chunks,
     drop_paths,
@@ -102,10 +103,11 @@ _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=
 # git 2.47), whose lock files come and go while ``cp -a`` walks ``.git``.
 _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
 # Box git reads only the repository's own config: a filter, hook or fsmonitor
-# command in $HOME or the XDG folder must not run in a box git call.
+# command in $HOME or the XDG folder must not run in a box git call, and a
+# folder in the tree shaped as a bare repository is not a repository (SKY-812).
 GIT = (
     "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
-    " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
+    f" GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git {shlex.join(SAFE_GIT)} -c core.attributesFile=/dev/null"
     " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _HASH_TIMEOUT_SECONDS = 300.0

@@ -188,6 +188,18 @@ EGRESS_PREFIX = "/tmp/.app-egress-"
 EGRESS_PROXY_PORT = 18443
 # The proxy start waits at most this long for the ready line, inside OUTPUT_POLL_TIMEOUT.
 EGRESS_READY_POLLS = 50
+# Starts the proxy file only after prctl(PR_SET_DUMPABLE=4, 0) succeeds. The proxy runs for the box's life as the
+# box user, so candidate code with the same uid could ptrace it or write its /proc/<pid>/mem, and keep its pid and
+# start time, which the warm box process scan compares (SKY-732). The kernel refuses both to a same-uid process
+# when the target is not dumpable. A failed prctl ends the launch before the ready line, so the box runs without
+# the proxy. This covers only the proxy: other long-lived box-user processes stay open to such a takeover.
+PROXY_LAUNCHER = (
+    "import ctypes, runpy, sys\n"
+    "if ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) != 0:\n"
+    "    sys.exit('The egress proxy could not become non-dumpable.')\n"
+    "sys.argv = sys.argv[1:]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
 # A box env that names its own proxy keeps it; the record then misses its requests.
 _PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
@@ -747,7 +759,8 @@ class VercelEnvironment(SandboxEnvironment):
         # One `command -v` with several names succeeds when any one exists, so check each name.
         launch = (
             "for tool in python3 setsid nohup; do command -v $tool > /dev/null || exit 1; done; "
-            f"setsid nohup python3 -I {script} {EGRESS_PROXY_PORT} {lifetime} '*' > {log} 2>&1 < /dev/null & "
+            f"setsid nohup python3 -I -c {shlex.quote(PROXY_LAUNCHER)} "
+            f"{script} {EGRESS_PROXY_PORT} {lifetime} '*' > {log} 2>&1 < /dev/null & "
             "proxy=$!; "
             f"for _ in $(seq {EGRESS_READY_POLLS}); do grep -qx {READY_MARKER} {log} 2>/dev/null && exit 0; "
             "kill -0 $proxy 2>/dev/null || exit 1; sleep 0.1; done; exit 1"

@@ -1,43 +1,28 @@
-"""Tests for the warm box lease, its start budget and the metric box per score (SKY-732).
+"""Tests for the warm box lease, its start budget and its placement (SKY-732).
 
-The lease tests use fake boxes. The tree sandbox tests use local subprocess
-boxes, so no test calls a paid provider or the network.
+The tests use fake boxes, so no test calls a paid provider or the network.
+The tree sandbox's own lease tests are in the blackbox tests folder.
 """
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
-import tempfile
+import logging
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from pathlib import Path
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
 
-from core.billing.budgets import BudgetError
 from core.billing.signals import BudgetReached
 from core.sandbox.box_lease import BoxLease, StartBudget
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.grants import Grant, GrantError
 from core.sandbox.placement import MODAL, VERCEL, Placement
-from core.sandbox.trees import BoxFailureError, GrantDeniedError
-from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
-from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
-from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxLease, StepRef, TreeSandbox
-from core.storage.models import Base, JobModel
-from core.storage.object_store import LocalObjectStore
-from core.storage.step_log_store import StepLogStore
-from core.storage.tree_store import TreeEntry, TreeStore
 
-RUN = "job-ada"
-_SPEC = SandboxSpec(lifetime_seconds=60, operation_key="op")
 # Test limits only: no test reaches them unless it sets its own.
 _LIMITS: dict[str, Any] = {"vercel_cap": 100, "starts_per_minute": 1000}
 _REAPER = "box-lease-reaper"
@@ -311,7 +296,13 @@ def test_a_check_that_raises_drops_the_box() -> None:
 def test_a_close_error_after_a_check_error_hides_it_only_when_it_is_a_stop(
     check_error: BaseException, close_error: BaseException, raised: str
 ) -> None:
-    """A check error reaches the caller over the close error of the dropped box, except under a budget stop."""
+    """A check error reaches the caller over the close error of the dropped box, except under a budget stop.
+
+    Args:
+        check_error: The error that the health check raises.
+        close_error: The error that the close of the dropped box raises.
+        raised: Names the error that must reach the caller.
+    """
     provider = _Provider()
 
     def check(box: _Box) -> bool:
@@ -346,17 +337,31 @@ def test_a_close_error_after_a_check_error_hides_it_only_when_it_is_a_stop(
     assert caught.value is {"check": check_error, "close": close_error}[raised]
 
 
-def test_new_grants_replace_the_warm_box() -> None:
-    """A box keeps the network policy it opened with, so other grants need a new box."""
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ([Grant("pypi.org")], [Grant("api.example.com")]),
+        ([Grant("pypi.org")], [Grant("pypi.org", credential=True)]),
+        ([Grant("pypi.org", credential=True)], [Grant("pypi.org")]),
+    ],
+    ids=["host", "adds-credential", "drops-credential"],
+)
+def test_new_grants_replace_the_warm_box(first: list[Grant], second: list[Grant]) -> None:
+    """A box keeps the network policy it opened with, so another host or credential flag needs a new box.
+
+    Args:
+        first: The grant list of the first acquire.
+        second: Another grant list for the second acquire.
+    """
     provider = _Provider()
     lease = provider.lease()
-    box = lease.acquire("agent-1", [Grant("pypi.org")])
+    box = lease.acquire("agent-1", first)
     lease.release(box, healthy=True)
 
-    again = lease.acquire("agent-1", [Grant("api.example.com")])
+    again = lease.acquire("agent-1", second)
 
     assert box.closed
-    assert again.grants == (Grant("api.example.com"),)
+    assert again.grants == tuple(second)
 
 
 def test_a_failed_close_of_a_replaced_box_frees_the_agent() -> None:
@@ -411,7 +416,12 @@ def test_a_bad_gpu_grant_keeps_the_warm_box() -> None:
     ],
 )
 def test_an_equal_grant_list_keeps_the_warm_box(first: list[Grant], second: list[Grant]) -> None:
-    """Grant lists that resolve to the same policy share the warm box: host case and repeats do not matter."""
+    """Grant lists that resolve to the same policy share the warm box: host case and repeats do not matter.
+
+    Args:
+        first: The grant list of the first acquire.
+        second: An equal grant list in another form, for the second acquire.
+    """
     provider = _Provider()
     lease = provider.lease()
     box = lease.acquire("agent-1", first)
@@ -423,7 +433,11 @@ def test_an_equal_grant_list_keeps_the_warm_box(first: list[Grant], second: list
 
 @pytest.mark.parametrize("host", [7, None])
 def test_a_host_that_is_not_text_is_a_grant_error_and_keeps_the_warm_box(host: object) -> None:
-    """A bad host is a refused grant list, not an AttributeError from the lease."""
+    """A bad host is a refused grant list, not an AttributeError from the lease.
+
+    Args:
+        host: A host that is not text.
+    """
     provider = _Provider()
     lease = provider.lease()
     box = lease.acquire("agent-1", [])
@@ -541,11 +555,13 @@ def test_the_lease_refuses_a_bad_vercel_cap() -> None:
 
 @pytest.mark.parametrize("spill", [VERCEL, "", None])
 def test_the_lease_refuses_a_bad_spill_provider(spill: Any) -> None:
-    """A Vercel spill would count past the cap, so the cap would have no effect."""
+    """A Vercel spill would count past the cap, so the cap would have no effect.
+
+    Args:
+        spill: A spill provider that is not valid.
+    """
     with pytest.raises(ValueError, match="spill provider"):
         _Provider().lease(spill=spill)
-    with pytest.raises(ValueError, match="spill provider"):
-        RuntimeBoxLease({VERCEL: _Runtime()}, _SPEC, spill=spill, **_LIMITS)
 
 
 @pytest.mark.parametrize(
@@ -559,7 +575,13 @@ def test_the_lease_refuses_a_bad_spill_provider(spill: Any) -> None:
     ],
 )
 def test_the_lease_refuses_a_bad_option(option: str, value: Any, message: str) -> None:
-    """A bad option fails when the lease is built, not at its first acquire."""
+    """A bad option fails when the lease is built, not at its first acquire.
+
+    Args:
+        option: The name of the lease option.
+        value: A value that the option does not accept.
+        message: A part of the expected error message.
+    """
     with pytest.raises(TypeError, match=message):
         _Provider().lease(**{option: value})
 
@@ -728,6 +750,29 @@ def test_a_close_during_the_budget_wait_stops_the_open() -> None:
     # A leaked reservation would make this acquire wait forever instead of raising.
     with pytest.raises(RuntimeError, match="closed"):
         _acquire_within(lease, "agent-2")
+
+
+def test_a_close_after_the_start_is_counted_stops_the_open() -> None:
+    """An acquire opens no box when the lease closes after the budget counts its start."""
+    provider = _Provider()
+
+    def close_at_the_count() -> float:
+        """Close the lease from inside take(), after its stop check, then return the fake time.
+
+        Returns:
+            The fake time, so take() counts the start.
+        """
+        lease.close()
+        return provider.clock()
+
+    lease = provider.lease(clock=close_at_the_count)
+
+    with pytest.raises(RuntimeError, match=r"^The box lease is closed\.$"):
+        _acquire_within(lease, "agent-1")
+
+    # The start is counted, so only the check after take() stops the paid open.
+    assert len(lease._budget._starts) == 1
+    assert provider.opened == []
 
 
 def test_close_wakes_every_acquire_that_waits_for_a_start() -> None:
@@ -981,7 +1026,11 @@ def test_the_next_acquire_after_a_sleep_opens_a_new_box_and_counts_a_start() -> 
 
 
 def test_an_idle_box_close_error_is_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> None:
-    """The log names only the error type, because the error text can hold a secret; close() raises the error."""
+    """The log names only the error type, because the error text can hold a secret; close() raises the error.
+
+    Args:
+        caplog: Captures the log lines.
+    """
     provider = _Provider()
 
     def fail_close(box: _Box) -> None:
@@ -1274,7 +1323,11 @@ def test_close_wakes_the_default_reaper_wait_at_once() -> None:
 
 
 def test_a_failing_reaper_clears_itself_in_the_lock_that_keeps_its_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No release can come between the kept error and the cleared reaper, so a later release starts a new reaper."""
+    """No release can come between the kept error and the cleared reaper, so a later release starts a new reaper.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     provider = _Provider()
     ticker = _Ticker()
     broken: list[float] = []
@@ -1367,7 +1420,11 @@ def test_a_reaper_ends_with_no_idle_box_and_the_next_release_starts_a_new_one() 
 
 
 def test_a_release_does_not_wake_the_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reaper waits on its own event, so a release, a drop or a failed open of another agent costs it no pass."""
+    """The reaper waits on its own event, so a release, a drop or a failed open of another agent costs it no pass.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     provider = _Provider()
     reaper_reads: list[float] = []
     waiting = threading.Event()
@@ -1485,460 +1542,291 @@ def test_the_reaper_closes_an_idle_box_in_the_context_of_its_last_release() -> N
     assert seen == ["step-2"]
 
 
-@pytest.mark.parametrize("seconds", [0, -1, True, None, "600", float("inf"), float("nan"), 1e10])
-def test_the_lease_refuses_a_bad_sleep_after_time(seconds: Any) -> None:
-    """A bad idle time fails when the lease is built, like a bad start budget."""
-    with pytest.raises(ValueError, match="sleep-after"):
-        _Provider().lease(sleep_after_seconds=seconds)
-
-
-@pytest.fixture
-def engine(tmp_path: Path) -> Engine:
-    """Return a SQLite engine with the schema and one job at generation 1.
+@pytest.mark.parametrize("broken", ["clock", "wait"])
+def test_a_release_right_after_a_reaper_failure_still_gets_a_reaper(
+    broken: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release in the reaper's failure log, the old gap before the reaper cleared itself, starts a new reaper.
 
     Args:
-        tmp_path: Scratch folder.
-
-    Returns:
-        The engine.
+        broken: The reaper call that fails once, the clock or the idle wait.
+        monkeypatch: Hooks the reaper's failure log.
     """
-    engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
-    Base.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add(JobModel(optimization_id=RUN, username="ada", execution_generation=1))
-        session.commit()
-    return engine
+    provider = _Provider()
+    ticker = _Ticker()
+    failed: list[bool] = []
 
-
-@pytest.fixture
-def step_log(engine: Engine, tmp_path: Path) -> Iterator[StepLogStore]:
-    """Yield a step log with a short flush window.
-
-    Args:
-        engine: The test engine.
-        tmp_path: Scratch folder.
-
-    Yields:
-        The step log; it closes after the test.
-    """
-    store = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "w1", flush_window_seconds=0.02)
-    yield store
-    store.close()
-
-
-@pytest.fixture
-def trees(step_log: StepLogStore) -> TreeStore:
-    """Return a tree store over the step log.
-
-    Args:
-        step_log: The test step log.
-
-    Returns:
-        The tree store.
-    """
-    return TreeStore(step_log)
-
-
-class _DyingBox:
-    """Wrap a local box whose agent commands raise once ``dead`` is set, as a box that dies mid-step."""
-
-    def __init__(self, inner: SandboxSession) -> None:
-        """Wrap the box.
-
-        Args:
-            inner: The local box.
-        """
-        self._inner = inner
-        self.dead = False
-        self.closed = False
-        # The health check's outcome: None runs it, an exit code fakes it, an error is raised from it.
-        self.check: int | BaseException | None = None
-
-    def write_files(self, files: Mapping[str, str]) -> None:
-        """Write files into the inner box.
-
-        Args:
-            files: Relative path to text.
-        """
-        self._inner.write_files(files)
-
-    def run(self, command: str, **options: Any) -> CommandResult:
-        """Raise on an agent command of a dead box, fake the health check when set, and run the others.
-
-        Args:
-            command: The shell command.
-            **options: The run options.
+    def clock() -> float:
+        """Return the fake time, and fail the reaper's first read when the clock is the broken call.
 
         Returns:
-            The inner box's result, or the faked health check result.
+            The fake time.
 
         Raises:
-            SandboxInfraError: For an agent command once the box is dead.
-            BaseException: The set health check error, for the ``true`` command.
+            RuntimeError: At the reaper's first read.
         """
-        if command == "true" and isinstance(self.check, BaseException):
-            raise self.check
-        if command == "true" and self.check is not None:
-            return CommandResult(exit_code=self.check)
-        if self.dead and command.startswith("cd tree"):
-            raise SandboxInfraError("The box stopped.")
-        return self._inner.run(command, **options)
+        if broken == "clock" and not failed and threading.current_thread().name == _REAPER:
+            failed.append(True)
+            raise RuntimeError("The clock broke.")
+        return provider.clock.now
 
-    def read_file(self, path: str) -> str | None:
-        """Read a file from the inner box.
+    def wait(seconds: float) -> None:
+        """Fail the first wait when the idle wait is the broken call, else wait on the ticker.
 
         Args:
-            path: Relative path.
+            seconds: The reaper's wait.
 
-        Returns:
-            The text, or ``None``.
+        Raises:
+            RuntimeError: At the first wait.
         """
-        return self._inner.read_file(path)
+        if broken == "wait" and not failed:
+            failed.append(True)
+            raise RuntimeError("The wait broke.")
+        ticker(seconds)
 
-    def close(self) -> None:
-        """Close the inner box."""
-        self.closed = True
-        self._inner.close()
+    lease = provider.lease(clock=clock, sleep_after_seconds=600, idle_wait=wait)
+    first = lease.acquire("agent-1", [])
+    second = lease.acquire("agent-2", [])
+    reapers: list[threading.Thread | None] = []
+    logged = threading.Event()
+    log = logging.getLogger(BoxLease.__module__)
+    warning = log.warning
 
-
-@dataclass
-class _Runtime:
-    """Open local boxes that can die, and record each one."""
-
-    injects_headers: bool = False
-    boxes: list[_DyingBox] = field(default_factory=list)
-    # When set, each box gets a new TMPDIR in this folder, outside its working directory.
-    tmp_root: Path | None = None
-
-    def open(self, spec: SandboxSpec) -> SandboxSession:
-        """Open one local box.
+    def release_in_log(message: str, *args: Any) -> None:
+        """Release the second box from another thread at the failure log, then log.
 
         Args:
-            spec: The box spec.
+            message: The log message.
+            *args: The message arguments.
+        """
+        if "reaper stopped" in message and not logged.is_set():
+            # Joined here, so the release runs where the old reaper had not yet cleared itself.
+            other = threading.Thread(target=lease.release, args=(second, True), daemon=True)
+            other.start()
+            other.join(timeout=5)
+            reapers.append(lease._reaper)
+            logged.set()
+        warning(message, *args)
+
+    monkeypatch.setattr(log, "warning", release_in_log)
+    lease.release(first, healthy=True)
+    failing = lease._reaper
+    assert failing is not None
+    try:
+        assert logged.wait(timeout=5), "The reaper did not fail."
+        failing.join(timeout=5)
+        assert not failing.is_alive()
+        new = reapers[0]
+        assert new is not None, "The release in the gap started no reaper."
+        assert new is not failing, "The release in the gap started no reaper."
+        assert lease._reaper is new
+        # Taken here, so the kept error does not reach the close in the teardown.
+        with pytest.raises(RuntimeError, match="broke"):
+            lease.acquire("agent-3", [])
+        ticker.passes(1)
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+        assert provider.closed == [first, second]
+    finally:
+        _stop(lease, ticker)
+
+
+def test_a_reaper_start_failure_drops_the_box_and_the_next_acquire_opens_a_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the reaper thread cannot start, the release closes the box, so the step's re-run does not block.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
+    provider = _Provider()
+    ticker = _Ticker()
+    lease = provider.lease(sleep_after_seconds=600, idle_wait=ticker)
+    box = lease.acquire("agent-1", [])
+    start = threading.Thread.start
+    refused: list[bool] = []
+
+    def refuse_once(self: threading.Thread) -> None:
+        """Refuse the first reaper start, as when the process has no thread left.
+
+        Args:
+            self: The thread.
+
+        Raises:
+            RuntimeError: At the first reaper start.
+        """
+        if self.name == _REAPER and not refused:
+            refused.append(True)
+            raise RuntimeError("can't start new thread")
+        start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", refuse_once)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        lease.release(box, healthy=True)
+    try:
+        assert box.closed, "A box that the failed release keeps stays open and held forever."
+        assert provider.closed == [box]
+        assert lease._reaper is None, "A thread that never started blocks every new reaper."
+        assert not lease._leases
+        assert not lease._idle
+
+        new = _acquire_within(lease, "agent-1")
+        assert new is not box
+        assert provider.opened == [box, new]
+        lease.release(new, healthy=True)
+        ticker.passes(1)
+        assert lease._reaper is not None
+        assert lease._reaper.is_alive()
+    finally:
+        _stop(lease, ticker)
+    assert new.closed
+
+
+def test_a_clock_failure_in_a_release_drops_the_box_and_the_next_acquire_opens_a_new_one() -> None:
+    """A release whose clock read fails closes the box, so the step's re-run opens a new box and does not block."""
+    provider = _Provider()
+    broken: list[bool] = []
+
+    def clock() -> float:
+        """Return the fake time, or fail while the test breaks the clock.
 
         Returns:
-            The box.
+            The fake time.
+
+        Raises:
+            RuntimeError: While the clock is broken.
         """
-        if self.tmp_root is not None:
-            spec = replace(spec, env={**spec.env, "TMPDIR": tempfile.mkdtemp(dir=self.tmp_root)})
-        box = _DyingBox(LocalSubprocessRuntime().open(spec))
-        self.boxes.append(box)
-        return box  # type: ignore[return-value]
+        if broken:
+            raise RuntimeError("The clock broke.")
+        return provider.clock.now
 
-
-def _on_both(runtime: _Runtime) -> dict[str, _Runtime]:
-    """Map Vercel and the Modal spill to one local runtime.
-
-    Args:
-        runtime: The runtime.
-
-    Returns:
-        The provider map.
-    """
-    return {VERCEL: runtime, MODAL: runtime}
-
-
-def _tree(trees: TreeStore, files: Mapping[str, str]) -> str:
-    """Store flat files as one tree.
-
-    Args:
-        trees: The tree store.
-        files: Name to text.
-
-    Returns:
-        The tree id.
-    """
-    return trees.put_tree(
-        RUN, [TreeEntry(name, "file", trees.put_blob(RUN, text.encode())) for name, text in files.items()]
-    )
-
-
-def _step(seq: int, agent_id: str = "agent-1") -> StepRef:
-    """Return one step of an agent at generation 1.
-
-    Args:
-        seq: The step's place.
-        agent_id: The agent.
-
-    Returns:
-        The step.
-    """
-    return StepRef(run_id=RUN, agent_id=agent_id, seq=seq, execution_generation=1)
-
-
-def _sandbox(
-    trees: TreeStore, step_log: StepLogStore, metric_runtime: _Runtime | None = None
-) -> tuple[TreeSandbox, _Runtime, _Runtime, RuntimeBoxLease, RuntimeBoxLease]:
-    """Build the layer over a warm candidate lease and a metric lease that keeps no box warm.
-
-    Args:
-        trees: The tree store.
-        step_log: The step log.
-        metric_runtime: The runtime of the metric boxes; ``None`` uses a plain local runtime.
-
-    Returns:
-        The layer, the candidate and metric runtimes, and the two leases.
-    """
-    candidate_runtime, metric_runtime = _Runtime(), metric_runtime or _Runtime()
-    candidates = RuntimeBoxLease(_on_both(candidate_runtime), _SPEC, **_LIMITS)
-    metrics = RuntimeBoxLease(_on_both(metric_runtime), _SPEC, keep_warm=False, **_LIMITS)
-    return TreeSandbox(trees, step_log, candidates, metrics), candidate_runtime, metric_runtime, candidates, metrics
-
-
-def test_an_agent_runs_its_steps_in_one_warm_box(trees: TreeStore, step_log: StepLogStore) -> None:
-    """Two steps of one agent use one box, and each step starts from its own tree."""
-    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
+    ticker = _Ticker()
+    lease = provider.lease(clock=clock, sleep_after_seconds=600, idle_wait=ticker)
+    box = lease.acquire("agent-1", [])
+    broken.append(True)
+    with pytest.raises(RuntimeError, match="The clock broke"):
+        lease.release(box, healthy=True)
+    broken.clear()
     try:
-        _, first = sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "echo two > b.txt", [])
-        result, _ = sandbox.run(_step(2), _tree(trees, {"a.txt": "other\n"}), "ls; cat a.txt", [])
+        assert box.closed, "A box that the failed release keeps stays open and held forever."
+        assert provider.closed == [box]
+        assert not lease._leases
+        assert not lease._idle
+        assert lease._reaper is None
+
+        new = _acquire_within(lease, "agent-1")
+        assert new is not box
+        assert provider.opened == [box, new]
+        lease.release(new, healthy=True)
+        ticker.passes(1)
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+        assert new.closed
     finally:
-        candidates.close()
-        metrics.close()
-
-    assert len(runtime.boxes) == 1
-    assert trees.get_tree(RUN, first) is not None
-    assert result.stdout == "a.txt\nother\n"
+        _stop(lease, ticker)
 
 
-def test_a_box_that_dies_mid_step_is_replaced_and_the_step_reruns_from_its_tree(
-    trees: TreeStore, step_log: StepLogStore
+@pytest.mark.parametrize(
+    ("release_error", "close_error", "raised"),
+    [
+        (RuntimeError("release"), BudgetReached("close"), "close"),
+        (RuntimeError("release"), RuntimeError("close"), "release"),
+        (BudgetReached("release"), RuntimeError("close"), "release"),
+        (BudgetReached("release"), BudgetReached("close"), "release"),
+    ],
+)
+def test_a_close_error_after_a_failed_healthy_release_hides_it_only_when_it_is_a_stop(
+    release_error: BaseException, close_error: BaseException, raised: str
 ) -> None:
-    """The dead box drops; the retry opens a new box and starts from the last committed tree."""
-    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
-    try:
-        _, committed = sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "echo two > b.txt", [])
-        runtime.boxes[0].dead = True
-        with pytest.raises(BoxFailureError):
-            sandbox.run(_step(2), committed, "echo three > c.txt", [])
-        result, _ = sandbox.run(_step(2), committed, "ls", [])
-    finally:
-        candidates.close()
-        metrics.close()
+    """A failed healthy release raises its own error over the box's close error, except under a budget stop.
 
-    assert len(runtime.boxes) == 2
-    assert result.stdout == "a.txt\nb.txt\n"
+    Args:
+        release_error: The error that the healthy release raises.
+        close_error: The error that the close of the dropped box raises.
+        raised: Names the error that must reach the caller.
+    """
+    provider = _Provider()
+    broken: list[bool] = []
 
+    def clock() -> float:
+        """Return the fake time, or raise the release error while the test breaks the clock.
 
-def test_a_score_never_sees_the_files_or_processes_of_an_earlier_score(
-    trees: TreeStore, step_log: StepLogStore, tmp_path: Path
-) -> None:
-    """Each score gets a new box, so a stray TMPDIR file or background process of the last score stays out."""
-    tmp_root = tmp_path / "box-tmp"
-    tmp_root.mkdir()
-    sandbox, _, metric_runtime, candidates, metrics = _sandbox(trees, step_log, _Runtime(tmp_root=tmp_root))
-    metric = _tree(trees, {"score.sh": "echo 1.0\n"})
-    # The metric fails when TMPDIR or the working directory holds a file from an earlier score. Then it
-    # leaves a file in each and a bounded background loop that keeps writing to TMPDIR after it ends.
-    command = (
-        'sleep 0.3; test -z "$(ls -A "$TMPDIR")" || exit 1;'
-        ' test -z "$(find . -type f ! -path "./outputs/*" ! -path "./metric/*")" || exit 1;'
-        ' echo seen > left.txt; echo seen > "$TMPDIR/left.txt";'
-        ' (for i in 1 2 3 4 5 6 7 8 9 10; do echo seen > "$TMPDIR/loop.txt"; sleep 0.2; done) >/dev/null 2>&1 &'
-        " sh metric/score.sh"
-    )
-    try:
-        first = sandbox.score(_step(1), _tree(trees, {"answer.txt": "1\n"}), metric, command)
-        second = sandbox.score(_step(2), _tree(trees, {"answer.txt": "2\n"}), metric, command)
-    finally:
-        candidates.close()
-        metrics.close()
+        Returns:
+            The fake time.
 
-    assert (first, second) == (1.0, 1.0)
-    assert len(metric_runtime.boxes) == 2
+        Raises:
+            BaseException: The release error, while the clock is broken.
+        """
+        if broken:
+            raise release_error
+        return provider.clock.now
 
+    def close(box: _Box) -> None:
+        """Raise the close error.
 
-def test_the_metric_box_never_gets_candidate_code(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The metric box holds only the outputs tree and the metric tree, never the candidate tree."""
-    sandbox, _, _, candidates, metrics = _sandbox(trees, step_log)
-    candidate = _tree(trees, {"solve.py": "print('secret')\n"})
-    metric = _tree(trees, {"score.sh": "echo 1.0\n"})
-    # The metric fails unless the box holds exactly the files of the two trees.
-    command = (
-        'test "$(find . -type f | LC_ALL=C sort | paste -s -d " " -)" = "./metric/score.sh ./outputs/answer.txt"'
-        " || exit 1; sh metric/score.sh"
-    )
-    try:
-        _, outputs = sandbox.run(_step(1), candidate, "rm solve.py; echo 1 > answer.txt", [])
-        score = sandbox.score(_step(2), outputs, metric, command)
-    finally:
-        candidates.close()
-        metrics.close()
+        Args:
+            box: The box.
 
-    assert score == 1.0
+        Raises:
+            BaseException: The close error.
+        """
+        raise close_error
 
-
-def test_a_warm_lease_cannot_give_the_metric_boxes(trees: TreeStore, step_log: StepLogStore) -> None:
-    """A warm metric box would keep the files and processes of an earlier score or candidate."""
-    candidates = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, **_LIMITS)
-    warm = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, **_LIMITS)
-
-    with pytest.raises(ValueError, match="keep_warm=False"):
-        TreeSandbox(trees, step_log, candidates, warm)
-    with pytest.raises(ValueError, match="keep_warm=False"):
-        TreeSandbox(trees, step_log, candidates, candidates)
-
-
-def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The step records the grant list that the layer resolves, so the lease must resolve the same way."""
-    registry = {"api.example.com": {"Authorization": "x"}}
-
-    with pytest.raises(ValueError, match="registry"):
-        TreeSandbox(
-            trees,
-            step_log,
-            RuntimeBoxLease(_on_both(_Runtime()), _SPEC, registry, **_LIMITS),
-            _Provider().lease(keep_warm=False),
-        )
-
-
-def test_a_gpu_step_is_refused_before_any_box_opens(trees: TreeStore, step_log: StepLogStore) -> None:
-    """No runtime here opens a GPU box, so a GPU grant is a denied grant, not a box without its GPU."""
-    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
-    try:
-        with pytest.raises(GrantDeniedError, match="GPU"):
-            sandbox.run(_step(1), _tree(trees, {}), "true", [Grant("gpu:a100")])
-    finally:
-        candidates.close()
-        metrics.close()
-
-    assert runtime.boxes == []
-
-
-def test_a_step_with_a_host_that_is_not_text_is_a_denied_grant(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The step records a denied grant, not an AttributeError, and no box opens."""
-    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
-    try:
-        with pytest.raises(GrantDeniedError):
-            sandbox.run(_step(1), _tree(trees, {}), "true", [Grant(7)])  # type: ignore[arg-type]
-    finally:
-        candidates.close()
-        metrics.close()
-
-    assert runtime.boxes == []
-
-
-def test_a_refused_gpu_step_keeps_the_warm_box_and_uses_no_start() -> None:
-    """The GPU refusal comes before the claim, so the agent's warm box stays and no start is counted."""
-    runtime, clock = _Runtime(), _Clock()
-    lease = RuntimeBoxLease(
-        _on_both(runtime), _SPEC, vercel_cap=100, starts_per_minute=2, clock=clock, sleep=clock.sleep
-    )
-    try:
-        box = lease.acquire("agent-1", [])
+    lease = BoxLease(provider.open, close, clock=clock, sleep=provider.clock.sleep, **_LIMITS)
+    box = lease.acquire("agent-1", [])
+    broken.append(True)
+    with pytest.raises(BaseException) as caught:
         lease.release(box, healthy=True)
-        with pytest.raises(GrantError, match="GPU"):
-            lease.acquire("agent-1", [Grant("gpu:a100")])
-        again = lease.acquire("agent-1", [])
-        lease.release(again, healthy=True)
-        # The budget holds two starts: the first box and this one, with no wait.
-        lease.release(lease.acquire("agent-2", []), healthy=True)
-    finally:
-        lease.close()
+    broken.clear()
 
-    assert again is box
-    assert len(runtime.boxes) == 2
-    assert clock.sleeps == []
+    assert caught.value is {"release": release_error, "close": close_error}[raised]
+    assert not lease._leases
+    assert not lease._idle
+    assert lease._reaper is None
+    assert lease._open[VERCEL] == 0
 
 
-def test_a_denied_grant_list_keeps_the_warm_box_and_uses_no_start() -> None:
-    """A network grant with no registered credential is refused before the claim, like a GPU grant."""
-    runtime, clock = _Runtime(), _Clock()
-    lease = RuntimeBoxLease(
-        _on_both(runtime), _SPEC, vercel_cap=100, starts_per_minute=2, clock=clock, sleep=clock.sleep
+def test_close_closes_an_idle_box_in_the_context_of_its_last_release() -> None:
+    """close() runs each idle box close in its release's context, as the reaper does, not in the closer's."""
+    provider = _Provider()
+    seen: list[str | None] = []
+
+    def close_in_scope(box: _Box) -> None:
+        """Record the run scope that the close sees, then close the box.
+
+        Args:
+            box: The box.
+        """
+        seen.append(_RUN_SCOPE.get(None))
+        provider.close(box)
+
+    ticker = _Ticker()
+    lease = BoxLease(
+        provider.open, close_in_scope, clock=provider.clock, sleep_after_seconds=600, idle_wait=ticker, **_LIMITS
     )
+    box = lease.acquire("agent-1", [])
+    token = _RUN_SCOPE.set("step-1")
     try:
-        box = lease.acquire("agent-1", [])
         lease.release(box, healthy=True)
-        with pytest.raises(GrantError):
-            lease.acquire("agent-1", [Grant("api.example.com", credential=True)])
-        again = lease.acquire("agent-1", [])
-        lease.release(again, healthy=True)
-        # The budget holds two starts: the first box and this one, with no wait.
-        lease.release(lease.acquire("agent-2", []), healthy=True)
     finally:
-        lease.close()
-
-    assert again is box
-    assert len(runtime.boxes) == 2
-    assert clock.sleeps == []
-
-
-@pytest.mark.parametrize("check", [1, SandboxInfraError("The box stopped.")])
-def test_a_warm_box_that_fails_its_health_check_is_replaced(check: int | Exception) -> None:
-    """The runtime check runs ``true`` in the warm box; a failed or broken run opens a new box."""
-    runtime = _Runtime()
-    lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
+        _RUN_SCOPE.reset(token)
+    ticker.passes(1)
+    token = _RUN_SCOPE.set("closer")
     try:
-        lease.release(lease.acquire("agent-1", []), healthy=True)
-        runtime.boxes[0].check = check
-        lease.release(lease.acquire("agent-1", []), healthy=True)
+        _stop(lease, ticker)
     finally:
-        lease.close()
+        _RUN_SCOPE.reset(token)
 
-    assert len(runtime.boxes) == 2
-    assert runtime.boxes[0].closed
-
-
-def test_a_budget_stop_in_the_health_check_reaches_the_caller() -> None:
-    """A budget signal from the check stops the run instead of counting as a dead box, and the box closes."""
-    runtime = _Runtime()
-    lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
-    try:
-        lease.release(lease.acquire("agent-1", []), healthy=True)
-        runtime.boxes[0].check = BudgetReached()
-        with pytest.raises(BudgetReached):
-            lease.acquire("agent-1", [])
-    finally:
-        lease.close()
-
-    assert len(runtime.boxes) == 1
-    assert runtime.boxes[0].closed
+    assert box.closed
+    assert seen == ["step-1"]
 
 
-def test_a_lease_needs_a_runtime_for_vercel_and_the_spill() -> None:
-    """A missing runtime fails at once, not later as a box failure when Vercel reaches the cap."""
-    runtime = _Runtime()
+@pytest.mark.parametrize("seconds", [0, -1, True, None, "600", float("inf"), float("nan"), 1e10])
+def test_the_lease_refuses_a_bad_sleep_after_time(seconds: Any) -> None:
+    """A bad idle time fails when the lease is built, like a bad start budget.
 
-    with pytest.raises(ValueError, match="modal"):
-        RuntimeBoxLease({VERCEL: runtime}, _SPEC, **_LIMITS)
-    with pytest.raises(ValueError, match="vercel"):
-        RuntimeBoxLease({MODAL: runtime}, _SPEC, **_LIMITS)
-    with pytest.raises(ValueError, match="daytona"):
-        RuntimeBoxLease(_on_both(runtime), _SPEC, spill="daytona", **_LIMITS)
-
-    lease = RuntimeBoxLease({VERCEL: runtime, "daytona": runtime}, _SPEC, spill="daytona", **_LIMITS)
-    assert lease.registry == {}
-    lease.close()
-    assert runtime.boxes == []
-
-
-def test_a_runtime_lease_keeps_its_first_budget_error_over_a_later_budget_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every budget error stops the run, so a later BudgetReached does not replace a kept BudgetError."""
-    runtime = _Runtime()
-    lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
-    boxes = [lease.acquire(agent, []) for agent in ("agent-1", "agent-2")]
-    errors: list[BaseException] = [BudgetError("over budget"), BudgetReached("budget stopped")]
-    for box, error in zip(runtime.boxes, errors, strict=True):
-
-        def fail_close(close: Any = box.close, error: BaseException = error) -> None:
-            """Close the local box, then fail as a settlement does.
-
-            Args:
-                close: The box's own close.
-                error: The settlement's error.
-
-            Raises:
-                BaseException: ``error``, always.
-            """
-            close()
-            raise error
-
-        monkeypatch.setattr(box, "close", fail_close)
-    for box in boxes:
-        lease.release(box, healthy=True)
-
-    with pytest.raises(BudgetError) as raised:
-        lease.close()
-
-    assert raised.value is errors[0]
-    assert all(box.closed for box in runtime.boxes)
+    Args:
+        seconds: A sleep-after time that is not valid.
+    """
+    with pytest.raises(ValueError, match="sleep-after"):
+        _Provider().lease(sleep_after_seconds=seconds)
