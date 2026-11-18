@@ -1924,7 +1924,11 @@ class ProgramScorer:
             path: The queued request file.
         """
         try:
-            request = json.loads(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            # The poll lists this folder ten times a second for the whole run, so
+            # a handled request leaves it and each listing holds only new requests.
+            path.unlink(missing_ok=True)
+            request = json.loads(text)
             response = self.score_program(str(request["program_path"]))
         except (Exception, EvaluationStopped) as exc:
             response = {"correct": False, "error": f"{type(exc).__name__}: {exc}", "metrics": {}}
@@ -2041,6 +2045,7 @@ class LineageReporter:
         self.generation_by_id: dict[str, int] = {}
         self.parent_by_generation: dict[int, int | None] = {}
         self.reported: set[int] = set()
+        self.last_rowid = 0
 
     def poll(self, *, final: bool = False) -> None:
         """Report every scored version whose lineage is known.
@@ -2088,17 +2093,25 @@ class LineageReporter:
         return steps
 
     def _read_lineage(self) -> None:
-        """Read every program's generation and parent from upstream's database."""
+        """Read the generation and parent of each program filed since the last read."""
         if not self.db_path.exists():
             return
+        # The poll runs ten times a second for the whole run, and each programs
+        # row holds its code, so a full read would cost CPU that grows with the
+        # square of the run length. Upstream never deletes a program, so new
+        # programs always get a higher rowid.
         try:
             with contextlib.closing(sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=1.0)) as db:
-                rows = db.execute("SELECT id, generation, parent_id FROM programs").fetchall()
+                rows = db.execute(
+                    "SELECT rowid, id, generation, parent_id FROM programs WHERE rowid > ? ORDER BY rowid",
+                    (self.last_rowid,),
+                ).fetchall()
         except sqlite3.Error:
             return
-        for program_id, generation, _ in rows:
+        for rowid, program_id, generation, _ in rows:
+            self.last_rowid = rowid
             self.generation_by_id[str(program_id)] = int(generation)
-        for _, generation, parent_id in rows:
+        for _, _, generation, parent_id in rows:
             parent = self.generation_by_id.get(str(parent_id)) if parent_id else None
             # Migration copies a program onto another island under a new id but
             # the same generation; the first filing names the true parent.

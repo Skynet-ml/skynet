@@ -73,10 +73,11 @@ _ROUTE_LABEL = "engine-loop"
 # The budget and the evaluation limit end a run; this only bounds a lost reply.
 _TIMEOUT_SECONDS = 7 * 24 * 3600.0
 # The child parses untrusted model replies, so a reply that makes a parser loop
-# or grow must not take the worker host with it. Its own work is prompt building
-# and parsing: a few hundred MiB and well under a second a generation, while it
-# waits on the worker for nearly all of a run. The address-space limit leaves
-# room for the thread stacks and malloc arenas that inflate the virtual size.
+# or grow must not take the worker host with it. Its own work is prompt building,
+# parsing and a lineage poll that reads only new programs: a few hundred MiB and
+# well under a second a generation, while it waits on the worker for nearly all
+# of a run. The address-space limit leaves room for the thread stacks and
+# malloc arenas that inflate the virtual size.
 _CHILD_MEMORY_BYTES = 8 * 1024**3
 _CHILD_CPU_SECONDS = 6 * 3600
 # macOS refuses to lower the address-space limit; the workers run Linux.
