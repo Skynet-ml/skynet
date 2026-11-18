@@ -7,6 +7,7 @@ import builtins
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -49,6 +50,7 @@ from ..repo_workspace import (
     METRIC_REPO_DIR,
     METRIC_SITE_DIR,
     PREPARED_DIR,
+    REPO_DIR,
     WORK_DIR,
     CandidateBox,
     Checkout,
@@ -2023,7 +2025,7 @@ def test_a_warm_box_that_fails_its_reset_is_replaced_by_a_new_box_with_the_candi
         box.close()
         (old,) = _candidates(runtime)  # type: ignore[arg-type]
         replaced = _open(space, version)
-        assert any(command.startswith("find .app-repo ") for command in old.root_commands)
+        assert any(" find .app-repo " in command for command in old.root_commands)
         assert old.closed
         new = _candidates(runtime)[-1]  # type: ignore[arg-type]
         assert replaced.session is new
@@ -2526,7 +2528,7 @@ def test_a_warm_box_whose_clear_command_fails_is_replaced_like_a_digest_mismatch
             Returns:
                 The command's result.
             """
-            if command.startswith("find .app-repo "):
+            if " find .app-repo " in command:
                 return CommandResult(exit_code=1, stderr="rm: busy")
             return run(command, **options)
 
@@ -2537,5 +2539,303 @@ def test_a_warm_box_whose_clear_command_fails_is_replaced_like_a_digest_mismatch
         assert box.session is not old
         assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
         box.close()
+    finally:
+        space.close()
+
+
+def _replaced(runtime: _Runtime, old: _Box, box: CandidateBox) -> None:
+    """Check that the warm box closed and the version runs in a new box.
+
+    Args:
+        runtime: The recording runtime.
+        old: The warm box.
+        box: The next version's open box.
+    """
+    assert old.closed
+    assert box.session is _candidates(runtime)[-1]
+    assert box.session is not old
+
+
+@pytest.mark.parametrize("link", [REPO_DIR, PREPARED_DIR])
+def test_a_link_in_place_of_the_repository_folder_or_prepared_tree_replaces_the_warm_box(
+    tmp_path: Path, link: str
+) -> None:
+    """A link passes the clear and the digest but can hold a stale checkout, so the box is replaced (SKY-805).
+
+    The link points at a clean copy outside the box, so only the link check
+    can tell this box from a clean one.
+    """
+    runtime = _Runtime()
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, runtime, setup=None)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        first = _open(space, "")
+        target = shlex.quote(str(outside / posixpath.basename(link)))
+        copied = first.session.run(
+            f"cp -a {PREPARED_DIR} {outside}/prepared && rm -rf {link} && ln -s {target} {link}"
+            if link == PREPARED_DIR
+            else f"mkdir {target} && cp -a {PREPARED_DIR} {target}/prepared && rm -rf {link} && ln -s {target} {link}"
+        )
+        assert copied.ok, copied.stderr
+        first.close()
+        (old,) = _candidates(runtime)
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        _replaced(runtime, old, box)
+        assert not (box.session.path / REPO_DIR).is_symlink()  # type: ignore[attr-defined]
+        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_warm_box_whose_clear_leaves_an_entry_in_the_repository_folder_is_replaced(tmp_path: Path) -> None:
+    """The repository folder must hold only the prepared tree after the clear, or the box is replaced (SKY-805)."""
+    runtime = _Runtime()
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, runtime, setup=None)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+        run = old.run
+
+        def removes_nothing(command: str, **options: Any) -> CommandResult:
+            """Make the reset's clear remove nothing, and run every command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+            """
+            return run(command.replace(" find .app-repo ", " true .app-repo "), **options)
+
+        old.run = removes_nothing  # type: ignore[method-assign]
+        box = _open(space, "")
+        _replaced(runtime, old, box)
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_checkout_folder_already_in_the_box_stops_the_apply_and_the_box_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cp -a`` into a checkout that is already there would keep its files, so the apply stops (SKY-805)."""
+    runtime = _Runtime()
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, runtime, setup=None)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+        reset = space._reset
+
+        def leaves_a_checkout(session: Any, slot: str) -> bool:
+            """Reset the box, then leave a stale checkout in it.
+
+            Args:
+                session: The warm box.
+                slot: The slot's lease key.
+
+            Returns:
+                The reset's result.
+            """
+            ready = reset(session, slot)
+            session.run(f"mkdir -p {WORK_DIR}/src && echo stale > {WORK_DIR}/src/old.py")
+            return ready
+
+        monkeypatch.setattr(space, "_reset", leaves_a_checkout)
+        with pytest.raises(RepoSetupError, match="already holds a checkout"):
+            space.open_candidate("")
+        assert old.closed
+        monkeypatch.undo()
+        box = _open(space, "")
+        assert box.session is not old
+        assert box.session.read_file(f"{WORK_DIR}/src/old.py") is None
+        box.close()
+    finally:
+        space.close()
+
+
+def _running(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie.
+
+    Args:
+        pid: The process.
+
+    Returns:
+        True when the process runs.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    state = Path(f"/proc/{pid}/stat")
+    if state.exists():
+        return state.read_bytes().rsplit(b")", 1)[1].split()[0] != b"Z"
+    listed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return bool(listed.stdout.strip()) and not listed.stdout.strip().startswith("Z")
+
+
+def _gone(pid: int) -> bool:
+    """Wait a short time for a killed process to end.
+
+    Args:
+        pid: The process.
+
+    Returns:
+        True when the process ended.
+    """
+    deadline = time.monotonic() + 5
+    while _running(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+_BACKGROUND = "{ nohup sleep 300 >/dev/null 2>&1 & echo $!; }"
+
+
+def test_a_background_process_of_a_version_is_stopped_before_the_next_version_on_the_warm_box(
+    tmp_path: Path,
+) -> None:
+    """A process that a version left does not run into the next version's run, and a host process stays (SKY-809)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    host = subprocess.Popen(["sleep", "300"], cwd=tmp_path)
+    try:
+        first = _open(space, "")
+        started = first.session.run(f"cd {WORK_DIR} && {_BACKGROUND}")
+        pid = int(started.stdout.split()[-1])
+        assert _running(pid)
+        first.close()
+        second = _open(space, "")
+        assert second.session is first.session
+        assert _gone(pid)
+        assert _running(host.pid)
+        (box,) = _candidates(runtime)
+        script = shlex.quote(repo_workspace._STOP_PROCESSES)
+        # A box on the host has no provider attribute, so it stops only processes inside its folder.
+        assert [command for command in box.root_commands if script in command][-1].endswith(f"{script} cwd")
+        second.close()
+    finally:
+        host.kill()
+        host.wait()
+        space.close()
+
+
+def test_a_reset_that_cannot_stop_the_last_versions_processes_replaces_the_warm_box(tmp_path: Path) -> None:
+    """A failed stop leaves processes that the next version could meet, so the box is replaced (SKY-809)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+        run = old.run
+        script = shlex.quote(repo_workspace._STOP_PROCESSES)
+
+        def cannot_stop(command: str, **options: Any) -> CommandResult:
+            """Fail the reset's stop, and run every other command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+            """
+            if script in command:
+                return CommandResult(exit_code=1, stderr="Processes of the last version still run.")
+            return run(command, **options)
+
+        old.run = cannot_stop  # type: ignore[method-assign]
+        box = _open(space, "")
+        _replaced(runtime, old, box)
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_provider_box_stops_the_box_users_processes_as_root(tmp_path: Path) -> None:
+    """Only a provider's box, known from its class, stops every process of the entry's user, as root (SKY-809)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+        old.root_has_capabilities = True  # type: ignore[attr-defined]
+        run = old.run
+        script = shlex.quote(repo_workspace._STOP_PROCESSES)
+        stops: list[tuple[str, bool]] = []
+
+        def recorded(command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+            """Record the stop without running it on the host, and run every other command.
+
+            Args:
+                command: The shell command.
+                sudo: The command asks for root.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+            """
+            if script in command:
+                stops.append((command, sudo))
+                return CommandResult(exit_code=0, stdout="stopped\n")
+            return run(command, sudo=sudo, **options)
+
+        old.run = recorded  # type: ignore[method-assign]
+        box = _open(space, "")
+        assert box.session is old
+        ((command, sudo),) = stops
+        assert command.endswith(f"{script} box")
+        assert sudo
+        box.close()
+    finally:
+        space.close()
+
+
+def test_the_box_scope_stop_refuses_to_run_outside_a_provider_box(tmp_path: Path) -> None:
+    """Without root, or in a folder that root owns, the box scope stops nothing and fails (SKY-809)."""
+    host = subprocess.Popen(["sleep", "300"], cwd=tmp_path)
+    try:
+        stopped = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", repo_workspace._STOP_PROCESSES, "box"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert stopped.returncode != 0
+        assert "stopped" not in stopped.stdout
+        assert _running(host.pid)
+    finally:
+        host.kill()
+        host.wait()
+
+
+def test_a_reset_clears_the_home_dotfiles_config_and_box_folder_files_that_a_version_wrote(tmp_path: Path) -> None:
+    """A version's git, pip and npm config and its files beside the repository folder are gone (SKY-809)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        first = _open(space, "")
+        written = first.session.run(
+            'mkdir -p "$HOME/.config/pip" && echo "[user]" > "$HOME/.gitconfig"'
+            ' && echo "[global]" > "$HOME/.config/pip/pip.conf" && echo "registry=x" > "$HOME/.npmrc"'
+            ' && echo left > beside.txt && echo note > "$TMPDIR/note"'
+        )
+        assert written.ok, written.stderr
+        first.close()
+        second = _open(space, "")
+        assert second.session is first.session
+        (box,) = _candidates(runtime)
+        for path in (".gitconfig", ".config", ".npmrc", "beside.txt", "tmp/note"):
+            assert not (box.path / path).exists(), path
+        assert (box.path / "tmp").is_dir()
+        second.close()
     finally:
         space.close()

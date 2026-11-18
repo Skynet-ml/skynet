@@ -9,9 +9,9 @@ Each evaluation uses two boxes (SKY-398). The candidate box C holds the
 prepared tree with the version laid out, and runs the ``[run]`` entry on the
 case's ``input`` only (E42). C comes from the run's warm box lease (SKY-805):
 the parent reads its output, then gives C back to the lease, which resets it
-for the next version and closes it when the run ends. A process that the
-version started in the background can survive the reset into the next
-version's run; SKY-809 stops those processes. The metric box M is new for each
+for the next version and closes it when the run ends. The reset stops every
+process that the version left (SKY-809). A run that failed or timed out
+closes C instead, so the next version gets a new box. The metric box M is new for each
 evaluation. It holds only the metric files and the runner, never the
 repository tree, and opens while C runs. M gets the metric files and C's
 output only after C went back to the lease, and runs
@@ -467,7 +467,8 @@ class RepoScorer:
                 healthy = False
                 try:
                     ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
-                    healthy = True
+                    # A failed or timed-out run can leave the box in any state, so the lease replaces it.
+                    healthy = ran is None or not ran.get("error")
                 finally:
                     # A budget error from the close must not leave the metric box parked.
                     try:
@@ -636,8 +637,8 @@ class RepoScorer:
 
         The box holds no metric file and no earlier call folder. After this
         returns, the caller gives the box back to the run's lease, which resets
-        it for the next version. A process that the entry left in the
-        background can survive the reset; SKY-809 stops those processes.
+        it for the next version and stops every process that the entry left
+        in the background (SKY-809).
 
         Args:
             candidate: The evaluation's open candidate box.

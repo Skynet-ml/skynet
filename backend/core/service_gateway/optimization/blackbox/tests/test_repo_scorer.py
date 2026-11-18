@@ -336,7 +336,7 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
 ) -> None:
     """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once.
 
-    Only a candidate box that went back healthy stays warm and parked, until the run ends (SKY-805).
+    Only a candidate box whose run ended without an error stays warm and parked, until the run ends (SKY-805).
     """
     budget = _ParkLog()
     scorer, _ = _park_scorer(tmp_path, budget)
@@ -371,10 +371,8 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")
     scorer.close()
-    if failure == "run_raises":
+    if failure in ("run_raises", "run_failed"):
         assert budget.events == [("park", metric), ("unpark", metric)]
-    elif failure == "run_failed":
-        assert budget.events == [("park", candidate), ("park", metric), ("unpark", metric), ("unpark", candidate)]
     else:
         assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric), ("unpark", candidate)]
 
@@ -5159,6 +5157,33 @@ def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
         scorer.close()
     assert result["score"] == 0.0
     assert "timeout after 1 s" in result["feedback"]
+
+
+def test_a_timed_out_run_gives_its_candidate_box_back_unhealthy_so_the_next_version_gets_a_new_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out ``[run]`` can leave the box in any state, so the lease replaces it (SKY-805, SKY-809)."""
+    closes: list[bool] = []
+    close = CandidateBox.close
+
+    def recorded(self: CandidateBox, healthy: bool = True) -> None:
+        """Record the health, then close the box.
+
+        Args:
+            self: The candidate box.
+            healthy: Whether the box is still good.
+        """
+        closes.append(healthy)
+        close(self, healthy)
+
+    monkeypatch.setattr(CandidateBox, "close", recorded)
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", run_timeout=1.0)
+    try:
+        result = scorer.score("", {"input": 5})
+    finally:
+        scorer.close()
+    assert "timeout after 1 s" in result["feedback"]
+    assert closes == [False]
 
 
 def test_without_a_run_entry_the_metric_gets_no_time(tmp_path: Path) -> None:

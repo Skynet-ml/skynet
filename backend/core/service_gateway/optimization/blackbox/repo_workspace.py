@@ -16,17 +16,19 @@ versions. Each box holds only the code it needs (SKY-398):
 - A candidate box C comes from the run's warm box lease (SKY-805). A new
   box opens from the prepared state, checks the digest and records the box
   user's state outside the repository folder. A warm box from the last
-  candidate of its slot first resets: it stops the compose services and
+  candidate of its slot first resets. It stops the compose services and
+  every process that the last version left (SKY-809). It checks that the
+  repository folder and the prepared tree are real folders, not links, and
   removes everything in the repository folder but the prepared tree. It
-  removes what changed since the open in the box user's HOME caches
-  (``~/.cache``), user base (``~/.local``: user site-packages, ``.pth``
-  files, ``sitecustomize``) and own temp entries, and that state must match
-  the record of the open. Then it starts the services and checks the digest
-  again. A failed step closes the box and a new box opens, so a version sees
-  the same box state as in a new box. Files outside these folders are not
-  reset. The box then lays out the version. Between
-  candidates the warm box is parked in the run budget. The run closes the
-  lease at its end.
+  removes what changed since the open in the box user's HOME, the box
+  folder and the box user's own temp entries (``/tmp``, ``/var/tmp`` and
+  ``/dev/shm``), and that state must match the record of the open. Then it
+  starts the services and checks the digest again. A failed step closes the
+  box and a new box opens, so a version sees the same box state as in a new
+  box. A ``[run]`` that failed or timed out also closes the box. The box
+  then lays out the version, and refuses a checkout folder that is already
+  there. Between candidates the warm box is parked in the run budget. The
+  run closes the lease at its end.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
 
@@ -123,6 +125,8 @@ GIT = (
     " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _HASH_TIMEOUT_SECONDS = 300.0
+# The apply command's exit code when the checkout folder is already there.
+_WORK_DIR_LEFT = 97
 # One requirement specifier: a name, optional extras, markers and versions.
 # Options (``-e``, ``--index-url``, ``-r``), paths and URLs fail, so the step
 # installs only named packages from the registry and never repository code.
@@ -306,34 +310,49 @@ print(sha.hexdigest())
 """
 
 # The box user's state outside the repository folder that a version can
-# write and the next version on a warm box could read: the HOME caches, the
-# user base (user site-packages, its ``.pth`` files and ``sitecustomize``)
-# and the box user's own entries in the temp folder. The provider's command
-# files (``.app-*``) stay. With a time argument it first removes each entry
-# whose change time is after it: a version can set a file's other times, but
-# not its change time. It prints the time it started and a digest of the
-# remaining entries, with each file's size and change time. A new box records
-# both before the first version; at a reset the digest must match again, so a
-# warm box holds the same state as a new box, or the parent replaces it.
-_USER_STATE = r"""
+# write and the next version on a warm box could read: every entry of HOME
+# and of the box folder but the parent's own repository and services folders,
+# and the box user's own entries in the temp folders. Without TMPDIR these are
+# /tmp, /var/tmp and /dev/shm; a set TMPDIR (a local box) is the only one. The
+# provider's command files (``.app-*``) in a temp folder stay. With a time
+# argument it first removes each entry whose change time is after it: a
+# version can set a file's other times, but not its change time. It never
+# removes HOME, the box folder or a temp folder itself. It prints the time it
+# started and a digest of the remaining entries, with each file's size and
+# change time. A new box records both before the first version; at a reset
+# the digest must match again, so a warm box holds the same state as a new
+# box, or the parent replaces it.
+_USER_STATE = rf"""
 import hashlib, os, stat, sys, time
 
 started = time.time()
 since = float(sys.argv[1]) if len(sys.argv) > 1 else None
-home = os.path.expanduser("~")
-tops = [os.path.join(home, ".cache"), os.path.join(home, ".local")]
-temp = os.environ.get("TMPDIR") or "/tmp"
-try:
-    names = sorted(os.listdir(temp))
-except OSError:
-    names = []
-for name in names:
-    path = os.path.join(temp, name)
+home = os.path.abspath(os.path.expanduser("~"))
+box = os.path.abspath(".")
+temps = [os.environ["TMPDIR"]] if os.environ.get("TMPDIR") else ["/tmp", "/var/tmp", "/dev/shm"]
+temps = [os.path.abspath(temp) for temp in temps]
+keep = {{home, box, *temps}}
+tops = []
+for folder in dict.fromkeys([home, box]):
     try:
-        if not name.startswith(".app-") and os.lstat(path).st_uid == os.getuid():
-            tops.append(path)
+        names = sorted(os.listdir(folder))
     except OSError:
-        pass
+        names = []
+    tops += [os.path.join(folder, name) for name in names if name not in ({REPO_DIR!r}, {SERVICES_DIR!r})]
+for temp in temps:
+    try:
+        names = sorted(os.listdir(temp))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(temp, name)
+        try:
+            if not name.startswith(".app-") and os.lstat(path).st_uid == os.getuid():
+                tops.append(path)
+        except OSError:
+            pass
+# A temp folder inside HOME is walked once, as part of HOME.
+tops = [top for top in dict.fromkeys(tops) if not any(top.startswith(other + os.sep) for other in tops)]
 
 def newer(info):
     return since is not None and info.st_ctime > since
@@ -346,7 +365,7 @@ def clear(path):
     if stat.S_ISDIR(info.st_mode):
         for name in os.listdir(path):
             clear(os.path.join(path, name))
-        if newer(os.lstat(path)) and not os.listdir(path):
+        if path not in keep and newer(os.lstat(path)) and not os.listdir(path):
             os.rmdir(path)
     elif newer(info):
         os.unlink(path)
@@ -357,12 +376,12 @@ def walk(path, sha):
     except FileNotFoundError:
         return
     kind = stat.S_IFMT(info.st_mode)
-    sha.update(f"{path}\0{kind}\0".encode("utf-8", "surrogateescape"))
+    sha.update(f"{{path}}\0{{kind}}\0".encode("utf-8", "surrogateescape"))
     if stat.S_ISDIR(info.st_mode):
         for name in sorted(os.listdir(path)):
             walk(os.path.join(path, name), sha)
     else:
-        sha.update(f"{info.st_size}\0{info.st_ctime_ns}\0".encode())
+        sha.update(f"{{info.st_size}}\0{{info.st_ctime_ns}}\0".encode())
 
 if since is not None:
     for top in tops:
@@ -370,7 +389,110 @@ if since is not None:
 sha = hashlib.sha256()
 for top in tops:
     walk(top, sha)
-print(f"{started!r} {sha.hexdigest()}")
+print(f"{{started!r}} {{sha.hexdigest()}}")
+"""
+
+# Stops every process that a version left in a warm box before the reset
+# (SKY-809). ``box`` scope runs as root in a provider's box: it kills the
+# processes of the user that the supervisor starts the entry as (runner
+# ``_entry_user``): the box folder's owner, or root itself where root has no
+# capability (local Docker). It never kills PID 1 or its own ancestors.
+# ``cwd`` scope is for a box on the host, as in the tests: it kills only its
+# own user's processes whose working folder is inside the box folder, so it
+# never stops a host process outside the box. Each round lists and kills the
+# targets again, because a process can start another; targets that remain
+# after the last round fail the script.
+_STOP_PROCESSES = r"""
+import os, signal, subprocess, sys, time
+
+scope = sys.argv[1]
+box = os.path.realpath(".")
+proc = os.path.isdir("/proc")
+
+def table():
+    rows = {}
+    if proc:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat", "rb") as handle:
+                    fields = handle.read().rsplit(b")", 1)[1].split()
+                with open(f"/proc/{name}/status", encoding="utf-8") as handle:
+                    uid = next(int(line.split()[1]) for line in handle if line.startswith("Uid:"))
+            except (OSError, StopIteration, ValueError, IndexError):
+                continue
+            rows[int(name)] = (int(fields[1]), uid, fields[0] == b"Z")
+    else:
+        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,uid=,stat="], capture_output=True, text=True, check=True)
+        for line in listed.stdout.splitlines():
+            pid, ppid, uid, state = line.split()[:4]
+            rows[int(pid)] = (int(ppid), int(uid), state.startswith("Z"))
+    return rows
+
+def folders():
+    found = {}
+    if proc:
+        for name in os.listdir("/proc"):
+            if name.isdigit():
+                try:
+                    found[int(name)] = os.path.realpath(os.readlink(f"/proc/{name}/cwd"))
+                except OSError:
+                    pass
+        return found
+    listed = subprocess.run(["lsof", "-a", "-d", "cwd", "-u", str(os.geteuid()), "-Fpn", "-w"], capture_output=True, text=True)
+    pid = None
+    for line in listed.stdout.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            found[pid] = os.path.realpath(line[1:])
+    return found
+
+def capable():
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            return next(int(line.split()[1], 16) for line in handle if line.startswith("CapEff:")) != 0
+    except (OSError, StopIteration, ValueError):
+        return True
+
+if scope == "box":
+    owner = os.stat(".").st_uid
+    if os.geteuid() != 0 or owner == 0:
+        sys.exit("The box scope needs root and a box folder that root does not own.")
+    user = owner if capable() else 0
+else:
+    user = os.geteuid()
+
+def targets():
+    rows = table()
+    mine, pid = set(), os.getpid()
+    while pid in rows and pid not in mine:
+        mine.add(pid)
+        pid = rows[pid][0]
+    places = folders() if scope != "box" else {}
+    found = []
+    for pid, (parent, uid, zombie) in rows.items():
+        if uid != user or zombie or pid in mine or pid == 1:
+            continue
+        place = places.get(pid, "")
+        if scope == "box" or place == box or place.startswith(box + os.sep):
+            found.append(pid)
+    return found
+
+for _ in range(20):
+    left = targets()
+    if not left:
+        print("stopped")
+        break
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.05)
+else:
+    sys.exit("Processes of the last version still run.")
 """
 
 
@@ -1524,12 +1646,17 @@ class RepoWorkspace:
                 self._start_services(session)
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
-                f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
+                # cp -a into a folder that is already there copies into it, so a
+                # stale checkout must stop the apply.
+                f"set -e; if [ -e {WORK_DIR} ] || [ -L {WORK_DIR} ]; then exit {_WORK_DIR_LEFT}; fi;"
+                f" cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
                 f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
                 return CandidateBox(self, session, box_root(session), box)
+            if applied.exit_code == _WORK_DIR_LEFT:
+                raise RepoSetupError("The candidate box already holds a checkout, so the version cannot be laid out.")
         except BaseException:
             box.release_failed("The candidate box")
             raise
@@ -1595,10 +1722,13 @@ class RepoWorkspace:
     def _reset(self, session: SandboxSession, slot: str) -> bool:
         """Clear the last candidate from a warm box, restart its services and check the prepared tree.
 
-        The reset keeps only the prepared tree of the repository folder, and
-        brings the box user's caches, user base and temp files back to the
-        state the box had when it opened (see ``_USER_STATE``). So a version
-        never reads or changes what an earlier version left.
+        The reset stops the last version's processes (see ``_STOP_PROCESSES``),
+        keeps only the prepared tree of the repository folder, and brings the
+        box user's HOME, box folder and temp files back to the state the box
+        had when it opened (see ``_USER_STATE``). So a version never reads or
+        changes what an earlier version left. The repository folder and the
+        prepared tree must be real folders: a link there would let the clear
+        and the digest pass while the next checkout lands in a stale one.
 
         Args:
             session: The warm box.
@@ -1611,9 +1741,22 @@ class RepoWorkspace:
             RepoSetupError: When the services cannot start again.
         """
         stops = "".join(f"{stop_command(service)}; " for service in self._spec.services)
+        # Static provider knowledge, never box output: only a provider's box
+        # has the attribute, and only there may root stop the box user's
+        # processes. A box on the host stops only processes inside its folder.
+        scope = "box" if hasattr(session, "root_has_capabilities") else "cwd"
+        stopped = session.run(
+            f'{stops}{_pick_base_python()}"$p" -I -S -c {shlex.quote(_STOP_PROCESSES)} {scope}',
+            timeout_seconds=_HASH_TIMEOUT_SECONDS,
+            sudo=True,
+        )
+        if not stopped.ok:
+            return False
         keep = posixpath.basename(PREPARED_DIR)
+        real = " && ".join(f"[ -d {path} ] && [ ! -L {path} ]" for path in (REPO_DIR, PREPARED_DIR))
         cleared = session.run(
-            f"{stops}find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name {keep} -exec rm -rf {{}} +",
+            f"{real} && find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name {keep} -exec rm -rf {{}} +"
+            f' && [ "$(ls -A {REPO_DIR})" = {keep} ]',
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             # The supervisor runs as root, so a call folder holds root's files.
             sudo=True,
