@@ -245,6 +245,21 @@ def _loop_agent(agent_id: str) -> bool:
     return agent_id == ROOT_AGENT_ID or agent_id.startswith(_LANE_AGENT_PREFIX)
 
 
+def _shown(stored: list[TreeEntry]) -> dict[str, TreeEntry]:
+    """Return a tree's stored entries by name, without a ``.git`` entry in any letter case.
+
+    A tree stored before SKY-810 can hold a ``.git`` entry. The tree store refuses to write it back, and the box
+    never gets it, so every read and write of the loop acts as if the tree did not hold it.
+
+    Args:
+        stored: The entries as stored.
+
+    Returns:
+        The entries that the loop shows.
+    """
+    return {entry.name: entry for entry in stored if not is_git_part(entry.name)}
+
+
 def _reply(record: dict[str, Any]) -> ModelReply:
     """Return the reply that a committed model step holds.
 
@@ -626,7 +641,8 @@ class EngineLoop:
             path: The ``/``-separated path of the file.
 
         Returns:
-            The file bytes, or ``None`` when the path is hidden or is not a file or executable in the tree.
+            The file bytes, or ``None`` when the path is hidden, has a ``.git`` part in any letter case, or is not a
+            file or executable in the tree.
 
         Raises:
             LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
@@ -653,8 +669,8 @@ class EngineLoop:
 
         Returns:
             The sorted paths of the files and executables below the folder, at any depth, from the tree's root,
-            without a hidden path; or ``None`` when the path is hidden, holds only hidden paths, or is not a
-            folder in the tree.
+            without a hidden path or a ``.git`` part in any letter case; or ``None`` when the path is hidden, has a
+            ``.git`` part, holds only hidden paths, or is not a folder in the tree.
 
         Raises:
             LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
@@ -877,8 +893,25 @@ class EngineLoop:
         if not owns:
             raise LoopStoppedError(f"Run {run.run_id} is no longer active at generation {run.execution_generation}.")
 
+    def _stored(self, tree_id: str) -> list[TreeEntry]:
+        """Return a tree's entries as stored, with any ``.git`` entry.
+
+        Args:
+            tree_id: The tree.
+
+        Returns:
+            The stored entries.
+
+        Raises:
+            LookupError: When the run cannot see the tree.
+        """
+        entries = self._trees.get_tree(self._run.run_id, tree_id)
+        if entries is None:
+            raise LookupError(f"run {self._run.run_id} cannot see tree {tree_id}")
+        return entries
+
     def _entries(self, tree_id: str) -> dict[str, TreeEntry]:
-        """Return a tree's entries by name.
+        """Return a tree's entries by name, without a ``.git`` entry in any letter case, as :func:`_shown` tells.
 
         Args:
             tree_id: The tree.
@@ -889,10 +922,7 @@ class EngineLoop:
         Raises:
             LookupError: When the run cannot see the tree.
         """
-        entries = self._trees.get_tree(self._run.run_id, tree_id)
-        if entries is None:
-            raise LookupError(f"run {self._run.run_id} cannot see tree {tree_id}")
-        return {entry.name: entry for entry in entries}
+        return _shown(self._stored(tree_id))
 
     def _visible_tree(self, tree_id: str) -> str:
         """Return the tree without its hidden paths and without ``.optimize/exploits``.
@@ -913,9 +943,9 @@ class EngineLoop:
         """Return a folder without its hidden paths, or ``None`` when it holds only hidden paths.
 
         A folder that the filter leaves empty is dropped, not kept empty: an empty ``eval/`` would show the
-        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays. A ``.git``
-        entry in any letter case is left out too: a tree stored before SKY-810 can hold one, and the tree store
-        refuses to write it back.
+        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays. The folder
+        has the entries of :func:`_shown`, so a ``.git`` entry is left out, and a folder that held only one
+        counts as empty before.
 
         Args:
             tree_id: The folder.
@@ -928,11 +958,12 @@ class EngineLoop:
         Raises:
             LookupError: When the run cannot see the tree or one of its folders.
         """
-        entries = self._entries(tree_id)
+        stored = self._stored(tree_id)
+        entries = _shown(stored)
         kept = []
         for name, entry in entries.items():
             path = f"{prefix}{name}"
-            if is_git_part(name) or hashed_kind(self._hidden, path) is not None:
+            if hashed_kind(self._hidden, path) is not None:
                 continue
             if entry.mode == "tree":
                 visible = self._visible(entry.object_id, f"{path}/")
@@ -940,9 +971,9 @@ class EngineLoop:
                     continue
                 entry = TreeEntry(name, "tree", visible)
             kept.append(entry)
-        if kept == list(entries.values()):
+        if kept == stored:
             return tree_id
-        if not kept:
+        if not kept and entries:
             return None
         return self._trees.put_tree(self._run.run_id, kept)
 
@@ -1222,8 +1253,7 @@ class EngineLoop:
                 replace a folder that holds a hidden path.
             LookupError: When the run cannot see the tree.
         """
-        # A tree stored before SKY-810 can hold a .git entry, which the tree store refuses to write back.
-        entries = {} if tree_id is None else {n: e for n, e in self._entries(tree_id).items() if not is_git_part(n)}
+        entries = {} if tree_id is None else self._entries(tree_id)
         folders: dict[str, dict[tuple[str, ...], bytes]] = {}
         written: set[str] = set()
         for (name, *rest), data in files.items():

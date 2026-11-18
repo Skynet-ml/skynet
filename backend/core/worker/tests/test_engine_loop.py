@@ -2832,3 +2832,40 @@ def test_a_tree_stored_before_sky_810_loses_its_git_entries_on_a_rewrite(
 
     written = loop.put_files({"sub/b.py": b"b"}, raw)
     assert written == _store(trees, {"README": b"seed", "metric.py": b"secret", "sub/a.py": b"seed", "sub/b.py": b"b"})
+
+
+def test_a_legacy_tree_with_only_git_entries_reads_as_a_tree_without_them(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Reads, listings and the context hide ``.git`` entries at any depth, as if the tree never held them.
+
+    The ``empty/`` folder holds only a ``.Git`` file, so it reads as an empty folder, not as a hidden one.
+    """
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob], ["x", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    empty = _put_raw_tree(trees, [[".Git", "file", blob]])
+    legacy = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["empty", "tree", empty], ["sub", "tree", sub]]
+    )
+    clean_sub = trees.put_tree(RUN_ID, [TreeEntry("a.py", "file", blob)])
+    clean = trees.put_tree(
+        RUN_ID,
+        [
+            TreeEntry("README", "file", blob),
+            TreeEntry("empty", "tree", trees.put_tree(RUN_ID, [])),
+            TreeEntry("sub", "tree", clean_sub),
+        ],
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(legacy, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == clean
+    assert loop.list_files(legacy) == ["README", "sub/a.py"]
+    for path in ["", "sub", "empty", ".GIT", ".git", "sub/.GIT", "empty/.Git"]:
+        assert loop.list_files(legacy, path) == loop.list_files(clean, path)
+    for path in ["README", "sub/a.py", "sub/.GIT/x", ".GIT/config", ".git/config", "empty/.Git"]:
+        assert loop.read_file(legacy, path) == loop.read_file(clean, path)
+    assert loop.read_file(legacy, "sub/.GIT/x") is None
