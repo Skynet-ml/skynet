@@ -860,6 +860,12 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     assert "The `evaluate` tool with only a `file` is a **full evaluation**" in brief
     assert "The `evaluate` tool with a `file` and `example_ids` is a **probe**" in brief
     assert "Only `work/` and `notebook.md` carry over" in brief
+    # The lab tree is built once per round, so a full evaluation of this round is not in the box's archive yet.
+    assert "a full evaluation before this round" in brief
+    assert (
+        "`archive/` and `frontier/` refresh only between rounds: the `evaluate` result is the current record for "
+        "this round." in brief
+    )
 
 
 @pytest.mark.parametrize(
@@ -1682,6 +1688,141 @@ def test_a_lab_file_the_local_file_system_refuses_stays_behind(
 
     assert sorted(path.name for path in (_lab(tmp_path) / "work").iterdir()) == ["c1.txt", "c2.txt", "seed.txt"]
     assert result.best_candidate == "seedxx"
+
+
+def test_an_over_cap_file_at_a_path_the_local_file_system_refuses_does_not_fail_the_run(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skipped file whose local path the worker refuses, as on a deep run_dir, stays behind and the run scores.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 11)
+    unlink = Path.unlink
+
+    def refuse_long(path: Path, missing_ok: bool = False) -> None:
+        """Refuse the file named ``long`` as a path past the name length is refused, and unlink the others.
+
+        Args:
+            path: The local file.
+            missing_ok: Whether a missing file is fine.
+
+        Raises:
+            OSError: For the file named ``long``.
+        """
+        if path.name == "long":
+            raise OSError(errno.ENAMETOOLONG, "File name too long", str(path))
+        unlink(path, missing_ok=missing_ok)
+
+    # The local boxes share the file system of the lab, so a real long path would fail in the box first.
+    monkeypatch.setattr(Path, "unlink", refuse_long)
+    model = _Researcher([_bash("printf 123456789012 > work/long"), *_ROUND])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert sorted(path.name for path in (_lab(tmp_path) / "work").iterdir()) == ["c1.txt", "c2.txt", "seed.txt"]
+    assert result.best_candidate == "seedxx"
+
+
+@pytest.mark.parametrize("prefix", ["", "p" * 250 + "/" + "q" * 250])
+def test_a_tree_path_past_the_fixed_bounds_stays_behind_whatever_the_local_prefix(
+    prefix: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The byte bounds on the relative path decide each skip before any read, so a deep run_dir skips the same files.
+
+    Args:
+        prefix: Extra folders in front of the run_dir; the long one makes the local file system refuse long paths.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(ar_mod, "_MAX_CARRY_BYTES", 3)
+    name = "n" * ar_mod._MAX_CARRY_NAME_BYTES
+    # Each path of the tree in sorted order: at the path bound, past it by one byte, a name past the name bound, a
+    # short file that a local refusal before it must not let past the total cap, and a short file under it.
+    at_bound = f"work/{name}/" + "m" * (ar_mod._MAX_CARRY_PATH_BYTES - len(f"work/{name}/"))
+    past_path = at_bound + "m"
+    past_name = f"work/o{name}"
+    tree = {
+        "notebook.md": b"",
+        at_bound: b"ab",
+        past_path: b"x",
+        past_name: b"x",
+        "work/zz": b"cd",
+        "work/zzz": b"e",
+    }
+    assert len(at_bound.encode()) == ar_mod._MAX_CARRY_PATH_BYTES
+    reads: list[str] = []
+
+    def read_file(tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
+        """Read a file of the fake tree and record the path.
+
+        Args:
+            tree_id: The tree.
+            path: The file.
+            max_bytes: The cap.
+
+        Returns:
+            The bytes.
+        """
+        reads.append(path)
+        return tree[path]
+
+    def list_files(tree_id: str, path: str = "") -> list[str] | None:
+        """List the files of the fake tree under ``work/``.
+
+        Args:
+            tree_id: The tree.
+            path: The folder.
+
+        Returns:
+            The sorted paths.
+        """
+        return sorted(name for name in tree if name.startswith("work/"))
+
+    run_dir = tmp_path / prefix if prefix else tmp_path
+    config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(run_dir), engine_config={"model": ""})
+    ctx = EngineContext(reflection_lm=str, run_dir=str(run_dir), read_file=read_file, list_files=list_files)
+    worker = ar_mod._WorkerAutoResearch(config, ctx, max_tool_calls=100)
+    (worker.work_dir / "work").mkdir(parents=True)
+    write_bytes = Path.write_bytes
+
+    def write(path: Path, data: bytes) -> int:
+        """Refuse the path at the bound when the run_dir is deep, as the local file system does, and write the others.
+
+        Args:
+            path: The local file.
+            data: The bytes.
+
+        Returns:
+            The number of bytes written.
+
+        Raises:
+            OSError: For a path past PATH_MAX.
+        """
+        if len(str(path).encode()) >= 1024:
+            raise OSError(errno.ENAMETOOLONG, "File name too long", str(path))
+        return write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", write)
+
+    worker._pull("tree")
+
+    assert reads == ["notebook.md", at_bound, "work/zz", "work/zzz"]
+    kept = sorted(path.relative_to(worker.work_dir).as_posix() for path in worker.work_dir.rglob("*") if path.is_file())
+    # The path at the bound takes 2 of the 3 carried bytes even when the local file system refuses it.
+    assert kept == (["notebook.md", "work/zzz"] if prefix else ["notebook.md", at_bound, "work/zzz"])
 
 
 def test_a_model_call_that_fails_after_a_tool_call_ends_only_the_round(

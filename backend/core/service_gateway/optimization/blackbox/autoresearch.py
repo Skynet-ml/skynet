@@ -106,6 +106,12 @@ _MAX_CARRY_BYTES = 4 * native_engines.MAX_CANDIDATE_BYTES
 # hundreds of typical ones, keep the lab tree with ``work/`` well under that limit. The worker's own archive, the
 # frontier and the ids stay complete; only the copy in the lab tree is cut.
 _MAX_ARCHIVE_BYTES = 8 * native_engines.MAX_CANDIDATE_BYTES
+# A tree path that comes back to the worker must fit the worker's file system whatever the run_dir prefix is, so a
+# fixed rule on the UTF-8 relative path decides each skip, not the local file system. macOS has PATH_MAX 1024 and
+# NAME_MAX 255 bytes (Linux: 4096 and 255): 512 bytes for the relative path leave 511 for the lab prefix, and 255
+# bytes for one name is NAME_MAX itself.
+_MAX_CARRY_PATH_BYTES = 512
+_MAX_CARRY_NAME_BYTES = 255
 
 logger = logging.getLogger(__name__)
 
@@ -408,8 +414,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             (
                 "`archive/<id>.txt` holds every candidate that ever received a full evaluation, with scores in "
                 "`archive/index.tsv`.",
-                "`archive/<id>.txt` holds the best candidates that ever received a full evaluation, up to a size "
-                "cap; `archive/index.tsv` has the scores of all of them.",
+                "`archive/<id>.txt` holds the best candidates that ever received a full evaluation before this "
+                "round, up to a size cap; `archive/index.tsv` has the scores of all of them. `archive/` and "
+                "`frontier/` refresh only between rounds: the `evaluate` result is the current record for this "
+                "round.",
             ),
             ("- If `eval.sh` prints", "- If the `evaluate` tool answers"),
         ]
@@ -643,9 +651,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
     def _pull(self, tree: str) -> None:
         """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
 
-        The files come in sorted order, the notebook first, and a file past the per-file cap, past the total cap,
-        or that the local file system refuses stays behind. The tree decides each skip, so a resume skips the same
-        files.
+        The files come in sorted order, the notebook first. A file whose relative path passes the path or name
+        byte bound, or past the per-file cap, or past the total cap stays behind. The tree decides each skip, so a
+        resume skips the same files: the bounds apply to the relative path before any local file access, and a
+        file that the local file system still refuses counts toward the total cap and never fails the run.
 
         Args:
             tree: The tree after the session.
@@ -657,20 +666,26 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         work.mkdir()
         total = 0
         for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
+            # ``work/`` starts empty and the notebook path is short, so a path past the bounds has no local file.
+            if len(path.encode("utf-8", "surrogateescape")) > _MAX_CARRY_PATH_BYTES or any(
+                len(name.encode("utf-8", "surrogateescape")) > _MAX_CARRY_NAME_BYTES for name in path.split("/")
+            ):
+                continue
             try:
                 content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
             except FileTooLargeError:
                 content = None
             local = self.work_dir / path
-            if content is None or total + len(content) > _MAX_CARRY_BYTES:
-                # A deleted or skipped notebook must not come back from an earlier round.
-                local.unlink(missing_ok=True)
-                continue
-            # A path that the local file system refuses, such as one past its name length, stays behind.
+            # The output is untrusted, so a local refusal, such as a path the bounds let through on a deep run_dir,
+            # only leaves the file behind.
             with contextlib.suppress(OSError):
+                if content is None or total + len(content) > _MAX_CARRY_BYTES:
+                    # A deleted or skipped notebook must not come back from an earlier round.
+                    local.unlink(missing_ok=True)
+                    continue
+                total += len(content)
                 local.parent.mkdir(parents=True, exist_ok=True)
                 local.write_bytes(content)
-                total += len(content)
 
 
 class AutoResearchEngine:
