@@ -129,7 +129,7 @@ def resolve_grants(grants: Iterable[Grant], registry: Mapping[str, Mapping[str, 
         UnknownCapabilityError: A credential grant names a host that the
             registry does not hold.
     """
-    wanted = _merge(grants)
+    wanted = merge_grants(grants)
     grant_list_id = json_fingerprint(sorted([host, credential] for host, credential in wanted.items()))
     if not wanted:
         return ResolvedGrants(
@@ -153,7 +153,7 @@ def resolve_grants(grants: Iterable[Grant], registry: Mapping[str, Mapping[str, 
     )
 
 
-def _merge(grants: Iterable[Grant]) -> dict[str, bool]:
+def merge_grants(grants: Iterable[Grant]) -> dict[str, bool]:
     """Normalize the grant hosts and merge repeated hosts.
 
     Args:

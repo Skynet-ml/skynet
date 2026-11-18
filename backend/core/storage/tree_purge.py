@@ -1,0 +1,768 @@
+"""Purge an account's trees and step log when the account is deleted (SKY-733).
+
+:func:`purge_user` runs inside the account deletion transaction. It deletes
+the account's ``tree_objects`` and ``workspaces`` rows and the
+``agent_steps`` rows of its runs. Then it deletes each pack object that no
+row points at any more, and the pack's ``storage_packs`` row.
+
+A pack can also hold entries of other accounts. Such a pack stays, because
+their rows still point at it, and no read can reach the deleted account's
+bytes in it. The purge sets the pack's ``needs_rewrite`` mark, so the next
+pass of the compactor rewrites it, at any size, with only the entries that
+rows still point at. The old pack is then retired and deleted, with the
+deleted account's bytes (:mod:`core.storage.tree_compactor`).
+
+The locks follow one global order. First come the account's ``jobs`` rows,
+in key order. Then :func:`delete_run_rows` deletes the run rows and takes the
+wallet and budget locks; ``account_data_service.delete_account``,
+``remote.delete_job`` and ``remote.delete_jobs`` call it first. Then come the
+``storage_packs`` rows, in key order, and last the step and tree object
+deletes. :meth:`StepLogStore._apply` locks the jobs first too, so no flush of
+the account's runs writes a row behind the purge. The compactor takes the
+pack locks with NOWAIT, so a merge of these packs gives up instead of
+waiting. A merge that commits between the key read and the pack lock moves
+rows to a new pack; the purge then locks again, in key order, under a
+savepoint. The one pack lock after a delete is the ``needs_rewrite`` mark of
+a pack that a run outside the job snapshot wrote to after the pack lock.
+
+Only a pack that a deleted row pointed at can be deleted. A locked pack with
+no rows was retired by a merge, and the compactor deletes it after its grace
+time, so a reader that read a row before the merge can still read it. For
+the same reason, the purge deletes a pack at once only when its
+``created_at`` is older than the grace time. A merge that moved only a part
+of a pack's rows set ``created_at`` to the move time, and a reader of a
+moved row can still GET the old pack inside the grace time. The compactor
+deletes a younger pack that no row points at once the grace time ends.
+
+The S3 delete happens only after the transaction commits, in
+:func:`delete_unused_packs`. A rollback after the purge then keeps every
+pack that the account's rows still point at. Before the commit, the purge
+only builds the delete function and does not contact the bucket. A deletion
+with packs to delete fails when ``SKYNET_TREE_BUCKET`` is not set or the
+client cannot be built. A wrong bucket name or a missing S3 permission shows
+only after the commit, as a logged error with a 200 answer. The unused packs keep their ``storage_packs`` rows,
+which no row points at, until their objects are gone. If the delete after
+the commit fails, the compactor deletes those packs in its next pass
+(:meth:`TreeCompactor.remove_retired`).
+
+A run that is deleted before its account goes the same way:
+:func:`mark_run_packs` runs in the job delete's transaction, before the
+cascade deletes the run's steps, and marks every pack that they point at.
+A run delete and an account delete both call :func:`delete_run_rows` first.
+It locks the jobs in key order before any other lock, then deletes the run
+rows, then takes the wallet and budget locks. A resume and a checkpoint
+write lock the job first too, so every path takes the job lock first.
+
+Step log shards (SKY-731): the purge runs on every shard of the map. The
+main database's part stays in the account deletion transaction. Each other
+shard gets its own transaction, in name order, with the same pack locks and
+deletes. :func:`purge_user_shards` runs them right before the main commit,
+while the account's jobs stay locked on the main database. The checks that
+can fail the deletion run first, in :func:`purge_user`: a run that records a
+shard the map does not have, a shard that does not answer, and a missing
+bucket. A shard that fails stops the purge with a :class:`TreePurgeError`
+that names the shard, so the account deletion fails and keeps the account.
+A shard that committed before a later failure keeps its deletes, and a retry
+of the deletion finds no rows there. The two databases have no two-phase
+commit, so a main commit that fails after the shards commit also leaves the
+shard rows deleted and the account in place; a retry deletes it. The unused
+packs of each shard are deleted after the commit, on that shard. A run
+delete also deletes the run's steps on the other shards
+(:func:`purge_run_shards`), because the job cascade stops at the main
+database.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import Any
+
+from sqlalchemy import ColumnElement, delete, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from ..billing.budgets import BudgetService
+from ..config import settings
+from .models import (
+    AgentStepModel,
+    BlackboxAgentRunModel,
+    GepaCheckpointModel,
+    JobEmbeddingModel,
+    JobModel,
+    LogEntryModel,
+    ProgressEventModel,
+    RunCallModel,
+    RunCandidateModel,
+    RunFolderItemModel,
+    SandboxTrialModel,
+    StoragePackModel,
+    TreeObjectModel,
+    WorkspaceModel,
+)
+from .shard_map import MAIN, ShardMap, shard_engine
+from .tree_compactor import GRACE_SECONDS, REFERENCED, tree_bucket_client
+
+logger = logging.getLogger(__name__)
+
+# Keys in one IN query, far below the SQLite bind limit.
+CHUNK_SIZE = 200
+# The most keys that one S3 DeleteObjects request takes.
+S3_DELETE_BATCH = 1000
+# Pack lock rounds before the purge gives up; each extra round needs a merge that commits in between.
+PACK_LOCK_TRIES = 3
+# Pack keys that one error message names; the message gives the full count.
+ERROR_KEYS_SHOWN = 5
+
+
+class TreePurgeError(RuntimeError):
+    """The purge of an account's or a run's tree rows and packs failed.
+
+    The cause is one of these: packs must go and no tree bucket client can be built, S3 did not delete a
+    pack, the packs kept moving during the purge, a step log shard failed, or a run records a step log
+    shard that the map does not have.
+    """
+
+
+@dataclass
+class TreePurgeSummary:
+    """Outcome of one purge.
+
+    Attributes:
+        deleted_rows: ``tree_objects``, ``workspaces`` and ``agent_steps`` rows deleted.
+        unused_packs: Packs that no row points at any more and that are older than the grace
+            time, in key order. :func:`delete_unused_packs` deletes them after the commit. The
+            compactor deletes the unused packs that are younger than the grace time.
+        delete_objects: Deletes pack objects; ``None`` only when ``unused_packs`` is empty.
+        pack_engines: The engine of the shard of each unused pack that is not on the main database.
+        shard_purge: Purges the other shards; :func:`purge_user_shards` runs it once. ``None`` when done.
+    """
+
+    deleted_rows: int
+    unused_packs: list[str] = field(default_factory=list)
+    delete_objects: Callable[[list[str]], None] | None = field(default=None, compare=False, repr=False)
+    pack_engines: dict[str, Engine] = field(default_factory=dict, compare=False, repr=False)
+    shard_purge: Callable[[], tuple[int, dict[str, Engine]]] | None = field(default=None, compare=False, repr=False)
+
+
+def _chunks(items: list[str]) -> Iterable[list[str]]:
+    """Split a list into chunks of at most ``CHUNK_SIZE`` items.
+
+    Args:
+        items: The list.
+
+    Returns:
+        The chunks, in order.
+    """
+    return (items[start : start + CHUNK_SIZE] for start in range(0, len(items), CHUNK_SIZE))
+
+
+def _describe(keys: list[str]) -> str:
+    """Name the count of tree packs and the first few keys, for an error message.
+
+    Args:
+        keys: The pack keys.
+
+    Returns:
+        The text.
+    """
+    more = ", ..." if len(keys) > ERROR_KEYS_SHOWN else ""
+    return f"{len(keys)} tree packs ({', '.join(keys[:ERROR_KEYS_SHOWN])}{more})"
+
+
+def _lock_jobs(session: Session, run_ids: list[str]) -> None:
+    """Lock ``jobs`` rows FOR UPDATE in key order, as :meth:`StepLogStore._apply` does.
+
+    Args:
+        session: The open transaction.
+        run_ids: The job ids, sorted.
+    """
+    for chunk in _chunks(run_ids):
+        session.execute(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(chunk))
+            .order_by(JobModel.optimization_id)
+            .with_for_update()
+        ).all()
+
+
+def _lock_packs(session: Session, keys: set[str]) -> None:
+    """Lock ``storage_packs`` rows FOR UPDATE in key order.
+
+    Args:
+        session: The purge transaction.
+        keys: The pack keys.
+    """
+    for chunk in _chunks(sorted(keys)):
+        session.execute(
+            select(StoragePackModel.pack_key)
+            .where(StoragePackModel.pack_key.in_(chunk))
+            .order_by(StoragePackModel.pack_key)
+            .with_for_update()
+        ).all()
+
+
+def _read_pack_keys(session: Session, username: str | None, run_ids: list[str]) -> set[str]:
+    """Read the keys of the packs that the account's step and tree object rows point at.
+
+    Args:
+        session: The purge transaction.
+        username: The account; ``None`` reads only the step rows of the runs.
+        run_ids: The account's job ids.
+
+    Returns:
+        The pack keys.
+    """
+    keys: set[str] = set()
+    for chunk in _chunks(run_ids):
+        keys.update(session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.run_id.in_(chunk)).distinct()))
+    if username is not None:
+        keys.update(
+            session.scalars(select(TreeObjectModel.pack_key).where(TreeObjectModel.username == username).distinct())
+        )
+    return keys
+
+
+def _lock_account_packs(session: Session, username: str | None, run_ids: list[str]) -> set[str]:
+    """Lock every pack that the account's rows point at, in key order, before any delete.
+
+    A compactor merge can move rows to a new pack between the key read and the lock. The read after
+    the lock then finds the new key. The purge rolls back to the savepoint, which releases the locks it
+    took there, and locks the union in key order again. It never takes a pack lock out of order.
+
+    Args:
+        session: The purge transaction, with the account's jobs locked.
+        username: The account; ``None`` locks only the packs of the runs' steps.
+        run_ids: The account's job ids.
+
+    Returns:
+        The keys of the packs that the account's rows point at, all locked. No row moves off them before
+        the commit: a merge needs these locks, and a flush of the account's runs needs the job locks.
+
+    Raises:
+        TreePurgeError: When the keys still change after ``PACK_LOCK_TRIES`` tries; a retry can succeed.
+    """
+    keys = _read_pack_keys(session, username, run_ids)
+    for _ in range(PACK_LOCK_TRIES):
+        savepoint = session.begin_nested()
+        _lock_packs(session, keys)
+        found = _read_pack_keys(session, username, run_ids)
+        if found <= keys:
+            savepoint.commit()
+            return found
+        savepoint.rollback()
+        keys |= found
+    raise TreePurgeError("the account's tree packs kept moving during the purge; try again")
+
+
+def _settings_shards(main: Engine) -> ShardMap:
+    """Build the shard map that ``STEP_LOG_SHARDS`` names, with no connection pool on the extra shards.
+
+    A purge with no map from its caller uses it once, so no pool outlives the purge.
+
+    Args:
+        main: The main database.
+
+    Returns:
+        The map.
+    """
+    return ShardMap(
+        main,
+        {name: shard_engine(url.get_secret_value(), pooled=False) for name, url in settings.step_log_shards.items()},
+    )
+
+
+def _other_shards(shards: ShardMap) -> list[tuple[str, Engine]]:
+    """Return the shards other than the main database, in name order.
+
+    Args:
+        shards: The shard map.
+
+    Returns:
+        Each shard's name and engine.
+    """
+    return [(name, shards.engine(name)) for name in shards.names() if name != MAIN]
+
+
+def _check_run_shards(session: Session, shards: ShardMap, run_ids: list[str]) -> None:
+    """Refuse runs that record a step log shard that the map does not have.
+
+    Their steps on that shard would stay with no row in ``jobs`` that names them, so the purge stops instead.
+
+    Args:
+        session: An open transaction on the main database, with the runs' jobs locked.
+        shards: The shard map.
+        run_ids: The job ids.
+
+    Raises:
+        TreePurgeError: When a run records a shard that the map does not have; the message names the shard.
+    """
+    names = set(shards.names())
+    for chunk in _chunks(run_ids):
+        for name in session.scalars(
+            select(JobModel.step_log_shard)
+            .where(JobModel.optimization_id.in_(chunk), JobModel.step_log_shard.is_not(None))
+            .distinct()
+        ):
+            if name not in names:
+                raise TreePurgeError(
+                    f"a run records step log shard {name!r}, which STEP_LOG_SHARDS on this pod does not have"
+                )
+
+
+def _shards_have_rows(shards: ShardMap, username: str | None, run_ids: list[str]) -> bool:
+    """Return whether any shard other than the main database has a step or tree object row of the account.
+
+    Args:
+        shards: The shard map.
+        username: The account; ``None`` reads only the step rows of the runs.
+        run_ids: The account's job ids.
+
+    Returns:
+        Whether a row exists.
+
+    Raises:
+        TreePurgeError: When a shard fails; the message names the shard.
+    """
+    for name, engine in _other_shards(shards):
+        try:
+            with Session(engine) as shard_session:
+                if _read_pack_keys(shard_session, username, run_ids):
+                    return True
+        except Exception as exc:
+            raise TreePurgeError(f"could not read the tree rows on step log shard {name!r}: {exc}") from exc
+    return False
+
+
+def _purge_database(
+    session: Session, username: str | None, run_ids: list[str], grace_seconds: float
+) -> tuple[int, list[str]]:
+    """Delete the account's step and tree object rows in one database, and mark or list their packs.
+
+    The caller locked the account's jobs on the main database. The packs are locked before any row goes, so
+    a compactor merge of them (NOWAIT) gives up and never holds a pack that the purge waits for.
+
+    Args:
+        session: An open transaction on the database; the caller commits.
+        username: The account whose tree objects go; ``None`` deletes only the runs' steps.
+        run_ids: The account's job ids, sorted.
+        grace_seconds: An unused pack is listed only when its ``created_at`` is older than this.
+
+    Returns:
+        The count of deleted rows, and the unused packs older than the grace time, in key order.
+
+    Raises:
+        TreePurgeError: When the packs keep moving for ``PACK_LOCK_TRIES`` tries.
+    """
+    pointed = _lock_account_packs(session, username, run_ids)
+    deleted_rows = 0
+    for chunk in _chunks(run_ids):
+        deleted_rows += _delete_rows(session, delete(AgentStepModel).where(AgentStepModel.run_id.in_(chunk)))
+    late: set[str] = set()
+    if username is not None:
+        # A run created after the job snapshot is not locked, and its flush can point rows at a pack outside
+        # the locked set. The pack is only marked, never deleted at once, so the compactor drops those bytes.
+        for pack_key in session.scalars(
+            delete(TreeObjectModel).where(TreeObjectModel.username == username).returning(TreeObjectModel.pack_key),
+            execution_options={"synchronize_session": False},
+        ):
+            deleted_rows += 1
+            if pack_key not in pointed:
+                late.add(pack_key)
+    # Only the packs that the deleted rows pointed at: a locked pack that no row points at was
+    # retired by a merge, and the compactor deletes it after the grace time.
+    unreferenced: list[str] = []
+    for chunk in _chunks(sorted(pointed)):
+        unreferenced.extend(
+            session.scalars(
+                select(StoragePackModel.pack_key)
+                .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
+                .order_by(StoragePackModel.pack_key)
+            )
+        )
+    # A part move sets created_at, and its readers may still GET the old pack until the grace time ends.
+    # The time is read after the lock, so a pack that a merge made before the lock counts as old enough.
+    retired_before = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    unused: list[str] = []
+    for chunk in _chunks(unreferenced):
+        unused.extend(
+            session.scalars(
+                select(StoragePackModel.pack_key)
+                .where(StoragePackModel.pack_key.in_(chunk), StoragePackModel.created_at < retired_before)
+                .order_by(StoragePackModel.pack_key)
+            )
+        )
+    for chunk in _chunks(sorted((pointed - set(unreferenced)) | late)):
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
+            execution_options={"synchronize_session": False},
+        )
+    return deleted_rows, unused
+
+
+def _purge_shards(
+    shards: ShardMap, username: str | None, run_ids: list[str], grace_seconds: float
+) -> tuple[int, dict[str, Engine]]:
+    """Run :func:`_purge_database` on each shard other than the main database, each in its own committed transaction.
+
+    Args:
+        shards: The shard map.
+        username: The account whose tree objects go; ``None`` deletes only the runs' steps.
+        run_ids: The account's job ids, sorted.
+        grace_seconds: An unused pack is listed only when its ``created_at`` is older than this.
+
+    Returns:
+        The count of deleted rows, and the engine of each unused pack by key.
+
+    Raises:
+        TreePurgeError: When a shard fails; the message names the shard. The shards before it keep their deletes.
+    """
+    deleted_rows = 0
+    pack_engines: dict[str, Engine] = {}
+    for name, engine in _other_shards(shards):
+        try:
+            with Session(engine) as shard_session:
+                deleted, unused = _purge_database(shard_session, username, run_ids, grace_seconds)
+                shard_session.commit()
+        except Exception as exc:
+            raise TreePurgeError(f"could not purge the tree rows on step log shard {name!r}: {exc}") from exc
+        deleted_rows += deleted
+        pack_engines.update(dict.fromkeys(unused, engine))
+    return deleted_rows, pack_engines
+
+
+def bucket_deleter() -> Callable[[list[str]], None] | None:
+    """Return a function that deletes objects from the tree bucket in DeleteObjects batches.
+
+    Returns:
+        The delete function, or ``None`` when ``SKYNET_TREE_BUCKET`` is not set.
+
+    Raises:
+        RuntimeError: When a bucket is set and boto3 is not installed.
+    """
+    found = tree_bucket_client()
+    if found is None:
+        return None
+    bucket, client = found
+
+    def delete_objects(keys: list[str]) -> None:
+        """Delete the objects; S3 does not fail on a missing key.
+
+        Args:
+            keys: The object keys.
+
+        Raises:
+            TreePurgeError: When S3 reports a key it could not delete.
+        """
+        for start in range(0, len(keys), S3_DELETE_BATCH):
+            batch = keys[start : start + S3_DELETE_BATCH]
+            response = client.delete_objects(
+                Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True}
+            )
+            # DeleteObjects answers 200 also when single keys fail; it lists them in Errors.
+            failed = sorted(error.get("Key", "?") for error in response.get("Errors") or [])
+            if failed:
+                raise TreePurgeError(f"could not delete {_describe(failed)}")
+
+    return delete_objects
+
+
+def delete_run_rows(session: Session, run_ids: list[str], embeddings: ColumnElement[bool] | None) -> int:
+    """Lock the jobs of runs about to be deleted, delete their rows and close their budgets.
+
+    A run delete and an account delete both call this before any other lock. The order is fixed:
+    the jobs in key order, then the log, progress, embedding, checkpoint, trial, agent run, call,
+    candidate and folder rows, then the wallet and budget locks. A resume locks the job and then
+    the wallet, and a checkpoint write locks the job and then its checkpoint row. If a delete took
+    a row or wallet lock before the job lock, it and such a writer could each wait for the other,
+    and PostgreSQL would abort one (SKY-733).
+
+    Args:
+        session: The open delete session; the caller commits.
+        run_ids: The job ids to be deleted. Duplicates and missing ids are allowed.
+        embeddings: Which embedding rows to delete, or ``None`` to delete none.
+
+    Returns:
+        The count of deleted rows.
+    """
+    _lock_jobs(session, sorted(set(run_ids)))
+    deleted = 0
+    if run_ids:
+        for model in (LogEntryModel, ProgressEventModel):
+            deleted += _delete_rows(session, delete(model).where(model.optimization_id.in_(run_ids)))
+    if embeddings is not None:
+        deleted += _delete_rows(session, delete(JobEmbeddingModel).where(embeddings))
+    if not run_ids:
+        return deleted
+    for model in (
+        GepaCheckpointModel,
+        SandboxTrialModel,
+        BlackboxAgentRunModel,
+        RunCallModel,
+        RunCandidateModel,
+        RunFolderItemModel,
+    ):
+        deleted += _delete_rows(session, delete(model).where(model.optimization_id.in_(run_ids)))
+    # The budgets close but stay: with their ledger rows they are the money record, with no key to the jobs.
+    BudgetService(engine=session.get_bind()).close_for_deleted_jobs(run_ids, session=session)
+    return deleted
+
+
+def _delete_rows(session: Session, statement: Any) -> int:
+    """Run one bulk delete.
+
+    Args:
+        session: The open delete session.
+        statement: The delete statement.
+
+    Returns:
+        The count of deleted rows.
+    """
+    return session.execute(statement, execution_options={"synchronize_session": False}).rowcount or 0
+
+
+def purge_user(
+    session: Session,
+    username: str,
+    run_ids: list[str],
+    *,
+    delete_objects: Callable[[list[str]], None] | None = None,
+    grace_seconds: float = GRACE_SECONDS,
+    shards: ShardMap | None = None,
+) -> TreePurgeSummary:
+    """Delete an account's tree rows and its runs' steps on the main database, and list the packs only they used.
+
+    Packs that other accounts also use get ``needs_rewrite``. The unused packs
+    are not deleted here: the caller passes the summary to
+    :func:`delete_unused_packs` after the commit. A second call finds no rows
+    and lists no pack. The other shards are not touched here: the caller runs
+    :func:`purge_user_shards` right before the main commit. All checks that can
+    fail the deletion run here, before any shard deletes a row.
+
+    Args:
+        session: The account deletion's open session on the main database; the caller commits.
+        username: The account's lowercased-email identity.
+        run_ids: The job ids of the account. Call this before their jobs go,
+            because the jobs' cascade deletes the steps without their pack keys.
+        delete_objects: Deletes pack objects after the commit; a missing
+            object is not an error. ``None`` uses the bucket that
+            ``SKYNET_TREE_BUCKET`` names.
+        grace_seconds: An unused pack is listed for deletion after the commit
+            only when its ``created_at`` is older than this; the compactor
+            deletes the others.
+        shards: The step log shard map over the session's database; ``None`` reads ``STEP_LOG_SHARDS``.
+
+    Returns:
+        The count of deleted rows, the unused packs, the delete function for them, and the pending
+        purge of the other shards.
+
+    Raises:
+        TreePurgeError: When a pack must go and ``SKYNET_TREE_BUCKET`` is not set or the bucket client
+            cannot be built (for example, boto3 is missing or no region is set). A row of the account
+            on another shard counts as a pack that must go. Also when the account's packs keep moving
+            for ``PACK_LOCK_TRIES`` tries; a retry can succeed. Also when a step log shard fails, or a
+            run records a shard that the map does not have; the message names the shard.
+    """
+    run_ids = sorted(run_ids)
+    shards = _settings_shards(session.get_bind()) if shards is None else shards
+    # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the
+    # commit and then finds no job, so it writes no row behind the purge. The locks stay until the main
+    # commit, so they also cover the other shards' transactions.
+    _lock_jobs(session, run_ids)
+    _check_run_shards(session, shards, run_ids)
+    deleted_rows, unused = _purge_database(session, username, run_ids, grace_seconds)
+    deleted_rows += _delete_rows(session, delete(WorkspaceModel).where(WorkspaceModel.username == username))
+    deleter = None
+    # The bucket decision comes before any shard deletes a row, so a missing bucket fails the deletion
+    # while every shard still has its rows. A shard row can leave an unused pack, so it needs the bucket.
+    if unused or _shards_have_rows(shards, username, run_ids):
+        deleter = _build_deleter(delete_objects)
+    return TreePurgeSummary(
+        deleted_rows=deleted_rows,
+        unused_packs=unused,
+        delete_objects=deleter,
+        shard_purge=partial(_purge_shards, shards, username, run_ids, grace_seconds),
+    )
+
+
+def _build_deleter(delete_objects: Callable[[list[str]], None] | None) -> Callable[[list[str]], None]:
+    """Return the pack delete function: the given one, or one over ``SKYNET_TREE_BUCKET``.
+
+    Nothing contacts the bucket here; a later S3 failure leaves the packs to the compactor.
+
+    Args:
+        delete_objects: The caller's delete function, or ``None``.
+
+    Returns:
+        The delete function.
+
+    Raises:
+        TreePurgeError: When ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be built.
+    """
+    try:
+        deleter = delete_objects or bucket_deleter()
+    except Exception as exc:
+        raise TreePurgeError("could not build the tree bucket client") from exc
+    if deleter is None:
+        raise TreePurgeError("the account has tree packs to delete, but SKYNET_TREE_BUCKET is not set")
+    return deleter
+
+
+def purge_user_shards(summary: TreePurgeSummary) -> int:
+    """Run the purge of the other shards that :func:`purge_user` left pending, and add it to the summary.
+
+    Call this in the account deletion's main transaction, right before its commit: each shard commits
+    here, and no rollback of the main database can bring the shard rows back. The account's jobs stay
+    locked on the main database until its commit, so no flush writes a row behind the purge.
+
+    Args:
+        summary: The summary of :func:`purge_user`; it gets the shard rows and unused packs.
+
+    Returns:
+        The count of rows deleted on the other shards.
+
+    Raises:
+        TreePurgeError: When a shard fails; the message names the shard. The shards before it keep their
+            deletes, and a retry finds no rows there.
+    """
+    if summary.shard_purge is None:
+        return 0
+    deleted_rows, pack_engines = summary.shard_purge()
+    summary.shard_purge = None
+    if pack_engines and summary.delete_objects is None:
+        # The job locks cover only the run_ids that the caller read, so a run that the account starts after
+        # that read can write tree objects to a shard after the check in purge_user. The compactor deletes them.
+        logger.warning("%s on step log shards have no delete function", _describe(sorted(pack_engines)))
+    else:
+        summary.unused_packs = sorted([*summary.unused_packs, *pack_engines])
+        summary.pack_engines.update(pack_engines)
+    summary.deleted_rows += deleted_rows
+    return deleted_rows
+
+
+def delete_unused_packs(engine: Engine, summary: TreePurgeSummary) -> int:
+    """Delete the unused packs of a committed purge: first their objects, then their rows.
+
+    Call this only after the purge's transaction commits. A pack that a row
+    points at again, for example after a rollback, stays. A second call
+    deletes the objects again, and S3 does not fail on a key that is gone.
+    Each pack's row is read and deleted on the pack's shard.
+
+    Args:
+        engine: The shared main database engine.
+        summary: The summary of the committed purge.
+
+    Returns:
+        The count of deleted packs.
+
+    Raises:
+        TreePurgeError: When an object delete or a database read or delete
+            fails. The pack rows stay, so the compactor deletes the packs in
+            its next pass.
+    """
+    if not summary.unused_packs:
+        return 0
+    if summary.delete_objects is None:
+        raise TreePurgeError(f"no delete function for {_describe(summary.unused_packs)}")
+    by_engine: dict[Engine, list[str]] = {}
+    for key in summary.unused_packs:
+        by_engine.setdefault(summary.pack_engines.get(key, engine), []).append(key)
+    # The caller already committed the purge, so a database error must not become a failed request.
+    unused: dict[Engine, list[str]] = {}
+    try:
+        for database, keys in by_engine.items():
+            with Session(database) as session:
+                for chunk in _chunks(keys):
+                    unused.setdefault(database, []).extend(
+                        session.scalars(
+                            select(StoragePackModel.pack_key)
+                            .where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED)
+                            .order_by(StoragePackModel.pack_key)
+                        )
+                    )
+    except SQLAlchemyError as exc:
+        raise TreePurgeError(f"could not read the rows of {_describe(summary.unused_packs)}") from exc
+    keys = sorted(key for found in unused.values() for key in found)
+    if not keys:
+        return 0
+    # The objects go before their rows: recovery applies a pack object that has no row.
+    try:
+        summary.delete_objects(keys)
+    except TreePurgeError:
+        raise
+    except Exception as exc:
+        raise TreePurgeError(f"could not delete {_describe(keys)}") from exc
+    try:
+        for database, found in unused.items():
+            with Session(database) as session:
+                for chunk in _chunks(found):
+                    session.execute(
+                        delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk), ~REFERENCED),
+                        execution_options={"synchronize_session": False},
+                    )
+                session.commit()
+    except SQLAlchemyError as exc:
+        raise TreePurgeError(f"could not delete the rows of {_describe(keys)}") from exc
+    return len(keys)
+
+
+def mark_run_packs(session: Session, run_ids: list[str], shards: ShardMap | None = None) -> None:
+    """Mark for rewrite each pack that the steps of runs about to be deleted point at.
+
+    The job delete's cascade removes the steps on the main database, but not their bytes in packs that
+    other runs share. The mark makes the compactor rewrite such a pack without them. A pack that only these
+    steps used has no row left after the delete, and the compactor deletes it after the grace time.
+
+    The cascade stops at the main database, so the caller then runs :func:`purge_run_shards` right
+    before the main commit, which deletes the runs' steps on each other shard.
+
+    Call this in the job delete's transaction, before the jobs go. The locks follow the purge's
+    order: the jobs, then the packs, each in key order. A flush of these runs waits for the jobs, and a
+    merge that would move their steps gives up on the job lock, so no step moves off a read pack.
+
+    Args:
+        session: The job delete's open session on the main database; the caller commits.
+        run_ids: The job ids to be deleted. Duplicates and missing ids are allowed.
+        shards: The step log shard map over the session's database; ``None`` reads ``STEP_LOG_SHARDS``.
+
+    Raises:
+        TreePurgeError: When a run records a step log shard that the map does not have; the message
+            names the shard.
+    """
+    run_ids = sorted(set(run_ids))
+    shards = _settings_shards(session.get_bind()) if shards is None else shards
+    _lock_jobs(session, run_ids)
+    _check_run_shards(session, shards, run_ids)
+    keys: set[str] = set()
+    for chunk in _chunks(run_ids):
+        keys.update(session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.run_id.in_(chunk)).distinct()))
+    _lock_packs(session, keys)
+    for chunk in _chunks(sorted(keys)):
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
+            execution_options={"synchronize_session": False},
+        )
+
+
+def purge_run_shards(run_ids: list[str], shards: ShardMap) -> int:
+    """Delete the steps of deleted runs on each shard other than the main database, and mark their packs.
+
+    Call this in the job delete's transaction, after :func:`mark_run_packs` and right before the main
+    commit: each shard commits here, and no rollback of the main database can bring the steps back.
+
+    Args:
+        run_ids: The job ids being deleted. Duplicates and missing ids are allowed.
+        shards: The step log shard map that :func:`mark_run_packs` checked the runs against.
+
+    Returns:
+        The count of deleted step rows.
+
+    Raises:
+        TreePurgeError: When a step log shard fails; the message names the shard.
+    """
+    # The compactor deletes the shard packs that no row points at any more, so the unused list is not needed.
+    return _purge_shards(shards, None, sorted(set(run_ids)), GRACE_SECONDS)[0]

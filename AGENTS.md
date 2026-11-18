@@ -108,9 +108,12 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   Before and After images or videos.
 - **Fix bugs locally, push once.** Each push starts a new review. Test and
   review the full diff locally, then push once.
-- **Among agents, only the orchestrator merges**, in the daily window (03:00
-  America/Los_Angeles) or when Gilad asks. Implementation and review agents
-  never merge, and never post `Approved for merge` or `Changes requested:`.
+- **Among agents, only the orchestrator merges.** It merges PRs into
+  `staging` through a batch, as soon as the batch passes all its pre-merge
+  gates. There is no fixed merge window (Gilad, 2026-11-18). The
+  `skynet-pr-workflow` skill lists the gates. Implementation and review
+  agents never merge, and never post `Approved for merge` or
+  `Changes requested:`.
 - A PR merges into `staging` when one Opus 5.5 review at medium effort
   approves its current head commit with 0 findings, and CI passes (Gilad,
   2026-11-11). This includes CI (`.github/**`), deploy and infra config, and
@@ -123,8 +126,11 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates and Linear flow: the `skynet-pr-workflow` skill.
 - **CI runs only per batch and on the promotion PR** (`staging` → `main`).
-  A red batch run or a red promotion run blocks the promotion. Put its fix
-  in a new PR.
+  A red batch run or a red promotion run blocks the promotion. A red batch
+  run that no PR in the batch causes gets its fix in a new PR. A red
+  promotion run does the same. That PR goes through the next batch. A PR
+  that causes a red batch run leaves the batch and gets its fix in its own
+  branch.
 
 ## Test accounts and environments (MANDATORY)
 
