@@ -65,6 +65,7 @@
   },
   "messages": {
     "submit.preflight.scorer_model": "יש להגדיר את המודל באמצעות llm(model=...) בקוד המדד.",
+    "accounts.deletion_storage_unavailable": "החשבון לא נמחק: לא ניתן היה למחוק כרגע את נתוני הריצות השמורים שלו. נסו שוב בעוד כמה דקות.",
     "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
     "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
     "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",
@@ -122,6 +123,7 @@
     "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
     "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
+    "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
     "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",
     "optimization.retry_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות להרצה חוזרת.",
     "optimization.retry_wrong_status": "אפשר להריץ מחדש רק {term.optimizationPlural} במצב 'נכשלה' או 'בוטלה' — זו במצב '{status}'. ניתן לשכפל אותה במקום.",
