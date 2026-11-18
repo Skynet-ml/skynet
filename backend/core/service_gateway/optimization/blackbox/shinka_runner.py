@@ -1419,6 +1419,33 @@ def _git(cwd: Path, *arguments: str) -> str:
     return result.stdout
 
 
+def _ignored_paths(cwd: Path, paths: list[str]) -> set[str]:
+    """Return the paths that the checkout's ``.gitignore`` rules leave out, as ``git add --all`` does.
+
+    Args:
+        cwd: The checkout to read the ignore rules in.
+        paths: Paths relative to the checkout.
+
+    Returns:
+        The ignored paths. A tracked path is never ignored.
+
+    Raises:
+        RuntimeError: When git fails.
+    """
+    result = subprocess.run(
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, "check-ignore", "-z", "--stdin"],
+        cwd=cwd,
+        input="".join(f"{path}\0" for path in paths),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Exit code 1 means that no path is ignored.
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"git check-ignore failed: {(result.stderr or result.stdout).strip()[-500:]}")
+    return set(filter(None, result.stdout.split("\0")))
+
+
 class AgentEditor:
     """Write a new version by letting a Pi coding agent edit the parent's files."""
 
@@ -1787,15 +1814,20 @@ class CommandEditor(AgentEditor):
                 # A case-insensitive file system reads ``.GIT`` as ``.git`` (SKY-810).
                 report["error"] = f"The [proposer] entry command may not write Git metadata: '{path}'."
                 return report
-            problem = self.bundle.rule_problem(path)
-            if problem is not None:
-                report["error"] = self.bundle.refusal(path, problem)
-                return report
         workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
         workspace.parent.mkdir(parents=True, exist_ok=True)
         with self._git_lock:
             _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
         try:
+            # The command's tree holds its ignored output too, such as ``.pytest_cache``. An agent session's
+            # ``git add`` leaves those out, so the rules must not refuse the version for them.
+            ignored = _ignored_paths(workspace, list(files))
+            files = {path: text for path, text in files.items() if path not in ignored}
+            for path in files:
+                problem = self.bundle.rule_problem(path)
+                if problem is not None:
+                    report["error"] = self.bundle.refusal(path, problem)
+                    return report
             for path, text in files.items():
                 target = checked_target(workspace, path)
                 target.parent.mkdir(parents=True, exist_ok=True)

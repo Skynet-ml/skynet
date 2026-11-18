@@ -137,10 +137,11 @@ U+2066 to U+2069), because they can hide what a command does.
   the worker's engine loop, which runs no run yet. So a single ShinkaEvolve
   run with `entry` fails the setup check, and Auto leaves out its lane. The
   rest of this item says how the command will run when the refusal ends.
-  ShinkaEvolve then refuses a budgeted or managed run, because it cannot
-  meter the command's model calls: only a run on your own model key runs the
-  command. It also refuses `entry` together with `[proposer] services` or
-  `[proposer] mcp`.
+  The engine also refuses every run with `entry` for now. The command may
+  reach a model only on your own model key, never on Skynet's key, and its
+  box has no such model route until a metered relay lands. Until then the
+  box gets no model address and no model credential. The engine also refuses
+  `entry` together with `[proposer] services` or `[proposer] mcp`.
   ShinkaEvolve keeps its search, and the command replaces
   its model. For each mutation, the run runs the command once in the
   proposer's box, on the tree of the parent version. `ASCENT_TASK` holds the

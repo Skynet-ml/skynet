@@ -186,25 +186,19 @@ class ShinkaEvolveEngine:
                 )
             if dict(repo.get("hidden_hashes") or {}) != dict(ctx.repo_seed.hidden_hashes):
                 raise ServiceError("The repository options hide other paths than the run's repository seed.")
-        proposer = None
         if repo is not None and repo.get("file_proposer"):
-            assert options is not None
             if route.get("services"):
                 raise ServiceError(
                     "ShinkaEvolve cannot give the [proposer] services to the [proposer] entry command yet. "
                     "Choose another engine, or remove [proposer] services from optimize.toml."
                 )
-            if options.budget_route is not None or options.max_token_cost is not None:
-                # The proposer box reaches the model with a raw credential grant, and the loop does not meter
-                # those calls. A budgeted or managed run would spend Skynet's key past its budget, so only a run
-                # on the user's own key (BYOK) runs the command: service.py leaves ``max_token_cost`` unset only
-                # for a BYOK model (SKY-815).
-                raise ServiceError(
-                    "ShinkaEvolve cannot meter the [proposer] entry command's model calls, so it runs the command "
-                    "only with your own model key, on a run without a budget route. Choose another engine, or "
-                    "remove [proposer] entry from optimize.toml."
-                )
-            proposer = _Proposer(ctx, options)
+            # The box may reach only a model route on the user's own key (BYOK), never the deployment's key. A
+            # BYOK budget route listens on the worker's loopback gateway, which no box reaches, and the route
+            # does not name its charge policy. Until SKY-728 brings a metered relay, every run refuses (SKY-815).
+            raise ServiceError(
+                "ShinkaEvolve cannot give the [proposer] entry command a model route on your own key yet. "
+                "Choose another engine, or remove [proposer] entry from optimize.toml."
+            )
         if repo is None and task.seed_candidate is None:
             # A blank run evolves an empty starting text rather than refusing.
             task = replace(task, seed_candidate="")
@@ -242,8 +236,6 @@ class ShinkaEvolveEngine:
             for index, chunk in enumerate(repo["chunks"]):
                 chunks.append(f"{_REPO_CHUNK_DIR}/tree.{index:04d}.b64")
                 shutil.copyfile(chunk, workdir / chunks[-1])
-            if proposer is not None:
-                payload["shinka_command"] = True
             payload["repo"] = {
                 "chunks": chunks,
                 "editable_paths": list(repo["editable_paths"]),
@@ -255,7 +247,7 @@ class ShinkaEvolveEngine:
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)
         (workdir / _INPUT_FILE).write_text(document_text, encoding="utf-8")
-        requests = _Requests(task, server, ctx, nonce, proposer)
+        requests = _Requests(task, server, ctx, nonce)
         try:
             outcome = self._drive(requests, workdir)
         except BudgetReached as stop:
@@ -569,17 +561,11 @@ class _Proposer:
         self.setup = [str(part) for part in repo.get("proposer_setup") or ()]
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
-        # The box reaches the model through the gateway; the registry's credential for that host is added at the
-        # network edge, so no key enters the box.
-        grants = [Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host]
-        if model_host:
-            grants.append(Grant(model_host, credential=True))
-        self.grants = tuple(grants)
-        # The same names the managed proposer box sets (docs/repository-constraints.md). APP_API_KEY is not set:
-        # the credential grant adds the key at the network edge.
+        # The run's gateway holds the deployment's managed key, so the box gets no grant or address for it. A
+        # model route on the user's own key needs SKY-728's metered relay; the engine refuses the command until then.
+        self.grants = tuple(Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host)
+        # The same name the managed proposer box sets (docs/repository-constraints.md).
         self.exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
-        if gateway:
-            self.exports.append(f"export APP_GATEWAY_URL={shlex.quote(gateway)}")
         self.seed = ctx.repo_seed.tree_id
         self.base: str | None = None
         self.seed_paths: set[str] = set()
@@ -598,7 +584,9 @@ class _Proposer:
 
         Raises:
             ServiceError: When the ``[proposer] setup`` command fails.
-            GrantError: When the registry holds no credential for a granted host.
+            GrantDeniedError: When the engine loop cannot resolve the grants. A ``run_command`` that resolves the
+                grants itself raises ``GrantError`` instead, a ``ValueError``; the method passes it on too, so it
+                stops the run and does not become a failed mutation.
         """
         assert self.ctx.run_command is not None
         assert self.ctx.put_files is not None

@@ -33,7 +33,7 @@ from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
 from core.sandbox.grants import Grant, UnknownCapabilityError
 from core.sandbox.trees import GrantDeniedError
-from core.service_gateway.optimization.blackbox import sandbox_log, shinka_evolve
+from core.service_gateway.optimization.blackbox import sandbox_log, shinka_bundle, shinka_evolve
 from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
     EngineContext,
@@ -2263,6 +2263,43 @@ def test_each_proposal_runs_the_file_command_on_the_parents_tree_and_files_the_t
     assert not any(boxes.open.values())
 
 
+def test_a_version_leaves_out_unchanged_seed_files_setup_output_and_large_files(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Keep only the text files that differ from the seed, within the size limit, and no setup output (SKY-815).
+
+    A setup output that the parent holds stays, since it came from an earlier version and not from the setup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    limit = shinka_bundle.MAX_FILE_BYTES
+    options = _proposer_options(
+        "printf edited > .cache.txt && printf mine > gen.txt && printf 'child\\n' > main.py"
+        f" && head -c {limit} /dev/zero | tr '\\0' a > edge.txt"
+        f" && head -c {limit + 1} /dev/zero | tr '\\0' a > big.txt",
+        setup=["sh", "-c", "printf built > .cache.txt && printf built > gen.txt"],
+    )
+    requests = shinka_evolve._Requests(
+        Task("seed"),
+        loop.server(lambda *args: (1.0, {}), max_evals=5),
+        ctx,
+        "n",
+        shinka_evolve._Proposer(ctx, options),
+    )
+
+    reply = _propose(requests, "1", {"main.py": "parent\n", "gen.txt": "old"}, "task")
+
+    assert reply == {"id": "1", "files": {"main.py": "child\n", "gen.txt": "mine", "edge.txt": "a" * limit}}
+
+
 def test_a_failed_proposer_command_is_a_failed_mutation_and_a_failed_setup_stops_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -2291,32 +2328,17 @@ def test_a_failed_proposer_command_is_a_failed_mutation_and_a_failed_setup_stops
         requests.line('APP_NATIVE_RPC n {"id": "2", "kind": "propose", "files": {"a": 1}, "task": "t"}', io.StringIO())
 
 
-def test_a_run_with_a_file_proposer_tells_the_child_to_ask_the_worker_for_each_version(
+def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mark the child's input for the command editor, and refuse a run with no engine loop or no boxes (SKY-815).
+    """Refuse the command on the sandbox path and on the engine loop, and need the loop's boxes (SKY-815).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Stops the run at the child's start.
+        monkeypatch: Fails the test when the child starts.
     """
-    inputs: list[dict[str, object]] = []
-
-    def drive(self: object, requests: object, workdir: Path) -> None:
-        """Keep the child's input and stop.
-
-        Args:
-            self: The engine.
-            requests: The request handler.
-            workdir: The child's folder.
-
-        Raises:
-            ServiceError: Always.
-        """
-        inputs.append(json.loads((workdir / shinka_evolve._INPUT_FILE).read_text()))
-        raise ServiceError("stop")
-
-    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", drive)
+    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     options = _proposer_options("node agent.js")
     no_boxes = EngineContext(
         reflection_lm=lambda prompt: "",
@@ -2325,31 +2347,17 @@ def test_a_run_with_a_file_proposer_tells_the_child_to_ask_the_worker_for_each_v
         native_options=options,  # type: ignore[arg-type]
         repo_seed=RepoSeed("tree"),
     )
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     sandbox = replace(no_boxes, call_model=None)
     with pytest.raises(ServiceError, match="only on the worker's engine loop"):
         ShinkaEvolveEngine(_fake_python(tmp_path)).run(
             Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), sandbox
         )
+    with pytest.raises(ServiceError, match="model route on your own key"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), _box_context(options, tmp_path)
+        )
     with pytest.raises(ServiceError, match="engine loop's boxes"):
-        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
-            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), no_boxes
-        )
-    assert inputs == []
-
-    boxes = replace(
-        no_boxes,
-        run_dir=str(tmp_path / "b"),
-        run_command=lambda *args: None,  # type: ignore[arg-type,return-value]
-        put_files=lambda *args: None,  # type: ignore[arg-type,return-value]
-        read_file=lambda *args: None,
-        list_files=lambda *args: None,
-    )
-    with pytest.raises(ServiceError, match="stop"):
-        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
-            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), boxes
-        )
-    assert inputs[0]["shinka_command"] is True
+        shinka_evolve._Proposer(no_boxes, options)
 
 
 def test_a_proposal_leaves_git_metadata_out_of_the_version(
@@ -2380,21 +2388,37 @@ def test_a_proposal_leaves_git_metadata_out_of_the_version(
     assert _propose(requests, "1", {"main.py": "parent\n"}, "task") == {"id": "1", "files": {"main.py": "child\n"}}
 
 
+_BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
+
+
 @pytest.mark.parametrize(
-    ("route", "message"),
+    ("route", "token_cost", "message"),
     [
-        ({MCP_RELAY_ROUTE_KEY: {"servers": [{"name": "docs"}]}}, r"\[proposer\] mcp servers"),
-        ({MCP_RELAY_ROUTE_KEY: {"services": {"api": {}}}}, r"\[proposer\] services"),
-        ({"url": "http://gateway.test/v1", "token": "t", "model": "m"}, "cannot meter"),
+        ({MCP_RELAY_ROUTE_KEY: {"servers": [{"name": "docs"}]}}, None, r"\[proposer\] mcp servers"),
+        ({MCP_RELAY_ROUTE_KEY: {"services": {"api": {}}}}, None, r"\[proposer\] services"),
+        # A BYOK route has no token budget; a managed route has one. Neither is a route a box can reach.
+        (_BYOK_ROUTE, None, "model route on your own key"),
+        (_BYOK_ROUTE, 1.5, "model route on your own key"),
+        # With no route, the run's gateway is the deployment's, with its managed key.
+        (None, None, "model route on your own key"),
+        (None, 1.5, "model route on your own key"),
     ],
 )
-def test_a_file_proposer_is_refused_with_mcp_services_or_a_budget(
-    route: dict[str, object], message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_file_proposer_is_refused_on_every_route(
+    route: dict[str, object] | None,
+    token_cost: float | None,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse the ``[proposer] entry`` command when it would lose its mcp or services, or spend unmetered (SKY-815).
+    """Refuse the ``[proposer] entry`` command on BYOK, managed and routeless runs alike (SKY-815).
+
+    No run can give the box a model route on the user's own key until SKY-728's metered relay, and the box must
+    never reach the deployment's key.
 
     Args:
         route: The run's budget route.
+        token_cost: The run's token budget, which only a managed run has.
         message: Words the refusal holds.
         tmp_path: Pytest's temporary folder.
         monkeypatch: Fails the test when the child starts.
@@ -2402,6 +2426,8 @@ def test_a_file_proposer_is_refused_with_mcp_services_or_a_budget(
     monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
     options = _proposer_options("node agent.js")
     options.budget_route = route
+    options.max_token_cost = token_cost
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
     ctx = EngineContext(
         reflection_lm=lambda prompt: "",
         run_dir=str(tmp_path),
@@ -2445,47 +2471,31 @@ def _box_context(options: SimpleNamespace, tmp_path: Path, **fields: object) -> 
     return replace(ctx, **fields)  # type: ignore[arg-type]
 
 
-def test_a_file_proposer_is_refused_on_a_managed_run_without_a_budget_route(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("route", [_BYOK_ROUTE, None])
+def test_the_proposer_box_gets_each_host_once_and_never_the_gateway(
+    route: dict[str, object] | None, tmp_path: Path
 ) -> None:
-    """Refuse the command on a managed run, which gets a token budget but no route (SKY-815).
-
-    The box would reach the model with the deployment's key, unmetered and outside ``max_token_cost``.
+    """Grant each ``proposer_hosts`` host once, with no credential, and never name the run's gateway (SKY-815).
 
     Args:
-        tmp_path: Pytest's temporary folder.
-        monkeypatch: Fails the test when the child starts.
-    """
-    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
-    options = _proposer_options("node agent.js")
-    options.max_token_cost = 1.5
-
-    with pytest.raises(ServiceError, match="only with your own model key"):
-        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
-            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), _box_context(options, tmp_path)
-        )
-
-
-def test_the_proposer_box_gets_each_host_once_and_the_credential_only_for_the_model_host(tmp_path: Path) -> None:
-    """Grant each ``proposer_hosts`` host once, and the registry's credential only for the gateway host (SKY-815).
-
-    Args:
+        route: The run's budget route.
         tmp_path: Pytest's temporary folder.
     """
     options = _proposer_options("node agent.js")
+    options.budget_route = route
     options.gateway = SimpleNamespace(url="https://gw.test/v1")
     options.repo["proposer_hosts"] = ["pypi.org", "gw.test", "docs.test", "pypi.org"]
 
     proposer = shinka_evolve._Proposer(_box_context(options, tmp_path), options)
 
-    assert proposer.grants == (Grant("docs.test"), Grant("pypi.org"), Grant("gw.test", credential=True))
-    assert "export APP_GATEWAY_URL=https://gw.test/v1" in proposer.exports
+    assert proposer.grants == (Grant("docs.test"), Grant("pypi.org"))
+    assert proposer.exports == ["export APP_MODEL=test-model"]
 
 
-def test_a_proposal_whose_model_host_has_no_registry_credential_stops_the_run(
+def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Stop the run when the registry holds no credential for the gateway host (SKY-815).
+    """Stop the run when the loop cannot resolve the proposer box's grants (SKY-815).
 
     Each mutation would fail the same way, so the error must not become a failed mutation.
 
@@ -2497,11 +2507,11 @@ def test_a_proposal_whose_model_host_has_no_registry_credential_stops_the_run(
         tmp_path: Pytest's temporary folder.
     """
     options = _proposer_options("printf 'child\\n' > main.py")
-    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+    options.repo["proposer_hosts"] = ["bad host"]
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
 
-    with pytest.raises(GrantDeniedError, match=r"gw\.test"):
+    with pytest.raises(GrantDeniedError, match="bad host"):
         shinka_evolve._Proposer(ctx, options).propose({"main.py": "parent\n"}, "task")
 
     def refuse(*args: object) -> None:

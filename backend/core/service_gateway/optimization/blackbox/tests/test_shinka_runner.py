@@ -494,11 +494,12 @@ class _RepoScorer:
         """
 
 
-def _repo(tmp_path: Path) -> tuple[list[str], shinka_bundle.RepoBundle]:
+def _repo(tmp_path: Path, ignore: str = "") -> tuple[list[str], shinka_bundle.RepoBundle]:
     """Ship a two-file repository and bind a bundle to its checkout.
 
     Args:
         tmp_path: Scratch folder.
+        ignore: The repository's ``.gitignore``, or no file when empty.
 
     Returns:
         The snapshot chunks and the bundle rules.
@@ -507,6 +508,8 @@ def _repo(tmp_path: Path) -> tuple[list[str], shinka_bundle.RepoBundle]:
     (source / "src").mkdir(parents=True)
     (source / "src/app.py").write_text("from util import SCALE\n")
     (source / "src/util.py").write_text("SCALE = 2\n")
+    if ignore:
+        (source / ".gitignore").write_text(ignore)
     archive = tmp_path / "tree.tgz"
     subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
     chunks = []
@@ -2134,17 +2137,18 @@ class _ProposalMailbox:
         return self.reply
 
 
-def _install_command_editor(tmp_path: Path, mailbox: _ProposalMailbox) -> Any:
+def _install_command_editor(tmp_path: Path, mailbox: _ProposalMailbox, ignore: str = "") -> Any:
     """Make a stand-in upstream runner write each version with the command editor.
 
     Args:
         tmp_path: Run folder.
         mailbox: The fake worker.
+        ignore: The repository's ``.gitignore``, or no file when empty.
 
     Returns:
         The runner.
     """
-    _, bundle = _repo(tmp_path)
+    _, bundle = _repo(tmp_path, ignore)
     editor = shinka_runner.CommandEditor(mailbox, tmp_path, ledger=shinka_runner.UsageLedger(None), bundle=bundle)
     sampler = SimpleNamespace(task_sys_msg="TASK", use_text_feedback=True)
     runner = SimpleNamespace(
@@ -2262,6 +2266,24 @@ def test_the_command_editor_refuses_a_path_the_rules_forbid(tmp_path: Path) -> N
 
     assert (patch, success) == (None, False)
     assert "Cannot change 'docs/x.md': it is outside the editable paths." in str(meta["last_error_msg"])
+
+
+def test_the_command_editor_leaves_out_ignored_output_before_the_rules_check(tmp_path: Path) -> None:
+    """File the version when the command also leaves git-ignored output outside the editable paths (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"src/util.py": "SCALE = 5\n", ".pytest_cache/README.md": "cache\n", "src/x.pyc": "x"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore=".pytest_cache/\n*.pyc\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True, meta.get("last_error_msg")
+    written = (tmp_path / "results" / "gen_1" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == {"src/util.py": "SCALE = 5\n"}
 
 
 def test_the_command_editors_git_runs_no_hook_and_no_fsmonitor(tmp_path: Path) -> None:
