@@ -68,6 +68,8 @@ _REPO_METRIC: dict[str, Any] = {
     "github_connected": True,
 }
 _SCORER = "def score(repo_path):\n    return 1.0, 'ok'\n"
+# The metric scores only what a [run] or a target stage gives it, so a valid contract names one (SKY-761).
+_VALID_TOML = 'version = 1\n[run]\nentry = "run.py:main"\n'
 # The commit every branch resolves to in these tests, unless a test says otherwise.
 _HEAD = "a" * 40
 
@@ -274,9 +276,7 @@ def test_an_invalid_optimize_toml_holds_the_metric_screen() -> None:
     assert _screen_problems("metric", bad) == [
         "optimize.toml is not valid: optimize.toml: version 2 is not supported; use version = 1."
     ]
-    assert (
-        _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml="version = 1")) == []
-    )
+    assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml=_VALID_TOML)) == []
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml="  ")) == []
 
 
@@ -293,7 +293,7 @@ async def test_check_setup_reports_the_parser_error_and_holds_continue() -> None
     assert isinstance(refused, str)
     assert "optimize.toml is not valid" in refused
 
-    turn.wizard_patch["optimize_toml"] = "version = 1"
+    turn.wizard_patch["optimize_toml"] = _VALID_TOML
     assert await tools["check_setup"].acall() == {"ok": True, "errors": []}
     assert (await tools["continue_to_next_screen"].acall())["screen_nav"]["action"] == "continue"
 

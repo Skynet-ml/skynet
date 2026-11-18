@@ -417,9 +417,11 @@ belongs in a `[run]` entry: the entry runs the code in the candidate box, and
 the metric judges the entry's output. Setup warns when a metric file imports
 a repository module that is not a metric file. The warning names the module
 and the fix: move the check into a `[run]` entry. The metric box holds no
-version file, so a `[metric]` needs a `[run]` section or a
-`[target.<name>]` stage whose outputs it scores. A `[metric]` with neither
-fails setup, because it would give each version the same score.
+version file, so every contract needs a `[run]` section or a
+`[target.<name>]` stage whose outputs the metric scores. This rule holds also
+when the file has no `[metric]` section, because the metric code can come
+with the run request. A contract with neither fails setup, because the
+metric would give each version the same score.
 
 The box user can be root. The boxes depend on the microVM boundary between
 boxes, not on file permissions inside a box.
@@ -561,6 +563,8 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 
 ## What fails the setup check
 
+- A contract with no `[run]` section and no `[target.<name>]` stage, with or
+  without a `[metric]` section. The message says to add one of them.
 - A `services` list in a `[target.<name>]`, or a `network` host list in a
   `[target.<name>]`. Runs cannot use these settings yet. `network = []` in a
   stage passes, because a stage box is already offline except for the relay.

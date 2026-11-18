@@ -1579,11 +1579,17 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
     metric_vcpus = _vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None
     # The metric box holds no repository tree (SKY-398), so a metric with no [run]
     # and no target stage sees nothing of the version and gives each one the same score.
-    if "metric" in document and run_entry is None and not targets:
+    # The metric code can come with the run request, so the rule holds with no [metric] too (SKY-761).
+    if run_entry is None and not targets:
+        if "metric" in document:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
+                " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
+                section="metric",
+            )
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
-            " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
-            section="metric",
+            f"{CONSTRAINTS_FILE}: the metric cannot score a version with no output. Add a [run] section"
+            " or a [target.<name>] stage whose outputs the metric scores."
         )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
