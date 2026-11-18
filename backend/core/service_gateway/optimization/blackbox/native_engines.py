@@ -1639,6 +1639,20 @@ class AutoResearchEngine:
             lines += [f"- `{eid}` scored {table[leader].get(eid, 0.0):.3f}: {note}"]
         return lines
 
+    def _round_prompt(self, directive: str) -> str:
+        """Write the prompt that starts one round's agent session.
+
+        Args:
+            directive: This round's directive.
+
+        Returns:
+            The prompt text.
+        """
+        return (
+            f"This is round {self.round} ({directive}). Read `BRIEF.md`, then `STATE.md`, then `notebook.md` in this "
+            "directory, and carry out the round as the brief describes. Record everything in `notebook.md`."
+        )
+
     def _session(self, server: EvalServer, directive: str, *, max_budget_usd: float | None) -> ProposerOutcome:
         """Run one round's agent session under the stall and allowance watchdogs.
 
@@ -1673,12 +1687,8 @@ class AutoResearchEngine:
                     return True
             return self.max_no_eval_seconds is not None and now - last_progress >= self.max_no_eval_seconds
 
-        prompt = (
-            f"This is round {self.round} ({directive}). Read `BRIEF.md`, then `STATE.md`, then `notebook.md` in this "
-            "directory, and carry out the round as the brief describes. Record everything in `notebook.md`."
-        )
         return run_proposer(
-            prompt,
+            self._round_prompt(directive),
             work_dir=self.work_dir,
             log_dir=self.run_dir / "sessions",
             name=f"round{self.round}",

@@ -1,25 +1,604 @@
-"""Run Skynet's AutoResearch engine in the native agent runtime."""
+"""Run Skynet's AutoResearch loop in the worker engine loop (SKY-725).
+
+The round loop of :class:`native_engines.AutoResearchEngine` runs here unchanged:
+the directives, the leaderboard, the Pareto front and the failure dossier come
+from the same code. Only each round's agent session changes: the ``claude`` CLI
+in a long-lived box becomes a tool loop in the worker, as in the Meta-Harness
+port (SKY-722). Each model reply is one ``model`` step and each shell command is
+one ``command`` step, so a killed run resumes from its last step.
+
+The agent scores a file with an ``evaluate`` tool in place of ``eval.sh``: the
+tool reads the file from the workspace tree and scores it in the worker, as the
+upstream HTTP handler does. The lab is a tree that the engine builds again from
+its local files before each round, so the frontier can lose a file. After a
+round, only the agent's ``work/`` and ``notebook.md`` come back from the tree.
+
+The session watchdogs count model turns, not seconds, so a resume stops a
+session at the same place. A run outside the worker engine loop still uses the
+native box runtime until the SKY-728 cutover; the loop path never calls it.
+"""
 
 from __future__ import annotations
 
-from .native_runtime import run_native_engine
-from .protocol import EngineContext, EvalServer, Result, Task
+import json
+import math
+import posixpath
+import shutil
+from collections.abc import Iterator
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any
+
+from gepa.oa.budget import BudgetExhausted
+from gepa.oa.config import OptimizeAnythingConfig
+from gepa.oa.task import Task as UpstreamTask
+
+from ....exceptions import ServiceError
+from ....sandbox.trees import BoxFailureError, TreeRejectedError
+from . import native_engines, sandbox_log
+from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
+from .native_runtime import native_task_payload, run_native_engine, sanitize_side_info
+from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, candidate_key
+from .runner import side_info_json_default
+
+BASH_TOOL = {
+    "name": "bash",
+    "description": (
+        "Run one shell command in the research lab, with no network. Each command starts in the lab root, in a "
+        "fresh box: files in the lab persist between commands, but the shell state and /tmp do not. Only `work/` "
+        "and `notebook.md` carry over to the next round. Returns the exit code, stdout, stderr and whether the "
+        "command timed out."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"command": {"type": "string", "description": "The shell command."}},
+        "required": ["command"],
+    },
+}
+
+EVALUATE_TOOL = {
+    "name": "evaluate",
+    "description": (
+        "Score a candidate file of the lab with the evaluator. With only `file`, it is a full evaluation; with "
+        "`example_ids`, it is a probe on just those examples. Each scored example costs one evaluation unit. "
+        "Returns the scores and the evaluator's feedback as JSON."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string", "description": "The candidate file, relative to the lab root."},
+            "example_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "The examples of a probe; leave out for a full evaluation.",
+            },
+        },
+        "required": ["file"],
+    },
+}
+
+# The native session gets 90 seconds to write up after it spends its round's allowance. A clock would stop
+# a resumed session at another place, so the worker counts model turns.
+_WRITE_UP_TURNS = 3
+
+
+class _Budget:
+    """The ``budget`` view of the gepa.oa server, read from the host eval server."""
+
+    def __init__(self, server: EvalServer) -> None:
+        """Bind the view to the host eval server.
+
+        Args:
+            server: The host eval server.
+        """
+        self._server = server
+
+    @property
+    def remaining(self) -> int:
+        """Return the scorer calls left."""
+        return self._server.remaining
+
+    @property
+    def used(self) -> int:
+        """Return the scorer calls spent."""
+        return self._server.used
+
+
+class _UpstreamServer:
+    """Answer the gepa.oa server calls that AutoResearch makes with the host eval server.
+
+    It names cases by position and versions by the order of their first full
+    sweep or checkpoint, as the native runtime does. It sends the same
+    ``case_scored``, ``candidate`` and feedback events, and it fills a null case
+    with its sweep's mean. It scores one case at a time in the caller's thread,
+    so each step has a fixed place in the agent's log. It keeps no clock values.
+    """
+
+    url = ""
+
+    def __init__(self, server: EvalServer, task: Task, ctx: EngineContext) -> None:
+        """Bind the adapter to the host eval server.
+
+        Args:
+            server: The host eval server.
+            task: The task; its cases go to the scorer, never to the proposer.
+            ctx: The engine context, for its progress sink.
+        """
+        self._server = server
+        self._cases = {str(index): case for index, case in enumerate(task.cases)}
+        self._progress = ctx.progress_callback
+        self._sweeps: dict[str, list[tuple[str, float]]] = {}
+        self._progress_log: list[dict[str, Any]] = []
+        self._best_val_score = float("-inf")
+        self.task = SimpleNamespace(has_dataset=bool(self._cases))
+        self.budget = _Budget(server)
+        self.eval_log: list[dict[str, Any]] = []
+        self._candidate_registry: dict[str, int] = {}
+        self.best_score = float("-inf")
+        self.best_candidate: Any = task.seed_candidate or ""
+
+    @property
+    def progress_log(self) -> list[dict[str, Any]]:
+        """Return the logged checkpoints."""
+        return list(self._progress_log)
+
+    def iter_split(self, split: str) -> Iterator[tuple[str, Any]]:
+        """Yield the cases of a split: all cases are the train split.
+
+        Args:
+            split: ``train`` or ``val``.
+
+        Returns:
+            ``(case id, case)`` pairs.
+        """
+        return iter(self._cases.items() if split == "train" else ())
+
+    def evaluate(self, candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score a candidate on one case, or as a whole when the task has no cases.
+
+        Args:
+            candidate: The candidate text.
+            example: The case id, or ``None`` for the whole candidate.
+            **kwargs: Not used.
+
+        Returns:
+            The score, negative infinity after a metric error, and the side information a proposer may see.
+
+        Raises:
+            BudgetExhausted: When no scorer call is left.
+        """
+        del kwargs
+        candidate_id = self._candidate_registry.get(candidate_key(candidate))
+        case = None if example is None else self._cases[example]
+        try:
+            # The scorer's events and model calls carry the version and the case, as in the native runtime.
+            with sandbox_log.event_scope(candidate=None if candidate_id is None else str(candidate_id), case=example):
+                score, info = self._server.evaluate(candidate, case)
+        except BudgetExhaustedError as error:
+            raise BudgetExhausted(str(error)) from error
+        if score is not None and math.isfinite(score) and isinstance(info, dict) and candidate_id is not None:
+            emit_scorer_feedback(
+                self._progress,
+                example_id="?" if example is None else example,
+                score=float(score),
+                side_info=info,
+                candidate_id=str(candidate_id),
+            )
+        value = float("-inf") if score is None else float(score)
+        self.eval_log.append({"eval": self._server.used, "score": value, "candidate_len": len(candidate)})
+        if value > self.best_score:
+            self.best_score = value
+            self.best_candidate = candidate
+        # The native child gets the side information as JSON, so the proposer sees the same values here.
+        shown = json.loads(json.dumps(sanitize_side_info(info), default=side_info_json_default))
+        return value, shown if isinstance(shown, dict) else {"info": shown}
+
+    def evaluate_examples(
+        self, candidate: str, example_ids: list[str] | None = None, split: str | None = None
+    ) -> tuple[float, dict[str, Any]]:
+        """Score a candidate on cases, and fill each null case with the sweep's scored mean (SKY-367).
+
+        Only a sweep of every case streams its scores, as in the native runtime: a probe would leave a version
+        half scored in the run view.
+
+        Args:
+            candidate: The candidate text.
+            example_ids: The case ids, or ``None`` for every case.
+            split: Not used; AutoResearch names its cases.
+
+        Returns:
+            The mean and the per-case ``scores`` and ``infos``, with the null cases under ``UNSCORED_CASES_KEY``.
+
+        Raises:
+            BudgetExhausted: When the budget cannot score every case.
+        """
+        del split
+        ids = list(self._cases) if example_ids is None else [eid for eid in example_ids if eid in self._cases]
+        if self.budget.remaining < len(ids):
+            raise BudgetExhausted(f"Not enough budget to evaluate all examples: {self.budget.remaining} remaining")
+        full = set(ids) == set(self._cases)
+        trial = self._register(candidate) if full else None
+        if trial is not None:
+            native_engines.log_event(
+                "candidate.eval.start",
+                f"Evaluating candidate {trial} on {len(ids)} cases",
+                candidate=trial,
+                cases=len(ids),
+            )
+        raw: list[float] = []
+        infos: dict[str, Any] = {}
+        for eid in ids:
+            score, info = self.evaluate(candidate, eid)
+            raw.append(score)
+            infos[eid] = info
+            if trial is not None and math.isfinite(score):
+                emit_case_scored(self._progress, trial=trial, example_id=eid, score=score, total=len(ids))
+        if trial is not None:
+            self._sweeps[candidate_key(candidate)] = [
+                (eid, score) for eid, score in zip(ids, raw, strict=True) if math.isfinite(score)
+            ]
+        filled = native_engines.fill_unscored([""] * len(raw), raw)
+        if not all(math.isfinite(score) for score in filled):
+            # A sweep that scored no case keeps its mean and lists every case, so no engine ranks it.
+            filled, unscored = raw, list(ids)
+        else:
+            unscored = [eid for eid, score in zip(ids, raw, strict=True) if not math.isfinite(score)]
+        return sum(filled) / len(filled), {
+            "scores": dict(zip(ids, filled, strict=True)),
+            "infos": infos,
+            "num_evaluated": len(ids),
+            native_engines.UNSCORED_CASES_KEY: unscored,
+        }
+
+    def log_progress(
+        self, val_score: float, candidate: str | None = None, reflection_cost: float = 0.0
+    ) -> dict[str, Any]:
+        """Log a checkpoint and send the version to the climb view, as the native runtime does.
+
+        Args:
+            val_score: The candidate's mean.
+            candidate: The candidate text.
+            reflection_cost: Not used.
+
+        Returns:
+            The score and the best score, as the gepa.oa server returns them.
+        """
+        del reflection_cost
+        self._best_val_score = max(self._best_val_score, val_score)
+        entry: dict[str, Any] = {
+            "val_score": val_score,
+            "best_val_score": self._best_val_score,
+            "total_evals": self._server.used,
+        }
+        if candidate is not None:
+            entry["candidate_id"] = self._register(candidate)
+        self._progress_log.append(entry)
+        if isinstance(candidate, str) and math.isfinite(val_score):
+            sweep = self._sweeps.pop(candidate_key(candidate), [])
+            # A version with a crashed case shows no score (SKY-350, SKY-367).
+            shown = None if self._server.metric_error(candidate) is not None else val_score
+            emit_candidate(
+                self._progress,
+                candidate_id=str(entry["candidate_id"]),
+                parent_id=None,
+                generation=0,
+                score=shown,
+                per_example=[] if shown is None else sweep,
+                candidate=candidate,
+                discovered_at_evals=self._server.used,
+                iteration=None,
+            )
+        return {"val_score": val_score, "best_val_score": self._best_val_score}
+
+    def _register(self, candidate: str) -> int:
+        """Give a candidate its id: its place in the order of first registrations.
+
+        Args:
+            candidate: The candidate.
+
+        Returns:
+            The id.
+        """
+        return self._candidate_registry.setdefault(candidate_key(candidate), len(self._candidate_registry))
+
+
+def _arguments(call: dict[str, Any]) -> dict[str, Any] | None:
+    """Read a tool call's arguments, sent as a mapping or as JSON text.
+
+    Args:
+        call: The tool call.
+
+    Returns:
+        The arguments, or ``None`` when they are not a JSON object.
+    """
+    arguments = call.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return None
+    return arguments if isinstance(arguments, dict) else None
+
+
+class _WorkerAutoResearch(native_engines.AutoResearchEngine):
+    """The native AutoResearch loop, with each round's session as a tool loop on the engine context."""
+
+    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext) -> None:
+        """Build the native engine and bind the context.
+
+        Args:
+            config: The native engine's config.
+            ctx: The engine loop's context, with its model, command and tree calls.
+        """
+        super().__init__(config)
+        self._ctx = ctx
+
+    def _layout(self, task: UpstreamTask, server: Any) -> None:
+        """Create the native lab, without ``eval.sh``: the ``evaluate`` tool takes its place.
+
+        Args:
+            task: The upstream task.
+            server: The upstream server adapter.
+        """
+        super()._layout(task, server)
+        (self.work_dir / "eval.sh").unlink()
+
+    def _brief(self) -> str:
+        """Return the native brief, with the ``evaluate`` tool in place of ``eval.sh``.
+
+        Returns:
+            The ``BRIEF.md`` text.
+        """
+        edits: list[tuple[str, ...]] = [
+            ("`STATE.md`, `eval.sh`, `frontier/`", "`STATE.md`, `frontier/`"),
+            (
+                "- `work/` is yours: write every new candidate there.",
+                "- `work/` is yours: write every new candidate there. Only `work/` and `notebook.md` carry over to "
+                "the next round.",
+            ),
+            (
+                "- `./eval.sh <file>` is a **full evaluation**",
+                "- The `evaluate` tool with only a `file` is a **full evaluation**",
+            ),
+            ("- If `eval.sh` prints", "- If the `evaluate` tool answers"),
+        ]
+        if self.example_ids:
+            edits.append(
+                (
+                    "- `./eval.sh <file> <example_id> [<example_id> ...]` is a **probe**",
+                    "- The `evaluate` tool with a `file` and `example_ids` is a **probe**",
+                )
+            )
+        return native_engines.adapt(super()._brief(), edits)
+
+    def _session(self, server: Any, directive: str, *, max_budget_usd: float | None) -> native_engines.ProposerOutcome:
+        """Run one round's session as a tool loop: one step per model reply and per command.
+
+        The cost cap counts only committed costs and the write-up grace counts model turns, so a resume makes the
+        same choices.
+
+        Args:
+            server: The upstream server adapter, with the engine's recording wrappers.
+            directive: This round's directive.
+            max_budget_usd: Proposer spend still allowed, or ``None``.
+
+        Returns:
+            The session's outcome.
+        """
+        ctx = self._ctx
+        assert ctx.put_files is not None
+        assert ctx.call_model is not None
+        start_used = server.budget.used
+        quota = self._round_quota(server)
+        files = {
+            path.relative_to(self.work_dir).as_posix(): path.read_bytes()
+            for path in sorted(self.work_dir.rglob("*"))
+            if path.is_file()
+        }
+        # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
+        tree = ctx.put_files(files, None)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": self._round_prompt(directive)}]
+        spent = Decimal(0)
+        text = ""
+        exhausted = False
+        killed = False
+        write_up = 0
+        while True:
+            if max_budget_usd is not None and float(spent) / 100 >= max_budget_usd:
+                exhausted = True
+                break
+            if quota is not None and server.budget.used - start_used >= quota:
+                if write_up >= _WRITE_UP_TURNS:
+                    killed = True
+                    break
+                write_up += 1
+            reply = ctx.call_model(messages, [BASH_TOOL, EVALUATE_TOOL])
+            spent += reply.cost_cents
+            text = reply.text
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply.text,
+                    **({"tool_calls": reply.tool_calls} if reply.tool_calls else {}),
+                }
+            )
+            if not reply.tool_calls:
+                break
+            for call in reply.tool_calls:
+                if call.get("name") == EVALUATE_TOOL["name"]:
+                    output, out_of_budget = self._evaluate(server, tree, call)
+                    exhausted = exhausted or out_of_budget
+                else:
+                    output, tree = self._exec(tree, call)
+                messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
+        self._pull(tree)
+        return native_engines.ProposerOutcome(
+            session_id=f"round{self.round}",
+            cost_usd=float(spent) / 100,
+            is_error=killed,
+            text=text,
+            budget_exhausted=exhausted,
+            killed=killed,
+        )
+
+    def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
+        """Run one bash call as one command over the tree, modeled on the Sandbox SDK ``exec``.
+
+        Args:
+            tree: The lab tree.
+            call: The tool call.
+
+        Returns:
+            The tool result as JSON text, and the tree after the command.
+        """
+        assert self._ctx.run_command is not None
+        arguments = _arguments(call)
+        command = None if arguments is None else arguments.get("command")
+        if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
+            # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
+            return json.dumps({"error": "Call the bash tool with a command string, or the evaluate tool."}), tree
+        try:
+            result, tree = self._ctx.run_command(tree, command, ())
+        except (TreeRejectedError, BoxFailureError) as error:
+            # The step committed the failure, so a resume raises it again and gets the same result here.
+            return json.dumps({"error": f"The command failed and changed nothing: {error}"}), tree
+        output = {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+        }
+        return json.dumps(output), tree
+
+    def _evaluate(self, server: Any, tree: str, call: dict[str, Any]) -> tuple[str, bool]:
+        """Score a lab file as the upstream HTTP handler that ``eval.sh`` calls does.
+
+        A full sweep of every visible example logs a checkpoint; a probe does not.
+
+        Args:
+            server: The upstream server adapter, with the engine's recording wrappers.
+            tree: The lab tree to read the file from.
+            call: The tool call.
+
+        Returns:
+            The tool result as JSON text, and whether the budget is spent.
+        """
+        assert self._ctx.read_file is not None
+        arguments = _arguments(call) or {}
+        file = arguments.get("file")
+        example_ids = arguments.get("example_ids") or None
+        path = posixpath.normpath(file) if isinstance(file, str) and file else ""
+        if not path or path.startswith(("/", "..")):
+            return json.dumps({"error": "Give `file` as a path inside the lab."}), False
+        if example_ids is not None and not (
+            isinstance(example_ids, list) and all(isinstance(eid, str) for eid in example_ids)
+        ):
+            return json.dumps({"error": "Give `example_ids` as a list of example id strings."}), False
+        data = self._ctx.read_file(tree, path)
+        if data is None:
+            return json.dumps({"error": f"No file {path} in the lab."}), False
+        try:
+            candidate = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return json.dumps({"error": f"{path} is not UTF-8 text."}), False
+        exhausted = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER}), True
+        if server.budget.remaining <= 0:
+            return exhausted
+        budget = server.budget
+        try:
+            if not server.task.has_dataset:
+                score, info = server.evaluate(candidate)
+                body: dict[str, Any] = {"score": score, "info": info}
+            else:
+                visible = set(self.example_ids)
+                unknown = [eid for eid in example_ids or () if eid not in visible]
+                if unknown:
+                    return json.dumps({"error": f"Unknown or sealed example_ids: {unknown[:5]}"}), False
+                targets = list(example_ids or self.example_ids)
+                average, info = server.evaluate_examples(candidate, example_ids=targets)
+                if set(targets) == visible:
+                    server.log_progress(average, candidate=candidate)
+                body = {
+                    "average_score": average,
+                    "scores": info.get("scores", {}),
+                    "infos": info.get("infos", {}),
+                    "num_evaluated": info.get("num_evaluated", 1),
+                }
+        except BudgetExhausted:
+            return exhausted
+        body["budget"] = {"used": budget.used, "remaining": budget.remaining}
+        return json.dumps(body), False
+
+    def _pull(self, tree: str) -> None:
+        """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
+
+        Args:
+            tree: The tree after the session.
+        """
+        assert self._ctx.read_file is not None
+        assert self._ctx.list_files is not None
+        work = self.work_dir / "work"
+        shutil.rmtree(work)
+        work.mkdir()
+        for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
+            content = self._ctx.read_file(tree, path)
+            if content is None:
+                continue
+            local = self.work_dir / path
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(content)
 
 
 class AutoResearchEngine:
-    """Select the round-based AutoResearch loop, which needs a coding-agent proposer."""
+    """Run the round-based AutoResearch loop in the worker engine loop."""
 
     name = "autoresearch"
 
     def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
-        """Delegate the research loop to the selected execution runtime.
+        """Run the unchanged loop, with its round sessions on the engine context, or in the native runtime.
 
         Args:
             task: Optimization inputs.
             server: Skynet scorer and budget.
-            ctx: Model routing, runtime and workspace.
+            ctx: The engine context; ``native_options`` gives the optional proposer knobs. With no worker
+                host, the native box runtime runs the engine.
 
         Returns:
-            The best server-verified candidate and execution evidence.
+            The best server-verified candidate and the loop's evidence.
+
+        Raises:
+            ServiceError: When a worker-loop run is on a repository, or the candidate is not one text.
+            BudgetExhaustedError: When no scorer call is left.
         """
-        return run_native_engine(self.name, task, server, ctx)
+        if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files):
+            # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
+            return run_native_engine(self.name, task, server, ctx)
+        if ctx.repo_seed is not None:
+            raise ServiceError("AutoResearch cannot run on a repository in the worker engine loop yet.")
+        if not task.str_mode:
+            raise ServiceError("Native agent engines require a single text candidate.")
+        if server.remaining <= 0:
+            raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
+        options = ctx.native_options
+        engine_config: dict[str, Any] = {"model": options.model if options else ""}
+        if options is not None:
+            engine_config["ralph"] = options.proposer.ralph
+        config = OptimizeAnythingConfig(
+            engine=self.name,
+            max_token_cost=options.max_token_cost if options else None,
+            max_evals=server.remaining,
+            max_concurrency=1,
+            run_dir=ctx.run_dir,
+            stop_at_score=ctx.stop_at_score,
+            sandbox=False,
+            engine_config=engine_config,
+        )
+        upstream = _WorkerAutoResearch(config, ctx).run(
+            UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, task, ctx)
+        )
+        return Result(
+            best_candidate=upstream.best_candidate,
+            best_score=upstream.best_score,
+            total_evals=server.used,
+            metadata=dict(upstream.metadata),
+        )
