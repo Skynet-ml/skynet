@@ -354,9 +354,9 @@ A manual hold on a change or on a promotion still stops it.
   orchestrator must check the green batch run itself before the merge. A new
   batch commit needs a new dispatched run.
 - **No unreviewed code on the batch branch.**
-  - A CI failure or a bug: fix it in the PR's own branch. That PR gets a new
-    review, then its new head goes into the batch again. Or remove the PR
-    from the batch.
+  - A CI failure or a bug: remove the PR from the batch, as "Merging into
+    staging" says. Fix it in the PR's own branch. After a new approval, the
+    PR returns to **Ready to Merge** and goes into a later batch.
   - A rebuild uses a new branch (`batch/<date>-<n+1>`) and a new batch PR.
     Close the old batch PR and delete its branch.
   - A merge conflict between PRs: the orchestrator may resolve it in the
@@ -390,11 +390,15 @@ A manual hold on a change or on a promotion still stops it.
 - The orchestrator builds one batch from every PR in **Ready to Merge**
   (see "PR tests and batch CI"). A PR branch does not need a merge from
   `staging`, because the batch starts from current `staging`.
-- A PR that the batch cannot take (a conflict it cannot resolve, a CI
-  failure) leaves the batch. The orchestrator moves its issue out of
-  **Ready to Merge**, removes the `ready-to-merge` label and puts the reason
-  in the PR and in Linear. The PR goes into a later batch only after a fix
-  and a new approval.
+- A PR that the batch cannot take (a conflict it cannot resolve, or a CI
+  failure that this PR causes) leaves the batch. The orchestrator moves its
+  issue back to **In Progress** and removes the `ready-to-merge` label. It
+  puts the reason in the PR and in Linear, and delegates the fix in the
+  existing worktree and branch. The PR goes into a later batch only after a
+  fix and a new approval.
+- A CI failure that no PR in the batch causes (a flaky test, a red
+  `staging`) follows section 3 (Urgent issue). The PRs stay in **Ready to
+  Merge**.
 - After GitHub confirms the batch merge, move each included issue to Done
   and attach the batch merge commit. A batch merge goes only into
   `staging`. It never goes into `main` and never touches production.
