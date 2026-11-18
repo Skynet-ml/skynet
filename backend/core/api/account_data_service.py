@@ -539,8 +539,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
             built (for example, boto3 is missing or no region is set). Also
             when the compactor keeps moving the account's packs for
             ``PACK_LOCK_TRIES`` tries; a retry can succeed. Also when a step
-            log shard fails; the message names the shard, and a retry can
-            succeed.
+            log shard fails, or a run records a shard that the map does not
+            have; the message names the shard, and a retry can succeed.
     """
     deleted = 0
     anonymized = 0
@@ -726,5 +726,11 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     )
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
+
+    # The other step log shards commit here, as the last step before the caller's main commit, so every
+    # main-database statement above already ran when they commit. The databases have no two-phase commit:
+    # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
+    # deletes it. purge_user ran every check that can fail the deletion before this point.
+    deleted += tree_purge.purge_user_shards(trees)
 
     return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

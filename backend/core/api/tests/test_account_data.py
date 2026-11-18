@@ -34,7 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import Engine, create_engine, select, text
+from sqlalchemy import Engine, create_engine, event, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -42,6 +42,7 @@ from sqlalchemy.pool import StaticPool
 from ...billing.budgets import BudgetService
 from ...billing.service import LOCAL_CUSTOMER_PREFIX, StripeBillingService, local_customer_id
 from ...config import app_env, settings
+from ...storage import tree_purge
 from ...storage.models import (
     AgentConversationModel,
     AgentFeedbackReportModel,
@@ -1155,6 +1156,86 @@ def test_deletion_purges_the_tree_rows_on_the_step_log_shards_that_the_settings_
     with Session(shard) as session:
         assert session.scalars(select(TreeObjectModel)).all() == []
         assert session.scalars(select(StoragePackModel)).all() == []
+
+
+def test_deletion_purges_the_step_log_shards_after_every_main_statement(
+    full_schema_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other shards commit their purge after the last main statement, right before the main commit.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    shard_url = f"sqlite:///{tmp_path / 's2.sqlite'}"
+    Base.metadata.create_all(
+        create_engine(shard_url),
+        tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__],
+    )
+    _seed_tree_pack(full_schema_engine)
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(shard_url)})
+    events: list[str] = []
+    real_purge = tree_purge.purge_user_shards
+
+    def _record_statement(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        """Record one main statement.
+
+        Args:
+            conn: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            *args: The other event arguments.
+        """
+        events.append(statement.split("(")[0].strip())
+
+    def _purge_shards(summary: Any) -> int:
+        """Record the shard purge, then run it.
+
+        Args:
+            summary: The purge summary.
+
+        Returns:
+            The count of rows deleted on the shards.
+        """
+        events.append("shard purge")
+        return real_purge(summary)
+
+    event.listen(full_schema_engine, "before_cursor_execute", _record_statement)
+    try:
+        with (
+            patch("core.storage.tree_purge.bucket_deleter", return_value=[].extend),
+            patch("core.api.account_data_service.tree_purge.purge_user_shards", _purge_shards),
+            Session(full_schema_engine) as session,
+        ):
+            delete_account(session, _EMAIL)
+            assert events[-1] == "shard purge"
+            session.commit()
+    finally:
+        event.remove(full_schema_engine, "before_cursor_execute", _record_statement)
+
+    assert any(statement.startswith("DELETE FROM users") for statement in events[:-1])
+
+
+def test_delete_answers_503_and_keeps_the_account_when_a_run_records_an_unknown_shard(
+    harness: SimpleNamespace,
+) -> None:
+    """A run on a step log shard that the map does not have stops the deletion with a 503 (SKY-733).
+
+    Args:
+        harness: The client and seeded data of the account-data routers.
+    """
+    with Session(harness.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == f"job-{_EMAIL}").values(step_log_shard="s9"))
+        session.commit()
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "accounts.deletion_storage_unavailable"
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.get(JobModel, f"job-{_EMAIL}") is not None
 
 
 def test_deletion_fails_and_keeps_the_account_when_a_step_log_shard_fails(

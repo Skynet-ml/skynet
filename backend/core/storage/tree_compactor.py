@@ -73,7 +73,9 @@ holds the locks until the shard commits, as a flush does. The sweep of the
 packs with no row reads the rows of every shard, so it never deletes a pack
 that another shard records. It claims an unrecorded flush pack on the shard
 that the pack's manifest names, the same database where an apply of the
-pack would insert its row. A shard that fails to answer stops the sweep.
+pack would insert its row. A shard that fails to answer stops the sweep. A
+job that records a shard that this map does not have also stops the sweep:
+the packs of that shard have their rows there, so they would look unrecorded.
 """
 
 from __future__ import annotations
@@ -685,6 +687,15 @@ class TreeCompactor:
                     old[prefix].append(key)
         if not old[COMPACTED_PREFIX] and not old[PACK_PREFIX]:
             return 0
+        unknown = self._unknown_shards()
+        if unknown:
+            # The rows of those shards are not read here, so their live packs would look unrecorded.
+            logger.error(
+                "Jobs record step log shards %s, which this map does not have; the sweep of the packs with "
+                "no row skips until every pod has the same STEP_LOG_SHARDS",
+                ", ".join(unknown),
+            )
+            return 0
         # A pack's row can be on any shard, so a pack goes only when no shard records it. A shard that does
         # not answer raises here, before any delete.
         recorded: set[str] = set()
@@ -709,6 +720,20 @@ class TreeCompactor:
                 continue
             removed += 1
         return removed
+
+    def _unknown_shards(self) -> list[str]:
+        """Return the step log shards that jobs on the main database record and this map does not have.
+
+        It runs after the LIST, so a run that records a new shard later writes only packs newer than the LIST.
+
+        Returns:
+            The shard names, sorted.
+        """
+        with Session(self._engine) as session:
+            recorded = set(
+                session.scalars(select(JobModel.step_log_shard).where(JobModel.step_log_shard.is_not(None)).distinct())
+            )
+        return sorted(recorded - set(self._shards.names()))
 
     def _flush_packs_by_shard(self, keys: list[str]) -> dict[str, list[str]]:
         """Group unrecorded flush packs by the shard that their manifest names.
@@ -814,12 +839,19 @@ def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
         The started compactor, or ``None`` when no bucket is set.
 
     Raises:
-        RuntimeError: When a bucket is set and boto3 is not installed.
+        RuntimeError: When a bucket is set and boto3 is not installed, or when ``STEP_LOG_SHARDS`` is
+            empty and a job records a shard other than ``main``.
     """
     found = tree_bucket_client()
     if found is None:
         return None
     bucket, client = found
+    shards = ShardMap.from_settings(engine)
+    try:
+        shards.check()
+    except Exception:
+        shards.dispose()
+        raise
 
     def delete_object(key: str) -> None:
         """Delete one object; S3 does not fail on a missing key.
@@ -829,8 +861,6 @@ def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
         """
         client.delete_object(Bucket=bucket, Key=key)
 
-    compactor = TreeCompactor(
-        engine, S3ObjectStore(bucket, client), delete_object, shards=ShardMap.from_settings(engine)
-    )
+    compactor = TreeCompactor(engine, S3ObjectStore(bucket, client), delete_object, shards=shards)
     compactor.start()
     return compactor

@@ -131,8 +131,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 is not set or the bucket client cannot be built (for example,
                 boto3 is missing or no region is set). Also when the compactor
                 keeps moving the account's packs for ``PACK_LOCK_TRIES``
-                tries; a retry can succeed. The database rows stay, so the
-                account is not deleted.
+                tries; a retry can succeed. Also when a step log shard fails,
+                or one of the account's runs records a shard that this pod's
+                ``STEP_LOG_SHARDS`` does not have. The main database rows
+                stay, so the account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking

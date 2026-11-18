@@ -71,7 +71,7 @@ from .models import (
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
 from .shard_map import MAIN, ShardMap, UnroutableRunError
-from .tree_purge import delete_run_rows, mark_run_packs
+from .tree_purge import delete_run_rows, mark_run_packs, purge_run_shards
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -1419,16 +1419,20 @@ class RemoteDBJobStore:
             optimization_id: ID of the job to remove.
 
         Raises:
-            TreePurgeError: When a step log shard fails; the job stays.
+            TreePurgeError: When a step log shard fails, or the run records a shard that the map does not
+                have; the job stays.
         """
         session = self._get_session()
         try:
             delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
             # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
-            # packs stay forever. The cascade stops at the main database, so this also deletes the steps on
-            # the other step log shards (SKY-733).
+            # packs stay forever (SKY-733).
             mark_run_packs(session, [optimization_id], self.step_log_shards)
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
+            # The cascade stops at the main database, so the other step log shards delete the steps, as
+            # the last step before the main commit. The databases have no two-phase commit: a main
+            # commit that still fails leaves the shard steps deleted and the job in place.
+            purge_run_shards([optimization_id], self.step_log_shards)
             session.commit()
         finally:
             session.close()
@@ -1511,7 +1515,8 @@ class RemoteDBJobStore:
             The number of job rows actually deleted.
 
         Raises:
-            TreePurgeError: When a step log shard fails; the jobs stay.
+            TreePurgeError: When a step log shard fails, or a run records a shard that the map does not
+                have; the jobs stay.
         """
         if not optimization_ids:
             return 0
@@ -1519,14 +1524,15 @@ class RemoteDBJobStore:
         try:
             delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
             # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
-            # packs stay forever. The cascade stops at the main database, so this also deletes the steps on
-            # the other step log shards (SKY-733).
+            # packs stay forever (SKY-733).
             mark_run_packs(session, optimization_ids, self.step_log_shards)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))
                 .delete(synchronize_session=False)
             )
+            # As in delete_job: the other shards delete the steps last, right before the main commit.
+            purge_run_shards(optimization_ids, self.step_log_shards)
             session.commit()
         finally:
             session.close()
