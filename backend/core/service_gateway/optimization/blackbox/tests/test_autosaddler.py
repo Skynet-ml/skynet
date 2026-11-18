@@ -9,6 +9,8 @@ boxes and a fake model: no network and no paid call.
 from __future__ import annotations
 
 import json
+import math
+import os
 import shlex
 import signal
 import subprocess
@@ -696,6 +698,74 @@ def test_the_child_gets_only_its_four_environment_variables(
     assert result.metadata["env"] == ["HOME", "LANG", "PATH", "PYTHONHASHSEED"]
 
 
+def test_the_child_honors_the_fixed_hash_seed_and_does_not_see_its_own_folder(tmp_path: Path) -> None:
+    """The child's flags keep ``PYTHONHASHSEED``, so set order is the same in a run and its replay.
+
+    The engine starts the image's AutoSaddler interpreter; ``APP_AUTOSADDLER_PYTHON`` names one, else this test
+    uses its own interpreter with the same flags and environment.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    script = (
+        "import json, sys\nsys.stdin.readline()\n"
+        'metadata = {"hash_randomization": sys.flags.hash_randomization, "path": sys.path}\n'
+        'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": metadata}\n'
+        'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
+    )
+    engine = _runner(tmp_path, script)
+    engine.python = os.environ.get("APP_AUTOSADDLER_PYTHON") or sys.executable
+    ctx = make_ctx(
+        str(tmp_path),
+        call_model=lambda *_: None,
+        run_command=lambda *_: None,
+        put_files=lambda *_: None,
+        read_file=lambda *_: None,
+        list_files=lambda *_: None,
+    )
+
+    result = engine.run(Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), ctx)
+
+    assert result.metadata["hash_randomization"] == 0
+    assert str(tmp_path) not in result.metadata["path"]
+
+
+def test_a_nan_in_a_reply_reaches_the_child_as_null(tmp_path: Path) -> None:
+    """A NaN in a model's tool arguments or in the scorer's side information does not stop the run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    lines = [
+        {"op": "model", "prompt": [{"role": "user", "content": "go"}], "tools": None},
+        {"op": "evaluate", "candidate": "seed", "example": None, "candidate_id": 0},
+    ]
+    script = (
+        "import json, sys\nsys.stdin.readline()\nreplies = []\n"
+        + "".join(
+            f"print({json.dumps(line)!r}, flush=True)\nreplies.append(json.loads(sys.stdin.readline()))\n"
+            for line in lines
+        )
+        + 'result = {"best_candidate": "seed", "best_score": 1.0, "metadata": {"replies": replies}}\n'
+        'print(json.dumps({"op": "result", "result": result}), flush=True)\n'
+    )
+    ctx = make_ctx(
+        str(tmp_path),
+        call_model=lambda *_: ModelReply("", Decimal(1), [_call("c1", "write_file", {"path": "a", "n": math.nan})]),
+        run_command=lambda *_: None,
+        put_files=lambda *_: None,
+        read_file=lambda *_: None,
+        list_files=lambda *_: None,
+    )
+    server = EvalServer(lambda *_: (1.0, {"note": math.nan, "list": [math.inf, 2.0]}), max_evals=1)
+
+    result = _runner(tmp_path, script).run(Task("seed"), server, ctx)
+
+    model, evaluation = result.metadata["replies"]
+    assert model["tool_calls"] == [{"id": "c1", "name": "write_file", "arguments": {"path": "a", "n": None}}]
+    assert evaluation == {"score": 1.0, "info": {"note": None, "list": [None, 2.0]}}
+
+
 def test_a_candidate_with_the_wrong_shape_is_never_scored(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -801,6 +871,10 @@ def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
                 '{"op": "command", "command": "true"}',
                 '{"op": "put_files", "files": [1]}',
                 '{"op": "read_file", "tree_id": "missing", "path": "a"}',
+                # Bad base64, a version count that is no number, and a result that is no object.
+                '{"op": "put_files", "files": {"a.txt": "a"}}',
+                '{"op": "progress", "event": {"candidate_id": 1, "score": 1.0, "candidate": "s", "total_evals": "x"}}',
+                '{"op": "result", "result": [1]}',
             )
         ),
     ],

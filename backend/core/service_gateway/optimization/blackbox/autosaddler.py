@@ -127,15 +127,17 @@ class AutoSaddlerEngine:
         workdir.mkdir(parents=True)
         with (workdir / "runner.log").open("w", encoding="utf-8") as log:
             child = subprocess.Popen(
-                [self.python, "-I", str(self.runner), WORKER_FLAG],
+                # ``-I`` would also ignore ``PYTHONHASHSEED``. ``-s -P`` keep the user site folder and the
+                # runner's own folder off ``sys.path``, so this module can not shadow upstream's ``autosaddler``.
+                [self.python, "-s", "-P", str(self.runner), WORKER_FLAG],
                 cwd=workdir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=log,
                 text=True,
                 encoding="utf-8",
-                # The child gets no worker secret. A fixed hash seed keeps set and dict order the same in a
-                # replay, so a prompt hash matches its committed step.
+                # The child gets no worker secret. A fixed hash seed keeps str hashes, and so set order, the same
+                # in a replay, so a prompt hash matches its committed step.
                 env={
                     "PATH": os.environ.get("PATH", ""),
                     "HOME": str(workdir),
@@ -191,12 +193,13 @@ class AutoSaddlerEngine:
                 line = child.stdout.readline()
             finally:
                 watchdog.cancel()
-            if silent.is_set():
-                raise ServiceError(
-                    f"The AutoSaddler runner sent no request for {_IDLE_SECONDS:g} seconds; see runner.log in the "
-                    "run folder."
-                )
             if not line:
+                # The watchdog can fire just after a full line arrives; only an empty read is its kill.
+                if silent.is_set():
+                    raise ServiceError(
+                        f"The AutoSaddler runner sent no request for {_IDLE_SECONDS:g} seconds; see runner.log in "
+                        "the run folder."
+                    )
                 raise ServiceError(_NO_RESULT)
             try:
                 request = json.loads(line)
@@ -207,9 +210,9 @@ class AutoSaddlerEngine:
                     "The AutoSaddler runner sent a request that is not a JSON object; see runner.log in the run folder."
                 )
             op = request.get("op")
-            if op == "result":
-                return dict(request.get("result") or {})
             try:
+                if op == "result":
+                    return dict(request.get("result") or {})
                 if op == "model":
                     reply = _model(ctx, request)
                 elif op == "command":
@@ -233,13 +236,19 @@ class AutoSaddlerEngine:
                     reply = {}
                 else:
                     raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")
-            except (KeyError, TypeError, LookupError) as error:
-                # A missing or mistyped field, or a tree the run can not see, is the child's fault, not the host's.
+            except (TypeError, ValueError, LookupError) as error:
+                # A missing, mistyped or malformed field, or a tree the run can not see, is the child's fault, not
+                # the host's.
                 raise ServiceError(
                     f"The AutoSaddler runner sent a bad request: {op!r} ({type(error).__name__}); see runner.log in "
                     "the run folder."
                 ) from error
-            _send(child.stdin, json.dumps(reply, default=side_info_json_default, allow_nan=False))
+            try:
+                text = json.dumps(_json_finite(reply), default=side_info_json_default, allow_nan=False)
+            except (TypeError, ValueError):
+                # As the native mailbox does: the child gets a refusal, and the run goes on.
+                text = json.dumps({"error": "The worker could not send its reply as JSON."})
+            _send(child.stdin, text)
 
 
 def _stop_silent(child: subprocess.Popen[str], silent: threading.Event) -> None:
@@ -439,6 +448,26 @@ def _finite(value: Any) -> bool:
         ``True`` for a finite int or float.
     """
     return isinstance(value, float | int) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _json_finite(value: Any) -> Any:
+    """Make a reply strict-JSON safe: each NaN or infinity becomes ``None``.
+
+    A NaN score already reads as ``None`` in the child; side information and tool arguments keep their other values.
+
+    Args:
+        value: The reply, or a value in it.
+
+    Returns:
+        The same structure with each non-finite float as ``None``.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_finite(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_finite(item) for item in value]
+    return value
 
 
 def _result(document: dict[str, Any], task: Task, server: EvalServer) -> Result:
