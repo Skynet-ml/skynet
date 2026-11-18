@@ -7,6 +7,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -2054,8 +2055,8 @@ def test_a_setup_that_runs_too_long_stops_with_every_process_it_started(tmp_path
         pytest.fail("The setup's child process still runs.")
 
 
-def test_the_setup_runs_once_per_checkout_until_a_reset_removes_its_output(tmp_path: Path) -> None:
-    """A second session in the same checkout skips the setup; ``git clean -fdx`` brings it back (SKY-753).
+def test_the_setup_runs_once_and_a_reset_checkout_gets_its_output_back(tmp_path: Path) -> None:
+    """``git clean -fdx`` removes the setup's output, and the next session gets a copy, not a new setup (SKY-753).
 
     Args:
         tmp_path: The checkout and the setup's log.
@@ -2069,7 +2070,13 @@ def test_the_setup_runs_once_per_checkout_until_a_reset_removes_its_output(tmp_p
         )
     (checkout / "parent.txt").write_text("from the parent version")
     log = tmp_path / "setup.log"
-    command = [sys.executable, "-c", f"open('out [x].txt', 'w'); open({str(log)!r}, 'a').write('ran\\n')"]
+    command = [
+        sys.executable,
+        "-c",
+        "import os; os.makedirs('deps/bin'); open('deps/bin/tool', 'w').write('t');"
+        " os.symlink('bin/tool', 'deps/link'); open('out [x].txt', 'w').write('o');"
+        f" open({str(log)!r}, 'a').write('ran\\n')",
+    ]
 
     harness_bridge.ensure_setup(command, checkout)
     harness_bridge.ensure_setup(command, checkout)
@@ -2081,11 +2088,56 @@ def test_the_setup_runs_once_per_checkout_until_a_reset_removes_its_output(tmp_p
         check=True,
     ).stdout
     subprocess.run(["git", "clean", "-fdxq"], cwd=checkout, check=True)
+    (checkout / "out [x].txt").write_text("from the next version")
     harness_bridge.ensure_setup(command, checkout)
 
-    assert log.read_text() == "ran\nran\n"
+    assert log.read_text() == "ran\n"
     # Only the setup's own output is hidden; the parent version's new file stays in the version.
     assert status == "?? parent.txt\n"
+    assert (checkout / "deps/bin/tool").read_text() == "t"
+    assert (checkout / "deps/link").readlink() == Path("bin/tool")
+    # A file of the version at a setup path wins over the kept copy.
+    assert (checkout / "out [x].txt").read_text() == "from the next version"
+
+
+def test_a_tracked_file_with_the_old_marker_name_does_not_skip_the_setup(tmp_path: Path) -> None:
+    """The setup's record is in the git dir, so no repository file can claim that the setup already ran (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    for name in (".ascent-proposer-setup", harness_bridge.SETUP_STATE):
+        (checkout / name).write_text("done")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    log = tmp_path / "setup.log"
+
+    harness_bridge.ensure_setup([sys.executable, "-c", f"open({str(log)!r}, 'a').write('ran')"], checkout)
+
+    assert log.read_text() == "ran"
+
+
+@pytest.mark.parametrize("name", ["x\n*", "x\t", "x ", "x\r"])
+def test_a_setup_file_name_that_no_exclude_line_can_hold_stops_the_run(tmp_path: Path, name: str) -> None:
+    """A newline would write a ``*`` line that hides every file, and git drops trailing whitespace (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        name: A file name the setup writes.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    command = [sys.executable, "-c", f"open({name!r}, 'w')"]
+
+    with pytest.raises(RuntimeError, match=r"control character or end in whitespace: " + re.escape(repr(name))):
+        harness_bridge.ensure_setup(command, checkout)
+
+    exclude = checkout / ".git/info/exclude"
+    assert "*" not in (exclude.read_text().splitlines() if exclude.exists() else [])
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
 def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) -> None:
@@ -2258,7 +2310,7 @@ def test_a_setup_that_edits_a_tracked_file_stops_with_its_command_and_the_file(t
     ):
         harness_bridge.ensure_setup(command, checkout)
 
-    assert not (checkout / harness_bridge.SETUP_MARKER).exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
 def test_a_setup_that_leaves_the_parent_versions_tracked_edits_alone_passes(tmp_path: Path) -> None:
@@ -2272,7 +2324,7 @@ def test_a_setup_that_leaves_the_parent_versions_tracked_edits_alone_passes(tmp_
 
     harness_bridge.ensure_setup([sys.executable, "-c", "open('new.txt', 'w')"], checkout)
 
-    assert (checkout / harness_bridge.SETUP_MARKER).exists()
+    assert (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
 def test_a_files_command_outside_a_checkout_runs_the_default_agent(tmp_path: Path) -> None:
@@ -2403,7 +2455,7 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
     ):
         harness_bridge.ensure_setup(command, checkout)
 
-    assert not (checkout / harness_bridge.SETUP_MARKER).exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
 def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:

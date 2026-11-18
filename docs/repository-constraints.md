@@ -94,11 +94,17 @@ empty part fails the setup check, and the message names the key.
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
 - `setup` without `entry` fails the setup check.
-- `setup` runs in the repository checkout where the command runs, before a
-  proposer session, also in a protected run. It runs again each time that
-  checkout loses its output: GEPA and Best-of-N reset the checkout before and
-  after each version, and AutoSaddler gives each session a new worktree. So
-  write a `setup` that you can run again with the same result. The files it
+- `setup` runs once in each proposer box, in the repository checkout where
+  the command runs, before the first proposer session, also in a protected
+  run. The run keeps a copy of the files that `setup` adds in the git
+  folder. GEPA and Best-of-N reset the checkout before and after each
+  version, and AutoSaddler gives each session a new worktree. Each later
+  session gets the kept copy back, and `setup` does not run again. A file
+  of the version at the same path stays, and the copy does not replace it.
+  The copy keeps symbolic links as links. A file that holds the absolute
+  path of the first checkout (for example a Python virtual environment)
+  can fail in an AutoSaddler worktree, because each worktree has a
+  different path. The copy uses disk space in the box. The files it
   adds never join a version. It has 30 minutes, but never more than the
   time that the proposer session has left: the setup time counts inside the
   session's time limit. If it fails or runs out of time, the run stops, and
@@ -111,6 +117,9 @@ empty part fails the setup check, and the message names the key.
   every version. Edits that the version made before `setup` ran do not count.
   The same applies to the new files of the version that git does not track
   yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
+- A file or folder name that `setup` adds cannot hold a control character
+  (such as a new line) or end in a space. The run cannot keep such a name
+  out of the versions, so the run stops, and the message names the file.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in

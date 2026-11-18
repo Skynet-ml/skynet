@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -48,12 +49,15 @@ TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
 # in the sandbox, so it cannot import that constant.
 SETUP_TIMEOUT_SECONDS = 1_800.0
-# Written into a checkout once ``[proposer] setup`` succeeds there. A reset
-# (``git clean -fdx``) or a fresh worktree has no marker and none of the
-# setup's output, so the next session runs the setup again (SKY-753).
-SETUP_MARKER = ".ascent-proposer-setup"
+# The folder in the git dir that keeps ``[proposer] setup``'s record and a
+# copy of its output. ``git clean -fdx`` never touches the git dir, and every
+# AutoSaddler worktree shares it, so the setup runs once per box (SKY-753).
+SETUP_STATE = "ascent-proposer-setup"
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
+# An exclude line cannot hold these: a newline starts a new pattern, and git
+# drops trailing whitespace, so such a name could hide other files.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
@@ -527,10 +531,12 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, text=True, check=False)
+    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, check=False)
+    # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
+    stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
     if done.returncode != 0:
-        raise RuntimeError(f"git {arguments[0]} failed: {(done.stderr or done.stdout).strip()[-2000:]}")
-    return done.stdout
+        raise RuntimeError(f"git {arguments[0]} failed: {(stderr or stdout).strip()[-2000:]}")
+    return stdout
 
 
 def _untracked(checkout: Path, *, folders: bool) -> set[str]:
@@ -604,11 +610,51 @@ def _tracked_changes(checkout: Path) -> dict[str, str]:
     return {path: _tracked_state(checkout, path) for path in paths if path}
 
 
-def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
-    """Run ``[proposer] setup`` in a checkout unless its output is still there.
+def _copy_path(source: Path, target: Path) -> None:
+    """Copy one file, link or folder of a setup's output, with its links kept as links.
 
-    The same command in the same folder gives the same result, so a session
-    after a reset or in a fresh worktree gets the setup again. What the setup
+    Args:
+        source: The path to copy.
+        target: The new path; its parent folders are made.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, target, symlinks=True)
+    else:
+        shutil.copy2(source, target, follow_symlinks=False)
+
+
+def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
+    """Turn a setup's output paths into exclude lines, and refuse a name no line can hold.
+
+    Args:
+        paths: Checkout-relative paths; a folder ends with ``/``.
+        command: The setup's argument list, for the error.
+
+    Returns:
+        One anchored exclude line per path.
+
+    Raises:
+        RuntimeError: When a name holds a control character or ends in whitespace.
+    """
+    unsafe = sorted(
+        path for path in paths if _CONTROL_CHARS.search(path) or path.rstrip("/") != path.rstrip("/").rstrip()
+    )
+    if unsafe:
+        raise RuntimeError(
+            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names hold"
+            f" a control character or end in whitespace: {', '.join(repr(path) for path in unsafe)}. The run"
+            " cannot keep such a file out of the versions. Rename it in the setup."
+        )
+    return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
+
+
+def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
+    """Run ``[proposer] setup`` once per box, and give each later checkout a copy of its output.
+
+    The setup runs in the first checkout. Its output is copied into
+    :data:`SETUP_STATE` in the git dir, and a session after a reset or in a
+    new worktree gets that copy back, without a second setup. What the setup
     adds is excluded from every version, like the harness files (SKY-753).
 
     Args:
@@ -617,45 +663,61 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         timeout_seconds: Stop the setup, and every process it started, after this long.
 
     Raises:
-        RuntimeError: When the setup or git fails, or the setup changes a file of the version.
+        RuntimeError: When the setup or git fails, the setup changes a file of
+            the version, or it writes a name that no exclude line can hold.
     """
-    marker = checkout / SETUP_MARKER
-    if marker.exists():
-        return
-    # Files the parent version added are untracked too; only the setup's new paths are excluded.
-    before = _untracked(checkout, folders=False)
-    version_files = {path: _tracked_state(checkout, path) for path in before}
-    tracked = _tracked_changes(checkout)
-    run_setup(command, checkout, timeout_seconds)
-    changed = sorted(
-        path
-        for path in tracked.keys() | _tracked_changes(checkout).keys()
-        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
-    )
-    if changed:
-        raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
-            f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
-            " files that git does not track."
+    common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
+    common = common if common.is_absolute() else checkout / common
+    state = common / SETUP_STATE
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "lock").open("a") as lock:
+        # Parallel AutoSaddler sessions share the git dir; one runs the setup, the others wait for its output.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = state / "done.json"
+        if record.exists():
+            for path in json.loads(record.read_text(encoding="utf-8"))["output"]:
+                name = path.rstrip("/")
+                # A file that the version holds at the same path wins over the setup's copy.
+                if not os.path.lexists(checkout / name):
+                    _copy_path(state / "output" / name, checkout / name)
+            return
+        # Files the parent version added are untracked too; only the setup's new paths are excluded.
+        before = _untracked(checkout, folders=False)
+        version_files = {path: _tracked_state(checkout, path) for path in before}
+        tracked = _tracked_changes(checkout)
+        run_setup(command, checkout, timeout_seconds)
+        changed = sorted(
+            path
+            for path in tracked.keys() | _tracked_changes(checkout).keys()
+            if path not in tracked or tracked[path] != _tracked_state(checkout, path)
         )
-    # GEPA and Best-of-N check out a parent version with its new files untracked;
-    # a change to one of them would enter every version as well.
-    rewritten = sorted(path for path, state in version_files.items() if _tracked_state(checkout, path) != state)
-    if rewritten:
-        raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed files"
-            f" of the version: {', '.join(rewritten)}. Those changes would enter every version. Make the setup"
-            " write only new files that git does not track."
-        )
-    added = sorted(_setup_output(checkout, before) | {SETUP_MARKER})
-    exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
-    exclude = (exclude if exclude.is_absolute() else checkout / exclude) / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in added]
-    known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
-    with exclude.open("a", encoding="utf-8") as stream:
-        stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-    marker.write_text(shlex.join(command) + "\n", encoding="utf-8")
+        if changed:
+            raise RuntimeError(
+                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+                " files that git does not track."
+            )
+        # GEPA and Best-of-N check out a parent version with its new files untracked;
+        # a change to one of them would enter every version as well.
+        rewritten = sorted(path for path, content in version_files.items() if _tracked_state(checkout, path) != content)
+        if rewritten:
+            raise RuntimeError(
+                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed files"
+                f" of the version: {', '.join(rewritten)}. Those changes would enter every version. Make the setup"
+                " write only new files that git does not track."
+            )
+        added = sorted(_setup_output(checkout, before))
+        lines = _excludable(added, command)
+        output = state / "output"
+        shutil.rmtree(output, ignore_errors=True)
+        for path in added:
+            _copy_path(checkout / path.rstrip("/"), output / path.rstrip("/"))
+        exclude = common / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+        with exclude.open("a", encoding="utf-8") as stream:
+            stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+        record.write_text(json.dumps({"output": added}), encoding="utf-8")
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:

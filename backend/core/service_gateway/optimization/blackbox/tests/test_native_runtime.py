@@ -631,11 +631,11 @@ def _guest_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: d
 def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The setup's output is in the checkout at every GEPA and Best-of-N session, also after a reset (SKY-753).
+    """The setup runs once, and its output is in the checkout at every GEPA and Best-of-N session (SKY-753).
 
     The bootstrap skips install steps in a protected run, so the setup goes
     with the proposer. ``git clean -fdx`` removes its output between
-    sessions, so the next session runs it again, and none of it joins a version.
+    sessions, so the next session gets the kept copy back, and none of it joins a version.
 
     Args:
         tmp_path: Artifact destination and guest folder.
@@ -679,12 +679,11 @@ def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_sess
     assert log.read_text().splitlines() == [
         f"setup {checkout}",
         f"agent {checkout} True",
-        f"setup {checkout}",
         f"agent {checkout} True",
     ]
     assert "src.txt" in second
     assert "setup-out" not in first + second
-    assert harness_bridge.SETUP_MARKER not in first + second
+    assert harness_bridge.SETUP_STATE not in first + second
 
 
 def test_a_files_proposer_whose_setup_fails_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

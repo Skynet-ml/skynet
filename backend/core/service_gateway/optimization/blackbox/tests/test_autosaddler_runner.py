@@ -579,7 +579,7 @@ print("done")
 def test_each_autosaddler_session_worktree_gets_the_files_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upstream gives each session a new worktree, so the setup runs in each one, where the command runs (SKY-753).
+    """Upstream gives each session a new worktree; the setup runs once, and each worktree gets its output (SKY-753).
 
     Args:
         tmp_path: Guest folder.
@@ -623,7 +623,9 @@ def test_each_autosaddler_session_worktree_gets_the_files_setup(
         asyncio.run(transport.run(session, 30.0))
 
     assert log.read_text().splitlines() == [
-        line for worktree in worktrees for line in (f"setup {worktree}", f"agent {worktree} True")
+        f"setup {worktrees[0]}",
+        f"agent {worktrees[0]} True",
+        f"agent {worktrees[1]} True",
     ]
     assert not (space.source_repo / "setup-out").exists()
     for worktree in worktrees:
