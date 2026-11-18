@@ -1016,6 +1016,8 @@ def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
                 # Bad base64, a version count that is no number, and a result that is no object.
                 '{"op": "put_files", "files": {"a.txt": "a"}}',
                 '{"op": "progress", "event": {"candidate_id": 1, "score": 1.0, "candidate": "s", "total_evals": "x"}}',
+                # json.loads reads 1e999 as inf, and int(inf) raises OverflowError.
+                '{"op": "progress", "event": {"candidate_id": 1, "score": 1.0, "candidate": "s", "total_evals": 1e999}}',
                 '{"op": "progress", "event": [1]}',
                 '{"op": "progress", "event": []}',
                 '{"op": "progress", "event": 0}',

@@ -248,9 +248,9 @@ class AutoSaddlerEngine:
                     reply = {}
                 else:
                     raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")
-            except (TypeError, ValueError, LookupError) as error:
+            except (TypeError, ValueError, LookupError, ArithmeticError) as error:
                 # A missing, mistyped or malformed field, or a tree the run can not see, is the child's fault, not
-                # the host's.
+                # the host's. ArithmeticError covers a number the host can not convert, such as int(inf) from 1e999.
                 raise ServiceError(
                     f"The AutoSaddler runner sent a bad request: {op!r} ({type(error).__name__}); see runner.log in "
                     "the run folder."
