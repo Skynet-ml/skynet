@@ -21,7 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, text, update
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -31,9 +31,18 @@ from core.api.routers.optimizations import create_optimizations_router
 from core.billing.budgets import BudgetService
 from core.config import app_env, settings
 from core.constants import WORKER_RESTART_CAUSE
-from core.storage.models import Base, BillingCustomerModel, GepaCheckpointModel, JobModel
+from core.storage.models import (
+    AgentStepModel,
+    Base,
+    BillingCustomerModel,
+    GepaCheckpointModel,
+    JobModel,
+    StoragePackModel,
+    TreeObjectModel,
+)
 from core.storage.object_store import LocalObjectStore
 from core.storage.remote import MAX_AUTOMATIC_RESUMES, RemoteDBJobStore
+from core.storage.shard_map import ShardMap, UnroutableRunError
 from core.storage.step_log_store import StepFenceError, StepLogStore
 from core.worker.checkpoint_compat import checkpoint_manifest
 from core.worker.step_recovery import last_committed_step, open_step_log, park_run, still_owns_run
@@ -268,6 +277,67 @@ def test_a_kill_between_steps_continues_after_the_last_committed_step(store: Ste
     log_b.durable(step_id, new_generation)
 
 
+def test_a_run_on_another_shard_resumes_at_its_last_committed_step(tmp_path: Path, objects: LocalObjectStore) -> None:
+    """A run whose steps are on shard ``s2`` resumes from them, not from the start (SKY-731)."""
+    store = make_sqlite_store(tmp_path)
+    shard = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(
+        shard, tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+    )
+    shards = ShardMap(store.engine, {"s2": shard})
+    store._step_log_shards = shards
+    _funded_run(store)
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(step_log_shard="s2"))
+        session.commit()
+    old_generation = _claim(store, "pod-a")
+    log_a = StepLogStore(store.engine, objects, "pod-a", flush_window_seconds=60.0, shards=shards)
+    try:
+        for seq in (0, 1):
+            _commit(log_a, seq, old_generation)
+        log_a.flush()
+    finally:
+        log_a.close()
+    with Session(store.engine) as session:
+        assert session.scalar(select(AgentStepModel.step_id)) is None
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job(RUN)["message"] == "Resuming after a worker restart"
+    _claim(store, "pod-b")
+    log_b = StepLogStore(store.engine, objects, "pod-b", flush_window_seconds=60.0, shards=shards)
+    try:
+        last = last_committed_step(store.engine, log_b, RUN, AGENT)
+    finally:
+        log_b.close()
+    assert last is not None
+    assert last["seq"] == 1
+    shard.dispose()
+
+
+def test_a_resume_of_a_run_on_a_shard_this_pod_lacks_raises_unroutable(tmp_path: Path) -> None:
+    """A resume of a run that records a shard the pod does not have raises ``UnroutableRunError`` and leaves the row."""
+    store = make_sqlite_store(tmp_path)
+    store._step_log_shards = ShardMap(store.engine)
+    _funded_run(store)
+    _claim(store, "pod-a")
+    with Session(store.engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN).values(step_log_shard="s9"))
+        session.commit()
+    _kill(store)
+    before = store.get_job(RUN)
+
+    with pytest.raises(UnroutableRunError, match="s9"):
+        store.requeue_for_resume(RUN, automatic=True)
+
+    after = store.get_job(RUN)
+    assert (after["status"], after["attempts"], after["execution_generation"]) == (
+        before["status"],
+        before["attempts"],
+        before["execution_generation"],
+    )
+
+
 def test_a_kill_mid_step_drops_the_step_that_was_not_durable(store: StepJobStore, step_logs: Any) -> None:
     """A step still in the dead worker's buffer is not committed, and it never lands after the bump."""
     _funded_run(store)
@@ -333,6 +403,35 @@ def test_a_crashed_pack_is_fenced_when_its_pod_restarts(
         restarted.close()
     assert last is not None
     assert last["seq"] == 0
+
+
+def test_open_step_log_closes_the_store_when_recovery_fails(
+    tmp_path: Path, objects: LocalObjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed recovery stops the store's flusher thread, so a worker that retries the open leaks no thread."""
+    opened: list[StepLogStore] = []
+
+    def fail(self: StepLogStore) -> int:
+        """Keep the store and fail its recovery, as a down object store does.
+
+        Args:
+            self: The store.
+
+        Raises:
+            OSError: Always.
+        """
+        opened.append(self)
+        raise OSError("object store down")
+
+    monkeypatch.setattr(StepLogStore, "recover", fail)
+
+    with pytest.raises(OSError, match="object store down"):
+        open_step_log(make_sqlite_store(tmp_path).engine, objects, "pod-a")
+
+    assert len(opened) == 1
+    assert not opened[0]._thread.is_alive()
+    with pytest.raises(RuntimeError, match="closed"):
+        _commit(opened[0], 0, 1)
 
 
 def test_a_stale_worker_commit_after_the_bump_fails_with_the_fence_error(store: StepJobStore, step_logs: Any) -> None:

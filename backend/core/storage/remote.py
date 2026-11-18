@@ -71,6 +71,7 @@ from .models import (
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
+from .shard_map import MAIN, ShardMap, UnroutableRunError
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -647,6 +648,25 @@ class PostgresSandboxTrialStore:
             ]
 
 
+def _step_resume_at(session: Session, run_id: str) -> datetime | None:
+    """Return the oldest of the run's newest committed step times, one for each agent.
+
+    Args:
+        session: A session on the run's step log shard.
+        run_id: The job id.
+
+    Returns:
+        The time, or ``None`` when the run committed no step.
+    """
+    newest_per_agent = (
+        session.query(func.max(AgentStepModel.created_at).label("newest"))
+        .filter(AgentStepModel.run_id == run_id)
+        .group_by(AgentStepModel.agent_id)
+        .subquery()
+    )
+    return session.query(func.min(newest_per_agent.c.newest)).scalar()
+
+
 class RemoteDBJobStore:
     """PostgreSQL-backed job storage using SQLAlchemy.
 
@@ -687,6 +707,7 @@ class RemoteDBJobStore:
             db_url,
             **_build_engine_kwargs(db_url),
         )
+        self._step_log_shards = ShardMap.from_settings(self._engine)
         if settings.embeddings_enabled and settings.embeddings_dim != EMBEDDING_DIM:
             # The embedding columns are a fixed-width vector(EMBEDDING_DIM). A
             # mismatched EMBEDDINGS_DIM boots fine but pgvector then rejects every
@@ -1782,13 +1803,17 @@ class RemoteDBJobStore:
             # before an engine with more than one agent writes the step log.
             # created_at is the time the pack was applied, not the commit time, so
             # the bound can be a flush window late (SKY-711 follow-up).
-            newest_per_agent = (
-                session.query(func.max(AgentStepModel.created_at).label("newest"))
-                .filter(AgentStepModel.run_id == optimization_id)
-                .group_by(AgentStepModel.agent_id)
-                .subquery()
-            )
-            step_resume_at = session.query(func.min(newest_per_agent.c.newest)).scalar()
+            # The jobs row lock stays held while the shard answers, as in a step log flush, so no step lands in between.
+            shard = job.step_log_shard or MAIN
+            if shard not in self.step_log_shards.names():
+                raise UnroutableRunError(
+                    f"run {optimization_id} records step log shard {shard!r}, which this pod does not have"
+                )
+            if shard == MAIN:
+                step_resume_at = _step_resume_at(session, optimization_id)
+            else:
+                with Session(self.step_log_shards.engine(shard)) as shard_session:
+                    step_resume_at = _step_resume_at(shard_session, optimization_id)
             fresh_restart = (automatic or resumes_interrupted) and not checkpoints and step_resume_at is None
             if not checkpoints and step_resume_at is None and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
@@ -2202,6 +2227,15 @@ class RemoteDBJobStore:
             return override
         return settings.user_storage_quota_bytes
 
+    @property
+    def step_log_shards(self) -> ShardMap:
+        """Return the step log shard map over this store's engine."""
+        # A test store that skips ``__init__`` builds the map on its first use.
+        shards = getattr(self, "_step_log_shards", None)
+        if shards is None:
+            shards = self._step_log_shards = ShardMap.from_settings(self._engine)
+        return shards
+
     def compute_user_storage(self, username: str) -> StorageUsage:
         """Return the user's unified storage usage across every owned table.
 
@@ -2211,7 +2245,7 @@ class RemoteDBJobStore:
         Returns:
             The :class:`StorageUsage` total and per-category breakdown.
         """
-        return compute_user_storage(self._engine, username)
+        return compute_user_storage(self._engine, username, self.step_log_shards)
 
     def compute_user_storage_items(self, username: str, limit: int = 20) -> list[StorageItem]:
         """Return the user's largest individual items for the cleanup list.
