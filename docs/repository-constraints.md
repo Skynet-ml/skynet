@@ -128,11 +128,15 @@ empty part fails the setup check, and the message names the key.
   engines with `entry` fails the setup check, and the message names
   `[proposer] entry` and the engine. Auto leaves out their lanes, and the run
   record says so in a note.
-- Every repository file that `entry` or `setup` names by its exact path,
-  such as `agent/my-agent.js` or `scripts/setup.sh`, is protected, like
-  `optimize.toml`. Other files that the command uses are not protected:
-  modules that it imports, a module in `python -m agent.main`, a script in
-  `sh -c "node agent.js"`, or `package.json`. A version can change those
+- Every repository file or folder that `entry` or `setup` names by its
+  exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
+  `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
+  The run reads each argument as a path relative to the checkout root, after
+  it removes `./` and a final `/`. An absolute path, the root itself (`.`)
+  and a path outside the checkout are never protected. A protected folder
+  protects every file in it. Other files that the command uses are not
+  protected: modules that it imports, a module in `python -m agent.main`, a
+  script in `sh -c "node agent.js"`, or `package.json`. A version can change those
   files, and so change the proposer of the next versions. To prevent this,
   put your proposer's folder in `[paths] protected`, for example
   `protected = ["agent"]`.

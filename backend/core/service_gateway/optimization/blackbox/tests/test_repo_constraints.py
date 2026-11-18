@@ -249,6 +249,30 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
 
 
+def test_a_folder_that_the_setup_names_is_protected_with_everything_in_it(tmp_path: Path) -> None:
+    """``npm ci --prefix agent`` protects the agent folder, but never the checkout root or a path outside (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nentry = ["node", "agent/bin/run.js"]\n'
+        b'setup = ["npm", "ci", "--prefix", "./agent/", ".", "..", "../agent", "src/app", "missing"]\n',
+        {"agent/bin/run.js": b"// agent", "agent/package.json": b"{}", "src/app.js": b"// app"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    assert constraints.proposer_command_files == ("agent/bin/run.js", "agent")
+    patch = (
+        "diff --git a/agent/package.json b/agent/package.json\n--- a/agent/package.json\n"
+        "+++ b/agent/package.json\n@@ -1 +1 @@\n-{}\n+{ }\n"
+    )
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+
+
 def test_the_setup_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
     """A version cannot rewrite the script that ``[proposer] setup`` runs before the first session.
 

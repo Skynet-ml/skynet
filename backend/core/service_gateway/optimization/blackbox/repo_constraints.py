@@ -311,7 +311,7 @@ class RepoConstraints:
     # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
     proposer_entry: tuple[str, ...] | None = None
     proposer_setup: tuple[str, ...] | None = None
-    # The repository files that entry and setup name; read_constraints fills them, and the file proposer protects them.
+    # The repository files and folders that entry and setup name; read_constraints fills them, and the file proposer protects them.
     proposer_command_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
@@ -1627,7 +1627,12 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
 
 
 def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
-    """Find the repository files that ``[proposer] entry`` and ``setup`` name, such as ``agent/run.js``.
+    """Find the repository files and folders that ``[proposer] entry`` and ``setup`` name.
+
+    An argument names a path when, normalized, it is relative and equals a
+    file of the snapshot, such as ``agent/run.js``, or a folder that holds
+    one, such as ``agent`` in ``npm ci --prefix agent``. The checkout root
+    (``.``) is never one, and a protected folder covers all its files.
 
     Args:
         constraints: The parsed proposal.
@@ -1639,10 +1644,11 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
     if constraints.proposer_entry is None:
         return constraints
     with tarfile.open(archive, "r:gz") as packed:
-        files = {str(PurePosixPath(member.name)) for member in packed.getmembers() if member.isfile()}
+        files = {PurePosixPath(member.name) for member in packed.getmembers() if member.isfile()}
+    paths = {str(path) for file in files for path in (file, *file.parents)} - {"."}
     parts = (*constraints.proposer_entry, *(constraints.proposer_setup or ()))
     named = (posixpath.normpath(part) for part in parts if not part.startswith("/"))
-    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(path for path in named if path in files)))
+    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(path for path in named if path in paths)))
 
 
 def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
