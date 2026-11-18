@@ -583,7 +583,7 @@ class _Proposer:
             ``{"error": ...}`` when the command failed or wrote a path it may not write.
 
         Raises:
-            ServiceError: When the ``[proposer] setup`` command fails.
+            ServiceError: When the ``[proposer] setup`` command fails, or changes or removes a file of the seed.
             GrantDeniedError: When the engine loop cannot resolve the grants. A ``run_command`` that resolves the
                 grants itself raises ``GrantError`` instead, a ``ValueError``; the method passes it on too, so it
                 stops the run and does not become a failed mutation.

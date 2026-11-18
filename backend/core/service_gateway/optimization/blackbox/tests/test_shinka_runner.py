@@ -2192,6 +2192,7 @@ def test_the_command_editor_files_the_tree_the_command_leaves_as_the_child(tmp_p
         ({"files": {"src/util.py": 7}}, "malformed version"),
         ({"files": {"../escape.py": "x"}}, "'../escape.py' is outside the repository"),
         ({"files": {"/abs/x": "x"}}, "'/abs/x' is outside the repository"),
+        ({"files": {"src/util.py/x.py": "x"}}, "'src/util.py/x.py' is below a file"),
         ({"files": {}}, ""),
     ],
 )

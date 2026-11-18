@@ -1183,17 +1183,21 @@ def checked_target(checkout: Path, path: str) -> Path:
         The target file.
 
     Raises:
-        ValueError: When the path leaves the checkout, crosses a symlink, or names a non-file.
+        ValueError: When the path leaves the checkout, crosses a symlink, lies below a file, or names a non-file.
     """
     root = checkout.resolve()
     target = root / path
     if not target.resolve().is_relative_to(root):
         raise ValueError(f"'{path}' is outside the repository.")
     current = root
-    for part in Path(path).parts:
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
         current = current / part
         if current.is_symlink():
             raise ValueError(f"'{path}' crosses a symlink.")
+        # Creating the parent folders would raise an OSError whose message names the worker's scratch folder.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise ValueError(f"'{path}' is below a file.")
     if target.exists() and not target.is_file():
         raise ValueError(f"'{path}' is not a regular file.")
     return target
