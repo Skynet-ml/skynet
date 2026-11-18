@@ -137,6 +137,10 @@ _GIT_IDENTITY = ("-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 _REPO_ASSETS = "repo/"
 _MODEL_LABEL = "engine-loop"
 _MAX_TURNS = 40
+# Upstream bounds each session with ``asyncio.wait_for`` on the real clock (30 s by default). In worker mode a
+# timeout leaves the old session thread on the channel while upstream retries, and a replay would not time out
+# where the live run did. The engine loop bounds each step instead, so this fixed bound is never reached.
+_STEP_SESSION_TIMEOUT_SECONDS = 365 * 24 * 3600.0
 _TOOL_OUTPUT_CHARS = 16_000
 # The model sees this in place of the process's own folder, which differs between a run and its resume.
 _WORK_ROOT = "/work"
@@ -1543,8 +1547,11 @@ class StepTransport:
         """Run the session's tool loop and report its cost.
 
         The instruction file the renderer wrote carries the system context.
-        The engine loop bounds each step, so the session has no clock deadline:
-        a deadline would make a resume differ from its run.
+        The engine loop bounds each step, so this transport sets no clock
+        deadline: a deadline would make a resume differ from its run. Upstream
+        still wraps this call in ``asyncio.wait_for``, and a timeout there
+        would leave the thread on the channel, so ``execute_worker`` gives
+        upstream a session timeout that no run reaches.
 
         Args:
             session: Rendered session with workspace, prompt and identifiers.
@@ -1609,6 +1616,8 @@ class StepTransport:
             arguments = function.get("arguments") or {}
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
+            if not isinstance(arguments, dict):
+                raise TypeError("the tool arguments must be a JSON object")
             if name == "list_files":
                 folder = _inside(workspace, str(arguments.get("path") or "."))
                 return "\n".join(
@@ -2303,7 +2312,15 @@ def execute_worker(payload: dict[str, Any], channel: WorkerChannel) -> dict[str,
         },
         resolved_entities=scenario.resolved_entities,
     )
-    engine = AutoSaddlerEngine(store=store, scenario=scenario, provider=provider, policies=policies)
+    engine = AutoSaddlerEngine(
+        store=store,
+        scenario=scenario,
+        provider=provider,
+        policies=policies,
+        diagnosis_patch_timeout_seconds=_STEP_SESSION_TIMEOUT_SECONDS,
+        selection_timeout_seconds=_STEP_SESSION_TIMEOUT_SECONDS,
+        reflection_timeout_seconds=_STEP_SESSION_TIMEOUT_SECONDS,
+    )
     seed = harness_space.seed()
     document: dict[str, Any] = {}
     try:

@@ -209,29 +209,36 @@ class AutoSaddlerEngine:
             op = request.get("op")
             if op == "result":
                 return dict(request.get("result") or {})
-            if op == "model":
-                reply = _model(ctx, request)
-            elif op == "command":
-                reply = _command(ctx, request)
-            elif op == "put_files":
-                reply = _put_files(ctx, request)
-            elif op == "read_file":
-                assert ctx.read_file is not None
-                data = ctx.read_file(str(request["tree_id"]), str(request["path"]))
-                reply = {"data": None if data is None else base64.b64encode(data).decode("ascii")}
-            elif op == "list_files":
-                assert ctx.list_files is not None
-                reply = {"paths": ctx.list_files(str(request["tree_id"]), str(request.get("path") or ""))}
-            elif op == "evaluate":
-                reply = _evaluate(task, server, ctx, request)
-            elif op == "progress":
-                _progress(task, server, ctx, request.get("event") or {})
-                reply = {}
-            elif op == "log":
-                sandbox_log.forward(request.get("record"), owner=None, scrub=sandbox_log.Scrubber(()))
-                reply = {}
-            else:
-                raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")
+            try:
+                if op == "model":
+                    reply = _model(ctx, request)
+                elif op == "command":
+                    reply = _command(ctx, request)
+                elif op == "put_files":
+                    reply = _put_files(ctx, request)
+                elif op == "read_file":
+                    assert ctx.read_file is not None
+                    data = ctx.read_file(str(request["tree_id"]), str(request["path"]))
+                    reply = {"data": None if data is None else base64.b64encode(data).decode("ascii")}
+                elif op == "list_files":
+                    assert ctx.list_files is not None
+                    reply = {"paths": ctx.list_files(str(request["tree_id"]), str(request.get("path") or ""))}
+                elif op == "evaluate":
+                    reply = _evaluate(task, server, ctx, request)
+                elif op == "progress":
+                    _progress(task, server, ctx, request.get("event") or {})
+                    reply = {}
+                elif op == "log":
+                    sandbox_log.forward(request.get("record"), owner=None, scrub=sandbox_log.Scrubber(()))
+                    reply = {}
+                else:
+                    raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")
+            except (KeyError, TypeError, LookupError) as error:
+                # A missing or mistyped field, or a tree the run can not see, is the child's fault, not the host's.
+                raise ServiceError(
+                    f"The AutoSaddler runner sent a bad request: {op!r} ({type(error).__name__}); see runner.log in "
+                    "the run folder."
+                ) from error
             _send(child.stdin, json.dumps(reply, default=side_info_json_default, allow_nan=False))
 
 

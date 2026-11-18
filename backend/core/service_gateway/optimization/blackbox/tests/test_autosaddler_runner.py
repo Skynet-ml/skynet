@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -236,7 +237,14 @@ class _ReplayHost:
         return {"text": "", "cost_cents": "1", "tool_calls": calls}
 
 
-def _run_worker(python: str, folder: Path, payload: dict[str, Any], files: dict[str, bytes]) -> Any:
+def _run_worker(
+    python: str,
+    folder: Path,
+    payload: dict[str, Any],
+    files: dict[str, bytes],
+    wrapper: Path | None = None,
+    host: _ReplayHost | None = None,
+) -> Any:
     """Run the runner in worker mode as the engine does, against a fresh fake host.
 
     Args:
@@ -244,14 +252,18 @@ def _run_worker(python: str, folder: Path, payload: dict[str, Any], files: dict[
         folder: The child's working folder.
         payload: The engine's payload.
         files: The seed tree's files.
+        wrapper: A script that loads the runner from its first argument and runs its worker mode, or ``None``
+            to run the runner itself.
+        host: The fake host, or ``None`` for a ``_ReplayHost`` over ``files``.
 
     Returns:
         The requests in order, and the result document.
     """
     folder.mkdir()
-    host = _ReplayHost(files)
+    host = _ReplayHost(files) if host is None else host
+    script = [] if wrapper is None else [str(wrapper)]
     child = subprocess.Popen(
-        [python, "-I", autosaddler_runner.__file__, autosaddler_runner.WORKER_FLAG],
+        [python, "-I", *script, autosaddler_runner.__file__, autosaddler_runner.WORKER_FLAG],
         cwd=folder,
         env={"PATH": os.environ.get("PATH", ""), "HOME": str(folder), "LANG": "C.UTF-8", "PYTHONHASHSEED": "0"},
         stdin=subprocess.PIPE,
@@ -326,6 +338,145 @@ def test_a_worker_run_and_its_replay_send_the_same_requests(tmp_path: Path, repo
     if repository:
         assert ops[:2] == ["list_files", "read_file"]
         assert "command" in ops
+
+
+# Upstream's default session timeout is 30 s; the child lowers it so that a slow model step trips it fast.
+_SLOW_STEP_SECONDS = 2.0
+
+
+class _SlowHost(_ReplayHost):
+    """A fake worker host whose first model reply comes later than a short session timeout."""
+
+    def answer(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Answer one request, and wait before the first model reply.
+
+        Args:
+            request: The runner's request.
+
+        Returns:
+            The reply.
+        """
+        if request["op"] == "model" and not getattr(self, "waited", False):
+            self.waited = True
+            time.sleep(_SLOW_STEP_SECONDS)
+        return super().answer(request)
+
+
+_SHORT_TIMEOUT_WORKER = """
+import importlib.util, sys
+
+spec = importlib.util.spec_from_file_location("autosaddler_runner", sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+
+
+class ShortTimeoutEngine(runner.AutoSaddlerEngine):
+    def __init__(self, *args, diagnosis_patch_timeout_seconds=0.5, **kwargs):
+        super().__init__(*args, diagnosis_patch_timeout_seconds=diagnosis_patch_timeout_seconds, **kwargs)
+
+
+runner.AutoSaddlerEngine = ShortTimeoutEngine
+sys.exit(runner.worker_main())
+"""
+
+
+def test_a_slow_model_step_does_not_time_out_its_session(tmp_path: Path) -> None:
+    """A model step slower than upstream's default session timeout ends as in a fast run, with no retry.
+
+    A session timeout runs on the real clock, so it would make a live run and its replay differ.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    script = tmp_path / "short_timeout_worker.py"
+    script.write_text(_SHORT_TIMEOUT_WORKER, encoding="utf-8")
+    payload = {
+        "engine_id": "autosaddler",
+        "task": {
+            "name": "autosaddler",
+            "seed_candidate": "bcd",
+            "objective": "maximize vowel density",
+            "background": "",
+            "train_set": [{"id": 0}, {"id": 1}],
+        },
+        "max_evals": 12,
+        "max_iterations": 1,
+        "stop_at_score": None,
+        "repo": None,
+    }
+
+    fast, fast_result = _run_worker(python, tmp_path / "fast", payload, {}, script)
+    slow, slow_result = _run_worker(python, tmp_path / "slow", payload, {}, script, _SlowHost({}))
+
+    assert "error" not in slow_result, slow_result
+    assert slow == fast
+    assert slow_result == fast_result
+
+
+def test_the_worker_engine_gets_the_same_long_session_timeouts_in_each_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each session kind gets one fixed timeout far above any model step, so no session times out on the clock.
+
+    Args:
+        tmp_path: The process folder.
+        monkeypatch: Replaces the upstream names, absent from this interpreter, and the working folder.
+    """
+    for name in (
+        "as_domain",
+        "as_ports",
+        "as_policies",
+        "as_assets",
+        "LocalRunStore",
+        "ComponentMapHarnessSpace",
+        "BaseAgentProvider",
+        "WorkspaceRenderer",
+        "composition_record",
+    ):
+        monkeypatch.setattr(autosaddler_runner, name, mock.MagicMock())
+    received: list[dict[str, Any]] = []
+
+    class Stop(BaseException):
+        """Ends the run once the engine is built."""
+
+    def build(**kwargs: Any) -> Any:
+        """Record the engine's arguments and stop.
+
+        Args:
+            **kwargs: The engine's arguments.
+
+        Raises:
+            Stop: Always.
+        """
+        received.append(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(autosaddler_runner, "AutoSaddlerEngine", build)
+    monkeypatch.chdir(tmp_path)
+    payload = {
+        "engine_id": "autosaddler",
+        "task": {"seed_candidate": "bcd", "objective": "", "background": "", "train_set": [{"id": 0}]},
+        "max_evals": 2,
+        "repo": None,
+    }
+
+    for _ in range(2):
+        with pytest.raises(Stop):
+            autosaddler_runner.execute_worker(payload, _channel()[0])
+
+    timeouts = [
+        {key: value for key, value in kwargs.items() if key.endswith("_timeout_seconds")} for kwargs in received
+    ]
+    assert timeouts[0] == timeouts[1]
+    assert sorted(timeouts[0]) == [
+        "diagnosis_patch_timeout_seconds",
+        "reflection_timeout_seconds",
+        "selection_timeout_seconds",
+    ]
+    assert min(timeouts[0].values()) >= 7 * 24 * 3600
 
 
 def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) -> None:
@@ -733,7 +884,11 @@ def test_files_go_to_the_tree_store_as_base64() -> None:
 
 
 def test_scrub_hides_the_process_folder_and_clock_times(tmp_path: Path) -> None:
-    """A prompt names no folder or time that differs between a run and its resume."""
+    """A prompt names no folder or time that differs between a run and its resume.
+
+    Args:
+        tmp_path: The process folder that the prompt must not name.
+    """
     text = f"see {tmp_path}/a.txt at 2026-11-17T10:20:30.5+00:00 and 2026-11-17 10:20:30Z"
 
     assert autosaddler_runner.scrub(text, tmp_path) == "see /work/a.txt at <time> and <time>"
@@ -929,13 +1084,38 @@ def test_a_tool_path_outside_the_workspace_is_refused(tmp_path: Path, path: str)
     assert sorted(tmp_path.rglob("*")) == [workspace]
 
 
+@pytest.mark.parametrize("arguments", ["[]", '"x"', "1", "null", [1]])
+def test_tool_arguments_that_are_no_json_object_give_the_model_an_error(tmp_path: Path, arguments: Any) -> None:
+    """The model gets an error text, and the session goes on, when its tool arguments are no JSON object.
+
+    Args:
+        tmp_path: The session workspace.
+        arguments: The model's arguments, as JSON text or as a decoded value.
+    """
+    channel, writer = _channel()
+    transport = autosaddler_runner.StepTransport(channel, tmp_path, None, None)
+
+    output = transport.tool(tmp_path, {"id": "c1", "function": {"name": "list_files", "arguments": arguments}})
+
+    assert output.startswith("Error: TypeError"), output
+    assert writer.getvalue() == ""
+
+
 def test_a_work_path_reads_as_workspace_relative(tmp_path: Path) -> None:
-    """The model sees ``/work``, so a path under it is a workspace path."""
+    """The model sees ``/work``, so a path under it is a workspace path.
+
+    Args:
+        tmp_path: The session workspace.
+    """
     assert autosaddler_runner._inside(tmp_path, "/work/a/b.txt") == tmp_path.resolve() / "a" / "b.txt"
 
 
 def test_a_repository_command_sends_only_the_changed_files(tmp_path: Path) -> None:
-    """In a repository run the box starts from the seed tree, so only changed and new files go up."""
+    """In a repository run the box starts from the seed tree, so only changed and new files go up.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "session"
     workspace.mkdir()
     (workspace / "same.txt").write_text("same")
@@ -954,7 +1134,11 @@ def test_a_repository_command_sends_only_the_changed_files(tmp_path: Path) -> No
 
 
 def test_a_repository_command_removes_the_files_the_version_deleted(tmp_path: Path) -> None:
-    """The box starts from the seed tree, so the command first removes what the version deleted or moved."""
+    """The box starts from the seed tree, so the command first removes what the version deleted or moved.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "session"
     workspace.mkdir()
     for name in ("keep.txt", "gone.txt", "old name.txt"):
@@ -981,7 +1165,11 @@ def test_a_repository_command_removes_the_files_the_version_deleted(tmp_path: Pa
 
 
 def test_a_repository_command_with_no_deletion_runs_as_given(tmp_path: Path) -> None:
-    """With nothing deleted, the command goes to the box unchanged."""
+    """With nothing deleted, the command goes to the box unchanged.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "session"
     workspace.mkdir()
     (workspace / "a.txt").write_text("a")
@@ -1001,7 +1189,11 @@ def test_a_repository_command_with_no_deletion_runs_as_given(tmp_path: Path) -> 
 
 
 def test_the_seed_tree_becomes_a_git_checkout(tmp_path: Path) -> None:
-    """One listing call and one read per file rebuild the seed tree, with no box command."""
+    """One listing call and one read per file rebuild the seed tree, with no box command.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     channel, writer = _channel({"paths": ["run.sh", "src/a.py"]}, {"data": "ZWNobyBoaQo="}, {"data": "cHJpbnQoMSkK"})
 
     base = autosaddler_runner.checkout_seed(channel, "seed", tmp_path / "checkout")
@@ -1019,7 +1211,11 @@ def test_the_seed_tree_becomes_a_git_checkout(tmp_path: Path) -> None:
 
 
 def test_a_seed_tree_leaves_out_its_git_folder(tmp_path: Path) -> None:
-    """Seeded Git config and hooks are not read or written, so the checkout's own ``git`` calls run none of them."""
+    """Seeded Git config and hooks are not read or written, so the checkout's own ``git`` calls run none of them.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     marker = tmp_path / "ran"
     files = {
         ".git/config": f"[core]\n\tfsmonitor = touch {marker}\n".encode(),
@@ -1057,7 +1253,11 @@ def test_a_seed_tree_leaves_out_its_git_folder(tmp_path: Path) -> None:
 
 
 def test_a_seed_tree_the_worker_can_not_list_stops_the_run(tmp_path: Path) -> None:
-    """When the seed tree is no folder the worker can list, the run has no versions to start from."""
+    """When the seed tree is no folder the worker can list, the run has no versions to start from.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     channel, _ = _channel({"paths": None})
 
     with pytest.raises(RuntimeError, match="Could not list the seed tree"):
@@ -1133,7 +1333,12 @@ def _verify_readme_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, on_bloc
 def test_a_constrained_repository_block_gives_the_illegal_action_message_and_a_run_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Under a constraints file, a path block reads the fixed message and reaches the run log as ``rule.block``."""
+    """Under a constraints file, a path block reads the fixed message and reaches the run log as ``rule.block``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces upstream's verdict type.
+    """
     channel, writer = _channel({})
     accepted, check, reason = _verify_readme_edit(tmp_path, monkeypatch, autosaddler_runner.rule_blocker(channel))
     assert (accepted, check, reason) == (False, "repository-rules", repo_tree.ILLEGAL_ACTION_MESSAGE)
@@ -1149,7 +1354,13 @@ def test_a_constrained_repository_block_gives_the_illegal_action_message_and_a_r
 def test_a_constrained_repository_block_in_a_box_prints_a_run_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Under a constraints file, a path block reads the fixed message and reaches the run log as ``rule.block``."""
+    """Under a constraints file, a path block reads the fixed message and reaches the run log as ``rule.block``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces upstream's verdict type.
+        capsys: Captures the run event line.
+    """
     blocker = autosaddler_runner.rule_blocker(autosaddler_runner.EvaluatorMailbox("testnonce", 1.0))
     accepted, check, reason = _verify_readme_edit(tmp_path, monkeypatch, blocker)
     assert (accepted, check, reason) == (False, "repository-rules", repo_tree.ILLEGAL_ACTION_MESSAGE)
@@ -1165,7 +1376,12 @@ def test_a_constrained_repository_block_in_a_box_prints_a_run_event(
 def test_an_unconstrained_repository_block_keeps_naming_the_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without a constraints file, the verifier names the refused path and logs no rule event."""
+    """Without a constraints file, the verifier names the refused path and logs no rule event.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces upstream's verdict type.
+    """
     accepted, check, reason = _verify_readme_edit(tmp_path, monkeypatch, None)
     assert (accepted, check) == (False, "repository-rules")
     assert "README.md" in reason
@@ -1197,7 +1413,15 @@ def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> N
 def test_a_harness_session_cost_carries_its_unit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cost_usd: float, cost: float | None, unit: str | None
 ) -> None:
-    """Upstream refuses a cost with no unit, so a harness session's dollar cost goes out as ``usd``."""
+    """Upstream refuses a cost with no unit, so a harness session's dollar cost goes out as ``usd``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the upstream outcome types, the harness session and ``HOME``.
+        cost_usd: The harness session's dollar cost.
+        cost: The provider cost the session must report.
+        unit: The cost unit the session must report.
+    """
     _plain_outcomes(monkeypatch)
     outcome = autosaddler_runner.harness_bridge.SessionOutcome(
         text="done",
@@ -1221,7 +1445,13 @@ def test_a_harness_session_cost_carries_its_unit(
 def test_harness_sessions_send_each_refusal_to_the_run_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Pass each hidden-path refusal of a harness session to the run log as ``proposer.refusal``."""
+    """Pass each hidden-path refusal of a harness session to the run log as ``proposer.refusal``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the harness session and ``HOME``.
+        capsys: Captures the run log line.
+    """
     outcome = autosaddler_runner.harness_bridge.SessionOutcome(
         text=None,
         stdout="",

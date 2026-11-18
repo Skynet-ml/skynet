@@ -430,7 +430,16 @@ def test_the_loop_path_never_calls_the_native_box(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A context with the loop's calls runs the child in the worker, and never the native box."""
+    """A context with the loop's calls runs the child in the worker, and never the native box.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Makes the native box fail the test.
+    """
     monkeypatch.setattr(autosaddler, "run_native_engine", _no_native_box)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
@@ -443,7 +452,12 @@ def test_the_loop_path_never_calls_the_native_box(
 def test_a_context_with_no_worker_host_runs_the_native_box_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Until the SKY-728 cutover, a context with no model, command or tree call runs the native box once."""
+    """Until the SKY-728 cutover, a context with no model, command or tree call runs the native box once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the native box with a recorder.
+    """
     calls: list[tuple[str, Task, EvalServer, EngineContext]] = []
     expected = Result(best_candidate="native", best_score=1.0, total_evals=1)
 
@@ -477,7 +491,15 @@ def test_the_worker_flag_matches_the_runner() -> None:
 def test_a_hidden_path_is_not_visible_to_the_engine(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The child's seed checkout, listing and read leave out the seed's hidden paths."""
+    """The child's seed checkout, listing and read leave out the seed's hidden paths.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     hidden = hidden_hashes(["eval", "optimize.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
     tree = loop.put_files({"eval/metric.py": b"secret", "optimize.toml": b"secret", "src/a.py": b"a"})
@@ -494,7 +516,15 @@ def test_a_hidden_path_is_not_visible_to_the_engine(
 def test_each_model_reply_and_command_is_one_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Run a session: one step for each model reply and each command, and the scorer goes through the loop."""
+    """Run a session: one step for each model reply and each command, and the scorer goes through the loop.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, model = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
@@ -518,7 +548,16 @@ def test_a_killed_run_resumes_from_its_last_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kill the worker in the third model call, then resume on a new generation from the committed steps."""
+    """Kill the worker in the third model call, then resume on a new generation from the committed steps.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the child.
+    """
     seed_tree, metric_tree = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
     first, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, die_at=2)
     children = _record_children(monkeypatch)
@@ -547,7 +586,15 @@ def test_a_killed_run_resumes_from_its_last_step(
 def test_a_spent_budget_stops_the_child_with_its_seed(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With no evaluation left, the child hears a budget stop and the run keeps its seed."""
+    """With no evaluation left, the child hears a budget stop and the run keeps its seed.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
@@ -560,7 +607,15 @@ def test_a_spent_budget_stops_the_child_with_its_seed(
 def test_a_failure_envelope_is_a_service_error(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The child's error reaches the job as a service error."""
+    """The child's error reaches the job as a service error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     script = (
         "import sys, json\nsys.stdin.readline()\n"
@@ -612,7 +667,15 @@ def test_a_child_that_breaks_the_protocol_is_stopped(
 def test_the_child_gets_only_its_four_environment_variables(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The child gets no worker secret: its environment holds PATH, HOME, LANG and PYTHONHASHSEED only."""
+    """The child gets no worker secret: its environment holds PATH, HOME, LANG and PYTHONHASHSEED only.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     script = (
         "import json, os, sys\nsys.stdin.readline()\n"
@@ -628,7 +691,15 @@ def test_the_child_gets_only_its_four_environment_variables(
 def test_a_candidate_with_the_wrong_shape_is_never_scored(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A text task's evaluation request with a named-parts candidate fails the run before any budget is spent."""
+    """A text task's evaluation request with a named-parts candidate fails the run before any budget is spent.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scored: list[Any] = []
     server = loop.server(lambda _loop, candidate, _case: (scored.append(candidate), (1.0, {}))[1], max_evals=1)
@@ -647,7 +718,15 @@ def test_a_candidate_with_the_wrong_shape_is_never_scored(
 def test_a_version_event_with_a_bad_candidate_is_dropped(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The run view gets the version events whose candidate has the task's shape, and no other."""
+    """The run view gets the version events whose candidate has the task's shape, and no other.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     events: list[tuple[str, dict[str, Any]]] = []
     lines = [
@@ -673,7 +752,15 @@ def test_a_version_event_with_a_bad_candidate_is_dropped(
 def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A result whose best candidate is not text, for a text task, fails the run."""
+    """A result whose best candidate is not text, for a text task, fails the run.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     script = (
         "import sys\nsys.stdin.readline()\n"
@@ -696,6 +783,18 @@ def test_a_best_candidate_with_the_wrong_shape_is_a_service_error(
             "exited with no result",
         ),
         ("import sys, time\nsys.stdin.readline()\ntime.sleep(30)\n", "sent no request for 0.5 seconds"),
+        # A request with a missing field, a field of the wrong type, or a tree the run can not see.
+        *(
+            (f"import sys\nsys.stdin.readline()\nprint({line!r}, flush=True)\nsys.stdin.readline()\n", "bad request")
+            for line in (
+                '{"op": "read_file", "path": "a"}',
+                '{"op": "list_files"}',
+                '{"op": "model", "tools": null}',
+                '{"op": "command", "command": "true"}',
+                '{"op": "put_files", "files": [1]}',
+                '{"op": "read_file", "tree_id": "missing", "path": "a"}',
+            )
+        ),
     ],
 )
 def test_a_broken_or_silent_child_is_a_service_error_and_is_stopped(
@@ -708,7 +807,7 @@ def test_a_broken_or_silent_child_is_a_service_error_and_is_stopped(
     script: str,
     message: str,
 ) -> None:
-    """A bad request line, a closed stdin or a long silence fails the run with a pointer to the log.
+    """A bad request line or field, a closed stdin or a long silence fails the run with a pointer to the log.
 
     Args:
         owner: Alice and her budget generation.
@@ -738,7 +837,16 @@ def test_a_child_that_does_not_exit_after_its_result_is_stopped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The host keeps the result of a child that hangs after it, and kills the child."""
+    """The host keeps the result of a child that hangs after it, and kills the child.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Shortens the exit limit and records the child.
+    """
     monkeypatch.setattr(autosaddler, "_EXIT_SECONDS", 0.5)
     children = _record_children(monkeypatch)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
