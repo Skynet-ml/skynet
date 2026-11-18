@@ -172,7 +172,8 @@ _MAX_LINKED_PATHS = 100_000
 # near Python's default recursion limit of 1000 would stop the run on every resume (SKY-817). 100 levels keeps a wide
 # margin for the stack under the encoder, and no real tool call nests that deep.
 _MAX_REPLY_DEPTH = 100
-# Far above the largest reply that a model's output token limit allows, but bounds the memory of a bad reply.
+# Far above the largest reply that a model's output token limit allows. It bounds the bytes that the step log commits
+# and that every resume reads again, not the memory that the model client uses to hold the reply.
 _MAX_REPLY_BYTES = 4 * 1024 * 1024
 # A box step that fails with one of these still commits a record, so a replay raises it at the same place.
 _BOX_ERRORS = {
