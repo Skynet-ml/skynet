@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +24,7 @@ from ..sandbox import (
     SandboxSpec,
     scorer_runtime_from_settings,
 )
+from ..sandbox_runtime import BOX_GIT_ENV, _async_spec
 
 _VERCEL_ENV = ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID")
 
@@ -32,6 +36,22 @@ except ImportError:
     _SDK_PRESENT = False
 
 _needs_sdk = pytest.mark.skipif(not _SDK_PRESENT, reason="vercel-sandbox SDK not installed")
+
+
+def _git_reads_safe_bare_repository() -> bool:
+    """Return whether a local git exists that knows ``safe.bareRepository`` (git 2.38 or later).
+
+    Returns:
+        True when the bare-repository test can run.
+    """
+    if shutil.which("git") is None:
+        return False
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
+    found = re.search(r"(\d+)\.(\d+)", version)
+    return found is not None and (int(found[1]), int(found[2])) >= (2, 38)
+
+
+_needs_git = pytest.mark.skipif(not _git_reads_safe_bare_repository(), reason="git 2.38 or later not installed")
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **values: Any) -> Settings:
@@ -171,3 +191,49 @@ def test_scorer_runtime_prefers_vercel_when_configured(monkeypatch: pytest.Monke
 def test_local_runtime_has_no_header_injecting_edge() -> None:
     """The host runtime cannot inject headers, so callers hand secrets to their commands themselves."""
     assert LocalSubprocessRuntime().injects_headers is False
+
+
+def test_every_box_spec_refuses_implicit_bare_repositories() -> None:
+    """The async provider spec and the local session both carry the box git env (SKY-812)."""
+    assert BOX_GIT_ENV == {"GIT_CONFIG_PARAMETERS": "'safe.bareRepository'='explicit'"}
+    assert _async_spec(SandboxSpec(lifetime_seconds=60, env={"APP_SPEC": "x"})).env == {
+        "APP_SPEC": "x",
+        **BOX_GIT_ENV,
+    }
+    box = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, env={"APP_SPEC": "x"}))
+    try:
+        printed = box.run("printenv GIT_CONFIG_PARAMETERS", timeout_seconds=30).stdout.strip()
+        assert printed == BOX_GIT_ENV["GIT_CONFIG_PARAMETERS"]
+    finally:
+        box.close()
+
+
+@_needs_git
+def test_box_git_reads_no_config_from_a_bare_repository_layout_in_a_tree(session: LocalSubprocessSession) -> None:
+    """A tree folder shaped as a bare repository gives box git no config (SKY-812).
+
+    The same command with the box git env cleared runs the planted alias, so
+    the layout is a working bare repository and only the env stops it.
+
+    Args:
+        session: Fixture.
+    """
+    marker = Path(session.path) / "marker"
+    session.write_files(
+        {
+            "tree/vendor/HEAD": "ref: refs/heads/main\n",
+            "tree/vendor/objects/keep": "",
+            "tree/vendor/refs/keep": "",
+            "tree/vendor/config": f"[core]\n\tbare = true\n[alias]\n\tpwn = \"!touch '{marker}'\"\n",
+        }
+    )
+
+    refused = session.run("cd tree/vendor && git rev-parse --git-dir", timeout_seconds=30)
+    assert refused.exit_code != 0
+    assert "safe.bareRepository" in refused.stderr
+    assert session.run("cd tree/vendor && git pwn", timeout_seconds=30).exit_code != 0
+    assert not marker.exists()
+
+    no_safety = {"GIT_CONFIG_PARAMETERS": "", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+    assert session.run("cd tree/vendor && git pwn", env=no_safety, timeout_seconds=30).exit_code == 0
+    assert marker.exists()

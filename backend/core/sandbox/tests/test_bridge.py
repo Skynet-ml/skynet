@@ -149,6 +149,7 @@ def _expected_request(spec: SandboxSpec) -> dict[str, Any]:
 
     The sync runtime is gone, so this pins its request shape by hand: the
     async box must keep the same reservation, or a live budget changes.
+    The async box adds ``BOX_GIT_ENV`` to the box env (SKY-812).
 
     Args:
         spec: The blackbox spec.
@@ -164,7 +165,7 @@ def _expected_request(spec: SandboxSpec) -> dict[str, Any]:
         "network_disabled": spec.network_disabled,
         "ports": [],
         "persistent": False,
-        "environment_fingerprint": json_fingerprint(dict(spec.env)),
+        "environment_fingerprint": json_fingerprint({**spec.env, **sandbox_runtime.BOX_GIT_ENV}),
         "operation_key": spec.operation_key,
     }
     if spec.allowed_hosts:
