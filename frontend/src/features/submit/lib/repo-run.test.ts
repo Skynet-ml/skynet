@@ -23,6 +23,7 @@ const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseTe
   "./repo-run.ts"
 );
 const { prepareModelConfig } = await import("./model-config.ts");
+const { HARNESS_DEFAULT_PICK, harnessPickerValue, pickHarness, proposerHeader } = await import("./engine-contract.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
 
@@ -92,6 +93,52 @@ test("a repository run sends the chosen sandbox provider and omits it when none 
   const older = repoState();
   delete older.optimizer.sandboxProvider;
   assert.equal("sandbox_provider" in repoRunRequest(older, options)!, false);
+});
+
+test("a repository run sends no harness until the user picks one (SKY-753)", () => {
+  const fresh = repoRunRequest(repoState(), options);
+  assert.ok(fresh?.proposer);
+  assert.equal("harness" in fresh.proposer, false);
+  assert.equal(fresh.proposer.max_tool_calls, 100);
+
+  const state = repoState();
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
+test("the harness picker starts empty, so picking Codex sends Codex (SKY-753)", () => {
+  const state = repoState();
+  // Radix fires onValueChange only for a new value, so the unset picker must not hold "codex".
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "codex" };
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "codex");
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "codex");
+});
+
+test("the default harness item drops the picked harness and host CLI again (SKY-753)", () => {
+  const state = repoState();
+  state.optimizer.proposer = pickHarness({ ...state.optimizer.proposer, host_cli: "claude" }, "pi");
+  assert.equal(state.optimizer.proposer.harness, "pi");
+
+  state.optimizer.proposer = pickHarness(state.optimizer.proposer, HARNESS_DEFAULT_PICK);
+  assert.equal("harness" in state.optimizer.proposer, false);
+  assert.equal("host_cli" in state.optimizer.proposer, false);
+  assert.equal(state.optimizer.proposer.max_tool_calls, 100);
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+  // With no harness, the repository's [proposer] entry runs again.
+  assert.equal("harness" in repoRunRequest(state, options)!.proposer!, false);
+});
+
+test("the closed proposer header shows the server default until the user picks a harness (SKY-753)", () => {
+  const state = repoState();
+  // The request sends no harness yet, so the header must not claim Codex.
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), {
+    labelKey: "submit.v2.optimizer.proposer.harness_default",
+  });
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), { harness: "pi" });
 });
 
 test("a repository Skynet created is flagged in the run request", () => {

@@ -18,6 +18,9 @@ versions. Each box holds only the code it needs (SKY-398):
   ``[run]`` entry; closing the box is the only cleanup.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
+
+Both boxes open through the tree sandbox session API (SKY-785), so the
+acquire, start, run and release steps match every other tree sandbox box.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -46,8 +49,10 @@ from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.grants import Grant
 from ....sandbox.snapshots import snapshot_cache_key
+from ....sandbox.trees import BoxSource
 from .repo_tree import (
     MAX_PATCH_BYTES,
+    SAFE_GIT,
     _member_path,
     archive_chunks,
     drop_paths,
@@ -56,6 +61,7 @@ from .repo_tree import (
     strip_archive,
 )
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .tree_sandbox import BoxSession, TreeSandbox
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +100,11 @@ _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=
 # git 2.47), whose lock files come and go while ``cp -a`` walks ``.git``.
 _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
 # Box git reads only the repository's own config: a filter, hook or fsmonitor
-# command in $HOME or the XDG folder must not run in a box git call.
+# command in $HOME or the XDG folder must not run in a box git call, and a
+# folder in the tree shaped as a bare repository is not a repository (SKY-812).
 GIT = (
     "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
-    " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
+    f" GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git {shlex.join(SAFE_GIT)} -c core.attributesFile=/dev/null"
     " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _HASH_TIMEOUT_SECONDS = 300.0
@@ -491,8 +498,11 @@ class RepoBoxSource:
         box.close()
 
 
-def _release_failed(source: RepoBoxSource, session: SandboxSession, what: str) -> None:
-    """Give a failed box back to its source as unhealthy, and log only a failure's type.
+def _release_failed(source: BoxSource[SandboxSession], session: SandboxSession, what: str) -> None:
+    """Give a failed box that no session holds back to its source as unhealthy, and log only a failure's type.
+
+    The boxes this module opens hold a session and call
+    :meth:`BoxSession.release_failed` directly, so the session marks itself released.
 
     Args:
         source: The source that gave the box.
@@ -502,30 +512,24 @@ def _release_failed(source: RepoBoxSource, session: SandboxSession, what: str) -
     Raises:
         BudgetReached: And the other budget errors of the close, in place of the box's own failure.
     """
-    try:
-        source.release(session, healthy=False)
-    except _BUDGET_ERRORS:
-        # A budget stop must not be lost, so it replaces the box's own failure.
-        raise
-    except Exception as release_error:
-        # The caller raises or returns the box's own failure.
-        logger.warning("%s did not close cleanly (%s)", what, type(release_error).__name__)
+    BoxSession(source, session).release_failed(what)
 
 
 class CandidateBox:
     """One evaluation's candidate box C: the prepared repository with the version laid out."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, source: RepoBoxSource) -> None:
+    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, box: BoxSession) -> None:
         """Bind an open, laid-out box to the workspace that checks its protected files.
 
         Args:
             workspace: The workspace that opened the box.
-            session: The box.
+            session: The box, for the protected-file checks and the relay answers.
             root: The box's working directory.
-            source: The box source that takes the box back at close.
+            box: The tree sandbox session that holds ``session``; it runs the
+                ``[run]`` entry and gives the box back at close.
         """
         self._workspace = workspace
-        self._source = source
+        self.box = box
         self.session = session
         self.root = root
         self.path = WORK_DIR
@@ -534,7 +538,6 @@ class CandidateBox:
         # again: a write, even one that raised after the server did it, moves every ctime.
         self._unstamped = False
         self._lock = threading.Lock()
-        self._closed = False
 
     @property
     def unstamped(self) -> bool:
@@ -657,37 +660,33 @@ class CandidateBox:
             return changes
 
     def close(self) -> None:
-        """Give the box back to its source; every process the version started ends with it."""
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-        self._source.release(self.session, healthy=True)
+        """Give the box back to its source once; every process the version started ends with it."""
+        self.box.release(healthy=True)
 
 
 class MetricBox:
     """One evaluation's metric box M: the metric state, the metric files and the runner, no repository."""
 
     def __init__(
-        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, source: RepoBoxSource
+        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, box: BoxSession
     ) -> None:
         """Bind an open metric box.
 
         Args:
             workspace: The workspace that opened the box.
-            session: The box.
+            session: The box, for the metric files, the runner and its output.
             root: The box's working directory.
             key: The box's operation key, or ``None`` when the spec has none.
-            source: The box source that takes the box back at close.
+            box: The tree sandbox session that holds ``session``; it runs the
+                metric and gives the box back at close.
         """
         self._workspace = workspace
-        self._source = source
+        self.box = box
         self.session = session
         self.root = root
         self.key = key
         self.repo_path = f"{root}/{METRIC_REPO_DIR}"
         self.site_path = f"{root}/{METRIC_SITE_DIR}"
-        self._closed = False
 
     def install_metric_files(self) -> None:
         """Put the metric files into ``METRIC_REPO_DIR`` at their repository paths.
@@ -713,11 +712,8 @@ class MetricBox:
             raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
 
     def close(self) -> None:
-        """Give the box back to its source."""
-        if self._closed:
-            return
-        self._closed = True
-        self._source.release(self.session, healthy=True)
+        """Give the box back to its source once."""
+        self.box.release(healthy=True)
 
 
 def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
@@ -1092,10 +1088,8 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(
-        self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]
-    ) -> tuple[RepoBoxSource, SandboxSession]:
-        """Open one box from a saved state through the evaluation box source (SKY-718).
+    def _open_box(self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]) -> BoxSession:
+        """Open one box from a saved state through the tree sandbox session API (SKY-718, SKY-785).
 
         Args:
             spec: The box's spec without its state.
@@ -1104,7 +1098,7 @@ class RepoWorkspace:
             grants: The role's network grants; empty keeps the box offline.
 
         Returns:
-            The source that takes the box back, and the open box, with a tar state unpacked.
+            The session that holds the open box, with a tar state unpacked.
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
@@ -1114,37 +1108,47 @@ class RepoWorkspace:
             spec = replace(spec, snapshot_id=state.snapshot_id)
         elif state is not None and state.archive is not None:
             spec = replace(spec, snapshot_archive=str(state.archive))
-        source = RepoBoxSource(self._runtime, spec)
+        archive = state.archive if state is not None else None
+        start: Callable[[SandboxSession], None] | None = None
+        if archive is not None:
+
+            def unpack(session: SandboxSession) -> None:
+                """Unpack the tar state into the new box.
+
+                Args:
+                    session: The box.
+
+                Raises:
+                    RepoSetupError: When the state cannot be unpacked.
+                """
+                parts = []
+                for index, chunk in enumerate(archive_chunks(archive)):
+                    name = f"{_STATE_DIR}/state.{index:04d}.b64"
+                    session.write_files({name: chunk})
+                    parts.append(name)
+                files = " ".join(shlex.quote(part) for part in parts)
+                result = session.run(
+                    f"set -e; cat {files} | base64 -d | tar -xzf - -C .; rm -rf {_STATE_DIR}",
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+                if not result.ok:
+                    raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
+
+            start = unpack
         try:
-            session = source.acquire(role, grants)
+            return TreeSandbox.open_session(
+                RepoBoxSource(self._runtime, spec), role, grants, start=start, what="A box from a tar state"
+            )
         except _BUDGET_ERRORS:
             raise
         except Exception as error:
+            # A saved state is a snapshot or a tar file, never both, so an error here with a snapshot is the open's.
             if spec.snapshot_id is None:
                 raise
             # Only the type: the provider's text can name the snapshot.
             logger.warning("A box did not open from its snapshot (%s)", type(error).__name__)
             self._drop_snapshots()
             raise _SnapshotLostError("A box could not open from the saved snapshot.") from None
-        if state is None or state.archive is None:
-            return source, session
-        try:
-            parts = []
-            for index, chunk in enumerate(archive_chunks(state.archive)):
-                name = f"{_STATE_DIR}/state.{index:04d}.b64"
-                session.write_files({name: chunk})
-                parts.append(name)
-            files = " ".join(shlex.quote(part) for part in parts)
-            result = session.run(
-                f"set -e; cat {files} | base64 -d | tar -xzf - -C .; rm -rf {_STATE_DIR}",
-                timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-            )
-            if not result.ok:
-                raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
-        except BaseException:
-            _release_failed(source, session, "A box from a tar state")
-            raise
-        return source, session
 
     def _box_spec(self, kind: str, vcpus: int | None, *, services: bool) -> SandboxSpec:
         """Return the spec of one evaluation box; the box source sets its network from the grants.
@@ -1224,7 +1228,8 @@ class RepoWorkspace:
         self.prepare()
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        source, session = self._open_box(spec, state, "candidate", self._run_grants)
+        box = self._open_box(spec, state, "candidate", self._run_grants)
+        session = box.box
         try:
             if self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
@@ -1240,12 +1245,12 @@ class RepoWorkspace:
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
-                return CandidateBox(self, session, box_root(session), source)
+                return CandidateBox(self, session, box_root(session), box)
         except BaseException:
-            _release_failed(source, session, "The candidate box")
+            box.release_failed("The candidate box")
             raise
         # Outside the try: a budget error of this release must not release the box a second time.
-        _release_failed(source, session, "The candidate box")
+        box.release_failed("The candidate box")
         return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
     def open_metric(self) -> MetricBox:
@@ -1278,7 +1283,8 @@ class RepoWorkspace:
         self.prepare()
         spec = self._box_spec("metric", self._metric_vcpus, services=False)
         state = self._metric_state
-        source, session = self._open_box(spec, state, "metric", self._metric_grants)
+        box = self._open_box(spec, state, "metric", self._metric_grants)
+        session = box.box
         try:
             if state is not None:
                 ready = session.run(f"test -f {_METRIC_READY}", timeout_seconds=60)
@@ -1288,9 +1294,9 @@ class RepoWorkspace:
                     raise (_SnapshotLostError if lost else RepoSetupError)(
                         "The metric box does not hold the metric packages."
                     )
-            return MetricBox(self, session, box_root(session), spec.operation_key, source)
+            return MetricBox(self, session, box_root(session), spec.operation_key, box)
         except BaseException:
-            _release_failed(source, session, "The metric box")
+            box.release_failed("The metric box")
             raise
 
     def _drop_snapshots(self) -> None:

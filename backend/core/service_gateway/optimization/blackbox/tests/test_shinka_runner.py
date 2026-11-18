@@ -2089,3 +2089,19 @@ def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(
 
     assert scorers[0]._cases._max_workers == 1
     assert runners[0]._generate_proposal_async.__qualname__ == "install_sequential_gate.<locals>.gated"
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        shinka_runner._git(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert shinka_runner._git(repo, "rev-parse", "--git-dir").strip() == "."
