@@ -3206,3 +3206,29 @@ def test_a_restore_through_a_linked_parent_folder_stops_and_writes_nothing_outsi
         harness_bridge.ensure_setup(command, checkout)
 
     assert list(outside.iterdir()) == []
+
+
+def test_a_restore_through_a_parent_folder_linked_inside_the_checkout_stops(tmp_path: Path) -> None:
+    """A parent folder that links to a folder inside the checkout also stops the restore (SKY-753).
+
+    Args:
+        tmp_path: Holds the checkout.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / "pkg").mkdir(parents=True)
+    (checkout / "pkg" / "keep.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    command = [sys.executable, "-c", "import os; os.makedirs('pkg/gen'); open('pkg/gen/out.txt', 'w').write('o')"]
+    harness_bridge.ensure_setup(command, checkout)
+    other = checkout / "other"
+    other.mkdir()
+    shutil.rmtree(checkout / "pkg")
+    (checkout / "pkg").symlink_to("other")
+
+    with pytest.raises(RuntimeError, match=r"pkg/gen cannot be restored: its parent folder .*pkg is a link"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert list(other.iterdir()) == []

@@ -4,7 +4,7 @@
  * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
  */
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import { describe, it } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -19,6 +19,7 @@ registerHooks({
       ? { format: "module", source: "", shortCircuit: true }
       : next(url, context),
 });
+const require = createRequire(import.meta.url);
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 const { BlackboxConfigCard, runProposerHarness, runProposerLabel, runStopScore, shellJoin } = await import(
@@ -48,6 +49,49 @@ void describe("BlackboxConfigCard sandbox row", () => {
     for (const payload of [{}, { sandbox_provider: null }, { sandbox_provider: "" }]) {
       assert.doesNotMatch(render(payload), /submit\.v2\.optimizer\.sandbox\.label/);
     }
+  });
+});
+
+void describe("BlackboxConfigCard proposer rows", () => {
+  // SummaryTabs opens on its first tab and a static render cannot click, so
+  // this starts it on the Optimization tab, where the proposer rows are.
+  function renderOptimizationTab(payload: Record<string, unknown>): string {
+    const react = require("react") as { useState: typeof React.useState };
+    const useState = react.useState;
+    react.useState = ((initial: unknown) =>
+      useState(initial === "general" ? "optimization" : initial)) as typeof React.useState;
+    try {
+      return render(payload);
+    } finally {
+      react.useState = useState;
+    }
+  }
+
+  void it("shows the proposer settings of a repository run that staging has not read yet", () => {
+    const html = renderOptimizationTab({
+      target: { kind: "repo", repo: { repository: "o/r", editable_paths: ["."] } },
+      proposer: {
+        max_candidates_per_iter: 2,
+        ralph: true,
+        max_no_eval_seconds: 60,
+        max_tool_calls: 5,
+        install_command: "npm ci",
+        run_command: "node agent.js",
+      },
+    });
+    for (const key of [
+      "submit.blackbox.proposer.max_candidates",
+      "submit.blackbox.proposer.ralph",
+      "optimization.config.proposer_idle",
+      "submit.blackbox.proposer.max_tool_calls",
+      "optimization.config.proposer_install",
+      "optimization.config.proposer_run",
+    ]) {
+      assert.match(html, new RegExp(key.replaceAll(".", "\\.")));
+    }
+    assert.doesNotMatch(html, /submit\.blackbox\.review\.proposer</);
+    const named = renderOptimizationTab({ proposer: { harness: "codex", max_tool_calls: 5 } });
+    assert.match(named, /submit\.blackbox\.review\.proposer</);
   });
 });
 

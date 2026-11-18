@@ -390,16 +390,18 @@ export function BlackboxConfigCard({
     value: String(calls),
     icon: <Wrench />,
   });
-  if (proposer && proposerLabel && !shinkaRun) {
-    optimizationRows.push({
-      label: (
-        <HelpTip text={tip("submit.blackbox.proposer")}>
-          {msg("submit.blackbox.review.proposer")}
-        </HelpTip>
-      ),
-      value: proposerLabel,
-      icon: <Robot />,
-    });
+  if (proposer && !shinkaRun) {
+    if (proposerLabel) {
+      optimizationRows.push({
+        label: (
+          <HelpTip text={tip("submit.blackbox.proposer")}>
+            {msg("submit.blackbox.review.proposer")}
+          </HelpTip>
+        ),
+        value: proposerLabel,
+        icon: <Robot />,
+      });
+    }
     if (proposer.max_candidates_per_iter != null) {
       optimizationRows.push({
         label: (
