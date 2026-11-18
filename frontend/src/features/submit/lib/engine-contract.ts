@@ -17,8 +17,8 @@ export function usesNativeProposer(choice: OptimizerChoice): boolean {
 }
 
 /**
- * The proposer settings a fresh wizard starts from. It sends every one but
- * `harness`, which only shows the server's default until the user picks one.
+ * The default proposer settings: the effort fallback and the candidate
+ * defaults. wizard-v2.ts keeps its own copy without `harness`, so change both.
  *
  * The stall timeout has no control: half an hour without a new score covers a
  * slow scorer pass while still cutting a wedged agent loose.

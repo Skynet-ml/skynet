@@ -256,6 +256,21 @@ def test_a_proposer_entry_with_a_zwnj_or_zwj_is_kept_exactly(name: str) -> None:
     assert parse_constraints(raw).proposer_entry == ("node", name)
 
 
+@pytest.mark.parametrize(
+    "char", ["\u0020", "\u007e", "\u00a0", "\u061b", "\u061d", "\u2010", "\u2029", "\u202f", "\u2065", "\u206a"]
+)
+def test_a_proposer_entry_with_a_character_next_to_a_refused_range_is_kept(char: str) -> None:
+    """The refused ranges end where the controls end, so each neighbor character is kept (SKY-753).
+
+    Args:
+        char: The character just before or just after a refused range.
+    """
+    name = f"agent{char}.js"
+    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+
+    assert parse_constraints(raw).proposer_entry == ("node", name)
+
+
 @pytest.mark.parametrize("key", ["entry", "setup"])
 @pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
 def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
