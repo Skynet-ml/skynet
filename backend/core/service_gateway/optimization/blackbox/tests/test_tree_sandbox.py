@@ -306,7 +306,7 @@ def test_run_gives_the_output_and_the_new_tree_and_commits_one_step(trees: TreeS
     assert step["tree_id"] == new_tree
     assert step["body"]["command"] == "cat a.txt; echo two > b.txt"
     assert step["body"]["stdout"] == "one\n"
-    assert candidates.acquired == [("agent-1", (Grant("api.example.com"),))]
+    assert candidates.acquired == [(f"{RUN}:agent-1", (Grant("api.example.com"),))]
     assert (runtime.specs[0].network_disabled, runtime.specs[0].allowed_hosts) == (False, ("api.example.com",))
     assert candidates.released == [True]
 
@@ -351,7 +351,7 @@ def test_score_runs_the_metric_in_a_box_with_only_the_outputs_and_metric_trees(
     assert value == 1.0
     assert metrics.files == [["./metric/score.sh", "./outputs/answer.txt"]]
     assert (runtime.specs[-1].network_disabled, runtime.specs[-1].allowed_hosts) == (True, ())
-    assert metrics.acquired == [("agent-1", ())]
+    assert metrics.acquired == [(f"{RUN}:agent-1", ())]
     assert len(candidates.acquired) == 1
     step = step_log.get_step(f"{RUN}:agent-1:2")
     assert step is not None

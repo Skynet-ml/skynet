@@ -31,7 +31,12 @@ from core.sandbox.placement import MODAL, VERCEL, Placement
 from core.sandbox.trees import BoxFailureError, GrantDeniedError
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
-from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxLease, StepRef, TreeSandbox
+from core.service_gateway.optimization.blackbox.tree_sandbox import (
+    PROCESS_SCAN,
+    RuntimeBoxLease,
+    StepRef,
+    TreeSandbox,
+)
 from core.storage.models import Base, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
@@ -312,7 +317,13 @@ def test_a_check_that_raises_drops_the_box() -> None:
 def test_a_close_error_after_a_check_error_hides_it_only_when_it_is_a_stop(
     check_error: BaseException, close_error: BaseException, raised: str
 ) -> None:
-    """A check error reaches the caller over the close error of the dropped box, except under a budget stop."""
+    """A check error reaches the caller over the close error of the dropped box, except under a budget stop.
+
+    Args:
+        check_error: The error that the health check raises.
+        close_error: The error that the close of the dropped box raises.
+        raised: Names the error that must reach the caller.
+    """
     provider = _Provider()
 
     def check(box: _Box) -> bool:
@@ -412,7 +423,12 @@ def test_a_bad_gpu_grant_keeps_the_warm_box() -> None:
     ],
 )
 def test_an_equal_grant_list_keeps_the_warm_box(first: list[Grant], second: list[Grant]) -> None:
-    """Grant lists that resolve to the same policy share the warm box: host case and repeats do not matter."""
+    """Grant lists that resolve to the same policy share the warm box: host case and repeats do not matter.
+
+    Args:
+        first: The grant list of the first acquire.
+        second: An equal grant list in another form, for the second acquire.
+    """
     provider = _Provider()
     lease = provider.lease()
     box = lease.acquire("agent-1", first)
@@ -424,7 +440,11 @@ def test_an_equal_grant_list_keeps_the_warm_box(first: list[Grant], second: list
 
 @pytest.mark.parametrize("host", [7, None])
 def test_a_host_that_is_not_text_is_a_grant_error_and_keeps_the_warm_box(host: object) -> None:
-    """A bad host is a refused grant list, not an AttributeError from the lease."""
+    """A bad host is a refused grant list, not an AttributeError from the lease.
+
+    Args:
+        host: A host that is not text.
+    """
     provider = _Provider()
     lease = provider.lease()
     box = lease.acquire("agent-1", [])
@@ -542,7 +562,11 @@ def test_the_lease_refuses_a_bad_vercel_cap() -> None:
 
 @pytest.mark.parametrize("spill", [VERCEL, "", None])
 def test_the_lease_refuses_a_bad_spill_provider(spill: Any) -> None:
-    """A Vercel spill would count past the cap, so the cap would have no effect."""
+    """A Vercel spill would count past the cap, so the cap would have no effect.
+
+    Args:
+        spill: A spill provider that is not valid.
+    """
     with pytest.raises(ValueError, match="spill provider"):
         _Provider().lease(spill=spill)
     with pytest.raises(ValueError, match="spill provider"):
@@ -560,7 +584,13 @@ def test_the_lease_refuses_a_bad_spill_provider(spill: Any) -> None:
     ],
 )
 def test_the_lease_refuses_a_bad_option(option: str, value: Any, message: str) -> None:
-    """A bad option fails when the lease is built, not at its first acquire."""
+    """A bad option fails when the lease is built, not at its first acquire.
+
+    Args:
+        option: The name of the lease option.
+        value: A value that the option does not accept.
+        message: A part of the expected error message.
+    """
     with pytest.raises(TypeError, match=message):
         _Provider().lease(**{option: value})
 
@@ -982,7 +1012,11 @@ def test_the_next_acquire_after_a_sleep_opens_a_new_box_and_counts_a_start() -> 
 
 
 def test_an_idle_box_close_error_is_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> None:
-    """The log names only the error type, because the error text can hold a secret; close() raises the error."""
+    """The log names only the error type, because the error text can hold a secret; close() raises the error.
+
+    Args:
+        caplog: Captures the log lines.
+    """
     provider = _Provider()
 
     def fail_close(box: _Box) -> None:
@@ -1275,7 +1309,11 @@ def test_close_wakes_the_default_reaper_wait_at_once() -> None:
 
 
 def test_a_failing_reaper_clears_itself_in_the_lock_that_keeps_its_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No release can come between the kept error and the cleared reaper, so a later release starts a new reaper."""
+    """No release can come between the kept error and the cleared reaper, so a later release starts a new reaper.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     provider = _Provider()
     ticker = _Ticker()
     broken: list[float] = []
@@ -1368,7 +1406,11 @@ def test_a_reaper_ends_with_no_idle_box_and_the_next_release_starts_a_new_one() 
 
 
 def test_a_release_does_not_wake_the_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reaper waits on its own event, so a release, a drop or a failed open of another agent costs it no pass."""
+    """The reaper waits on its own event, so a release, a drop or a failed open of another agent costs it no pass.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     provider = _Provider()
     reaper_reads: list[float] = []
     waiting = threading.Event()
@@ -1578,7 +1620,11 @@ def test_a_release_right_after_a_reaper_failure_still_gets_a_reaper(
 def test_a_reaper_start_failure_drops_the_box_and_the_next_acquire_opens_a_new_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the reaper thread cannot start, the release closes the box, so the step's re-run does not block."""
+    """When the reaper thread cannot start, the release closes the box, so the step's re-run does not block.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     provider = _Provider()
     ticker = _Ticker()
     lease = provider.lease(sleep_after_seconds=600, idle_wait=ticker)
@@ -1678,7 +1724,13 @@ def test_a_clock_failure_in_a_release_drops_the_box_and_the_next_acquire_opens_a
 def test_a_close_error_after_a_failed_healthy_release_hides_it_only_when_it_is_a_stop(
     release_error: BaseException, close_error: BaseException, raised: str
 ) -> None:
-    """A failed healthy release raises its own error over the box's close error, except under a budget stop."""
+    """A failed healthy release raises its own error over the box's close error, except under a budget stop.
+
+    Args:
+        release_error: The error that the healthy release raises.
+        close_error: The error that the close of the dropped box raises.
+        raised: Names the error that must reach the caller.
+    """
     provider = _Provider()
     broken: list[bool] = []
 
@@ -1757,7 +1809,11 @@ def test_close_closes_an_idle_box_in_the_context_of_its_last_release() -> None:
 
 @pytest.mark.parametrize("seconds", [0, -1, True, None, "600", float("inf"), float("nan"), 1e10])
 def test_the_lease_refuses_a_bad_sleep_after_time(seconds: Any) -> None:
-    """A bad idle time fails when the lease is built, like a bad start budget."""
+    """A bad idle time fails when the lease is built, like a bad start budget.
+
+    Args:
+        seconds: A sleep-after time that is not valid.
+    """
     with pytest.raises(ValueError, match="sleep-after"):
         _Provider().lease(sleep_after_seconds=seconds)
 
@@ -1823,6 +1879,9 @@ class _DyingBox:
         self.closed = False
         # The health check's outcome: None runs it, an exit code fakes it, an error is raised from it.
         self.check: int | BaseException | None = None
+        # The process scan's output; None runs the real scan. The host's own processes come and go, so a
+        # real scan on a test host can see a new process that no step started.
+        self.processes: str | None = "1 Tue Nov 17 00:00:00 2026\n"
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write files into the inner box.
@@ -1833,14 +1892,14 @@ class _DyingBox:
         self._inner.write_files(files)
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Raise on an agent command of a dead box, fake the health check when set, and run the others.
+        """Raise on an agent command of a dead box, fake the set health check and process scan, and run the rest.
 
         Args:
             command: The shell command.
             **options: The run options.
 
         Returns:
-            The inner box's result, or the faked health check result.
+            The inner box's result, or the faked health check or process scan result.
 
         Raises:
             SandboxInfraError: For an agent command once the box is dead.
@@ -1850,6 +1909,8 @@ class _DyingBox:
             raise self.check
         if command == "true" and self.check is not None:
             return CommandResult(exit_code=self.check)
+        if command == PROCESS_SCAN and self.processes is not None:
+            return CommandResult(exit_code=0, stdout=self.processes)
         if self.dead and command.startswith("cd tree"):
             raise SandboxInfraError("The box stopped.")
         return self._inner.run(command, **options)
@@ -1937,7 +1998,7 @@ def _step(seq: int, agent_id: str = "agent-1") -> StepRef:
 
 
 def _sandbox(
-    trees: TreeStore, step_log: StepLogStore, metric_runtime: _Runtime | None = None
+    trees: TreeStore, step_log: StepLogStore, metric_runtime: _Runtime | None = None, **options: Any
 ) -> tuple[TreeSandbox, _Runtime, _Runtime, RuntimeBoxLease, RuntimeBoxLease]:
     """Build the layer over a warm candidate lease and a metric lease that keeps no box warm.
 
@@ -1945,6 +2006,7 @@ def _sandbox(
         trees: The tree store.
         step_log: The step log.
         metric_runtime: The runtime of the metric boxes; ``None`` uses a plain local runtime.
+        **options: Extra :class:`TreeSandbox` options.
 
     Returns:
         The layer, the candidate and metric runtimes, and the two leases.
@@ -1952,11 +2014,17 @@ def _sandbox(
     candidate_runtime, metric_runtime = _Runtime(), metric_runtime or _Runtime()
     candidates = RuntimeBoxLease(_on_both(candidate_runtime), _SPEC, **_LIMITS)
     metrics = RuntimeBoxLease(_on_both(metric_runtime), _SPEC, keep_warm=False, **_LIMITS)
-    return TreeSandbox(trees, step_log, candidates, metrics), candidate_runtime, metric_runtime, candidates, metrics
+    sandbox = TreeSandbox(trees, step_log, candidates, metrics, **options)
+    return sandbox, candidate_runtime, metric_runtime, candidates, metrics
 
 
 def test_an_agent_runs_its_steps_in_one_warm_box(trees: TreeStore, step_log: StepLogStore) -> None:
-    """Two steps of one agent use one box, and each step starts from its own tree."""
+    """Two steps of one agent use one box, and each step starts from its own tree.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
     try:
         _, first = sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "echo two > b.txt", [])
@@ -1970,10 +2038,109 @@ def test_an_agent_runs_its_steps_in_one_warm_box(trees: TreeStore, step_log: Ste
     assert result.stdout == "a.txt\nother\n"
 
 
+def test_two_runs_with_one_agent_id_never_share_a_box(trees: TreeStore, step_log: StepLogStore, engine: Engine) -> None:
+    """The box key holds the run id, so a file that one run leaves outside its tree never reaches the other run.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        engine: The test engine; it gets the second run's job.
+    """
+    other = "job-bea"
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id=other, username="bea", execution_generation=1))
+        session.commit()
+    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
+    empty = _tree(trees, {})
+    other_empty = trees.put_tree(other, [])
+    try:
+        sandbox.run(_step(1), empty, "echo left > ../left.txt", [])
+        result, _ = sandbox.run(replace(_step(1), run_id=other), other_empty, "cat ../left.txt", [])
+        again, _ = sandbox.run(_step(2), empty, "cat ../left.txt", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert result.exit_code != 0
+    assert again.stdout == "left\n"
+    assert len(runtime.boxes) == 2
+
+
+def test_a_step_that_times_out_gives_its_box_back_unhealthy(trees: TreeStore, step_log: StepLogStore) -> None:
+    """The timeout kills only the command's process group, so the next step gets a new box.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
+    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log, timeout_seconds=1)
+    empty = _tree(trees, {})
+    try:
+        result, _ = sandbox.run(_step(1), empty, "sleep 30", [])
+        sandbox.run(_step(2), empty, "true", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert result.timed_out
+    assert len(runtime.boxes) == 2
+    assert runtime.boxes[0].closed
+
+
+def test_a_step_that_leaves_a_background_job_gives_its_box_back_unhealthy(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A job that outlives its step could write into the next step's tree, so the next step gets a new box.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
+    sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
+    empty = _tree(trees, {})
+    try:
+        sandbox.run(_step(1), empty, "true", [])
+        runtime.boxes[0].processes = None
+        # The job writes into the tree folder after its step ends, where the next step would unpack.
+        sandbox.run(_step(2), empty, 'here=$PWD; (sleep 1; echo stray > "$here/late.txt") >/dev/null 2>&1 &', [])
+        result, _ = sandbox.run(_step(3), empty, "sleep 1.5; ls", [])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert result.stdout == ""
+    assert len(runtime.boxes) == 2
+    assert runtime.boxes[0].closed
+
+
+def test_the_process_scan_sees_a_background_job_and_not_itself() -> None:
+    """A job that a command leaves running is a new line in the next scan, and two scans in a row see no own process."""
+    box = LocalSubprocessRuntime().open(_SPEC)
+    try:
+        before = box.run(PROCESS_SCAN, timeout_seconds=30)
+        started = box.run("sleep 30 >/dev/null 2>&1 & echo $!", timeout_seconds=30)
+        after = box.run(PROCESS_SCAN, timeout_seconds=30)
+        box.run(f"kill {started.stdout.strip()}", timeout_seconds=30)
+    finally:
+        box.close()
+
+    assert before.ok
+    assert after.ok
+    pids = {line.split()[0] for line in after.stdout.splitlines()} - {
+        line.split()[0] for line in before.stdout.splitlines()
+    }
+    assert started.stdout.strip() in pids
+
+
 def test_a_box_that_dies_mid_step_is_replaced_and_the_step_reruns_from_its_tree(
     trees: TreeStore, step_log: StepLogStore
 ) -> None:
-    """The dead box drops; the retry opens a new box and starts from the last committed tree."""
+    """The dead box drops; the retry opens a new box and starts from the last committed tree.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
     try:
         _, committed = sandbox.run(_step(1), _tree(trees, {"a.txt": "one\n"}), "echo two > b.txt", [])
@@ -1992,7 +2159,13 @@ def test_a_box_that_dies_mid_step_is_replaced_and_the_step_reruns_from_its_tree(
 def test_a_score_never_sees_the_files_or_processes_of_an_earlier_score(
     trees: TreeStore, step_log: StepLogStore, tmp_path: Path
 ) -> None:
-    """Each score gets a new box, so a stray TMPDIR file or background process of the last score stays out."""
+    """Each score gets a new box, so a stray TMPDIR file or background process of the last score stays out.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+        tmp_path: Scratch folder; it holds the metric boxes' TMPDIR folders.
+    """
     tmp_root = tmp_path / "box-tmp"
     tmp_root.mkdir()
     sandbox, _, metric_runtime, candidates, metrics = _sandbox(trees, step_log, _Runtime(tmp_root=tmp_root))
@@ -2018,7 +2191,12 @@ def test_a_score_never_sees_the_files_or_processes_of_an_earlier_score(
 
 
 def test_the_metric_box_never_gets_candidate_code(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The metric box holds only the outputs tree and the metric tree, never the candidate tree."""
+    """The metric box holds only the outputs tree and the metric tree, never the candidate tree.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     sandbox, _, _, candidates, metrics = _sandbox(trees, step_log)
     candidate = _tree(trees, {"solve.py": "print('secret')\n"})
     metric = _tree(trees, {"score.sh": "echo 1.0\n"})
@@ -2038,7 +2216,12 @@ def test_the_metric_box_never_gets_candidate_code(trees: TreeStore, step_log: St
 
 
 def test_a_warm_lease_cannot_give_the_metric_boxes(trees: TreeStore, step_log: StepLogStore) -> None:
-    """A warm metric box would keep the files and processes of an earlier score or candidate."""
+    """A warm metric box would keep the files and processes of an earlier score or candidate.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     candidates = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, **_LIMITS)
     warm = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, **_LIMITS)
 
@@ -2049,7 +2232,12 @@ def test_a_warm_lease_cannot_give_the_metric_boxes(trees: TreeStore, step_log: S
 
 
 def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The step records the grant list that the layer resolves, so the lease must resolve the same way."""
+    """The step records the grant list that the layer resolves, so the lease must resolve the same way.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     registry = {"api.example.com": {"Authorization": "x"}}
 
     with pytest.raises(ValueError, match="registry"):
@@ -2062,7 +2250,12 @@ def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLog
 
 
 def test_a_gpu_step_is_refused_before_any_box_opens(trees: TreeStore, step_log: StepLogStore) -> None:
-    """No runtime here opens a GPU box, so a GPU grant is a denied grant, not a box without its GPU."""
+    """No runtime here opens a GPU box, so a GPU grant is a denied grant, not a box without its GPU.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
     try:
         with pytest.raises(GrantDeniedError, match="GPU"):
@@ -2075,7 +2268,12 @@ def test_a_gpu_step_is_refused_before_any_box_opens(trees: TreeStore, step_log: 
 
 
 def test_a_step_with_a_host_that_is_not_text_is_a_denied_grant(trees: TreeStore, step_log: StepLogStore) -> None:
-    """The step records a denied grant, not an AttributeError, and no box opens."""
+    """The step records a denied grant, not an AttributeError, and no box opens.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
     sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
     try:
         with pytest.raises(GrantDeniedError):
@@ -2135,7 +2333,11 @@ def test_a_denied_grant_list_keeps_the_warm_box_and_uses_no_start() -> None:
 
 @pytest.mark.parametrize("check", [1, SandboxInfraError("The box stopped.")])
 def test_a_warm_box_that_fails_its_health_check_is_replaced(check: int | Exception) -> None:
-    """The runtime check runs ``true`` in the warm box; a failed or broken run opens a new box."""
+    """The runtime check runs ``true`` in the warm box; a failed or broken run opens a new box.
+
+    Args:
+        check: The faked exit code of the health check, or the error it raises.
+    """
     runtime = _Runtime()
     lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
     try:
@@ -2183,7 +2385,11 @@ def test_a_lease_needs_a_runtime_for_vercel_and_the_spill() -> None:
 
 
 def test_a_runtime_lease_keeps_its_first_budget_error_over_a_later_budget_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every budget error stops the run, so a later BudgetReached does not replace a kept BudgetError."""
+    """Every budget error stops the run, so a later BudgetReached does not replace a kept BudgetError.
+
+    Args:
+        monkeypatch: Replaces the parts that the test makes fail or records.
+    """
     runtime = _Runtime()
     lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
     boxes = [lease.acquire(agent, []) for agent in ("agent-1", "agent-2")]

@@ -7,10 +7,20 @@ metric tree, so no candidate code reaches it. Each call commits one step to
 the step log and returns only once that step is durable behind the run's
 fence. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
 it opens a new box for each acquire and closes it at release.
-:class:`RuntimeBoxLease` keeps one warm box for each agent on the provider
-that placement picks (SKY-732). A metric lease must use ``keep_warm=False``:
-no wipe resets /tmp, $HOME and stray processes on every provider, so each
-score gets a new box.
+:class:`RuntimeBoxLease` keeps one warm box for each agent of a run on the
+provider that placement picks (SKY-732); the lease key holds the run id, so
+two runs never share a box. A metric lease must use ``keep_warm=False``: no
+wipe resets /tmp, $HOME and stray processes on every provider, so each score
+gets a new box.
+
+A step's process must not live into the next step of a warm box, where it
+could write into the unpacked tree. No simple way kills every such process on
+every provider: a candidate can leave its process group and session. So the
+step goes back healthy only when it can show that no process is left: the
+command did not time out, and a ``ps`` scan after the pack finds no process
+that the scan before the command did not see. A box without ``ps`` or with
+other new processes goes back unhealthy, and the next step gets a new box.
+The limit: a candidate with root in the box can hide a process from ``ps``.
 
 :meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
 one box from a :class:`BoxSource`, starts it from a state, and gives the
@@ -78,6 +88,16 @@ _MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_P
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
 _CHECK_TIMEOUT_SECONDS = 30
+# Prints one "pid start-time" line for each process, except the scan's own shell, its ancestors and its
+# children (ps, awk, sort), and the kernel threads (pid 2 and its children). A pid with its start time names
+# one process, also when the pid is used again.
+PROCESS_SCAN = (
+    "set -o pipefail; ps -A -o pid= -o ppid= -o lstart= | awk -v me=$$ '"
+    "{parent[$1] = $2; line[$1] = $0} END {p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
+    " for (pid in line) if (!(pid in skip) && parent[pid] != me && pid != 2 && parent[pid] != 2)"
+    ' {text = line[pid]; sub(/^ *[0-9]+ +[0-9]+ +/, "", text); sub(/ +$/, "", text); print pid, text}}'
+    "' | LC_ALL=C sort"
+)
 
 _Result = TypeVar("_Result")
 
@@ -235,6 +255,29 @@ def _close_box(box: SandboxSession) -> None:
         logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
 
 
+def _processes(box: SandboxSession) -> frozenset[str] | None:
+    """Return the processes in a box, each as its pid and start time.
+
+    Args:
+        box: The box.
+
+    Returns:
+        The process lines of :data:`PROCESS_SCAN`, or ``None`` when the scan
+        fails, so the caller cannot show that no process is left.
+
+    Raises:
+        BudgetReached: And the other budget errors; the run stops.
+    """
+    try:
+        result = box.run(PROCESS_SCAN, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+    except _BUDGET_ERRORS:
+        raise
+    except Exception:
+        return None
+    lines = frozenset(result.stdout.splitlines())
+    return lines if result.ok and not result.timed_out and lines else None
+
+
 def _box_alive(box: SandboxSession) -> bool:
     """Return whether a warm box still runs a command.
 
@@ -374,6 +417,12 @@ class StepRef:
         """Return the step id, ``run_id:agent_id:seq``."""
         return step_id_for(self.run_id, self.agent_id, self.seq)
 
+    @property
+    def box_key(self) -> str:
+        """Return the key of the agent's box, ``run_id:agent_id``, so two runs with one agent id never share a box."""
+        # A run id holds no ":", so the key names one run and one agent.
+        return f"{self.run_id}:{self.agent_id}"
+
 
 class TreeSandbox:
     """Run commands and metrics on stored trees, in boxes from two sources."""
@@ -483,19 +532,32 @@ class TreeSandbox:
         """
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
+        # A fresh-box source closes every box at its release, so only another source needs the scans.
+        fresh = isinstance(self._candidates, RuntimeBoxSource) or (
+            isinstance(self._candidates, BoxLease) and not self._candidates.keeps_warm
+        )
 
-        def work(box: SandboxSession) -> tuple[CommandResult, str]:
-            """Unpack the tree, run the command and store the new tree.
+        def work(box: SandboxSession) -> tuple[tuple[CommandResult, str], bool]:
+            """Unpack the tree, run the command, store the new tree and say whether the box can serve a next step.
 
             Args:
                 box: The candidate box.
 
             Returns:
-                The command's result and the new tree id.
+                The command's result and the new tree id, and False when a
+                process of the command can still be alive in the box.
             """
             self._unpack(box, archive, TREE_DIR)
+            before = None if fresh else _processes(box)
             result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=self._timeout)
-            return result, self._pack(box, step.run_id, TREE_DIR)
+            new_tree_id = self._pack(box, step.run_id, TREE_DIR)
+            if result.timed_out:
+                # The kill reaches only the command's process group, so a process outside it can live on.
+                return (result, new_tree_id), False
+            if fresh:
+                return (result, new_tree_id), True
+            after = _processes(box)
+            return (result, new_tree_id), before is not None and after is not None and after <= before
 
         result, new_tree_id = self._in_box(self._candidates, step, grants, work)
         body = {
@@ -551,18 +613,20 @@ class TreeSandbox:
                 raise TreeRejectedError(step.step_id, "The outputs tree holds a link.")
         metric = tree_to_tar(self._trees, step.run_id, metric_tree_id)
 
-        def work(box: SandboxSession) -> CommandResult:
+        def work(box: SandboxSession) -> tuple[CommandResult, bool]:
             """Unpack the two trees and run the metric.
 
             Args:
                 box: The metric box.
 
             Returns:
-                The metric command's result.
+                The metric command's result, and False when it timed out, so
+                its processes can still be alive in the box.
             """
             self._unpack(box, outputs, OUTPUTS_DIR)
             self._unpack(box, metric, METRIC_DIR)
-            return box.run(command, timeout_seconds=self._timeout)
+            result = box.run(command, timeout_seconds=self._timeout)
+            return result, not result.timed_out
 
         result = self._in_box(self._metrics, step, grants, work)
         lines = result.stdout.strip().splitlines()
@@ -602,7 +666,7 @@ class TreeSandbox:
         source: BoxSource[SandboxSession],
         step: StepRef,
         grants: Sequence[Grant],
-        work: Callable[[SandboxSession], _Result],
+        work: Callable[[SandboxSession], tuple[_Result, bool]],
     ) -> _Result:
         """Do one piece of work in a box from a source and give the box back.
 
@@ -610,10 +674,11 @@ class TreeSandbox:
             source: Gives the box.
             step: The step the work is.
             grants: The box's grants.
-            work: What to do in the box.
+            work: What to do in the box; it also returns False when the box
+                must not serve another step, so it goes back unhealthy.
 
         Returns:
-            What ``work`` returns.
+            The first value that ``work`` returns.
 
         Raises:
             GrantDeniedError: When the source refuses the grants.
@@ -622,17 +687,17 @@ class TreeSandbox:
             BudgetReached: And the other budget errors, from the work or the release.
         """
         try:
-            session = self.open_session(source, step.agent_id, grants)
+            session = self.open_session(source, step.box_key, grants)
         except _BUDGET_ERRORS:
             raise
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
         except Exception as error:
             raise BoxFailureError(step.step_id, f"The box did not open ({type(error).__name__}).") from error
-        healthy = False
+        healthy = done = False
         try:
-            outcome = work(session.box)
-            healthy = True
+            outcome, healthy = work(session.box)
+            done = True
         except _BUDGET_ERRORS:
             raise
         except BadArchiveError as error:
@@ -647,7 +712,7 @@ class TreeSandbox:
                 # A budget stop wins over the step's own error, so the run stops.
                 raise
             except Exception as error:
-                if healthy:
+                if done:
                     # Only the type: the provider's text can name the box.
                     raise BoxFailureError(step.step_id, f"The box did not go back ({type(error).__name__}).") from error
                 # The step's own error is the one the caller acts on.

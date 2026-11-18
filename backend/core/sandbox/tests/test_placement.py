@@ -45,7 +45,11 @@ def test_a_full_vercel_spills_to_the_second_provider() -> None:
     ],
 )
 def test_bad_gpu_grants_are_refused(grants: list[Grant]) -> None:
-    """A GPU grant needs one type and no credential."""
+    """A GPU grant needs one type and no credential.
+
+    Args:
+        grants: A grant list with a GPU grant that is not valid.
+    """
     with pytest.raises(GrantError):
         choose(grants, _ROOM)
 
@@ -65,7 +69,11 @@ def test_network_grants_drop_the_gpu_grants() -> None:
 
 @pytest.mark.parametrize("host", [7, None])
 def test_a_host_that_is_not_text_is_a_network_grant(host: object) -> None:
-    """Placement does not fail on such a host; the grant resolution refuses it with GrantError."""
+    """Placement does not fail on such a host; the grant resolution refuses it with GrantError.
+
+    Args:
+        host: A host that is not text.
+    """
     grants = [Grant(host)]  # type: ignore[arg-type]
 
     assert gpu_type(grants) is None
