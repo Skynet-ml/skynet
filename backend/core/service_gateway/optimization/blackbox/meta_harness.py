@@ -121,8 +121,13 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     arguments = call.get("arguments")
     if not isinstance(arguments, str):
         # Sorted keys give the same text for a live reply and for its replay from the step log. ``_exec`` refuses
-        # arguments past the depth bound, so the transcript holds an empty object in their place.
-        arguments = _REFUSED_ARGUMENTS if _too_deep(arguments) else json.dumps(arguments, sort_keys=True)
+        # arguments past the depth or length bound, so the transcript holds an empty object in their place.
+        if _too_deep(arguments):
+            arguments = _REFUSED_ARGUMENTS
+        else:
+            arguments = json.dumps(arguments, sort_keys=True)
+            if len(arguments) > MAX_ARGUMENT_CHARS:
+                arguments = _REFUSED_ARGUMENTS
     return {
         "id": call.get("id"),
         "type": "function",
@@ -544,9 +549,10 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 arguments = None
         if _too_deep(arguments):
             return self._refuse_arguments(tree)
-        command = arguments.get("command") if isinstance(arguments, dict) else None
-        if isinstance(command, str) and len(command) > MAX_ARGUMENT_CHARS:
+        # The protocol gives valid JSON object arguments as a mapping, so the text bound above never sees them.
+        if isinstance(arguments, dict) and len(json.dumps(arguments)) > MAX_ARGUMENT_CHARS:
             return self._refuse_arguments(tree)
+        command = arguments.get("command") if isinstance(arguments, dict) else None
         if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
             # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
             return json.dumps({"error": f"Call the {BASH_TOOL['name']} tool with a command string."}), tree

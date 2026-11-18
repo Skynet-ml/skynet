@@ -1580,11 +1580,12 @@ def _nested(depth: int) -> dict[str, Any]:
         ("[" * 990, "command string"),
         (json.dumps({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}), "nested at most"),
         ({"command": "x" * (meta_mod.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
+        ({"command": "true", "pad": "x" * meta_mod.MAX_ARGUMENT_CHARS}, "nested at most"),
         # Close to the depth past which the engine loop cannot commit the reply. How deep ``json.dumps`` can go
         # depends on the stack at the call, so the transcript must not depend on it.
         (_nested(900), "nested at most"),
     ],
-    ids=["deep-text", "long-text", "long-command", "deep-object"],
+    ids=["deep-text", "long-text", "long-command", "long-object", "deep-object"],
 )
 def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
     arguments: Any,
@@ -1614,7 +1615,7 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     assert result.best_candidate == "seed"
     assert boxes.opened == 0
     assert error in json.loads(model.calls[1][-1]["content"])["error"]
-    if isinstance(arguments, dict) and "a" in arguments:
+    if isinstance(arguments, dict):
         assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
     resumed, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=0), generation=2)
     assert _run(resumed).best_candidate == "seed"
