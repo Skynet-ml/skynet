@@ -170,8 +170,9 @@ def run(config: ChaosGateConfig) -> ScenarioResult:
     rows: list[dict[str, Any]] = []
     fired = dict.fromkeys(KILL_KINDS, 0)
     for (shape, outcome), (_, _, switch) in zip(outcomes, plan, strict=True):
-        metrics.record(status_code=200 if outcome.ok else 500, latency_seconds=outcome.wall_seconds)
         row = outcome_report(shape, outcome, config.model_wait_seconds)
+        # The row's ``ok`` also holds the GPU placement check, so the metric and the gate agree.
+        metrics.record(status_code=200 if row["ok"] else 500, latency_seconds=outcome.wall_seconds)
         row["shape"] = shape.name
         row["kills"] = dict(switch.fired)
         row["commit_cuts_lost"] = outcome.cuts_lost

@@ -1381,8 +1381,9 @@ def run(config: ReferenceShapesConfig) -> ScenarioResult:
         try:
             for index, shape in enumerate(SHAPES):
                 outcome = run_shape(harness, shape, f"shape-{index}", rounds=config.rounds)
-                metrics.record(status_code=200 if outcome.ok else 500, latency_seconds=outcome.wall_seconds)
                 rows[shape.name] = outcome_report(shape, outcome, config.model_wait_seconds)
+                # The row's ``ok`` also holds the GPU placement check, so the metric and the gate agree.
+                metrics.record(status_code=200 if rows[shape.name]["ok"] else 500, latency_seconds=outcome.wall_seconds)
         finally:
             harness.close()
     result = metrics.finish()
