@@ -606,6 +606,45 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
     assert "inside the lab" in _tool_result(model, 3)["error"]
 
 
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ({"file": "work/bad.txt"}, "is not UTF-8 text"),
+        ({"file": "work/c1.txt", "example_ids": [["a"]]}, "list of example id strings"),
+        ({"file": "work/c1.txt", "example_ids": ["zzz"]}, "Unknown or sealed example_ids"),
+    ],
+)
+def test_a_bad_evaluate_input_gets_an_error_result_and_spends_no_budget(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    arguments: dict[str, Any],
+    error: str,
+) -> None:
+    """A lab file that is not UTF-8, or bad ``example_ids``, gets an error; the next sweep still scores.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        arguments: The arguments of the bad evaluate call.
+        error: Text that the error result holds.
+    """
+    bad: Turn = lambda n: {"id": "bad", "name": "evaluate", "arguments": arguments}  # noqa: E731
+    model = _Researcher([_WRITE, _bash("printf '\\377' > work/bad.txt"), bad, _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=2, stop_at_score=None)
+
+    assert error in _tool_result(model, 3)["error"]
+    assert _tool_result(model, 4)["budget"] == {"used": 2, "remaining": 0}
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
+
+
 def test_a_lab_file_whose_name_starts_with_two_dots_is_scored(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
