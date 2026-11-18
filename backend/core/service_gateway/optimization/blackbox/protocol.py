@@ -12,10 +12,11 @@ import json
 import logging
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from gepa.oa.budget import BudgetExhausted
 
@@ -25,7 +26,9 @@ from ..timing import STAGE_TRAINING
 from .runner import FEEDBACK_REQUIRED
 
 if TYPE_CHECKING:
+    from ....sandbox.grants import Grant
     from .native_runtime import NativeOptions
+    from .sandbox_contract import CommandResult
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +261,187 @@ class CandidateRecord:
         return self.total / self.count
 
 
+class ToolDefinition(TypedDict):
+    """One tool that the model may call, in the engine loop's flat form.
+
+    ``input_schema`` is the JSON Schema of the call's arguments. :func:`openai_tools` gives the OpenAI form.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class ToolCall(TypedDict):
+    """One tool call that a model reply asks for, in the engine loop's flat form.
+
+    ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object. The engine gives
+    the model an error tool result for raw text, so the model can correct its call.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] | str
+
+
+def openai_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+    """Convert flat tool definitions to the OpenAI ``tools`` form that LiteLLM takes.
+
+    Args:
+        tools: The flat tool definitions.
+
+    Returns:
+        One ``{"type": "function", "function": {"name", "description", "parameters"}}`` item for each tool.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
+    """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
+
+    Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
+    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
+    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+
+    Args:
+        message: The assistant message, for example ``response.choices[0].message.model_dump()``.
+
+    Returns:
+        The flat tool calls in their order; empty when the message asks for none.
+    """
+    calls: list[ToolCall] = []
+    for call in message.get("tool_calls") or []:
+        function = call["function"]
+        raw = function.get("arguments")
+        if raw is None or raw == "":
+            raw = "{}"
+        if isinstance(raw, dict):
+            # Some clients parse the arguments already.
+            arguments: dict[str, Any] | str = raw
+        elif not isinstance(raw, str):
+            arguments = json.dumps(raw, default=str)
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                parsed = None
+            arguments = parsed if isinstance(parsed, dict) else raw
+        calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
+    return calls
+
+
+@dataclass(frozen=True)
+class ModelReply:
+    """One model response: its text, the tool calls that it asks for, and its cost in cents."""
+
+    text: str
+    cost_cents: Decimal
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RepoSeed:
+    """The run's repository seed tree and the rules for its paths, all repository-relative.
+
+    A symlink of the tree must not be at a hidden path, and no hidden path may be reached through a symlinked
+    folder: the engine loop stops on such a tree, because the link's target would stay visible under its real
+    path. Links inside a hidden folder count only when the folder is reached through a link, since no box gets
+    the folder itself. When the seed hides paths of its own, the tree must also have no other symlink loop and no
+    other symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell what it
+    reaches. A candidate may change a constrained path, but only within the rules of the constraints file
+    (``optimize.toml``). The engine loop does not enforce the editable, read-only and constrained paths; the
+    caller enforces them where it accepts a candidate.
+    """
+
+    tree_id: str
+    editable_paths: tuple[str, ...] = ()
+    readonly_paths: tuple[str, ...] = ()
+    constrained_paths: tuple[str, ...] = ()
+    # The engine never reads hidden content. It can confirm a guessed hidden name, because writes to it are
+    # refused. Each key is the SHA-256 of a normalized repository-relative path, built by
+    # harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case. The value is its
+    # kind. A folder key hides its whole subtree, so check a path with
+    # harness_bridge.hashed_kind, never with ``path in hidden_hashes``.
+    hidden_hashes: Mapping[str, str] = field(default_factory=dict)
+
+
+class CallModel(Protocol):
+    """Call the model once, as one step of the worker engine loop."""
+
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None = None) -> ModelReply:
+        """Call the model with a prompt and optional tool definitions.
+
+        Args:
+            prompt: The prompt text or messages.
+            tools: The tool definitions that the model may call; ``None`` for no tools.
+
+        Returns:
+            The reply, its tool calls and its cost in cents.
+        """
+        ...
+
+
+class RunCommand(Protocol):
+    """Run one command in a box over a tree, as one step of the worker engine loop."""
+
+    def __call__(self, tree_id: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+        """Run a command over a tree.
+
+        Args:
+            tree_id: The tree the command starts from.
+            command: The shell command.
+            grants: The box's network grants; empty means no network.
+
+        Returns:
+            The command's result and the tree id after it.
+        """
+        ...
+
+
+class PutFiles(Protocol):
+    """Write files over a tree with no box."""
+
+    def __call__(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+        """Write files over a base tree.
+
+        Args:
+            files: The file bytes by ``/``-separated path.
+            base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+
+        Returns:
+            The new tree id.
+        """
+        ...
+
+
+class ListFiles(Protocol):
+    """List the files under one folder of a tree with no box."""
+
+    def __call__(self, tree_id: str, path: str = "") -> list[str] | None:
+        """List the files below a folder.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated folder; ``""`` is the tree's root.
+
+        Returns:
+            The sorted file paths, or ``None`` when the folder is missing or hidden.
+        """
+        ...
+
+
 @dataclass
 class EngineContext:
     """Run-scoped resources every engine receives alongside the task."""
@@ -282,6 +466,13 @@ class EngineContext:
     # Job-level progress sink. Engines that can narrate their run (GEPA via
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
+    # The worker engine loop (SKY-719) sets these; each model call and command is one step there.
+    call_model: CallModel | None = None
+    run_command: RunCommand | None = None
+    put_files: PutFiles | None = None
+    read_file: Callable[[str, str], bytes | None] | None = None
+    list_files: ListFiles | None = None
+    repo_seed: RepoSeed | None = None
 
 
 class Engine(Protocol):

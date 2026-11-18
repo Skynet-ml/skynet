@@ -1555,6 +1555,7 @@ def test_shinka_runner_files_carry_the_pinned_requirements() -> None:
         "shinka_runner.py",
         "shinka_bundle.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "shinka_requirements.txt",
     }
@@ -1780,6 +1781,7 @@ def test_autosaddler_runner_files_bundle_the_scenario_plugin() -> None:
     assert set(files) == {
         "autosaddler_runner.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "autosaddler_plugin/LICENSE",
         "autosaddler_plugin/NOTICE.md",
@@ -1801,6 +1803,7 @@ def test_autosaddler_runner_files_bundle_the_scenario_plugin() -> None:
         "native_runner.py",
         "native_engines.py",
         "harness_bridge.py",
+        "exec_shim.py",
         "repo_tree.py",
         "upstream_prompts/meta_harness/SKILL.md",
         "upstream_prompts/meta_harness/LICENSE",

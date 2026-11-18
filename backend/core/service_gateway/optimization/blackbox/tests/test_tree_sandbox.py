@@ -40,7 +40,7 @@ from core.storage.tree_store import TreeEntry, TreeStore
 from .. import tree_sandbox
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_contract import CommandResult, SandboxSession
-from ..tree_sandbox import RuntimeBoxSource, StepRef, TreeSandbox
+from ..tree_sandbox import RuntimeBoxSource, StepCommittedError, StepRef, TreeSandbox
 
 RUN = "job-ada"
 _SPEC = SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="op")
@@ -451,6 +451,44 @@ def test_a_lost_fence_is_a_typed_error_that_names_the_step(
         sandbox.run(_step(2), empty, "true", [])
 
     assert raised.value.step_id == f"{RUN}:agent-1:2"
+
+
+def test_a_durable_failure_after_the_commit_keeps_the_seq_taken(
+    trees: TreeStore, step_log: StepLogStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit took the seq, so the error says so; the next step at the next seq stores its own result."""
+    sandbox, _, _ = _sandbox(trees, step_log, _Runtime())
+    empty = _tree(trees, {})
+    durable = step_log.durable
+    waits: list[str] = []
+
+    def lost(step_id: str, execution_generation: int, timeout: float | None = None) -> None:
+        """Fail the first durable wait, as a wait that times out does.
+
+        Args:
+            step_id: The step.
+            execution_generation: The step's generation.
+            timeout: The most seconds to wait.
+
+        Raises:
+            TimeoutError: In the first wait.
+        """
+        if not waits:
+            waits.append(step_id)
+            raise TimeoutError("the step did not become durable")
+        durable(step_id, execution_generation, timeout)
+
+    monkeypatch.setattr(step_log, "durable", lost)
+    with pytest.raises(StepCommittedError) as raised:
+        sandbox.run(_step(1), empty, "echo first", [])
+    assert raised.value.step_id == f"{RUN}:agent-1:1"
+
+    result, _ = sandbox.run(_step(2), empty, "echo second", [])
+
+    assert result.stdout == "second\n"
+    step_log.flush()
+    assert step_log.get_step(f"{RUN}:agent-1:1")["body"]["command"] == "echo first"
+    assert step_log.get_step(f"{RUN}:agent-1:2")["body"]["command"] == "echo second"
 
 
 def test_a_box_that_dies_mid_command_is_a_box_failure_and_the_step_retries_on_a_new_box(

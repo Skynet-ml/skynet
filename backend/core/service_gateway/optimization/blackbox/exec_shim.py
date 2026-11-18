@@ -7,8 +7,8 @@ the real command, passes its output through as it comes, and appends one JSON
 line with the command line, exit code and output to the session's exec log.
 The parent commits each line as a step (``harness_capture``).
 
-Stdlib only, so it can run in the sandbox next to the bridge. The sandbox file
-maps do not ship it yet.
+Stdlib only, so it can run in the sandbox next to the bridge. The native
+runtime's file maps ship it next to the bridge (``_bridge_files``).
 """
 
 from __future__ import annotations
