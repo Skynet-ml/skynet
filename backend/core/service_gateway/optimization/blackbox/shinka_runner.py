@@ -220,8 +220,8 @@ class EvaluatorMailbox:
         self._arrived = threading.Condition()
         self._replies: dict[str, dict[str, Any]] = {}
         self._closed = False
-        # A counter, not uuid4: the seeded uuid4 belongs to upstream's program
-        # ids, and a draw here would shift them with thread timing.
+        # A counter, not uuid4: a request id needs to be unique only in this
+        # process, and a counter keeps these ids out of the seeded uuid4 sources.
         self._ids = itertools.count()
 
     def listen(self, stream: TextIO) -> threading.Thread:
