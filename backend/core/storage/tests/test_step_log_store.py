@@ -1737,7 +1737,13 @@ def test_one_flush_is_one_put_and_one_transaction(make_store, engine, objects) -
 
 
 def test_a_batch_above_the_sqlite_bind_limit_lands_in_one_flush(make_store, engine, objects) -> None:
-    """A batch of 3,001 steps needs more bind variables than SQLite allows in one statement; it lands at once (SKY-807)."""
+    """A batch of 3,001 steps needs more bind variables than SQLite allows in one statement; it lands at once (SKY-807).
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        objects: The counting object store.
+    """
     commits: list[object] = []
 
     def default_bind_limit(dbapi_connection: Any, record: Any) -> None:
@@ -1774,7 +1780,13 @@ def test_a_batch_above_the_sqlite_bind_limit_lands_in_one_flush(make_store, engi
 
 
 def test_each_flush_statement_splits_into_chunks_under_the_bind_limit(make_store, engine, monkeypatch) -> None:
-    """With a small bind limit, the step insert, the tree object insert and the id query each split into chunks."""
+    """With a small bind limit, the step insert, the tree object insert and the id query each split into chunks.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     limit = 28
     monkeypatch.setattr("core.storage.step_log_store.SQL_PARAMS_MAX", limit)
     ids = [f"{number:064x}" for number in range(9, 0, -1)]
@@ -1967,7 +1979,13 @@ def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, m
 
 
 def test_a_flush_that_fails_again_logs_the_count_and_only_the_error_type(make_store, caplog, monkeypatch) -> None:
-    """Each repeat of a failed flush logs one line with its count and error type, never the error text."""
+    """Each repeat of a failed flush logs one line with its count and error type, never the error text.
+
+    Args:
+        make_store: The factory of step log stores.
+        caplog: The pytest log capture fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     caplog.set_level("WARNING", logger="core.storage.step_log_store")
     store = make_store(flush_window_seconds=0.05)
 
@@ -1996,7 +2014,13 @@ def test_a_flush_that_fails_again_logs_the_count_and_only_the_error_type(make_st
 
 
 def test_a_flush_that_fails_with_a_new_error_type_logs_the_full_error_again(make_store, caplog, monkeypatch) -> None:
-    """When a repeat fails with another error type, the log shows that error's full trace, and the count starts again."""
+    """When a repeat fails with another error type, the log shows that error's full trace, and the count starts again.
+
+    Args:
+        make_store: The factory of step log stores.
+        caplog: The pytest log capture fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     caplog.set_level("WARNING", logger="core.storage.step_log_store")
     store = make_store(flush_window_seconds=0.05)
     errors: list[Exception] = [RuntimeError("first"), RuntimeError("first"), ValueError("second"), ValueError("second")]
@@ -2031,7 +2055,14 @@ def test_a_flush_that_fails_with_a_new_error_type_logs_the_full_error_again(make
 def test_a_flush_that_fails_again_after_a_success_logs_the_full_error_again(
     make_store, engine, caplog, monkeypatch
 ) -> None:
-    """A successful flush resets the count, so the next failure with the same cause logs its full trace."""
+    """A successful flush resets the count, so the next failure with the same cause logs its full trace.
+
+    Args:
+        make_store: The factory of step log stores.
+        engine: The test engine.
+        caplog: The pytest log capture fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     caplog.set_level("WARNING", logger="core.storage.step_log_store")
     store = make_store(flush_window_seconds=0.05)
     real_apply = store._apply
@@ -2070,7 +2101,13 @@ def test_a_flush_that_fails_again_after_a_success_logs_the_full_error_again(
 
 
 def test_a_flush_that_fails_with_a_new_driver_error_logs_the_full_error_again(make_store, caplog, monkeypatch) -> None:
-    """Both SQLite errors are ``sqlite3.OperationalError``; a new SQLite error code still logs its full trace."""
+    """Both SQLite errors are ``sqlite3.OperationalError``; a new SQLite error code still logs its full trace.
+
+    Args:
+        make_store: The factory of step log stores.
+        caplog: The pytest log capture fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     caplog.set_level("WARNING", logger="core.storage.step_log_store")
     store = make_store(flush_window_seconds=0.05)
     too_many_orig = sqlite3.OperationalError("too many SQL variables")
