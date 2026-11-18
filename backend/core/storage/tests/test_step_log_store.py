@@ -1161,6 +1161,54 @@ def test_the_objects_of_a_lost_pack_go_into_the_next_pack(make_store, engine, mo
     assert store.get_object("job-1", object_id) == data
 
 
+def test_the_object_of_a_lost_pack_stays_readable_when_the_next_put_fails(
+    make_store, engine, objects, monkeypatch
+) -> None:
+    """The flush after the lost pack fails at the PUT: the object stays readable and a second put adds no entry.
+
+    Args:
+        make_store: Builds a step log store.
+        engine: The test engine.
+        objects: The counting object store.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    store = make_store()
+    apply = store._apply
+    put = objects.put
+    object_id = "f" * 64
+    data = b"blob\0kept"
+
+    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+        """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
+
+        Args:
+            pack_key: The pack key.
+            *args: The pack size and manifest.
+
+        Raises:
+            OperationalError: Always.
+        """
+        with Session(engine) as session:
+            session.add(StoragePackModel(pack_key=pack_key, worker_id="w1", byte_size=0, created_at=datetime.now(UTC)))
+            session.commit()
+        monkeypatch.setattr(store, "_apply", apply)
+        raise OperationalError("INSERT INTO storage_packs", {}, Exception("database is down"))
+
+    monkeypatch.setattr(store, "_apply", claim_and_fail)
+    store.put_object("job-1", object_id, data)
+    with pytest.raises(OperationalError):
+        store.flush()
+    monkeypatch.setattr(objects, "put", lambda key, data: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        store.flush()
+    monkeypatch.setattr(objects, "put", put)
+
+    assert store.get_object("job-1", object_id) == data
+    pending = len(store._pending)
+    store.put_object("job-1", object_id, data)
+    assert len(store._pending) == pending == 1
+
+
 def test_a_kept_pack_that_recovery_applied_settles_at_the_next_flush(make_store, engine, objects, monkeypatch) -> None:
     """Recovery in the same process can apply the kept pack first; the next flush then opens its waiters."""
     store = make_store()
