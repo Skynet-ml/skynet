@@ -2678,7 +2678,9 @@ def test_a_setup_that_uses_up_the_session_time_stops_before_the_harness_starts(
         monkeypatch: Makes the setup end just past the session's limit.
     """
     ran = tmp_path / "harness-ran"
-    monkeypatch.setattr(harness_bridge, "ensure_setup", lambda command, checkout, seconds: time.sleep(seconds + 0.2))
+    monkeypatch.setattr(
+        harness_bridge, "ensure_setup", lambda command, checkout, seconds, env: time.sleep(seconds + 0.2)
+    )
     proposer = {**_PLAIN, "run_command": f"touch {shlex.quote(str(ran))}", "setup": ["true"]}
 
     with pytest.raises(RuntimeError, match=r"\(true\) used up the session's time limit of 0\.5 seconds"):
@@ -2974,7 +2976,7 @@ def test_a_setup_with_no_time_left_after_the_lock_never_runs(tmp_path: Path, mon
         return tracked_changes(path)
 
     monkeypatch.setattr(harness_bridge, "_tracked_changes", slow_tracked_changes)
-    monkeypatch.setattr(harness_bridge, "run_setup", lambda command, path, timeout: calls.append(timeout))
+    monkeypatch.setattr(harness_bridge, "run_setup", lambda command, path, timeout, env: calls.append(timeout))
 
     with pytest.raises(RuntimeError, match=r"no time was left within 0\.2 seconds"):
         harness_bridge.ensure_setup(
@@ -3037,12 +3039,13 @@ def test_a_later_session_copies_the_setup_output_without_the_lock(
     copy = harness_bridge._copy_path
     lock_free: list[bool] = []
 
-    def copy_while_another_session_locks(source: Path, target: Path) -> None:
+    def copy_while_another_session_locks(source: Path, target: Path, root: Path) -> None:
         """Take the setup lock from another open file, as a parallel session does, then copy.
 
         Args:
             source: The kept copy.
             target: The path in the checkout.
+            root: The checkout.
         """
         with (checkout / ".git" / harness_bridge.SETUP_STATE / "lock").open("a") as other:
             try:
@@ -3050,7 +3053,7 @@ def test_a_later_session_copies_the_setup_output_without_the_lock(
                 lock_free.append(True)
             except BlockingIOError:
                 lock_free.append(False)
-        copy(source, target)
+        copy(source, target, root)
 
     monkeypatch.setattr(harness_bridge, "_copy_path", copy_while_another_session_locks)
     harness_bridge.ensure_setup([sys.executable, "-c", "raise SystemExit(1)"], checkout)
@@ -3109,3 +3112,97 @@ def test_the_command_reads_the_task_file_from_an_absolute_ascent_task(
     )
 
     assert outcome.stdout.strip() == "the task"
+
+
+def test_the_setup_gets_the_proposer_env_and_the_guard(tmp_path: Path) -> None:
+    """The setup is untrusted like the entry command, so it runs with the same environment and guard (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the session folder and the setup's record of its environment.
+    """
+    seen = tmp_path / "seen.json"
+    script = (
+        "import json, os; json.dump({name: os.environ.get(name) for name in"
+        " ('MY_SETUP_VAR', 'EXTRA_VAR', 'APP_GUARD_CODEX', 'OPENCODE_CONFIG_DIR')}"
+        f", open({str(seen)!r}, 'w'))"
+    )
+    proposer = {
+        **_PLAIN,
+        "env": {"MY_SETUP_VAR": "from-proposer"},
+        "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN),
+        "setup": [sys.executable, "-c", script],
+    }
+    session = tmp_path / "session"
+
+    run_session(
+        proposer,
+        workspace=_git_checkout(tmp_path / "checkout"),
+        prompt="x",
+        model="m",
+        session_dir=session,
+        timeout_seconds=30,
+        extra_env={"EXTRA_VAR": "extra"},
+        api_key="k",
+    )
+
+    env = json.loads(seen.read_text())
+    assert env["MY_SETUP_VAR"] == "from-proposer"
+    assert env["EXTRA_VAR"] == "extra"
+    assert env["OPENCODE_CONFIG_DIR"] == str(session / harness_bridge.GUARD_DIR)
+    assert Path(env["APP_GUARD_CODEX"]).is_file()
+
+
+def test_a_failed_setup_leaves_no_partial_output_and_runs_again_clean(tmp_path: Path) -> None:
+    """A setup that fails removes what it wrote, so no version holds it and the next setup starts clean (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "parent.txt").write_text("from the parent version")
+    (checkout / ".gitignore").write_text("*.cache\n")
+    log = tmp_path / "setup.log"
+    write = (
+        f"import os; open({str(log)!r}, 'a').write(str(os.path.exists('partial.txt')) + '\\n');"
+        " os.makedirs('deps', exist_ok=True); open('deps/x', 'w'); open('partial.txt', 'w'); open('b.cache', 'w')"
+    )
+
+    with pytest.raises(RuntimeError, match="failed with exit code 3"):
+        harness_bridge.ensure_setup([sys.executable, "-c", write + "; raise SystemExit(3)"], checkout)
+
+    assert not (checkout / "partial.txt").exists()
+    assert not (checkout / "deps").exists()
+    assert not (checkout / "b.cache").exists()
+    assert (checkout / "parent.txt").read_text() == "from the parent version"
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
+
+    harness_bridge.ensure_setup([sys.executable, "-c", write], checkout)
+
+    assert log.read_text() == "False\nFalse\n"
+    assert (checkout / "partial.txt").exists()
+
+
+def test_a_restore_through_a_linked_parent_folder_stops_and_writes_nothing_outside(tmp_path: Path) -> None:
+    """A version that turns a parent folder into a link cannot make the restore write outside the checkout (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the outside folder.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / "pkg").mkdir(parents=True)
+    (checkout / "pkg" / "keep.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    command = [sys.executable, "-c", "import os; os.makedirs('pkg/gen'); open('pkg/gen/out.txt', 'w').write('o')"]
+    harness_bridge.ensure_setup(command, checkout)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.rmtree(checkout / "pkg")
+    (checkout / "pkg").symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match=r"pkg/gen cannot be restored: its parent folder .*pkg is a link"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert list(outside.iterdir()) == []

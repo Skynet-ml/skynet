@@ -51,7 +51,8 @@ TASK_ENV = "ASCENT_TASK"
 SETUP_TIMEOUT_SECONDS = 1_800.0
 # The folder in the git dir that keeps ``[proposer] setup``'s record and a
 # copy of its output. ``git clean -fdx`` never touches the git dir, and every
-# AutoSaddler worktree shares it, so the setup runs once per box (SKY-753).
+# worktree of a checkout shares its common dir, so the setup runs once per git
+# checkout and its worktrees. Each Auto lane checkout runs it again (SKY-753).
 SETUP_STATE = "ascent-proposer-setup"
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
@@ -387,13 +388,19 @@ def workspace_files(proposer: dict[str, Any]) -> list[str]:
     return paths
 
 
-def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
+def run_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
     """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
         checkout: The repository checkout or worktree of the next session.
         timeout_seconds: Stop the setup, and every process it started, after this long.
+        env: The setup's environment; the default is this process's environment.
 
     Raises:
         RuntimeError: When the command cannot start, runs out of time or
@@ -412,6 +419,7 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
                 process = subprocess.Popen(
                     command,
                     cwd=checkout,
+                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_file,
                     stderr=stderr_file,
@@ -624,18 +632,43 @@ def _tracked_changes(checkout: Path) -> dict[str, str]:
     return {path: _tracked_state(checkout, path) for path in paths if path}
 
 
-def _copy_path(source: Path, target: Path) -> None:
+def _copy_path(source: Path, target: Path, root: Path) -> None:
     """Copy one file, link or folder of a setup's output, with its links kept as links.
 
     Args:
         source: The path to copy.
         target: The new path; its parent folders are made.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link or resolves outside ``root``.
     """
+    # A version can replace a parent folder with a link; the copy would then write outside the checkout.
+    folder = root
+    for part in target.relative_to(root).parts[:-1]:
+        folder = folder / part
+        if folder.is_symlink() or (os.path.lexists(folder) and not folder.resolve().is_relative_to(root.resolve())):
+            raise RuntimeError(
+                f"The [proposer] setup output {target} cannot be restored: its parent folder {folder} is a link"
+                f" or is outside {root}. Make the version keep that folder a plain folder."
+            )
     target.parent.mkdir(parents=True, exist_ok=True)
     if source.is_dir() and not source.is_symlink():
         shutil.copytree(source, target, symlinks=True)
     else:
         shutil.copy2(source, target, follow_symlinks=False)
+
+
+def _remove_path(path: Path) -> None:
+    """Remove one file, link or folder, and never follow a link.
+
+    Args:
+        path: The path to remove; a missing path is skipped.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        path.unlink()
 
 
 def _unsafe(path: str) -> bool:
@@ -675,10 +708,17 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
     return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
 
 
-def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP_TIMEOUT_SECONDS) -> None:
-    """Run ``[proposer] setup`` once per box, and give each later checkout a copy of its output.
+def ensure_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Run ``[proposer] setup`` once per git checkout, and give each later session in it a copy of its output.
 
-    The setup runs in the first checkout. Its output, ignored files
+    The record is in the git common dir, so the checkout and its worktrees
+    share it, and a separate checkout (each Auto lane) runs the setup again.
+    The setup runs in the first session. Its output, ignored files
     included, is copied into :data:`SETUP_STATE` in the git dir, and a
     session after a reset or in a new worktree gets that copy back, without
     a second setup. What the setup adds, ignored files included, is excluded
@@ -689,6 +729,7 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         checkout: The repository checkout or worktree the proposer command runs in.
         timeout_seconds: Stop the setup, and every process it started, after this long.
             The wait for another session's setup counts inside it.
+        env: The setup's environment, the same as the proposer command's.
 
     Raises:
         RuntimeError: When the setup or git fails, the setup changes a file of
@@ -732,7 +773,7 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
                 name = path.rstrip("/")
                 # A file that the version holds at the same path wins over the setup's copy.
                 if not os.path.lexists(checkout / name):
-                    _copy_path(state / "output" / name, checkout / name)
+                    _copy_path(state / "output" / name, checkout / name, checkout)
             return
         # Files the parent version added are untracked too; only the setup's new paths are excluded.
         before = _untracked(checkout, folders=False)
@@ -748,7 +789,13 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
                 f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
                 f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
             )
-        run_setup(command, checkout, remaining)
+        try:
+            run_setup(command, checkout, remaining, env)
+        except RuntimeError:
+            # A failed setup's partial output must not enter the version, and the next session starts clean.
+            for path in _setup_output(checkout, before) | _setup_output(checkout, ignored_before, ignored=True):
+                _remove_path(checkout / path.rstrip("/"))
+            raise
         moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
         if moved != head:
             # A commit would hide its changes from the diff below, and enter every version.
@@ -788,7 +835,7 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
             name = path.rstrip("/")
             # An ignored path inside a new folder is already in that folder's copy.
             if not os.path.lexists(output / name):
-                _copy_path(checkout / name, output / name)
+                _copy_path(checkout / name, output / name, output)
         exclude = common / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
@@ -1882,6 +1929,17 @@ def run_session(
                 f"The [proposer] entry command in optimize.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    if api_key is None:
+        api_key = _env(KEY_ENV)
+    env = {
+        **os.environ,
+        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
+        **(extra_env or {}),
+    }
+    hashes = dict(proposer.get("hidden_hashes") or {})
+    if hashes:
+        home = Path(env["HOME"]) if env.get("HOME") else None
+        env.update(install_guard(session_dir, workspace, hashes, home))
     if proposer.get("setup"):
         # The setup counts inside the session's time limit. An in-process
         # caller (AutoSaddler) installs no SIGTERM handler; its stop kills
@@ -1890,7 +1948,9 @@ def run_session(
         setup_seconds = (
             SETUP_TIMEOUT_SECONDS if timeout_seconds is None else min(SETUP_TIMEOUT_SECONDS, timeout_seconds)
         )
-        ensure_setup(list(proposer["setup"]), workspace, setup_seconds)
+        # The setup gets the proposer command's environment and guard. The exec shim comes after it, so
+        # the exec log holds only the proposer's own commands.
+        ensure_setup(list(proposer["setup"]), workspace, setup_seconds, env)
         if timeout_seconds is not None:
             limit = timeout_seconds
             timeout_seconds -= time.monotonic() - setup_started
@@ -1900,8 +1960,6 @@ def run_session(
                     f"The [proposer] setup command in optimize.toml ({shlex.join(proposer['setup'])}) used up"
                     f" the session's time limit of {limit:g} seconds."
                 )
-    if api_key is None:
-        api_key = _env(KEY_ENV)
     for relative_path, content in (proposer.get("files") or {}).items():
         target = contained_path(workspace, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1914,15 +1972,6 @@ def run_session(
     attempt = len(list(session_dir.glob("prompt-*.md"))) + 1
     prompt_file = session_dir / f"prompt-{attempt}.md"
     prompt_file.write_text(prompt, encoding="utf-8")
-    env = {
-        **os.environ,
-        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
-        **(extra_env or {}),
-    }
-    hashes = dict(proposer.get("hidden_hashes") or {})
-    if hashes:
-        home = Path(env["HOME"]) if env.get("HOME") else None
-        env.update(install_guard(session_dir, workspace, hashes, home))
     exec_commands = proposer.get("exec_commands") or []
     if exec_commands:
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
