@@ -752,6 +752,29 @@ def test_a_close_during_the_budget_wait_stops_the_open() -> None:
         _acquire_within(lease, "agent-2")
 
 
+def test_a_close_after_the_start_is_counted_stops_the_open() -> None:
+    """An acquire opens no box when the lease closes after the budget counts its start."""
+    provider = _Provider()
+
+    def close_at_the_count() -> float:
+        """Close the lease from inside take(), after its stop check, then return the fake time.
+
+        Returns:
+            The fake time, so take() counts the start.
+        """
+        lease.close()
+        return provider.clock()
+
+    lease = provider.lease(clock=close_at_the_count)
+
+    with pytest.raises(RuntimeError, match=r"^The box lease is closed\.$"):
+        _acquire_within(lease, "agent-1")
+
+    # The start is counted, so only the check after take() stops the paid open.
+    assert len(lease._budget._starts) == 1
+    assert provider.opened == []
+
+
 def test_close_wakes_every_acquire_that_waits_for_a_start() -> None:
     """A close ends each real budget wait at once with no start counted, so no thread waits out the window."""
     provider = _Provider()
