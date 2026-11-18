@@ -15,7 +15,7 @@ from sqlalchemy import engine_from_config, pool
 
 import core.storage.preflights  # noqa: F401  # registers WizardPreflightModel on Base.metadata
 from alembic import context
-from core.storage.migrate import upgrade_step_log_shards
+from core.storage.migrate import cli_upgrades_shards, upgrade_step_log_shards
 from core.storage.models import Base
 
 config = context.config
@@ -123,9 +123,7 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata, include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
-    # A CLI downgrade or stamp acts on the main chain alone.
-    command_line = getattr(config.cmd_opts, "cmd", None) if config.cmd_opts is not None else None
-    if command_line is None or command_line[0].__name__ == "upgrade":
+    if cli_upgrades_shards(config.cmd_opts):
         upgrade_step_log_shards()
 
 

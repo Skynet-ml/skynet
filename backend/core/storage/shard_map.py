@@ -5,11 +5,12 @@ steps from one database. The design follows the Durable Object model: a run
 is one key with one home, and more shards give more scale. The main
 database is always the shard named ``main``; ``STEP_LOG_SHARDS`` adds more.
 
-With no extra shard, every run uses the main database and the map reads and
-writes nothing, as before the map. With extra shards, the first use of a
-run records its shard in ``jobs.step_log_shard`` with one conditional
-UPDATE. The record never changes, so a new shard gets only new runs. A run
-that already has steps on the main database records ``main``.
+With no extra shard, every run uses the main database. The map writes
+nothing, and the first flush of a run on the main database records ``main``
+for it. With extra shards, the first use of a run records its shard in
+``jobs.step_log_shard`` with one conditional UPDATE. The record never
+changes, so a new shard gets only new runs. A run that already has steps on
+the main database, or a ``main`` record, keeps ``main``.
 
 A shard holds only ``agent_steps``, ``tree_objects`` and ``storage_packs``.
 Jobs, users, wallets and budgets stay on the main database. The cascade from
@@ -17,9 +18,11 @@ Jobs, users, wallets and budgets stay on the main database. The cascade from
 on the other shards until SKY-733 (tree retention and purge) adds the purge.
 
 Give every pod the same ``STEP_LOG_SHARDS`` map before any run records a
-shard. A pod with no extra shard refuses to start step log work when a job
-records a shard other than ``main``: it would otherwise read and write that
-run on the main database.
+shard. The check is for each run: a pod refuses to read or write a run that
+records a shard that its map does not have (:class:`UnroutableRunError`),
+and the flush fence refuses a step whose run records another shard. A pod
+with no extra shard also refuses to start when a job records a shard other
+than ``main``.
 """
 
 from __future__ import annotations
@@ -54,6 +57,13 @@ SHARD_KEEPALIVES_INTERVAL_SECONDS = 5
 SHARD_KEEPALIVES_COUNT = 4
 
 
+class UnroutableRunError(RuntimeError):
+    """The run records a step log shard that this pod's map does not have.
+
+    It stays so until a deploy changes the map, so a retry cannot help.
+    """
+
+
 class ShardMap:
     """Route each run's step log reads and writes to the run's shard."""
 
@@ -77,7 +87,6 @@ class ShardMap:
         self._owned: tuple[Engine, ...] = ()
         self._lock = threading.Lock()
         self._cache: dict[str, str] = {}
-        self._single_checked = False
 
     @classmethod
     def from_settings(cls, main: Engine) -> ShardMap:
@@ -142,16 +151,14 @@ class ShardMap:
             is recorded: the fence fails its steps.
 
         Raises:
-            KeyError: When the recorded shard is not configured.
-            RuntimeError: With no extra shard, when a job records another shard.
+            UnroutableRunError: When the run records a shard that this map does not have.
         """
-        if self.single:
-            self._check_single()
-            return MAIN
         with self._lock:
             name = self._cache.get(run_id)
         if name is not None:
             return name
+        if self.single:
+            return self._single_shard_of(run_id)
         pick = self._names[zlib.crc32(run_id.encode("utf-8", "replace")) % len(self._names)]
         has_steps = exists().where(AgentStepModel.run_id == run_id)
         with Session(self._main) as session:
@@ -166,33 +173,61 @@ class ShardMap:
             session.commit()
         if name is None:
             return MAIN
-        self.engine(name)
+        if name not in self._engines:
+            raise UnroutableRunError(f"run {run_id} records step log shard {name!r}, which this pod does not have")
+        self._remember(run_id, name)
+        return name
+
+    def _single_shard_of(self, run_id: str) -> str:
+        """Return ``main`` for a run on a map with no extra shard, after a check of the run's record.
+
+        Another pod with a shard map can record a shard for the run at any time
+        before the run's first step lands, so only a ``main`` record is cached.
+
+        Args:
+            run_id: The job id.
+
+        Returns:
+            ``main``.
+
+        Raises:
+            UnroutableRunError: When the run records another shard.
+        """
+        with Session(self._main) as session:
+            name = session.scalar(select(JobModel.step_log_shard).where(JobModel.optimization_id == run_id))
+        if name is None:
+            return MAIN
+        if name != MAIN:
+            raise UnroutableRunError(
+                f"run {run_id} records step log shard {name!r}, but STEP_LOG_SHARDS is empty on this pod; "
+                "give every pod the same map"
+            )
+        self._remember(run_id, name)
+        return name
+
+    def _remember(self, run_id: str, name: str) -> None:
+        """Cache a run's recorded shard, which never changes, and drop the oldest entry above ``CACHE_MAX``.
+
+        Args:
+            run_id: The job id.
+            name: The recorded shard name.
+        """
         with self._lock:
             self._cache[run_id] = name
             if len(self._cache) > CACHE_MAX:
                 del self._cache[next(iter(self._cache))]
-        return name
 
     def check(self) -> None:
         """Refuse a map with no extra shard when a job records another shard; a map with shards passes.
 
-        A worker calls it before it takes work, so a pod with a wrong map stops at start.
+        A worker calls it before it takes work, so a pod with a wrong map stops
+        at start. A run that records a shard later is refused by :meth:`shard_of`
+        and the flush fence.
 
         Raises:
             RuntimeError: With no extra shard, when a job records a shard other than ``main``.
         """
-        if self.single:
-            self._check_single()
-
-    def _check_single(self) -> None:
-        """Refuse a map with no extra shard once any job records a shard other than ``main``.
-
-        The check runs one time for each map; a failed check runs again on the next use.
-
-        Raises:
-            RuntimeError: When a job records another shard: this pod lacks the map of the others.
-        """
-        if self._single_checked:
+        if not self.single:
             return
         with Session(self._main) as session:
             run_id = session.scalar(
@@ -205,7 +240,6 @@ class ShardMap:
                 f"run {run_id} records a step log shard, but STEP_LOG_SHARDS is empty on this pod; "
                 "give every pod the same map"
             )
-        self._single_checked = True
 
     def engine_for(self, run_id: str) -> Engine:
         """Return the engine of the run's shard.
@@ -215,6 +249,9 @@ class ShardMap:
 
         Returns:
             The engine.
+
+        Raises:
+            UnroutableRunError: When the run records a shard that this map does not have.
         """
         return self.engine(self.shard_of(run_id))
 
@@ -226,6 +263,9 @@ class ShardMap:
 
         Returns:
             The session.
+
+        Raises:
+            UnroutableRunError: When the run records a shard that this map does not have.
         """
         return Session(self.engine_for(run_id))
 

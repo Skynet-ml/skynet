@@ -46,7 +46,12 @@ def open_step_log(engine: Engine, objects: ObjectStore, worker_id: str) -> StepL
         The open step log.
     """
     store = StepLogStore(engine, objects, worker_id)
-    store.recover()
+    try:
+        store.recover()
+    except Exception:
+        # The caller gets no store to close, so its flusher thread and shard engines would stay open.
+        store.close()
+        raise
     return store
 
 

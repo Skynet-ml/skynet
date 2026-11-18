@@ -34,7 +34,10 @@ pack for each shard in its batch, and the manifest names the shard, so
 recovery applies the pack there. The fence still locks the ``jobs`` rows on
 the main database, and holds the locks until the shard transaction commits.
 Each shard flushes on its own: a shard that fails keeps its entries and its
-written pack, and the other shards still flush.
+written pack, and the other shards still flush. The fence also checks the
+shard: a step lands only on the shard that its run records, and the first
+flush of an unrecorded run on the main database records ``main``. So a pod
+with an old map never writes a run's steps to the wrong database.
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -59,7 +62,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
-from .shard_map import MAIN, ShardMap
+from .shard_map import MAIN, ShardMap, UnroutableRunError
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +92,7 @@ _STEP_FIELDS = (
 
 
 class StepFenceError(RuntimeError):
-    """A step failed at flush because its ``execution_generation`` is stale."""
+    """A step failed at flush because its ``execution_generation`` is stale or its run records another shard."""
 
     def __init__(self, step_id: str) -> None:
         """Name the failed step in the error.
@@ -97,7 +100,9 @@ class StepFenceError(RuntimeError):
         Args:
             step_id: The id of the step that failed.
         """
-        super().__init__(f"step {step_id} failed: its execution_generation is stale")
+        super().__init__(
+            f"step {step_id} failed the fence: its execution_generation is stale or its run is on another shard"
+        )
         self.step_id = step_id
 
 
@@ -302,6 +307,12 @@ class StepLogStore:
             or worker_id in {".", ".."}
         ):
             raise ValueError(f"bad worker id: {worker_id!r}")
+        window = settings.step_log_flush_window_seconds if flush_window_seconds is None else flush_window_seconds
+        max_bytes = settings.step_log_flush_max_bytes if flush_max_bytes is None else flush_max_bytes
+        # A window of 0 or less makes the flusher retry a failed flush with no wait. A wait above
+        # ``TIMEOUT_MAX`` raises in the flusher thread and ends it, so no later commit lands.
+        if not 0 < window <= threading.TIMEOUT_MAX or max_bytes < 1:
+            raise ValueError(f"bad flush window or size cap: {window!r}, {max_bytes!r}")
         self._owns_shards = shards is None
         shards = ShardMap.from_settings(engine) if shards is None else shards
         if shards.main is not engine:
@@ -316,12 +327,6 @@ class StepLogStore:
         self._shards = shards
         self._objects = objects
         self._worker_id = worker_id
-        window = settings.step_log_flush_window_seconds if flush_window_seconds is None else flush_window_seconds
-        max_bytes = settings.step_log_flush_max_bytes if flush_max_bytes is None else flush_max_bytes
-        # A window of 0 or less makes the flusher retry a failed flush with no wait. A wait above
-        # ``TIMEOUT_MAX`` raises in the flusher thread and ends it, so no later commit lands.
-        if not 0 < window <= threading.TIMEOUT_MAX or max_bytes < 1:
-            raise ValueError(f"bad flush window or size cap: {window!r}, {max_bytes!r}")
         self._window = window
         self._max_bytes = max_bytes
         self._cond = threading.Condition()
@@ -499,6 +504,8 @@ class StepLogStore:
                 is no longer current.
             TimeoutError: When the flush does not commit in time.
             KeyError: When the store knows no such step and it has no row.
+            UnroutableRunError: When the store holds nothing for the step and
+                its run records a shard that this pod's map does not have.
             RuntimeError: When the last flush of :meth:`close` failed before
                 the step was durable, or the flush could not route the step's run
                 to a shard on this pod.
@@ -622,10 +629,10 @@ class StepLogStore:
         new PUT, and until then writes no new pack for that shard.
 
         Each run is routed on its own. When the lookup of a run's shard fails,
-        that run's entries go back to the buffer. When the run records a shard
-        that this pod's map does not have, or this pod has no map while a job
-        records a shard, its entries are dropped and its waiters fail, so they
-        do not fail every later flush.
+        that run's entries go back to the buffer. Only when the run records a
+        shard that this pod's map does not have (:class:`UnroutableRunError`)
+        are its entries dropped and its waiters failed, so they do not fail
+        every later flush.
 
         Raises:
             Exception: The first error, after every shard that could flush flushed.
@@ -724,9 +731,9 @@ class StepLogStore:
                 routes[item.run_id] = route
             if isinstance(route, str):
                 groups.setdefault(route, []).append((item, data))
-            # A shard that this pod's map does not know (``KeyError``), or a job shard on a pod with no map
-            # (``RuntimeError``), stays so until a deploy: a retry would fail each flush and hang each waiter.
-            elif isinstance(route, KeyError | RuntimeError):
+            # A shard that this pod's map does not have stays so until a deploy: a retry would fail each flush and
+            # hang each waiter. Any other error can pass, so its entries wait for the next flush.
+            elif isinstance(route, UnroutableRunError):
                 unroutable.append((item, data))
             else:
                 retry.append((item, data))
@@ -866,8 +873,9 @@ class StepLogStore:
 
         The ``jobs`` row locks are on the main database. For another shard
         they are held until the shard transaction ends, so a generation bump
-        waits for the shard commit. The main transaction only reads, so no
-        two-phase commit is needed.
+        waits for the shard commit. On another shard the main transaction
+        only reads, so no two-phase commit is needed. A step whose run records
+        another shard fails the fence, so it never lands on this one.
 
         Args:
             shard: The shard that records the pack.
@@ -888,13 +896,15 @@ class StepLogStore:
         run_ids = sorted({entry["run_id"] for entry in steps + objects})
         if engine is self._engine:
             with Session(self._engine) as session:
-                return self._record(session, _lock_jobs(session, run_ids), pack_key, byte_size, manifest)
+                jobs = _fence_shard(session, _lock_jobs(session, run_ids), shard)
+                return self._record(session, jobs, pack_key, byte_size, manifest)
         with Session(engine) as shard_session:
             # The shard connection comes before the ``jobs`` locks: a shard that does not answer holds no lock.
             # Each apply takes the shard connection first and then the main one, so two applies cannot wait on each other.
             shard_session.connection()
             with Session(self._engine) as session:
-                result = self._record(shard_session, _lock_jobs(session, run_ids), pack_key, byte_size, manifest)
+                jobs = _fence_shard(session, _lock_jobs(session, run_ids), shard)
+                result = self._record(shard_session, jobs, pack_key, byte_size, manifest)
                 session.commit()
         return result
 
@@ -1023,15 +1033,53 @@ def _lock_jobs(session: Session, run_ids: list[str]) -> dict[str, Any]:
         run_ids: The run ids, sorted.
 
     Returns:
-        The locked rows' id, generation and owner, by run id.
+        The locked rows' id, generation, owner and recorded shard, by run id.
     """
     # One order of the ``jobs`` row locks keeps two flushes of the same runs from deadlocking.
     return {
         row.optimization_id: row
         for row in session.execute(
-            select(JobModel.optimization_id, JobModel.execution_generation, JobModel.username)
+            select(JobModel.optimization_id, JobModel.execution_generation, JobModel.username, JobModel.step_log_shard)
             .where(JobModel.optimization_id.in_(run_ids))
             .order_by(JobModel.optimization_id)
             .with_for_update()
         )
     }
+
+
+def _fence_shard(session: Session, jobs: dict[str, Any], shard: str) -> dict[str, Any]:
+    """Keep the locked jobs whose run records this shard, and record ``main`` for an unrecorded run on main.
+
+    A pod whose map is older than another pod's can route a run to the wrong
+    shard; the locked record decides. The ``main`` record of a run with no
+    record commits with its first steps on the main database, so a later map
+    with more shards keeps the run on ``main``.
+
+    Args:
+        session: The session on the main database that holds the ``jobs`` row locks.
+        jobs: The locked rows, by run id.
+        shard: The shard that the pack writes to.
+
+    Returns:
+        The rows of the runs whose steps may land on the shard; the steps of the others fail the fence.
+    """
+    unrecorded = sorted(run_id for run_id, job in jobs.items() if job.step_log_shard is None)
+    if shard == MAIN and unrecorded:
+        session.execute(
+            update(JobModel)
+            .where(JobModel.optimization_id.in_(unrecorded), JobModel.step_log_shard.is_(None))
+            .values(step_log_shard=MAIN)
+            .execution_options(synchronize_session=False)
+        )
+    kept = {
+        run_id: job
+        for run_id, job in jobs.items()
+        if job.step_log_shard == shard or (job.step_log_shard is None and shard == MAIN)
+    }
+    if len(kept) < len(jobs):
+        logger.error(
+            "step log fence refused the steps of runs that record another shard than %s: %s",
+            shard,
+            sorted(set(jobs) - set(kept)),
+        )
+    return kept

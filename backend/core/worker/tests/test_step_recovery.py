@@ -378,6 +378,35 @@ def test_a_crashed_pack_is_fenced_when_its_pod_restarts(
     assert last["seq"] == 0
 
 
+def test_open_step_log_closes_the_store_when_recovery_fails(
+    tmp_path: Path, objects: LocalObjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed recovery stops the store's flusher thread, so a worker that retries the open leaks no thread."""
+    opened: list[StepLogStore] = []
+
+    def fail(self: StepLogStore) -> int:
+        """Keep the store and fail its recovery, as a down object store does.
+
+        Args:
+            self: The store.
+
+        Raises:
+            OSError: Always.
+        """
+        opened.append(self)
+        raise OSError("object store down")
+
+    monkeypatch.setattr(StepLogStore, "recover", fail)
+
+    with pytest.raises(OSError, match="object store down"):
+        open_step_log(make_sqlite_store(tmp_path).engine, objects, "pod-a")
+
+    assert len(opened) == 1
+    assert not opened[0]._thread.is_alive()
+    with pytest.raises(RuntimeError, match="closed"):
+        _commit(opened[0], 0, 1)
+
+
 def test_a_stale_worker_commit_after_the_bump_fails_with_the_fence_error(store: StepJobStore, step_logs: Any) -> None:
     """A commit of the old worker after the sweep's bump fails at its flush, then at its next commit."""
     _funded_run(store)

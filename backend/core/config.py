@@ -774,7 +774,8 @@ class Settings(BaseSettings):
         description=(
             "Extra step log shard databases, as a JSON map of shard name to database URL. The main database is "
             "always the shard named main. Give every worker the same map before any run records a shard: a run "
-            "keeps the shard it gets first, and a worker with no map refuses runs on another shard"
+            "keeps the shard it gets first, and a worker refuses to read or write each run that records a shard "
+            "that its map does not have"
         ),
     )
     connector_import_max_rows: int = Field(
