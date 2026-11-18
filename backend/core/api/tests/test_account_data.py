@@ -1217,6 +1217,49 @@ def test_deletion_purges_the_step_log_shards_after_every_main_statement(
     assert any(statement.startswith("DELETE FROM users") for statement in events[:-1])
 
 
+def test_a_main_failure_after_the_tree_row_deletes_keeps_the_shard_rows(
+    full_schema_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A main step after the tree row deletes fails; the shard purge has not run, so the shard rows stay (SKY-733).
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    shard_url = f"sqlite:///{tmp_path / 's2.sqlite'}"
+    shard = create_engine(shard_url)
+    Base.metadata.create_all(
+        shard, tables=[AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+    )
+    with Session(shard) as session:
+        session.add(
+            StoragePackModel(
+                pack_key="packs/w1/s2", worker_id="w1", byte_size=10, created_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        session.add(
+            TreeObjectModel(
+                username=_EMAIL, object_id="o2", byte_size=10, pack_key="packs/w1/s2", pack_offset=0, pack_length=10
+            )
+        )
+        session.commit()
+    _seed_tree_pack(full_schema_engine)
+    monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(shard_url)})
+
+    with (
+        patch("core.storage.tree_purge.bucket_deleter", return_value=[].extend),
+        patch.object(BudgetService, "close_for_deleted_account", side_effect=RuntimeError("database is gone")),
+        Session(full_schema_engine) as session,
+        pytest.raises(RuntimeError, match="database is gone"),
+    ):
+        delete_account(session, _EMAIL)
+
+    with Session(shard) as session:
+        assert session.scalars(select(TreeObjectModel.object_id)).all() == ["o2"]
+        assert session.scalars(select(StoragePackModel.pack_key)).all() == ["packs/w1/s2"]
+
+
 def test_delete_answers_503_and_keeps_the_account_when_a_run_records_an_unknown_shard(
     harness: SimpleNamespace,
 ) -> None:

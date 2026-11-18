@@ -9,6 +9,7 @@ test that migrates a shard, ``APP_TEST_SHARD_DB_URL`` (shard).
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 import time
 import zlib
@@ -40,7 +41,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.remote import RemoteDBJobStore
 from core.storage.schema_lock import SCHEMA_BOOTSTRAP_LOCK_KEY
 from core.storage.shard_map import MAIN, ShardMap, UnroutableRunError
-from core.storage.step_log_store import CLAIM_BYTE_SIZE, StepFenceError, StepLogStore
+from core.storage.step_log_store import _FOOTER, CLAIM_BYTE_SIZE, StepFenceError, StepLogStore, _read_manifest
 from core.storage.tree_compactor import TreeCompactor
 from core.storage.tree_purge import (
     TreePurgeError,
@@ -1532,6 +1533,47 @@ def test_the_run_delete_merge_and_account_purge_work_on_two_postgres_databases(
         _wipe(shard)
         main.dispose()
         shard.dispose()
+
+
+def test_the_sweep_claims_an_old_flush_pack_with_no_shard_in_its_manifest_on_main(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, objects: LocalObjectStore, tmp_path: Path, monkeypatch
+) -> None:
+    """A flush pack from before the shard map names no shard; a multi-shard sweep claims it on main and deletes it.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    _write_account(two_shard_log)
+    recorded = sorted(objects.list("packs/"))
+    with Session(main) as session:
+        (on_main,) = session.scalars(select(StoragePackModel.pack_key)).all()
+    pack = objects.get(on_main)
+    manifest = _read_manifest(pack)
+    (length,) = _FOOTER.unpack(pack[-_FOOTER.size :])
+    del manifest["shard"]
+    footer = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    old = f"packs/gone-pod/{1:020d}-a.pack"
+    objects.put(old, pack[: -_FOOTER.size - length] + footer + _FOOTER.pack(len(footer)))
+    assert "shard" not in _read_manifest(objects.get(old))
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
+
+    assert compactor.remove_unrecorded() == 1
+
+    assert sorted(objects.list("packs/")) == recorded
+    with Session(main) as session:
+        assert session.scalar(select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == old)) == (
+            CLAIM_BYTE_SIZE
+        )
+    with Session(shard) as session:
+        assert session.get(StoragePackModel, old) is None
 
 
 def _orphan_pack(objects: LocalObjectStore, shard: Engine) -> str:

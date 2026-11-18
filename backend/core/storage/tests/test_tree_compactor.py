@@ -1403,6 +1403,68 @@ def test_a_marked_pack_over_the_row_cap_moves_in_parts_until_it_is_empty(
     _assert_all_readable(store, written)
 
 
+def test_a_lone_marked_pack_over_the_target_bytes_is_rewritten_in_one_pass(
+    engine, objects, store, make_compactor
+) -> None:
+    """A marked pack larger than the target and under the row cap is the first pack, so one pass rewrites it.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+    """
+    written = _fill(store, flushes=1)
+    (marked,) = objects.list("packs/w1/")
+    assert len(_offsets_on(engine, marked)) < tree_compactor.MAX_ROWS_PER_PASS
+    with Session(engine) as session:
+        session.execute(update(StoragePackModel).values(needs_rewrite=True))
+        session.commit()
+        size = session.get(StoragePackModel, marked).byte_size
+
+    assert make_compactor(target_bytes=size - 1).merge() == 1
+
+    assert marked not in _pack_keys_of_rows(engine)
+    _assert_all_readable(store, written)
+
+
+def test_a_newer_marked_pack_comes_before_a_full_window_of_older_small_packs(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """More older small packs than the window holds; the first pass still takes the newer marked pack.
+
+    Args:
+        engine: The SQLite engine.
+        objects: The test object store.
+        store: The step log store that the test flushes by hand.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    written = _fill(store, flushes=4)
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+    with Session(engine) as session:
+        *older, marked = session.scalars(
+            select(StoragePackModel.pack_key).order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
+        ).all()
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key.in_(older))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key == marked)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=1), needs_rewrite=True)
+        )
+        session.commit()
+    assert len(older) > tree_compactor.MAX_PACKS_PER_PASS
+
+    assert make_compactor().merge() == 2
+
+    assert marked not in _pack_keys_of_rows(engine)
+    _assert_all_readable(store, written)
+
+
 def test_a_marked_pack_that_breaks_logs_an_error(engine, objects, store, make_compactor, caplog) -> None:
     """A marked pack with no object leaves the candidates with the deleted bytes, so the pass logs an error.
 
