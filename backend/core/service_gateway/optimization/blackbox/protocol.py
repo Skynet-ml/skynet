@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +47,9 @@ STATUS_KEY = "status"
 # alone gets it; a batch fills each null case with its version's mean over the
 # scored cases (see :func:`fill_unscored`), so the null cases do not change the
 # mean upstream ranks by. Only a version with no scored case is UNSCORED.
+# SKY-751: a failed [run] entry is the version's fault, not the metric's, so it
+# gets no fill: that version is UNSCORED on every case of the batch and ranks
+# below every fully scored version.
 UNSCORED = float("-inf")
 
 
@@ -61,25 +65,37 @@ def engine_score(score: float | None) -> float:
     return UNSCORED if score is None else score
 
 
-def fill_unscored(candidates: list[Candidate], scores: list[float | None]) -> list[float]:
+def fill_unscored(
+    candidates: list[Candidate], scores: list[float | None], side_infos: list[SideInfo] | None = None
+) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
     Args:
         candidates: The version scored on each case, aligned with ``scores``.
-        scores: Each case's score, ``None`` after a metric error.
+        scores: Each case's score, ``None`` after a metric error or a failed ``[run]`` entry.
+        side_infos: Each case's side info, when known; it tells a failed ``[run]`` entry apart.
 
     Returns:
         A number for every case: the score, the mean of the same version's
         scored cases for a null case, or :data:`UNSCORED` when the version
-        has no scored case in the batch.
+        has no scored case in the batch or a failed ``[run]`` entry.
     """
+    infos = side_infos if side_infos is not None else [{} for _ in candidates]
+    # A scorer's own run_failed status with a real score is not a failed [run] entry.
+    failed = {
+        candidate_key(candidate)
+        for candidate, score, info in zip(candidates, scores, infos, strict=True)
+        if score is None and is_run_failed(info)
+    }
     scored: dict[str, list[float]] = {}
     for candidate, score in zip(candidates, scores, strict=True):
         if score is not None:
             scored.setdefault(candidate_key(candidate), []).append(score)
     filled: list[float] = []
     for candidate, score in zip(candidates, scores, strict=True):
-        if score is None:
+        if candidate_key(candidate) in failed:
+            score = UNSCORED
+        elif score is None:
             values = scored.get(candidate_key(candidate))
             score = sum(values) / len(values) if values else UNSCORED
         filled.append(score)
@@ -111,7 +127,9 @@ def score_batch(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(lambda pair: score_one(*pair), pairs))
-    filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+    filled = fill_unscored(
+        [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+    )
     return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
 
@@ -125,6 +143,18 @@ def is_metric_error(side_info: SideInfo) -> bool:
         Whether its ``status`` is :data:`METRIC_ERROR`.
     """
     return side_info.get(STATUS_KEY) == METRIC_ERROR
+
+
+def is_run_failed(side_info: SideInfo) -> bool:
+    """Return True when the side info marks a case whose ``[run]`` entry failed (SKY-751).
+
+    Args:
+        side_info: What the scorer returned for one case.
+
+    Returns:
+        Whether its ``status`` is :data:`RUN_FAILED_STATUS`.
+    """
+    return isinstance(side_info, dict) and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -445,10 +475,11 @@ class EvalServer:
         # A nested server (an Auto lane) scores through the upstream server,
         # which hands back UNSCORED or a batch-filled number; the status marks
         # it as no score.
-        if score is None or is_metric_error(side_info):
-            # A scorer's own ``run_failed`` status never drops a score; only a
-            # failed [run] entry, which sends no score, keeps it (SKY-751).
-            failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        # A scorer's own ``run_failed`` status never drops a score; only a
+        # failed [run] entry, which sends no score, keeps it (SKY-751). In an
+        # Auto lane that entry arrives as UNSCORED, not None.
+        failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
+        if score is None or is_metric_error(side_info) or failed_run:
             return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
         return score, side_info
 

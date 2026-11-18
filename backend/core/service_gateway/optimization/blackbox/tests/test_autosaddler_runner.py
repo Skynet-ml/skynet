@@ -697,3 +697,80 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(setup_pid, signal.SIGKILL)
+
+
+def _evaluation(aggregate: float, crashed: bool) -> SimpleNamespace:
+    """Build an upstream-shaped evaluation over cases ``a``, ``b`` and ``c``.
+
+    Args:
+        aggregate: Upstream's mean over the valid cases.
+        crashed: Whether case ``c`` had a failed [run] entry.
+
+    Returns:
+        An evaluation with one observation per case.
+    """
+    feedback = [{"feedback": "ok"}, {"feedback": "ok"}, {"feedback": "ok"}]
+    if crashed:
+        feedback[2] = {"feedback": "Run failed: boom", "status": "run_failed"}
+    return SimpleNamespace(
+        aggregate_score=aggregate,
+        requested_case_ids=("a", "b", "c"),
+        observations=[SimpleNamespace(metadata={"scorer_feedback": item}) for item in feedback],
+    )
+
+
+class _MeanRanking:
+    """Rank like upstream: the highest mean over the valid cases wins."""
+
+    def select(self, candidates: list[tuple[Any, Any]]) -> tuple[Any, Any]:
+        """Select the pair with the highest aggregate.
+
+        Args:
+            candidates: ``(candidate, evaluation)`` pairs.
+
+        Returns:
+            The selected pair.
+        """
+        return max(candidates, key=lambda item: item[1].aggregate_score)
+
+
+class _StrictImprovement:
+    """Accept like upstream: a higher mean over the valid cases wins."""
+
+    def compare(self, parent: Any, child: Any) -> SimpleNamespace:
+        """Accept the child when its aggregate is higher.
+
+        Args:
+            parent: Parent evaluation.
+            child: Child evaluation.
+
+        Returns:
+            A verdict with ``accepted``.
+        """
+        return SimpleNamespace(accepted=child.aggregate_score > parent.aggregate_score)
+
+
+def test_ranking_never_selects_a_version_with_a_failed_run_case() -> None:
+    """A version that crashed on one case and scored high elsewhere loses to a lower, fully scored one (SKY-751)."""
+    ranking = autosaddler_runner.NoScoreLastRanking(_MeanRanking())
+
+    assert ranking.select([("crashed", _evaluation(0.9, True)), ("scored", _evaluation(0.3, False))])[0] == "scored"
+    assert ranking.select([("crashed", _evaluation(0.9, True)), ("low", _evaluation(0.1, True))])[0] == "crashed"
+
+
+def test_acceptance_rejects_a_child_with_a_failed_run_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crashed child never replaces a fully scored parent; a child that fixes the crash does (SKY-751).
+
+    Args:
+        monkeypatch: Stands in for upstream's domain module, which needs Python 3.12.
+    """
+    monkeypatch.setattr(autosaddler_runner, "as_domain", SimpleNamespace(PatchVerdict=SimpleNamespace))
+    acceptance = autosaddler_runner.NoScoreRejectedAcceptance(_StrictImprovement())
+
+    rejected = acceptance.compare(_evaluation(0.3, False), _evaluation(0.9, True))
+    fixed = acceptance.compare(_evaluation(0.9, True), _evaluation(0.3, False))
+
+    assert not rejected.accepted
+    assert (rejected.before_score, rejected.after_score) == (0.3, 0.9)
+    assert fixed.accepted
+    assert acceptance.compare(_evaluation(0.3, False), _evaluation(0.5, False)).accepted

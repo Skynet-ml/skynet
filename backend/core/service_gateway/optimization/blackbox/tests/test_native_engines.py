@@ -1058,3 +1058,31 @@ def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
         assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
     finally:
         server.stop()
+
+
+def test_gepa_repo_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path, fake_home: Path) -> None:
+    """A repository version whose [run] fails on one case loses to the lower, fully scored seed (SKY-751)."""
+    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
+    calls: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        """Score the seed 0.25; score a patch 0.9 on case ``a`` and fail its [run] entry on case ``b``."""
+        calls.append(candidate)
+        if not candidate:
+            return 0.25, {"feedback": "seed"}
+        if example["id"] == "b":
+            return float("-inf"), {"feedback": "Run failed: boom", "status": native_engines.RUN_FAILED_STATUS}
+        return 0.9, {"feedback": "patch"}
+
+    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
+    server.start()
+    try:
+        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
+        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
+        result = engine.run(task, server)
+    finally:
+        server.stop()
+
+    assert any(calls), "the patched version was never scored"
+    assert (result.best_candidate, result.best_score) == ("", 0.25)
+    assert engine.incumbent(server) == ("", 0.25)

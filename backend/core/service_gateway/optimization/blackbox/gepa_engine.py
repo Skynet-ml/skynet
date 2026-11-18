@@ -206,7 +206,10 @@ class GepaEngine:
 
             GEPA averages a version's batch itself. A filled case leaves that
             mean at the scored cases' mean, so a case that always crashes does
-            not hide which version is better (SKY-367).
+            not hide which version is better (SKY-367). A version with a failed
+            ``[run]`` entry gets no fill: every case of it in the batch is
+            UNSCORED, so GEPA never accepts it, puts it on its front or picks it
+            as the best version (SKY-751).
 
             Args:
                 pairs: The ``(candidate, case)`` pairs of one GEPA batch.
@@ -221,7 +224,9 @@ class GepaEngine:
                 return score_batch(score_one, pairs, 1)
             calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
             results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
-            filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+            filled = fill_unscored(
+                [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+            )
             return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {

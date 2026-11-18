@@ -99,6 +99,9 @@ _HARNESS_SKILL_DIRECTORY = ".agents/skills"
 _GIT_IDENTITY = ("-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false")
 # Repository runs read their prompts and skills from this plugin subfolder.
 _REPO_ASSETS = "repo/"
+# Mirrors protocol.RUN_FAILED_STATUS: this file imports no app code. The status
+# marks a case whose [run] entry failed (SKY-751).
+_RUN_FAILED_STATUS = "run_failed"
 
 
 class EvaluationStopped(BaseException):
@@ -691,6 +694,91 @@ class AppEvaluator:
         )
         if self.stop_at_score is not None and score >= self.stop_at_score:
             raise TargetReached(f"Development score {score} reached the target {self.stop_at_score}.")
+
+
+def _run_failed(evaluation: Any) -> bool:
+    """Tell whether any case of an upstream evaluation had a failed ``[run]`` entry.
+
+    Args:
+        evaluation: Upstream evaluation whose observations carry the scorer feedback.
+
+    Returns:
+        Whether any observation's scorer feedback has the run-failed status.
+    """
+    for observation in evaluation.observations:
+        feedback = observation.metadata.get("scorer_feedback")
+        if isinstance(feedback, Mapping) and feedback.get("status") == _RUN_FAILED_STATUS:
+            return True
+    return False
+
+
+class NoScoreRejectedAcceptance:
+    """Acceptance that never prefers a version with a failed ``[run]`` entry (SKY-751).
+
+    Upstream compares only the cases both versions scored, so a child that
+    crashed on one case and scored high on the rest would replace a fully
+    scored parent. A child with a failed entry is rejected; a child that
+    fixes its parent's failed entry is accepted.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap upstream's acceptance policy.
+
+        Args:
+            inner: Upstream acceptance, used when both or neither side failed.
+        """
+        self.inner = inner
+
+    def compare(self, parent: Any, child: Any) -> Any:
+        """Decide whether the child replaces the parent.
+
+        Args:
+            parent: Parent's training evaluation.
+            child: Child's training evaluation on the same cases.
+
+        Returns:
+            Upstream's patch verdict.
+        """
+        parent_failed, child_failed = _run_failed(parent), _run_failed(child)
+        if parent_failed == child_failed:
+            return self.inner.compare(parent, child)
+        # The verdict's scores are only a record. Upstream records reject
+        # non-finite numbers, so a side with no valid case records 0.0.
+        return as_domain.PatchVerdict(
+            before_score=parent.aggregate_score if parent.aggregate_score is not None else 0.0,
+            after_score=child.aggregate_score if child.aggregate_score is not None else 0.0,
+            compared_case_ids=tuple(parent.requested_case_ids),
+            accepted=parent_failed,
+            reason="the child fixes a failed [run] entry" if parent_failed else "the child has a failed [run] entry",
+        )
+
+
+class NoScoreLastRanking:
+    """Ranking that puts every version with a failed ``[run]`` entry last (SKY-751).
+
+    Upstream ranks by the mean of the valid cases, which leaves a crashed case
+    out, so a version that crashed on one case could win the final selection.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap upstream's ranking policy.
+
+        Args:
+            inner: Upstream ranking, used on the versions with no failed entry.
+        """
+        self.inner = inner
+
+    def select(self, candidates: Sequence[tuple[Any, Any]]) -> tuple[Any, Any]:
+        """Select the best fully scored version, or rank all when every version failed.
+
+        Args:
+            candidates: ``(candidate, development evaluation)`` pairs.
+
+        Returns:
+            The selected pair.
+        """
+        scored = [item for item in candidates if not _run_failed(item[1])]
+        return self.inner.select(scored or candidates)
 
 
 class AppEvidenceBuilder:
@@ -1477,9 +1565,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     max_iterations = payload.get("max_iterations") or max_evals
     policies = as_policies.PolicyBundle(
         task_selection=as_policies.FixedTaskSelectionPolicy(batch_size=min(2, len(train_cases))),
-        acceptance=as_policies.MatchedValidStrictImprovement(),
+        acceptance=NoScoreRejectedAcceptance(as_policies.MatchedValidStrictImprovement()),
         development=as_policies.FullOnAcceptDevelopment(),
-        ranking=as_policies.MeanDevelopmentRanking(),
+        ranking=NoScoreLastRanking(as_policies.MeanDevelopmentRanking()),
         budget=as_policies.BudgetPolicy(max_rollouts=max_evals, max_iterations=int(max_iterations)),
     )
     store.initialize(

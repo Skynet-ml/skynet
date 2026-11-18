@@ -411,6 +411,42 @@ def test_gepa_engine_ranks_by_scored_cases_when_one_case_always_crashes(tmp_path
     assert server.metric_error("aeiou") is not None
 
 
+@pytest.mark.parametrize("concurrency", [1, 4])
+def test_gepa_engine_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path, concurrency: int) -> None:
+    """A version whose [run] fails on one case loses to a lower, fully scored version (SKY-751).
+
+    Args:
+        tmp_path: Artifact directory.
+        concurrency: Scorer workers; 4 takes the pool path.
+    """
+
+    def run_fails_on_case_two(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Fail the [run] entry of "aeiou" on case 2, else score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            No score with a ``run_failed`` status, or vowel density and side information.
+        """
+        if candidate == "aeiou" and case == {"i": 2}:
+            return None, {"feedback": "Run failed: boom", "status": "run_failed"}
+        return vowel_scorer(candidate, case)
+
+    server = EvalServer(run_fails_on_case_two, max_evals=16)
+    task = Task(seed_candidate="hello world", objective="more vowels", cases=[{"i": 0}, {"i": 1}, {"i": 2}])
+
+    result = GepaEngine().run(task, server, make_ctx(str(tmp_path), concurrency=concurrency))
+
+    # "aeiou" scores far higher on its two scored cases, but the seed must win.
+    assert vowel_scorer("aeiou")[0] > vowel_scorer("hello world")[0]
+    assert server.metric_error("aeiou") is not None
+    assert result.best_candidate == "hello world"
+    tree = result.metadata["candidate_tree"]
+    assert all(node["candidate"] != "aeiou" for node in tree)
+
+
 def _crash_off_seed(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
     """Raise on cases 1 and 2 for every version but the seed, else score vowel density.
 

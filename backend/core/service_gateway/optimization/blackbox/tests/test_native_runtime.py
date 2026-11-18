@@ -2416,6 +2416,130 @@ def _child_server(mailbox: _RecordingMailbox, tmp_path: Path, max_evals: int = 2
     return native_runner.ProgressEvalServer(task, mailbox, config, tmp_path)
 
 
+def _run_fails_on(fails: dict[str, set[str]]) -> _RecordingMailbox:
+    """Build a mailbox that fails the [run] entry on chosen cases of chosen versions.
+
+    Args:
+        fails: Case ids whose [run] entry fails, keyed by version text.
+
+    Returns:
+        A recording mailbox that scores every other case by vowel density.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Give negative infinity with a ``run_failed`` status, as the parent sends a failed [run] entry."""
+        if example is not None and example["id"] in fails.get(candidate, set()):
+            return float("-inf"), {"status": native_engines.RUN_FAILED_STATUS, "feedback": "Run failed: boom"}
+        return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    return mailbox
+
+
+def test_a_sweep_with_a_failed_run_case_has_no_score(tmp_path: Path) -> None:
+    """A sweep with a failed [run] case gets no fill, so a lower, fully scored version ranks above it (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+
+    crashed, crashed_info = server.evaluate_examples("aeio", split="train")
+    scored, _ = server.evaluate_examples("axyz", split="train")
+    for candidate, score in (("aeio", crashed), ("axyz", scored)):
+        server.log_progress(score, candidate=candidate)
+
+    assert crashed == float("-inf")
+    assert crashed_info["scores"] == {"a": 1.0, "b": float("-inf")}
+    assert crashed_info[native_engines.UNSCORED_CASES_KEY] == ["a", "b"]
+    assert scored == 0.25
+    assert native_engines.best_aggregate_candidate(server) == ("axyz", 0.25)
+
+
+def test_native_fill_unscored_gives_a_failed_run_version_no_score() -> None:
+    """A version with a failed [run] case is negative infinity on every case; a scorer's own status is kept (SKY-751)."""
+    inf = float("-inf")
+    failed = {"status": native_engines.RUN_FAILED_STATUS}
+
+    assert native_engines.fill_unscored(["x", "x", "y"], [0.9, inf, 0.3], [{}, failed, {}]) == [inf, inf, 0.3]
+    assert native_engines.fill_unscored(["x", "x"], [0.4, 0.6], [failed, {}]) == [0.4, 0.6]
+
+
+def test_meta_harness_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path) -> None:
+    """Meta-Harness ranks a failed [run] version below a lower scored one, and its files show null (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "crashed", "aeio")
+    engine._benchmark(server, "ok", "axyz")
+
+    assert engine._best() == ("axyz", 0.25)
+    assert engine.incumbent(server) == ("axyz", 0.25)
+    record = json.loads((engine.logs_dir / "results" / "crashed" / "val.json").read_text(encoding="utf-8"))
+    assert record["avg_val"] is None
+    assert record["scores"] == {"a": 1.0, "b": None}
+
+
+def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent's evolution summary shows a failed [run] version as "no score", never -Infinity (SKY-751).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's work and log folders.
+        monkeypatch: Replaces the proposer CLI.
+    """
+    server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.work_dir = tmp_path / "work"
+    engine.results = {}
+    engine.session_ids = []
+    engine.cost_usd = 0.0
+    engine.repo = None
+    engine.model = "fake"
+    engine.candidates_per_iter = 2
+    engine.logs_dir.mkdir()
+    (engine.work_dir / "agents").mkdir(parents=True)
+    engine._benchmark(server, "seed", "axyz")
+    monkeypatch.setattr(engine, "_task_prompt", lambda iteration: "")
+    monkeypatch.setattr(engine, "skill", lambda: "")
+
+    def propose(*args: Any, **kwargs: Any) -> native_engines.ProposerOutcome:
+        """Write one candidate whose [run] entry fails, as the agent would.
+
+        Args:
+            *args: The prompt.
+            **kwargs: The CLI options.
+
+        Returns:
+            A clean session outcome.
+        """
+        (engine.work_dir / "agents" / "crashed.txt").write_text("aeio", encoding="utf-8")
+        pending = {"candidates": [{"name": "crashed", "file": "agents/crashed.txt"}]}
+        (engine.logs_dir / "pending_eval.json").write_text(json.dumps(pending), encoding="utf-8")
+        return native_engines.ProposerOutcome("s", 0.0, False, "", False, False)
+
+    monkeypatch.setattr(native_engines, "run_proposer", propose)
+
+    engine._iteration(server, 1, None)
+
+    lines = (engine.logs_dir / "evolution_summary.jsonl").read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[-1])
+    assert (row["avg_val"], row["delta"], row["outcome"]) == (None, None, "no score")
+    assert "Infinity" not in lines[-1]
+    assert engine._leader() == ("axyz", 0.25)
+
+
 def test_native_fill_unscored_fills_per_version() -> None:
     """A null case takes its own version's scored mean; a version with no scored case stays negative infinity."""
     inf = float("-inf")
