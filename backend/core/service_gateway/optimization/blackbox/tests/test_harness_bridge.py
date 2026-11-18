@@ -3617,6 +3617,7 @@ def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
     _git(checkout, "add", "--all")
     _git(checkout, "commit", "--quiet", "--no-verify", "-m", "many")
     run = subprocess.run
+    checkouts: list[list[str]] = []
 
     def small_limit(arguments: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         """Fail like the system does for a long argument list, and run any other command.
@@ -3634,6 +3635,8 @@ def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
         """
         if sum(len(argument) + 1 for argument in arguments) > 1000:
             raise OSError(7, "Argument list too long")
+        if arguments[:2] == ["git", "checkout"]:
+            checkouts.append(arguments)
         return run(arguments, *args, **kwargs)
 
     monkeypatch.setattr(harness_bridge.subprocess, "run", small_limit)
@@ -3641,6 +3644,8 @@ def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
         harness_bridge.ensure_setup(["sh", "-c", "for f in file-*; do echo new > $f; done"], checkout)
 
     assert not getattr(failure.value, "__notes__", [])
+    # One process for all the files, not one for each.
+    assert len(checkouts) == 1
     assert all((checkout / name).read_text() == "old" for name in names)
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
 
