@@ -76,14 +76,19 @@ def _set_terminal_if_active(job_store, optimization_id: str, expected: tuple[str
         **fields: Column values to write.
 
     Returns:
-        ``True`` when the write applied (or the store has no CAS); ``False`` only
-        when the CAS found the row already past ``expected``.
+        ``True`` when the write applied, the row already holds the target
+        status, or the store has no CAS; ``False`` only when the CAS found the
+        row past ``expected`` in another status.
     """
     cas = getattr(job_store, "update_job_if_status", None)
     if cas is None:
         job_store.update_job(optimization_id, **fields)
         return True
-    return cas(optimization_id, expected, ends_recovery=True, **fields)
+    if cas(optimization_id, expected, ends_recovery=True, **fields):
+        return True
+    # A recovery sweep that sees the user's closed admission writes the user's
+    # status itself, so the user's stop did take effect (SKY-814).
+    return job_store.get_job(optimization_id).get("status") == fields["status"]
 
 
 def _stop_budget_admission(job_store: Any, job: dict[str, Any], reason: str) -> None:
@@ -298,8 +303,16 @@ def register_lifecycle_routes(
             worker.cancel_job(optimization_id)
 
         now = datetime.now(UTC).isoformat()
+        # The pre-check above proved a running run with a checkpoint. A recovery
+        # sweep can requeue it to pending since; the pause still wins, because the
+        # closed admission would fail the worker's claim of it (SKY-814).
         if not _set_terminal_if_active(
-            job_store, optimization_id, ("running",), status="paused", message=PAUSE_REASON, completed_at=now
+            job_store,
+            optimization_id,
+            ("running", "pending"),
+            status="paused",
+            message=PAUSE_REASON,
+            completed_at=now,
         ):
             # The worker finished in the window after the running pre-check; the
             # run is no longer pausable.

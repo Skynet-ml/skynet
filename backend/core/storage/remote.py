@@ -158,6 +158,50 @@ def _leave_sweep_recovery(
     session.commit()
 
 
+def _end_user_stopped_requeue(
+    session: Session, optimization_id: str, generation: int, recovery: dict[str, Any] | None, reason: str
+) -> None:
+    """Give up a requeue to the user's cancel or pause, write the user's status, and commit.
+
+    The route closes admission before its status write, and the API can stop
+    between the two, so the sweep writes the user's status itself. When the
+    route's write landed first, the compare-and-set misses and only the
+    sweep's ``recovering`` marker ends (SKY-814).
+
+    Args:
+        session: The requeue's session, with no write of the requeue pending.
+        optimization_id: The run that the user stopped.
+        generation: The execution generation that the requeue holds.
+        recovery: The marker the run keeps, from ``_interrupted_recovery``.
+        reason: The user's stop reason on the closed budget.
+    """
+    paused = reason == "user_paused"
+    ended = (
+        session.query(JobModel)
+        .filter(
+            JobModel.optimization_id == optimization_id,
+            JobModel.status.in_(("running", "validating")),
+            JobModel.execution_generation == generation,
+        )
+        .update(
+            {
+                JobModel.status: "paused" if paused else "cancelled",
+                JobModel.message: PAUSE_REASON if paused else CANCELLATION_REASON,
+                JobModel.completed_at: datetime.now(UTC),
+                JobModel.recovery: recovery,
+                JobModel.claimed_by: None,
+                JobModel.claimed_at: None,
+                JobModel.lease_expires_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not ended:
+        _leave_sweep_recovery(session, optimization_id, generation, recovery)
+        return
+    session.commit()
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1989,38 +2033,14 @@ class RemoteDBJobStore:
                     )
                 if automatic and budget.blocked_reason in USER_STOP_REASONS:
                     # The user cancelled or paused the run while this sweep held it,
-                    # and the user wins: the budget stays closed (SKY-814). The route
-                    # closes admission before its status write, and the API can stop
-                    # between the two, so the sweep writes the user's status itself.
-                    # When the route's write landed first, this compare-and-set misses.
-                    held_generation = int(job.execution_generation or 0)
-                    recovery = _interrupted_recovery(job.recovery, interrupted)
-                    paused = budget.blocked_reason == "user_paused"
-                    ended = (
-                        session.query(JobModel)
-                        .filter(
-                            JobModel.optimization_id == optimization_id,
-                            JobModel.status.in_(("running", "validating")),
-                            JobModel.execution_generation == held_generation,
-                        )
-                        .update(
-                            {
-                                JobModel.status: "paused" if paused else "cancelled",
-                                JobModel.message: PAUSE_REASON if paused else CANCELLATION_REASON,
-                                JobModel.completed_at: datetime.now(UTC),
-                                JobModel.recovery: recovery,
-                                JobModel.claimed_by: None,
-                                JobModel.claimed_at: None,
-                                JobModel.lease_expires_at: None,
-                            },
-                            synchronize_session=False,
-                        )
+                    # and the user wins: the budget stays closed (SKY-814).
+                    _end_user_stopped_requeue(
+                        session,
+                        optimization_id,
+                        int(job.execution_generation or 0),
+                        _interrupted_recovery(job.recovery, interrupted),
+                        budget.blocked_reason,
                     )
-                    if not ended:
-                        _leave_sweep_recovery(session, optimization_id, held_generation, recovery)
-                        return None
-                    session.commit()
-                    self._note_ended_orphan(optimization_id, held_generation)
                     return None
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
                     if budget.blocked_reason is None:
@@ -2035,6 +2055,21 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
+                if automatic:
+                    # A user's stop can close admission after the reads above. This
+                    # read holds the budget row lock until the requeue commits, so a
+                    # later stop waits and then finds the run pending (SKY-814).
+                    budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        _end_user_stopped_requeue(
+                            session,
+                            optimization_id,
+                            int(job.execution_generation or 0),
+                            _interrupted_recovery(job.recovery, interrupted),
+                            budget.blocked_reason,
+                        )
+                        return None
+                    kept_recovery = _interrupted_recovery(job.recovery, interrupted)
             held_generation = int(job.execution_generation or 0)
             # SQLite has no row lock, so a user's cancel or pause can land after the
             # reads above. This compare-and-set requeues only the row as it was read,
@@ -2160,6 +2195,16 @@ class RemoteDBJobStore:
                     )
                     if not ended:
                         session.rollback()
+                        return None
+                    # The rollback ended the budget row lock, so a user's stop can
+                    # close admission since. The user's stop wins over the failure,
+                    # and the run must not fail or notify (SKY-814).
+                    budget = budget_service.get(budget_id, username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        session.rollback()
+                        _end_user_stopped_requeue(
+                            session, optimization_id, held_generation, kept_recovery, budget.blocked_reason
+                        )
                         return None
                     # The resume above can reopen admission. Close it in the same
                     # transaction as the failure, so a run that another sweep
