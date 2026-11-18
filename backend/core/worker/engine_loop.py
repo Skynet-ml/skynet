@@ -66,17 +66,19 @@ writes the same files gets the same tree. The loop gets the run's hidden-path
 hashes once, when it is built, and ``read_file``, ``list_files`` and every
 candidate box leave those paths out; no caller can turn that off. The loop
 always hides ``.optimize/exploits`` the same way, as the native runtime hides
-the exploit suite from the proposer. A tree with a symlink that is, lies
-below or holds a hidden path stops the loop at its first read, listing or run,
-and a seed tree stops it in ``context``: the filter matches paths, so the
-link's target would stay visible. When the run hides paths of its own, a link
-loop or a link that names an absolute path or leaves the tree stops the loop
-too, since the loop cannot tell what it reaches. A tree that a ``run`` step
-gave, live or replayed, or that ``put_files`` wrote over such a tree, is not
-walked: a candidate box never gets a hidden file, so these trees hold no
-hidden content, and their links can show none. ``put_files`` refuses to
-write, replace or remove a hidden path, and a ``run`` whose command writes one
-fails with :class:`TreeRejectedError`, as a box error that a replay raises
+the exploit suite from the proposer. A tree with a symlink at a hidden path,
+or with a hidden path that a box reaches through a symlinked folder, stops the
+loop at its first read, listing or run, and a seed tree stops it in
+``context``: the filter matches paths, so the link's target would stay
+visible. The check skips a hidden folder that it reaches with no link on the
+way: no box, read or listing gets that folder, so its links show nothing. When
+the run hides paths of its own, a link loop or a link that names an absolute
+path or leaves the tree stops the loop too, since the loop cannot tell what it
+reaches. A tree that a ``run`` step gave, live or replayed, or that
+``put_files`` wrote over such a tree, is not walked: a candidate box never gets
+a hidden file, so these trees hold no hidden content, and their links can show
+none. ``put_files`` refuses to write, replace or remove a hidden path, and a
+``run`` whose command writes one fails with :class:`TreeRejectedError`, as a box error that a replay raises
 again. A refusal confirms that a guessed path is hidden, but never gives its
 content.
 
@@ -317,10 +319,12 @@ class EngineLoop:
             registry: The capability registry that the grant lists resolve against.
             hidden_hashes: The run's hidden-path hashes, as in :attr:`RepoSeed.hidden_hashes`. Every candidate
                 box, file read and file listing of the loop leaves these paths out, and ``.optimize/exploits``
-                too; no call can turn that off. A tree must have no symlink that is, lies below or holds one of
-                these paths. When these hashes are not empty, a tree that no run step gave must also have no
-                symlink loop and no symlink that names an absolute path or leaves the tree. The loop stops at the
-                first read, listing or run of such a tree, or in :meth:`context` for a seed tree.
+                too; no call can turn that off. A tree must have no symlink at one of these paths, and no
+                symlinked folder through which a box reaches one of them. Links inside a hidden folder count
+                only when the folder is reached through a link, since no box gets the folder itself. When these
+                hashes are not empty, a tree that no run step gave must also have no other symlink loop and no
+                other symlink that names an absolute path or leaves the tree. The loop stops at the first read,
+                listing or run of such a tree, or in :meth:`context` for a seed tree.
 
         Raises:
             TypeError: When ``metrics`` is not a :class:`RuntimeBoxSource`.
@@ -617,8 +621,8 @@ class EngineLoop:
             The file bytes, or ``None`` when the path is hidden or is not a file or executable in the tree.
 
         Raises:
-            LoopStoppedError: When the loop stopped, or a symlink of the tree is, lies below or holds a hidden
-                path; the loop keeps it.
+            LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
+                :meth:`_check_links` tells; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
         """
         with self._stops():
@@ -645,8 +649,8 @@ class EngineLoop:
             folder in the tree.
 
         Raises:
-            LoopStoppedError: When the loop stopped, or a symlink of the tree is, lies below or holds a hidden
-                path; the loop keeps it.
+            LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
+                :meth:`_check_links` tells; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
         """
         with self._stops():
@@ -733,7 +737,7 @@ class EngineLoop:
             StepDivergedError: When the committed step at this place is not this call.
             LoopStoppedError: When the loop stopped or was closed, the agent cannot open, or the step fails
                 outside its box errors: a fence, a budget stop, a tree the run cannot see, a tree with a symlink
-                that is, lies below or holds a hidden path, or a commit failure.
+                that could show a hidden path, as :meth:`_check_links` tells, or a commit failure.
             GrantDeniedError, BoxFailureError, TreeRejectedError: The box errors of :meth:`TreeSandbox.run`;
                 each commits a record, and a replay raises it again. ``TreeRejectedError`` also comes when the
                 command writes a hidden path: a tree id is a content hash, so that tree would confirm a guess
@@ -964,14 +968,16 @@ class EngineLoop:
 
         The hidden filter matches tree paths. A hidden path that is a symlink, or lies below a symlinked folder,
         loses only that path, and the link's target stays visible under its real path. The loop holds only path
-        hashes, so it walks the tree as a box sees it, through each link to a folder of the tree, and checks each
-        path that it reaches through a link. A link back into a folder that holds it, or more than
-        ``_MAX_LINKED_PATHS`` paths reached through links, also stops the loop, since the walk cannot check all
-        of them. So does a link that names an absolute path, or a path that leaves the tree, also one that comes
-        back in: the loop does not know where a box puts the tree, so it cannot tell what such a link reaches.
-        When the run hides no path of its own, a link loop, a link that leaves the tree and the limit stop the
-        loop only in a tree that holds a hidden path. A tree that a run step gave, or that ``put_files`` wrote over
-        one, holds no hidden content, so the loop does not walk it.
+        hashes, so it walks the tree as a box sees it, through each link to a folder of the tree. It refuses a
+        link at a hidden path, and a hidden path that it reaches through a link. It skips a hidden folder that it
+        reaches with no link on the way, with all its links: the box, :meth:`read_file` and :meth:`list_files`
+        drop that whole folder, so none of its links reaches a box. A link back into a folder that holds it, or
+        more than ``_MAX_LINKED_PATHS`` paths reached through links, also stops the loop, since the walk cannot
+        check all of them. So does a link that names an absolute path, or a path that leaves the tree, also one
+        that comes back in: the loop does not know where a box puts the tree, so it cannot tell what such a link
+        reaches. When the run hides no path of its own, a link loop, a link that leaves the tree and the limit
+        stop the loop only in a tree that holds a hidden path. A tree that a run step gave, or that ``put_files``
+        wrote over one, holds no hidden content, so the loop does not walk it.
 
         Args:
             tree_id: The tree.
@@ -1051,8 +1057,10 @@ class EngineLoop:
         A link that leaves the tree, or a link loop, hides from the walk what it reaches, and a hidden path can
         lie behind it: ``a -> .`` reaches ``a/secret.txt``. So when the run hides paths of its own, such a link
         refuses the tree, and so does a walk that reaches more than ``_MAX_LINKED_PATHS`` paths through links,
-        which then stops. With the exploit suite alone, these refuse the tree only when it holds a hidden path,
-        since repositories hold such links: ``python -m venv`` writes an absolute link on Linux.
+        which then stops. A hidden folder that the walk reaches with no link on the way is skipped, with its
+        links, as :meth:`_check_links` tells. With the exploit suite alone, these refuse the tree only when it
+        holds a hidden path, since repositories hold such links: ``python -m venv`` writes an absolute link on
+        Linux.
 
         Args:
             folders: The entries by name of each folder, by path parts from the tree's root.
@@ -1074,6 +1082,10 @@ class EngineLoop:
                 path = (*seen, name)
                 hidden = hashed_kind(self._hidden, "/".join(path)) is not None
                 holds_hidden = holds_hidden or hidden
+                # No box, read or listing gets a hidden folder that the walk reaches with no link on the way, so
+                # its links show nothing: a checked-in ``eval/.venv`` must not refuse the tree.
+                if hidden and not linked and entry.mode == "tree":
+                    continue
                 if linked or entry.mode == "symlink":
                     reached += 1
                     if reached > _MAX_LINKED_PATHS:

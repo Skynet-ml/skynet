@@ -1859,9 +1859,14 @@ def test_a_scorer_of_the_eval_server_cannot_read_a_hidden_path(
         (["eval"], {"eval": "real"}, "real/answer.txt"),
         (["data/answer.txt"], {"data": "real"}, "real/answer.txt"),
         (["data/sub/answer.txt"], {"data": "real", "real/sub": "../other"}, "other/answer.txt"),
-        (["eval"], {"eval/link": "../real"}, "real/answer.txt"),
+        (["data/eval"], {"data": "real", "real/eval/link": "../../other"}, "other/answer.txt"),
     ],
-    ids=["hidden-link", "hidden-file-below-a-linked-folder", "hidden-file-below-a-chain-of-links", "link-in-hidden"],
+    ids=[
+        "hidden-link",
+        "hidden-file-below-a-linked-folder",
+        "hidden-file-below-a-chain-of-links",
+        "link-in-a-hidden-folder-below-a-linked-folder",
+    ],
 )
 def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     owner: tuple[User, int],
@@ -1892,6 +1897,52 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     assert boxes.opened == 0
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         loop.list_files(tree)
+
+
+def test_links_inside_a_hidden_folder_that_no_box_gets_do_not_stop_the_loop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A checked-in venv or ``node_modules/.bin`` below ``eval/`` never reaches a box, so its links are not walked."""
+    hidden = hidden_hashes(["eval"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    seed = _store(
+        trees,
+        {"eval/metric.py": b"m", "eval/node_modules/x/cli.js": b"c", "src/a.py": b"a"},
+        {
+            "eval/.venv/bin/python": "/usr/bin/python3",
+            "eval/node_modules/.bin/x": "../x/cli.js",
+            "eval/self": "..",
+            "eval/up": "../../outside",
+        },
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(seed, hidden_hashes=hidden))
+    assert ctx.read_file is not None
+    assert ctx.read_file(seed, "src/a.py") == b"a"
+    assert loop.list_files(seed) == ["src/a.py"]
+    listed, _ = loop.run(seed, "find . -type f -o -type l | sort")
+    assert listed.stdout.split() == ["./src/a.py"]
+
+
+def test_links_inside_the_exploit_suite_do_not_stop_the_loop_but_a_link_at_or_into_it_does(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The loop always hides ``.optimize/exploits``, so a link in it is dropped; a link that shows it is not."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    tree = _store(
+        trees,
+        {".optimize/exploits/1/patch.diff": b"secret", "src/a.py": b"a"},
+        {".optimize/exploits/1/repo": "../../../src", ".optimize/exploits/python": "/usr/bin/python3"},
+    )
+
+    assert loop.read_file(tree, "src/a.py") == b"a"
+    assert loop.list_files(tree) == ["src/a.py"]
+
+    for index, links in enumerate([{".optimize/exploits": "../real"}, {".optimize": "real"}]):
+        bad, _, _ = _loop(owner, engine, step_log, trees, tmp_path / str(index), generation=1)
+        linked = _store(trees, {"real/exploits/1/patch.diff": b"secret", "src/a.py": b"a"}, links)
+        with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
+            bad.read_file(linked, "src/a.py")
 
 
 def test_a_symlink_loop_stops_the_loop_and_a_link_away_from_hidden_paths_is_kept(

@@ -318,10 +318,12 @@ class ModelReply:
 class RepoSeed:
     """The run's repository seed tree and the rules for its paths, all repository-relative.
 
-    A symlink of the tree must not be, lie below or hold a hidden path: the engine loop stops on such a tree,
-    because the link's target would stay visible under its real path. When the seed hides paths of its own, the
-    tree must also have no symlink loop and no symlink that names an absolute path or a path that leaves the
-    tree, since the loop cannot tell what it reaches. The engine loop does not enforce the editable, read-only
+    A symlink of the tree must not be at a hidden path, and no hidden path may be reached through a symlinked
+    folder: the engine loop stops on such a tree, because the link's target would stay visible under its real
+    path. Links inside a hidden folder count only when the folder is reached through a link, since no box gets
+    the folder itself. When the seed hides paths of its own, the tree must also have no other symlink loop and no
+    other symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell what it
+    reaches. The engine loop does not enforce the editable, read-only
     and constrained paths; the caller enforces them where it accepts a candidate.
     """
 
