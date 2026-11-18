@@ -1307,11 +1307,9 @@ def test_the_carried_lab_skips_files_past_the_caps_the_same_way_on_a_resume(
     """
     monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 11)
     monkeypatch.setattr(ar_mod, "_MAX_CARRY_BYTES", 27)
-    # In order: the notebook (11 bytes), a (6, at 17), big (12, past the per-file cap), c (6, at 23), d (6, past the
-    # total cap) and seed.txt (4, at 27). A skip does not stop the scan.
-    files = (
-        "printf 123456789012 > work/big && printf 123456 > work/a && printf 123456 > work/c && printf 123456 > work/d"
-    )
+    # In order: the notebook (11 bytes), 0 (12, past the per-file cap; it would fit the total cap), a (6, at 17),
+    # c (6, at 23), d (6, past the total cap) and seed.txt (4, at 27). A skip does not stop the scan.
+    files = "printf 123456789012 > work/0 && printf 123456 > work/a && printf 123456 > work/c && printf 123456 > work/d"
     model = _Researcher([_bash(f"printf '## Round {{n}}\\n' > notebook.md && {files}")])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
