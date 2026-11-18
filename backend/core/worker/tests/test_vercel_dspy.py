@@ -221,6 +221,41 @@ def test_an_image_runs_when_it_can_read_the_runs_outcome(
     assert all(event.get("error") != vercel_dspy.OUTCOME_IMAGE_MESSAGE for event in events)
 
 
+@pytest.mark.parametrize(("image_protocol", "refused"), [(17, True), (SANDBOX_PROTOCOL, False)])
+def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
+    image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image before 18 ignores ``file_proposer`` and would run the default agent (SKY-753).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        refused: Whether the worker refuses the image.
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    events: queue.Queue = queue.Queue()
+    payload = _descriptor_payload(
+        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "file_proposer": True}
+    )
+
+    vercel_dspy.run_vercel_dspy(payload, "job-file-proposer", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+
+    if refused:
+        assert session.steps == ["probe"]
+        assert seen[0]["error"] == vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE
+    else:
+        assert "optimizer" in session.steps
+        assert all(event.get("error") != vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE for event in seen)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 
