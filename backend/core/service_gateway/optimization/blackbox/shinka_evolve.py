@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import resource
 import shutil
@@ -44,6 +45,8 @@ from .native_runtime import (
     SHINKA_IMAGE_PYTHON,
     SHINKA_KEY_ENV,
     SHINKA_META_KEY_ENV,
+    _candidate_shape_ok,
+    _finite,
     assert_metric_absent,
     native_task_payload,
     run_native_engine,
@@ -84,6 +87,15 @@ _MEMORY_LIMITED = sys.platform == "linux"
 _IDLE_SECONDS = 30 * 60.0
 # A stopped child only reports its scored versions and writes its result.
 _DRAIN_SECONDS = 60.0
+# A real line holds one request or one scored version; a repository version is
+# bounded well below this.
+_LINE_CHARS = 64 * 1024**2
+# Each file the child writes, its stderr log included, stops at this size, so a
+# runaway writer cannot fill the worker's disk. Upstream's program database is
+# the largest file of a real run and stays far below it.
+_CHILD_FILE_BYTES = 4 * 1024**3
+# Only the end of the stderr log goes into a failure message.
+_STDERR_TAIL_BYTES = 64 * 1024
 
 
 class ShinkaEvolveEngine:
@@ -116,8 +128,9 @@ class ShinkaEvolveEngine:
             upstream failed or the scorer cap stopped it.
 
         Raises:
-            ServiceError: When the settings need a feature the worker does not run yet, or upstream fails
-                before it scores a version.
+            ServiceError: When the settings need a feature the worker does not run yet, when the child
+                sends a malformed request or candidate, or when upstream fails, goes quiet or writes an
+                overlong line before it scores a version.
             BudgetExhaustedError: When no scorer call remains, or the cap stops the run before a version is scored.
             BudgetReached: When the budget stops the run; it carries the best version scored so far.
         """
@@ -197,7 +210,7 @@ class ShinkaEvolveEngine:
         (workdir / _INPUT_FILE).write_text(document_text, encoding="utf-8")
         requests = _Requests(task, server, ctx, nonce)
         try:
-            returncode = self._drive(requests, workdir)
+            outcome = self._drive(requests, workdir)
         except BudgetReached as stop:
             # The child drains, writes an interrupted incumbent and exits 1; its
             # progress lines report every scored version, so, as in ``_result``'s
@@ -215,11 +228,13 @@ class ShinkaEvolveEngine:
             if requests.best is None:
                 raise
             return requests.best_so_far(workdir)
-        result = self._result(workdir, returncode, requests)
+        if isinstance(outcome, Result):
+            return outcome
+        result = self._result(workdir, outcome, requests)
         result.metadata["model_cost_cents"] = str(requests.cost_cents)
         return result
 
-    def _drive(self, requests: _Requests, workdir: Path) -> int:
+    def _drive(self, requests: _Requests, workdir: Path) -> int | Result:
         """Run the child process and answer each of its requests in the order it sends them.
 
         Args:
@@ -227,7 +242,14 @@ class ShinkaEvolveEngine:
             workdir: The child's folder.
 
         Returns:
-            The child's exit code.
+            The child's exit code. When the worker stopped the child because it
+            went quiet or wrote an overlong line, the best version it reported.
+
+        Raises:
+            ServiceError: When the child sends a malformed request, or the worker
+                stops it before it reports a scored version.
+            BudgetReached: When the budget stops the run, after the child drains.
+            BudgetExhaustedError: When the scorer cap stops the run, after the child drains.
         """
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -238,6 +260,11 @@ class ShinkaEvolveEngine:
             # Upstream prices calls from a bundled catalog unless told not to;
             # the loop, not the child, prices and bills every call.
             "SHINKA_PRICING_MODE": "offline",
+            # Per-thread buffers and malloc arenas inflate the address space
+            # that ``_limit_resources`` bounds; the child needs no parallel math.
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MALLOC_ARENA_MAX": "2",
         }
         with (workdir / "stderr.log").open("w", encoding="utf-8") as stderr:
             # ``preexec_fn`` is unsafe in a threaded parent only when it takes a
@@ -264,14 +291,17 @@ class ShinkaEvolveEngine:
             # The same limit bounds the child's start (tree unpack, git, upstream
             # import), which writes no line until its first request.
             killer.arm(_IDLE_SECONDS)
+            overlong = False
             try:
                 try:
-                    for line in child.stdout:
+                    while (line := _read_line(child.stdout)) is not None:
                         # The limit pauses only while the worker handles the line: a
                         # progress or log line must not leave a hung child unbounded.
                         killer.cancel()
-                        requests.line(line.rstrip("\n"), child.stdin)
+                        requests.line(line, child.stdin)
                         killer.arm(_IDLE_SECONDS)
+                except _OverlongLineError:
+                    overlong = True
                 except (BudgetReached, BudgetExhaustedError):
                     # A group member that holds the pipe and ignores the stop
                     # would block the worker, so the drain has a time limit.
@@ -281,8 +311,10 @@ class ShinkaEvolveEngine:
                     # depends on how far its progress lines got.
                     with contextlib.suppress(OSError):
                         child.stdin.close()
-                    for line in child.stdout:
-                        requests.line(line.rstrip("\n"), None)
+                    # An overlong line ends the drain; the stop keeps the versions before it.
+                    with contextlib.suppress(_OverlongLineError):
+                        while (line := _read_line(child.stdout)) is not None:
+                            requests.line(line, None)
                     raise
             finally:
                 killer.cancel()
@@ -297,8 +329,17 @@ class ShinkaEvolveEngine:
                 with contextlib.suppress(OSError):
                     child.stdin.close()
                 child.stdout.close()
-        if killer.fired:
-            raise ServiceError(f"ShinkaEvolve wrote nothing for {_IDLE_SECONDS:g} seconds, so the worker stopped it.")
+        if killer.fired or overlong:
+            reason = (
+                f"ShinkaEvolve wrote a line longer than {_LINE_CHARS} characters, so the worker stopped it."
+                if overlong
+                else f"ShinkaEvolve wrote nothing for {_IDLE_SECONDS:g} seconds, so the worker stopped it."
+            )
+            if requests.best is None:
+                raise ServiceError(reason)
+            # As for a failed child, the run keeps the best version scored before the stop.
+            logger.warning("%s It keeps its best reported version.", reason)
+            return requests.best_so_far(workdir)
         return returncode
 
     @staticmethod
@@ -308,8 +349,8 @@ class ShinkaEvolveEngine:
         Args:
             workdir: The child's folder.
             returncode: The child's exit code.
-            requests: The child's answers: its eval server knows the versions that
-                hit a metric error, and its progress holds the best scored version.
+            requests: The child's answers: its eval server holds the score of
+                each version, and its progress holds the best scored version.
 
         Returns:
             The best version and its score. When upstream failed after it scored
@@ -319,23 +360,31 @@ class ShinkaEvolveEngine:
             ServiceError: When the child failed before it scored a version without a metric error.
         """
         path = workdir / _RESULT_FILE
-        document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        try:
+            document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except ValueError:
+            # A child killed while it writes leaves a partial document.
+            document = {}
+        if not isinstance(document, dict):
+            document = {}
+        metadata = document.get("metadata")
+        metadata = {**(metadata if isinstance(metadata, dict) else {}), "native_artifacts_dir": str(workdir)}
         incumbent = document.get("interrupted_incumbent")
         # A failure keeps the last good version, as the sandbox path does; a
         # version with no score, or with a crashed case (SKY-350), is never one.
-        if (
-            isinstance(incumbent, dict)
-            and incumbent.get("best_score") is not None
-            and requests.server.metric_error(incumbent.get("best_candidate")) is None
-        ):
-            logger.warning("ShinkaEvolve stopped early and keeps its best version: %s", document.get("error"))
-            return Result(
-                best_candidate=incumbent["best_candidate"],
-                best_score=incumbent["best_score"],
-                total_evals=incumbent.get("total_evals", 0),
-                metadata={**document.get("metadata", {}), "native_artifacts_dir": str(workdir)},
-            )
-        if returncode != 0 or not document or document.get("error") or document.get("best_score") is None:
+        # The score comes from the eval server, never from the child's claim.
+        if isinstance(incumbent, dict):
+            score = requests.recorded_score(incumbent.get("best_candidate"))
+            if score is not None:
+                logger.warning("ShinkaEvolve stopped early and keeps its best version: %s", document.get("error"))
+                return Result(
+                    best_candidate=incumbent["best_candidate"],
+                    best_score=score,
+                    total_evals=requests.evals,
+                    metadata=metadata,
+                )
+        score = requests.recorded_score(document.get("best_candidate"))
+        if returncode != 0 or document.get("error") or score is None:
             # A killed child writes no result, and a rejected incumbent is no
             # version, but the progress can still hold a scored version.
             if requests.best is not None:
@@ -343,19 +392,56 @@ class ShinkaEvolveEngine:
                     "ShinkaEvolve stopped early and keeps its best reported version: %s", document.get("error")
                 )
                 return requests.best_so_far(workdir)
-            stderr = (workdir / "stderr.log").read_text(encoding="utf-8", errors="replace")
-            detail = str(document.get("error") or stderr[-2000:] or "No result was produced.")
+            detail = str(document.get("error") or _stderr_tail(workdir) or "No result was produced.")
             raise ServiceError(f"ShinkaEvolve failed: {detail}")
         return Result(
             best_candidate=document["best_candidate"],
-            best_score=document["best_score"],
-            total_evals=document.get("total_evals", 0),
-            metadata={**document.get("metadata", {}), "native_artifacts_dir": str(workdir)},
+            best_score=score,
+            total_evals=requests.evals,
+            metadata=metadata,
         )
 
 
+class _OverlongLineError(Exception):
+    """The child wrote a line longer than ``_LINE_CHARS``."""
+
+
+def _read_line(stream: IO[str]) -> str | None:
+    """Read one line of the child's output, and never more than ``_LINE_CHARS`` of it.
+
+    Args:
+        stream: The child's stdout.
+
+    Returns:
+        The line without its newline, or ``None`` at the end of the output.
+
+    Raises:
+        _OverlongLineError: When the line has no end within ``_LINE_CHARS`` characters.
+    """
+    line = stream.readline(_LINE_CHARS)
+    if not line:
+        return None
+    if len(line) >= _LINE_CHARS and not line.endswith("\n"):
+        raise _OverlongLineError
+    return line.rstrip("\n")
+
+
+def _stderr_tail(workdir: Path) -> str:
+    """Read the end of the child's stderr log, for a failure message.
+
+    Args:
+        workdir: The child's folder.
+
+    Returns:
+        The last 2000 characters of the log's final ``_STDERR_TAIL_BYTES`` bytes.
+    """
+    with (workdir / "stderr.log").open("rb") as log:
+        log.seek(max(0, log.seek(0, os.SEEK_END) - _STDERR_TAIL_BYTES))
+        return log.read().decode("utf-8", errors="replace")[-2000:]
+
+
 def _limit_resources() -> None:
-    """Bound the child's memory and CPU time; it runs in the forked child before ``exec``.
+    """Bound the child's memory, CPU time and file sizes; it runs in the forked child before ``exec``.
 
     It makes only system calls, so it takes no lock that another worker thread
     could hold at the fork.
@@ -363,6 +449,7 @@ def _limit_resources() -> None:
     if _MEMORY_LIMITED:
         resource.setrlimit(resource.RLIMIT_AS, (_CHILD_MEMORY_BYTES, _CHILD_MEMORY_BYTES))
     resource.setrlimit(resource.RLIMIT_CPU, (_CHILD_CPU_SECONDS, _CHILD_CPU_SECONDS))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (_CHILD_FILE_BYTES, _CHILD_FILE_BYTES))
 
 
 class _GroupKiller:
@@ -443,6 +530,21 @@ class _Requests:
             metadata={"native_artifacts_dir": str(workdir), "model_cost_cents": str(self.cost_cents)},
         )
 
+    def recorded_score(self, candidate: Any) -> float | None:
+        """Return the eval server's own mean score of a version the child names.
+
+        Args:
+            candidate: The version, as the child sent it.
+
+        Returns:
+            The finite mean score, or ``None`` for a malformed version, one the
+            server never scored, or one with a metric error.
+        """
+        if not _candidate_shape_ok(candidate, self.task.str_mode):
+            return None
+        score = self.server.mean_score(candidate)
+        return score if score is not None and math.isfinite(score) else None
+
     def line(self, line: str, replies: IO[str] | None) -> bool:
         """Handle one line the child wrote.
 
@@ -453,6 +555,9 @@ class _Requests:
 
         Returns:
             Whether a reply went to the child.
+
+        Raises:
+            ServiceError: When a request, its candidate or its case is malformed.
         """
         for prefix, handle in (
             (_RPC_PREFIX, self._request),
@@ -561,15 +666,7 @@ class _Requests:
             ServiceError: When the candidate or the case is malformed.
         """
         candidate = request.get("candidate")
-        if self.task.str_mode:
-            valid = isinstance(candidate, str)
-        else:
-            valid = (
-                isinstance(candidate, dict)
-                and bool(candidate)
-                and all(isinstance(name, str) and isinstance(text, str) for name, text in candidate.items())
-            )
-        if not valid:
+        if not _candidate_shape_ok(candidate, self.task.str_mode):
             raise ServiceError("ShinkaEvolve sent an invalid candidate shape.")
         example = request.get("example")
         case = None
@@ -602,12 +699,14 @@ class _Requests:
     def _progress(self, event: dict[str, Any]) -> None:
         """Relay a scored case, or a scored version, to the run's progress.
 
+        The event is untrusted child output: one with a malformed field is ignored.
+
         Args:
             event: The child's progress event.
         """
         score = event.get("score")
         candidate_id = event.get("candidate_id")
-        if type(candidate_id) is not int or not isinstance(score, int | float) or isinstance(score, bool):
+        if type(candidate_id) is not int or not _finite(score):
             return
         if event.get("event") == "case_scored":
             if type(event.get("total")) is int:
@@ -619,24 +718,32 @@ class _Requests:
                     total=event["total"],
                 )
             return
-        per_example = event.get("per_example")
+        candidate = event.get("candidate")
+        per_example = event.get("per_example") or []
+        total_evals = event.get("total_evals", 0)
+        if (
+            not _candidate_shape_ok(candidate, self.task.str_mode)
+            or type(total_evals) is not int
+            or not isinstance(per_example, list)
+            or not all(isinstance(pair, list) and len(pair) == 2 and _finite(pair[1]) for pair in per_example)
+        ):
+            return
         generation = event.get("generation")
         parent_id = event.get("parent_id")
         # A version with a crashed case has no score (SKY-350).
-        shown = None if self.server.metric_error(event.get("candidate")) is not None else float(score)
-        if shown is not None and (self.best is None or shown > self.best["score"]):
-            self.best = {"candidate": event.get("candidate"), "score": shown}
+        shown = None if self.server.metric_error(candidate) is not None else float(score)
+        recorded = self.recorded_score(candidate)
+        if recorded is not None and (self.best is None or recorded > self.best["score"]):
+            self.best = {"candidate": candidate, "score": recorded}
         emit_candidate(
             self.ctx.progress_callback,
             candidate_id=str(candidate_id),
             parent_id=None if parent_id is None else str(parent_id),
             generation=generation if type(generation) is int else 0,
             score=shown,
-            per_example=[]
-            if shown is None
-            else [(str(case_id), float(value)) for case_id, value in (per_example or []) if value is not None],
-            candidate=event.get("candidate"),
-            discovered_at_evals=int(event.get("total_evals") or 0),
+            per_example=[] if shown is None else [(str(case_id), float(value)) for case_id, value in per_example],
+            candidate=candidate,
+            discovered_at_evals=total_evals,
             iteration=None,
         )
 

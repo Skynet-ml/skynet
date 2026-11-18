@@ -1075,6 +1075,9 @@ def test_a_budget_stop_reports_the_best_version_the_child_reports_only_after_the
 ) -> None:
     """Read the child's progress after a budget stop, so a version it reports while it drains is the stop's result.
 
+    The eval server scored the version before the stop: the engine takes a
+    version's score only from the server's own records.
+
     Args:
         tmp_path: Pytest's temporary folder.
         monkeypatch: Stops the run at the child's first request.
@@ -1089,11 +1092,11 @@ def test_a_budget_stop_reports_the_best_version_the_child_reports_only_after_the
         """,
     )
     monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+    server = EvalServer(lambda candidate, case: (3.0, {}), max_evals=5)
+    server.evaluate("late", None)
 
     with pytest.raises(BudgetReached) as stopped:
-        ShinkaEvolveEngine(python).run(
-            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
-        )
+        ShinkaEvolveEngine(python).run(Task("seed"), server, _context(tmp_path))
 
     assert stopped.value.result is not None
     assert (stopped.value.result.best_candidate, stopped.value.result.best_score) == ("late", 3.0)
@@ -1130,8 +1133,16 @@ def test_the_child_gets_the_memory_and_cpu_limits(monkeypatch: pytest.MonkeyPatc
 
     shinka_evolve._limit_resources()
 
-    memory, cpu = shinka_evolve._CHILD_MEMORY_BYTES, shinka_evolve._CHILD_CPU_SECONDS
-    assert limits == [(resource.RLIMIT_AS, (memory, memory)), (resource.RLIMIT_CPU, (cpu, cpu))]
+    memory, cpu, size = (
+        shinka_evolve._CHILD_MEMORY_BYTES,
+        shinka_evolve._CHILD_CPU_SECONDS,
+        shinka_evolve._CHILD_FILE_BYTES,
+    )
+    assert limits == [
+        (resource.RLIMIT_AS, (memory, memory)),
+        (resource.RLIMIT_CPU, (cpu, cpu)),
+        (resource.RLIMIT_FSIZE, (size, size)),
+    ]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Only Linux lowers the address-space limit.")
@@ -1148,7 +1159,13 @@ def test_the_real_child_runs_under_the_memory_and_cpu_limits(tmp_path: Path) -> 
         import resource
 
         open({str(limits)!r}, "w").write(
-            json.dumps([resource.getrlimit(resource.RLIMIT_AS), resource.getrlimit(resource.RLIMIT_CPU)])
+            json.dumps(
+                [
+                    resource.getrlimit(resource.RLIMIT_AS),
+                    resource.getrlimit(resource.RLIMIT_CPU),
+                    resource.getrlimit(resource.RLIMIT_FSIZE),
+                ]
+            )
         )
         """,
     )
@@ -1158,8 +1175,12 @@ def test_the_real_child_runs_under_the_memory_and_cpu_limits(tmp_path: Path) -> 
             Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
         )
 
-    memory, cpu = shinka_evolve._CHILD_MEMORY_BYTES, shinka_evolve._CHILD_CPU_SECONDS
-    assert json.loads(limits.read_text()) == [[memory, memory], [cpu, cpu]]
+    memory, cpu, size = (
+        shinka_evolve._CHILD_MEMORY_BYTES,
+        shinka_evolve._CHILD_CPU_SECONDS,
+        shinka_evolve._CHILD_FILE_BYTES,
+    )
+    assert json.loads(limits.read_text()) == [[memory, memory], [cpu, cpu], [size, size]]
 
 
 def test_a_child_past_its_cpu_limit_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1254,7 +1275,8 @@ def test_the_idle_limit_does_not_run_while_the_worker_answers(tmp_path: Path, mo
         emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 0, "candidate": "x", "score": 1.0})
         """,
     )
-    monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 0.3)
+    # The limit also covers the child's start, which a loaded test host can slow.
+    monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 1.5)
 
     def slow(candidate: object, case: object) -> tuple[float, dict[str, object]]:
         """Score after a delay longer than the idle limit.
@@ -1266,7 +1288,7 @@ def test_the_idle_limit_does_not_run_while_the_worker_answers(tmp_path: Path, mo
         Returns:
             A score of one and no side information.
         """
-        time.sleep(1.0)
+        time.sleep(2.0)
         return 1.0, {}
 
     result = ShinkaEvolveEngine(python).run(Task("seed"), EvalServer(slow, max_evals=5), _context(tmp_path))
@@ -1407,3 +1429,319 @@ def test_the_child_hashes_strings_with_a_fixed_seed(tmp_path: Path, monkeypatch:
     env = children[0].popen["env"]
     assert isinstance(env, dict)
     assert env["PYTHONHASHSEED"] == "0"
+
+
+def test_the_child_runs_one_math_thread_and_few_malloc_arenas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep thread buffers and malloc arenas from filling the child's address-space limit.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces the child process.
+    """
+    _, children = _fake_popen(monkeypatch, "")
+
+    ShinkaEvolveEngine("python")._drive(_requests(tmp_path, lambda candidate, case: (1.0, {})), tmp_path)
+
+    env = children[0].popen["env"]
+    assert isinstance(env, dict)
+    assert (env["OPENBLAS_NUM_THREADS"], env["OMP_NUM_THREADS"], env["MALLOC_ARENA_MAX"]) == ("1", "1", "2")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"per_example": "ab"},
+        {"per_example": [["0", "bad"]]},
+        {"per_example": [["0"]]},
+        {"per_example": [["0", float("nan")]]},
+        {"total_evals": "many"},
+        {"total_evals": True},
+        {"candidate": ["good"]},
+        {"candidate": {"part": "good"}},
+        {"score": float("nan")},
+        {"score": "2"},
+    ],
+    ids=[
+        "per-example-text",
+        "per-example-text-score",
+        "per-example-no-pair",
+        "per-example-nan",
+        "total-evals-text",
+        "total-evals-bool",
+        "candidate-list",
+        "candidate-wrong-shape",
+        "score-nan",
+        "score-text",
+    ],
+)
+def test_a_malformed_scored_version_is_ignored(
+    fields: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ignore a progress line with a malformed field, so child output can neither fail the run nor be its result.
+
+    Args:
+        fields: The malformed fields of the progress line.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the shown versions.
+    """
+    shown: list[object] = []
+    monkeypatch.setattr(shinka_evolve, "emit_candidate", lambda callback, **kwargs: shown.append(kwargs))
+    requests = _scored_requests(tmp_path)
+    event = {"event": "candidate", "candidate_id": 1, "candidate": "good", "score": 2.0, "total_evals": 1, **fields}
+
+    requests.line("APP_NATIVE_PROGRESS n " + json.dumps(event), io.StringIO())
+
+    assert shown == []
+    assert requests.best is None
+
+
+def test_a_scored_case_with_a_score_that_is_not_finite_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ignore a case score that is not a finite number.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the shown case scores.
+    """
+    shown: list[object] = []
+    monkeypatch.setattr(shinka_evolve, "emit_case_scored", lambda callback, **kwargs: shown.append(kwargs))
+    requests = _scored_requests(tmp_path)
+    event = {"event": "case_scored", "candidate_id": 1, "example_id": "0", "score": float("inf"), "total": 1}
+
+    requests.line("APP_NATIVE_PROGRESS n " + json.dumps(event), io.StringIO())
+
+    assert shown == []
+
+
+def test_the_best_version_takes_its_score_from_the_eval_server(tmp_path: Path) -> None:
+    """Keep the server's score of a version, and never a version the server did not score.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _scored_requests(tmp_path)
+
+    _report(requests, "never-scored", 9.0, 1)
+    assert requests.best is None
+    _report(requests, "good", 9.0, 2)
+
+    assert requests.best == {"candidate": "good", "score": 2.0}
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"error": "upstream broke", "interrupted_incumbent": {"best_candidate": ["good"], "best_score": 3.0}},
+        {"error": "upstream broke", "interrupted_incumbent": {"best_candidate": "never-scored", "best_score": 3.0}},
+        {"error": "upstream broke", "interrupted_incumbent": "good", "metadata": ["x"]},
+        {"best_candidate": ["good"], "best_score": 2.0},
+        {"best_candidate": "never-scored", "best_score": 2.0},
+        ["good"],
+    ],
+    ids=[
+        "incumbent-list",
+        "incumbent-never-scored",
+        "incumbent-not-a-mapping",
+        "result-list",
+        "result-never-scored",
+        "document-list",
+    ],
+)
+def test_a_result_with_no_version_the_server_scored_fails_the_run(document: object, tmp_path: Path) -> None:
+    """Fail the run, with no crash, when the child's result names no version the eval server scored.
+
+    Args:
+        document: The child's result document.
+        tmp_path: Pytest's temporary folder.
+    """
+    workdir = tmp_path / "child"
+    workdir.mkdir()
+    (workdir / "stderr.log").write_text("")
+    (workdir / "native_result.json").write_text(json.dumps(document))
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine._result(workdir, 0, _scored_requests(tmp_path))
+
+
+def test_a_result_takes_its_score_and_evaluations_from_the_worker(tmp_path: Path) -> None:
+    """Report the eval server's score and the worker's evaluation count, not the child's claims.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    workdir = tmp_path / "child"
+    _write_result(workdir, {"best_candidate": "good", "best_score": 9.0, "total_evals": "many", "metadata": {"k": 1}})
+    requests = _scored_requests(tmp_path)
+    requests.evals = 2
+
+    result = ShinkaEvolveEngine._result(workdir, 0, requests)
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("good", 2.0, 2)
+    assert result.metadata["k"] == 1
+
+
+def test_a_partial_result_document_keeps_the_best_reported_version(tmp_path: Path) -> None:
+    """Treat a result document cut off in its write as no document.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    workdir = tmp_path / "child"
+    _write_result(workdir, None)
+    (workdir / "native_result.json").write_text('{"best_candidate": "go')
+    requests = _scored_requests(tmp_path)
+    _report(requests, "good", 2.0, 1)
+
+    result = ShinkaEvolveEngine._result(workdir, -9, requests)
+
+    assert (result.best_candidate, result.best_score) == ("good", 2.0)
+
+
+def test_a_failure_message_holds_only_the_end_of_the_stderr_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read only the end of the stderr log, which the child can make large.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a short tail.
+    """
+    workdir = tmp_path / "child"
+    _write_result(workdir, None)
+    (workdir / "stderr.log").write_text("HEAD" + "x" * 20 + "the-real-error")
+    monkeypatch.setattr(shinka_evolve, "_STDERR_TAIL_BYTES", 20)
+
+    with pytest.raises(ServiceError) as failed:
+        ShinkaEvolveEngine._result(workdir, 1, _scored_requests(tmp_path))
+
+    assert str(failed.value) == "ShinkaEvolve failed: " + "x" * 6 + "the-real-error"
+
+
+def test_a_malformed_progress_line_in_the_drain_keeps_the_budget_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the budget stop, not a parse error, when the child reports a malformed version while it drains.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Stops the run at the child's first request.
+    """
+    python = _scripted_child(
+        tmp_path,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0"})
+        sys.stdin.read()
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 1, "candidate": ["x"], "score": 3.0})
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 2, "candidate": "y", "score": 3.0,
+                                      "per_example": "ab", "total_evals": "many"})
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve._Requests, "_request", _stopping_request(BudgetReached()))
+
+    with pytest.raises(BudgetReached) as stopped:
+        ShinkaEvolveEngine(python).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+        )
+
+    assert stopped.value.result is None
+
+
+# Indented as the scripted bodies around it, which are dedented as one block.
+_SCORE_ONE_VERSION = """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0", "candidate": "x"})
+        sys.stdin.readline()
+        emit("APP_NATIVE_PROGRESS ", {"event": "candidate", "candidate_id": 0, "candidate": "x", "score": 1.0})
+"""
+
+
+def test_a_child_that_goes_quiet_after_a_scored_version_returns_that_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the best scored version when the worker stops a child that went quiet.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a short idle limit.
+    """
+    child_pid = tmp_path / "child.pid"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        import os
+
+        open({str(child_pid)!r}, "w").write(str(os.getpid()))
+        """
+        + _SCORE_ONE_VERSION
+        + """
+        # Longer than the time limit below, so a missed kill fails the test, not hangs it.
+        time.sleep(20)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 1.0)
+    started = time.monotonic()
+
+    result = ShinkaEvolveEngine(python).run(
+        Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+    )
+
+    assert (result.best_candidate, result.best_score) == ("x", 1.0)
+    assert time.monotonic() - started < 10
+    assert _wait_until_dead(int(child_pid.read_text()))
+
+
+@pytest.mark.parametrize("scored", [False, True], ids=["before-a-scored-version", "after-a-scored-version"])
+def test_a_child_that_writes_an_overlong_line_is_stopped(
+    scored: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop reading at the line limit, kill the child, and keep the best scored version if there is one.
+
+    Args:
+        scored: Whether the child reports a scored version before the long line.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Sets a short line limit.
+    """
+    child_pid = tmp_path / "child.pid"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        import os
+
+        open({str(child_pid)!r}, "w").write(str(os.getpid()))
+        """
+        + (_SCORE_ONE_VERSION if scored else "")
+        + """
+        print("y" * 1000, flush=True)
+        # Longer than the time limit below, so a missed kill fails the test, not hangs it.
+        time.sleep(20)
+        """,
+    )
+    monkeypatch.setattr(shinka_evolve, "_LINE_CHARS", 300)
+    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=5)
+    started = time.monotonic()
+
+    if scored:
+        result = ShinkaEvolveEngine(python).run(Task("seed"), server, _context(tmp_path))
+        assert (result.best_candidate, result.best_score) == ("x", 1.0)
+    else:
+        with pytest.raises(ServiceError, match="longer than 300 characters"):
+            ShinkaEvolveEngine(python).run(Task("seed"), server, _context(tmp_path))
+
+    assert time.monotonic() - started < 10
+    assert _wait_until_dead(int(child_pid.read_text()))
+
+
+def test_a_line_at_the_limit_with_its_newline_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read a line whose newline falls within the limit, and refuse one character more.
+
+    Args:
+        monkeypatch: Sets a short line limit.
+    """
+    monkeypatch.setattr(shinka_evolve, "_LINE_CHARS", 4)
+
+    assert shinka_evolve._read_line(io.StringIO("abc\nabc")) == "abc"
+    assert shinka_evolve._read_line(io.StringIO("abc")) == "abc"
+    assert shinka_evolve._read_line(io.StringIO("")) is None
+    with pytest.raises(shinka_evolve._OverlongLineError):
+        shinka_evolve._read_line(io.StringIO("abcd\n"))
