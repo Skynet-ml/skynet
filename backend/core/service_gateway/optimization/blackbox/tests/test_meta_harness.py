@@ -512,10 +512,131 @@ def test_the_proposer_cost_cap_stops_the_session(
     assert result.metadata["stop_reason"] == "proposer_budget"
 
 
-def test_a_repository_run_is_refused(
+def _repo_reply(prompt: str | list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+    """Answer one turn of a repository session: append to ``a.py`` and write a report and the notes, then stop.
+
+    Args:
+        prompt: The session's messages.
+        tools: The tool definitions.
+
+    Returns:
+        A bash call on the first turn, and a reply with no tool call after a tool result.
+    """
+    del tools
+    assert isinstance(prompt, list)
+    if prompt[-1]["role"] == "tool":
+        return ModelReply("done", Decimal(1), [])
+    n = int(re.search(r"Run iteration (\d+)", prompt[1]["content"]).group(1))
+    logs = ".meta-harness/logs/run"
+    pending = json.dumps({"candidates": [{"name": "ignored", "hypothesis": f"h{n}", "axis": "exploration"}]})
+    command = (
+        f"printf %s {'x' * n} >> a.py && printf 'report {n}' > {logs}/reports/iter{n}.md"
+        f" && printf '%s' '{pending}' > {logs}/pending_eval.json"
+    )
+    return ModelReply("", Decimal(1), [{"id": f"call-{n}", "name": "bash", "arguments": {"command": command}}])
+
+
+def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_lead(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A repository run needs ``save.sh`` and git in the box, which this port does not give yet.
+    """Each session edits the leader's tree; the tree it leaves, without the workspace, is one benchmarked version.
+
+    Iteration one's version is a metric error, so it shows no score and iteration two starts again from the seed.
+    Iteration two's version is the final pick (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    scored: list[tuple[str, str, float | None]] = []
+    sessions: list[list[dict[str, Any]] | None] = []
+
+    def model(prompt: str | list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+        """Record the tools of each turn, and answer with the scripted repository session.
+
+        Args:
+            prompt: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            The scripted reply.
+        """
+        sessions.append(tools)
+        return _repo_reply(prompt, tools)
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score a version tree by the length of its ``a.py``, with a metric error on case ``b`` at a length of two.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The length, or ``None`` for the metric error, and no side information.
+        """
+        assert loop.list_files(candidate, ".meta-harness") is None
+        text = (loop.read_file(candidate, "a.py") or b"").decode()
+        value = None if len(text) == 2 and case == _CASES[1] else float(len(text))
+        scored.append((candidate, text, value))
+        return value, {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, scorer=score, repo_seed=RepoSeed(tree_id=seed))
+
+    # Iteration two appends to the seed, not to the metric-error version.
+    assert [(text, value) for _, text, value in scored] == [
+        ("a", 1.0),
+        ("a", 1.0),
+        ("ax", 2.0),
+        ("ax", None),
+        ("axx", 3.0),
+        ("axx", 3.0),
+    ]
+    versions = list(dict.fromkeys(candidate for candidate, _, _ in scored))
+    assert versions[0] == seed
+    assert len(versions) == 3
+    assert (result.best_candidate, result.best_score) == (versions[2], 3.0)
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [1.0, None, 3.0]
+    assert sessions[0] == [meta_mod.REPO_BASH_TOOL]
+    logs = next(tmp_path.rglob("meta_harness/logs/run"))
+    rows = [json.loads(line) for line in (logs / "evolution_summary.jsonl").read_text().splitlines()]
+    assert [(row["system"], row["hypothesis"]) for row in rows] == [("iter1", "h1"), ("iter2", "h2")]
+    assert (logs / "reports" / "iter1.md").read_text() == "report 1"
+
+
+def test_a_repository_session_that_changes_nothing_gives_no_candidate(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A session that leaves the leader's files as they were gives no new version, so nothing is benchmarked.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    command = "mkdir -p .meta-harness/scratch && printf s > .meta-harness/scratch/s.txt"
+    call = {"id": "call", "name": "bash", "arguments": {"command": command}}
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(call=call), generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, repo_seed=RepoSeed(tree_id=seed))
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == (seed, 1.0 * len(seed), 2)
+
+
+def test_a_repository_with_a_file_at_the_workspace_path_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The engine removes ``.meta-harness`` from each version, so a repository file there would be lost.
 
     Args:
         owner: Alice and her budget generation.
@@ -526,11 +647,30 @@ def test_a_repository_run_is_refused(
     """
     model = _Proposer()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
-    seed = RepoSeed(tree_id=_tree(trees, "a.py", "a"))
+    seed = RepoSeed(tree_id=_store(trees, {".meta-harness/x.txt": b"a"}))
 
-    with pytest.raises(ServiceError, match="repository"):
+    with pytest.raises(ServiceError, match="lab"):
         _run(loop, repo_seed=seed)
     assert model.calls == []
+
+
+def test_the_repository_skill_and_prompt_point_into_the_workspace_folder(tmp_path: Path) -> None:
+    """In a repository run, the agent edits the repository, and the workspace files are under ``.meta-harness/``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    config = OptimizeAnythingConfig(engine="meta_harness", run_dir=str(tmp_path), engine_config={"model": ""})
+    ctx = EngineContext(reflection_lm=str, run_dir=str(tmp_path), repo_seed=RepoSeed(tree_id="t"))
+    worker = meta_mod._WorkerMetaHarness(config, ctx)
+    skill = worker.skill()
+    prompt = worker._task_prompt(1)
+
+    assert worker.candidates_per_iter == 1
+    assert "agents/<name>.txt" not in skill
+    assert "scratch file under `.meta-harness/scratch/`" in skill
+    assert "`.meta-harness/logs/run/pending_eval.json`" in prompt
+    assert "`.meta-harness/.claude/skills/meta-harness/SKILL.md`" in prompt
 
 
 @pytest.mark.parametrize(

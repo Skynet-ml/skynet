@@ -15,6 +15,11 @@ command left, and the engine writes its own files (task, skill, frontier,
 results) over that tree before each session. After a session, the engine reads
 back only ``pending_eval.json`` and the candidate files that it lists.
 
+In a repository run (SKY-825), a version is a tree. Each session works on the
+frontier leader's tree, with the workspace files under ``.meta-harness/``. The
+tree that it leaves, without that folder, is the iteration's one candidate.
+The engine names it and benchmarks it as the native loop does.
+
 A run outside the worker engine loop still uses the native box runtime until
 the SKY-728 cutover; the loop path never calls it.
 """
@@ -74,9 +79,23 @@ BASH_TOOL = {
     },
 }
 
+# The workspace folder of a repository run, relative to the repository root.
+_REPO_LAB = ".meta-harness"
+
+REPO_BASH_TOOL = {
+    "name": "bash",
+    "description": (
+        "Run one shell command in the repository, with no network. Each command starts in the repository root, in "
+        "a fresh box: files persist between commands, but the shell state and /tmp do not. The repository files you "
+        f"leave are the candidate. Keep scratch files under `{_REPO_LAB}/scratch/`. Returns the exit code, stdout, "
+        "stderr and whether the command timed out."
+    ),
+    "input_schema": BASH_TOOL["input_schema"],
+}
 
 _TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
 _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
+_REPO_SCRATCH = f"Draft the change in a scratch file under `{_REPO_LAB}/scratch/`"
 
 # Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
 # never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
@@ -356,14 +375,98 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         self._pulled: set[str] = set()
         self._oversize: set[str] = set()
         self._max_tool_calls = BlackboxProposer().max_tool_calls if max_tool_calls is None else max_tool_calls
+        self._repo = ctx.repo_seed
+        if self._repo is not None:
+            # A session leaves one tree, so a repository iteration has one candidate.
+            self.candidates_per_iter = 1
+
+    def _layout(self, task: UpstreamTask) -> None:
+        """Create the native workspace, and add the path rules to ``task.md`` in a repository run.
+
+        Args:
+            task: The upstream task.
+        """
+        super()._layout(task)
+        if self._repo is not None:
+            rules = native_engines.repo_rules(
+                {"editable_paths": self._repo.editable_paths or (".",), "readonly_paths": self._repo.readonly_paths}
+            )
+            with (self.work_dir / "task.md").open("a", encoding="utf-8") as brief:
+                brief.write(rules)
 
     def skill(self) -> str:
         """Return the native skill, with scratch files in the workspace: ``/tmp`` does not persist between commands.
 
+        In a repository run, the candidate is the repository that the session leaves, not a file under ``agents/``.
+
         Returns:
             The skill text for the tool loop.
         """
-        return super().skill().replace(_TMP_SCRATCH, _WORKSPACE_SCRATCH)
+        text = super().skill()
+        if self._repo is None:
+            return text.replace(_TMP_SCRATCH, _WORKSPACE_SCRATCH)
+        return native_engines.adapt(
+            text,
+            [
+                (_TMP_SCRATCH, _REPO_SCRATCH),
+                (
+                    "   - `task.md` for the objective, background and the evaluation examples",
+                    f"   - `{_REPO_LAB}/task.md` for the objective, background, the evaluation examples and the "
+                    "paths you may change",
+                ),
+                (
+                    "1. Copy a top-performing base candidate to `agents/<name>.txt`, then make targeted "
+                    "modifications. This copy-then-edit approach keeps proven patterns.",
+                    "1. The repository root holds the files of the frontier leader. Make targeted changes to them "
+                    "in place. This edit-in-place approach keeps proven patterns.",
+                ),
+                (
+                    "4. Validate: `test -s agents/<name>.txt && echo OK` — the file must exist and be non-empty; "
+                    "its whole content is what gets evaluated.\n\n"
+                    "Do not edit `task.md`. The benchmark reads exactly the files listed in `pending_eval.json`.",
+                    f"4. Validate: re-read each file you changed. The repository you leave, without `{_REPO_LAB}/`, "
+                    "is what gets evaluated.\n\n"
+                    f"Do not edit `{_REPO_LAB}/task.md`, and change only the paths that it allows.",
+                ),
+                ('      "file": "agents/<name>.txt",\n', ""),
+                (
+                    "- Each candidate is a plain text file under `agents/`; its whole content is submitted to the "
+                    "evaluator.\n"
+                    "- `task.md` says what the candidate is for and how it is judged.\n"
+                    "- `agents/seed.txt` is the starting candidate the run began from.",
+                    f"- Each candidate is a version of the repository: the files you leave, without `{_REPO_LAB}/`.\n"
+                    f"- `{_REPO_LAB}/task.md` says what the repository is for, how it is judged and which paths you "
+                    "may change.\n"
+                    "- The engine names each candidate `iter<N>`; `seed` is the repository the run began from.",
+                ),
+            ],
+        )
+
+    def _task_prompt(self, iteration: int) -> str:
+        """Render the native prompt, with the workspace paths under ``.meta-harness/`` in a repository run.
+
+        Args:
+            iteration: One-based iteration number.
+
+        Returns:
+            The prompt text.
+        """
+        text = super()._task_prompt(iteration)
+        if self._repo is None:
+            return text
+        logs = self.logs_dir.relative_to(self.work_dir).as_posix()
+        text = text.replace(f"`{logs}", f"`{_REPO_LAB}/{logs}").replace("`.claude/", f"`{_REPO_LAB}/.claude/")
+        return native_engines.adapt(
+            text,
+            [
+                (
+                    "Follow the meta-harness skill",
+                    "The repository root holds the files of the frontier leader: change them in place. The files "
+                    f"you leave, without `{_REPO_LAB}/`, are this iteration's candidate.\n\n"
+                    "Follow the meta-harness skill",
+                )
+            ],
+        )
 
     def _propose(self, iteration: int, remaining_cost: float | None) -> native_engines.ProposerOutcome:
         """Run one proposer session as a tool loop: one step per model reply and per command.
@@ -386,10 +489,13 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         pending = self.logs_dir / "pending_eval.json"
         # A tree write cannot delete a file, so an empty file stands for no candidates.
         pending.write_text("", encoding="utf-8")
+        # The local ``agents/`` files of a repository run hold tree ids, which mean nothing to the agent.
         files = {
             path.relative_to(self.work_dir).as_posix(): path.read_bytes()
             for path in sorted(self.work_dir.rglob("*"))
-            if path.is_file() and path.relative_to(self.work_dir).as_posix() not in self._pulled
+            if path.is_file()
+            and path.relative_to(self.work_dir).as_posix() not in self._pulled
+            and not (self._repo is not None and path.relative_to(self.work_dir).parts[0] == "agents")
         }
         # A tree holds only files, so an empty folder of the layout (such as ``logs/run/reports``) gets a marker
         # file; without it, the folder is missing and the agent's first write into it fails.
@@ -400,7 +506,14 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 if path.is_dir() and not any(path.iterdir())
             }
         )
-        tree = ctx.put_files(files, self._tree)
+        parent = start = None
+        if self._repo is None:
+            tree = ctx.put_files(files, self._tree)
+        else:
+            leader = self._leader()
+            parent = self._repo.tree_id if leader is None else leader[0]
+            tree = start = loop_tools.put_lab(ctx, parent, _REPO_LAB, files)
+        tool = BASH_TOOL if self._repo is None else REPO_BASH_TOOL
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.skill()},
             {"role": "user", "content": self._task_prompt(iteration)},
@@ -420,7 +533,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             if commands >= self._max_tool_calls or loop_tools.messages_bytes(messages) > loop_tools.MAX_PROMPT_BYTES:
                 exhausted = True
                 break
-            reply, failed_cents = loop_tools.call_model(ctx, messages, [BASH_TOOL], spent, remaining_cost)
+            reply, failed_cents = loop_tools.call_model(ctx, messages, [tool], spent, remaining_cost)
             spent += failed_cents
             if reply is None:
                 exhausted = True
@@ -451,8 +564,11 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 commands += 1
                 output, tree = self._exec(tree, call)
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
-        self._tree = tree
-        self._pull(tree)
+        if parent is None or start is None:
+            self._tree = tree
+            self._pull(tree)
+        else:
+            self._repo_pull(iteration, start, tree, parent)
         return native_engines.ProposerOutcome(
             session_id=f"iter{iteration}",
             cost_usd=float(spent) / 100,
@@ -559,6 +675,56 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                     local.write_bytes(content)
                     self._pulled.add(path)
 
+    def _repo_pull(self, iteration: int, start: str, tree: str, parent: str) -> None:
+        """Turn the tree that a repository session left into the iteration's one candidate.
+
+        The agent's ``pending_eval.json`` gives only the notes of the row (hypothesis, axis, components). The engine
+        writes the version's tree id to ``agents/iter<N>.txt`` and a local ``pending_eval.json`` that lists it, so the
+        native iteration benchmarks the tree. A version that is the parent or an earlier candidate gets no benchmark.
+
+        Args:
+            iteration: One-based iteration number.
+            start: The session's first tree, the parent with the workspace.
+            tree: The session's last tree.
+            parent: The tree of the version that the session started from.
+        """
+        assert self._ctx.read_file is not None
+        assert self._ctx.list_files is not None
+        logs = self.logs_dir.relative_to(self.work_dir).as_posix()
+        pending = self.logs_dir / "pending_eval.json"
+        try:
+            data = self._ctx.read_file(tree, f"{_REPO_LAB}/{logs}/pending_eval.json", native_engines.MAX_PENDING_BYTES)
+        except FileTooLargeError:
+            data = None
+        pending.write_bytes(data or b"")
+        notes = next(iter(self._read_pending(pending)), {})
+        # The reports carry over to the next session, which starts from the leader's tree with a fresh workspace.
+        reports = f"{_REPO_LAB}/{logs}/reports/"
+        for path in self._ctx.list_files(tree, reports.rstrip("/")) or []:
+            local = posixpath.normpath(path.removeprefix(reports))
+            if local.startswith(("..", "/")) or posixpath.basename(local) == ".keep":
+                continue
+            try:
+                content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+            except FileTooLargeError:
+                content = None
+            with contextlib.suppress(OSError):
+                target = self.logs_dir / "reports" / local
+                if content is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+        version = loop_tools.drop_lab(self._ctx, start, tree, parent, _REPO_LAB)
+        if version is None or any(entry["candidate"] == version for entry in self.results.values()):
+            pending.write_text("", encoding="utf-8")
+            return
+        name = f"iter{iteration}"
+        (self.work_dir / "agents" / f"{name}.txt").write_text(version, encoding="utf-8")
+        spec = {key: notes[key] for key in ("hypothesis", "axis", "base_system", "components") if key in notes}
+        spec.update({"name": name, "file": f"agents/{name}.txt"})
+        pending.write_text(json.dumps({"iteration": iteration, "candidates": [spec]}), encoding="utf-8")
+
     def _validate(self, spec: dict[str, Any]) -> str | None:
         """Check a candidate spec as the native engine does, and refuse a file that ``_pull`` does not copy.
 
@@ -603,23 +769,28 @@ class MetaHarnessEngine:
             The frontier's best candidate and the loop's evidence.
 
         Raises:
-            ServiceError: When a worker-loop run is on a repository, has a proposer setting that the tool loop does
-                not run, would expose the metric source, or the candidate is not one text.
+            ServiceError: When a worker-loop run has a proposer setting that the tool loop does not run, would
+                expose the metric source, or the candidate is not one text; or when a repository has a file at the
+                workspace path.
             BudgetExhaustedError: When no scorer call is left.
         """
-        if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file):
+        missing = None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file)
+        if missing or (ctx.repo_seed is not None and ctx.list_files is None):
             # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
             return run_native_engine(self.name, task, server, ctx)
-        if ctx.repo_seed is not None:
-            raise ServiceError("Meta-Harness cannot run on a repository in the worker engine loop yet.")
         options = ctx.native_options
         if options is not None:
             # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
             loop_tools.refuse_unsupported_proposer(options, "Meta-Harness")
-        if not task.str_mode:
+        # A repository run's candidate is a tree id, so its seed is the visible seed tree.
+        seed_tree = None if ctx.repo_seed is None else loop_tools.repo_seed_tree(ctx, _REPO_LAB, "Meta-Harness")
+        if seed_tree is None and not task.str_mode:
             raise ServiceError("Native agent engines require a single text candidate.")
+        payload = native_task_payload(self.name, task)
         # The native runtime checks the same document before it writes it into the box.
-        assert_metric_absent(json.dumps(native_task_payload(self.name, task), default=side_info_json_default), task)
+        assert_metric_absent(json.dumps(payload, default=side_info_json_default), task)
+        if seed_tree is not None:
+            payload["seed_candidate"] = seed_tree
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
         engine_config: dict[str, Any] = {"model": options.model if options else ""}
@@ -639,7 +810,7 @@ class MetaHarnessEngine:
         )
         worker = _WorkerMetaHarness(config, ctx, options.proposer.max_tool_calls if options else None)
         adapter = _UpstreamServer(server, list(task.cases), ctx)
-        upstream = worker.run(UpstreamTask(**native_task_payload(self.name, task)), adapter)
+        upstream = worker.run(UpstreamTask(**payload), adapter)
         # A best version with no finite mean, or with a crashed case, has no score (SKY-350, SKY-367, SKY-751).
         scored = math.isfinite(upstream.best_score) and not adapter.crashed(upstream.best_candidate)
         return Result(
