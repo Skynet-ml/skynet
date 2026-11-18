@@ -7,6 +7,7 @@ import json
 import os
 import random
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -1162,15 +1163,93 @@ def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest
     state = random.getstate()
     try:
         shinka_runner.seed_randomness(5)
-        first = (random.random(), str(uuid.uuid4()), str(uuid.uuid4()))
+        first = (random.random(), _draw_a(), _draw_a())
         shinka_runner.seed_randomness(5)
-        second = (random.random(), str(uuid.uuid4()), str(uuid.uuid4()))
+        second = (random.random(), _draw_a(), _draw_a())
     finally:
         random.setstate(state)
 
     assert first == second
     assert uuid.UUID(first[1]).version == 4
     assert first[1] != first[2]
+
+
+def _draw_a() -> str:
+    """Draw one program id from this line.
+
+    Returns:
+        The id.
+    """
+    return str(uuid.uuid4())
+
+
+def _draw_b() -> str:
+    """Draw one program id from another line.
+
+    Returns:
+        The id.
+    """
+    return str(uuid.uuid4())
+
+
+def test_each_seeded_id_source_repeats_its_ids_in_any_interleaving(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each call line the same ids whether another line draws before or after it.
+
+    Upstream draws a proposal task id before the sequential gate, so that draw
+    can fall on either side of the previous version's program ids.
+
+    Args:
+        monkeypatch: Restores ``uuid.uuid4``.
+    """
+    monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    state = random.getstate()
+    try:
+        shinka_runner.seed_randomness(5)
+        live = (_draw_a(), _draw_b(), _draw_a())
+        shinka_runner.seed_randomness(5)
+        replay_b = _draw_b()
+        replay = (_draw_a(), replay_b, _draw_a())
+    finally:
+        random.setstate(state)
+
+    assert live == replay
+    assert len(set(live)) == 3
+
+
+@pytest.mark.parametrize(
+    ("timeout", "time_limit"), [(7 * 24 * 3600.0, "168:00:00"), (90061.5, "25:01:02"), (59.0, "0:00:59")]
+)
+def test_on_the_engine_loop_the_job_time_limit_is_the_runs_timeout(timeout: float, time_limit: str) -> None:
+    """Set upstream's ``hh:mm:ss`` job time to the run's timeout on the engine loop, and leave it unset elsewhere.
+
+    With ``time`` set, upstream 0.0.7 takes its hung-evaluation limit from it,
+    not from the measured evaluation times that a replay shortens.
+
+    Args:
+        timeout: The run's timeout in seconds.
+        time_limit: The expected job time.
+    """
+    payload = {"transport": "stdio", "timeout_seconds": timeout}
+
+    assert shinka_runner.job_fields(payload) == {"python_executable": sys.executable, "time": time_limit}
+    assert shinka_runner.job_fields({"timeout_seconds": timeout}) == {"python_executable": sys.executable}
+
+
+def test_upstreams_hung_evaluation_limit_does_not_follow_the_measured_times_on_the_engine_loop() -> None:
+    """Run the pinned upstream's limit rule: a near-zero and a long measured average give the same limit."""
+    pytest.importorskip("shinka.core.async_runner")
+    limits = set()
+    for average in (0.001, 1000.0):
+        runner = SimpleNamespace(
+            job_config=shinka_runner.LocalJobConfig(
+                **shinka_runner.job_fields({"transport": "stdio", "timeout_seconds": 7 * 24 * 3600.0})
+            ),
+            scheduler=SimpleNamespace(job_type="local"),
+            _evaluation_seconds_ewma=average,
+        )
+        limits.add(shinka_runner.ShinkaEvolveRunner._get_evaluation_runtime_limit_seconds(runner))
+
+    assert limits == {7 * 24 * 3600.0}
 
 
 def test_in_the_sandbox_an_evaluation_waits_for_the_runtime_reply_file(

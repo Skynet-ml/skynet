@@ -123,6 +123,14 @@ class ShinkaEvolveEngine:
                 "Choose another engine, or remove [proposer] mcp from optimize.toml."
             )
         repo = options.repo if options is not None else None
+        # The loop checks the seed's hidden paths against its own (SKY-719), so
+        # the bundle must refuse the same paths, or a model could read what a box hides.
+        if (
+            repo is not None
+            and ctx.repo_seed is not None
+            and dict(repo.get("hidden_hashes") or {}) != dict(ctx.repo_seed.hidden_hashes)
+        ):
+            raise ServiceError("The repository options hide other paths than the run's repository seed.")
         if repo is None and task.seed_candidate is None:
             # A blank run evolves an empty starting text rather than refusing.
             task = replace(task, seed_candidate="")

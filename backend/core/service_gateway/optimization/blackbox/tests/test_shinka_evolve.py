@@ -22,7 +22,14 @@ from sqlalchemy.engine import Engine
 from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
 from core.service_gateway.optimization.blackbox import sandbox_log, shinka_evolve
-from core.service_gateway.optimization.blackbox.protocol import EngineContext, EvalServer, Result, Task
+from core.service_gateway.optimization.blackbox.protocol import (
+    BudgetExhaustedError,
+    EngineContext,
+    EvalServer,
+    RepoSeed,
+    Result,
+    Task,
+)
 from core.service_gateway.optimization.blackbox.shinka_evolve import ShinkaEvolveEngine
 from core.service_gateway.optimization.budget_stop import BudgetReached
 from core.storage.step_log_store import StepLogStore
@@ -74,8 +81,9 @@ _FAKE_UPSTREAM = {
     "shinka/edit.py": "def summarize_diff(*args, **kwargs):\n    return ''\n",
     "shinka/launch.py": """
         class LocalJobConfig:
-            def __init__(self, python_executable):
+            def __init__(self, python_executable, time=None):
                 self.python_executable = python_executable
+                self.time = time
     """,
     "shinka/local_openai_config.py": "def parse_local_openai_model(name):\n    return None\n",
     "shinka/prompts.py": "FULL_SYS_FORMATS = {}\n",
@@ -281,6 +289,38 @@ def test_a_feature_the_worker_does_not_run_yet_is_refused_before_any_step(
             Task("seed"), EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5), ctx
         )
     assert calls == []
+    assert not (tmp_path / "shinka_evolve").exists()
+
+
+@pytest.mark.parametrize(
+    ("seed_hidden", "error"),
+    [({"h1": "file"}, BudgetExhaustedError), ({"h2": "file"}, ServiceError), ({}, ServiceError)],
+)
+def test_the_repository_options_must_hide_the_same_paths_as_the_runs_repository_seed(
+    seed_hidden: dict[str, str], error: type[Exception], tmp_path: Path
+) -> None:
+    """Refuse options whose hidden paths differ from the seed's, which the loop checks against its own (SKY-719).
+
+    With the same hidden paths, the run goes on to its next check: here, an empty evaluation budget.
+
+    Args:
+        seed_hidden: The repository seed's hidden path hashes.
+        error: The error the run raises.
+        tmp_path: Pytest's temporary folder.
+    """
+    repo = {"chunks": [], "editable_paths": [], "readonly_paths": [], "hidden_hashes": {"h1": "file"}}
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=SimpleNamespace(shinka={}, budget_route=None, repo=repo),  # type: ignore[arg-type]
+        repo_seed=RepoSeed("tree", hidden_hashes=seed_hidden),
+    )
+
+    with pytest.raises(error):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=0), ctx
+        )
     assert not (tmp_path / "shinka_evolve").exists()
 
 

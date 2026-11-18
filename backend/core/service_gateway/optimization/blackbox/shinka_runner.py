@@ -576,6 +576,29 @@ def generation_budget(max_evals: int, examples: int, max_iterations: int | None)
     return affordable
 
 
+def job_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Build upstream's ``LocalJobConfig`` fields.
+
+    On the engine loop, ``time`` is the run's timeout. Without it, upstream
+    0.0.7 cancels an evaluation as hung after ``max(60, ewma * 5 + 60)``
+    seconds of measured wall-clock time. A resume replays its evaluations at
+    once, so that limit would drop to 60 seconds and could cancel an
+    evaluation that the live run let finish.
+
+    Args:
+        payload: Parent configuration carrying ``transport`` and ``timeout_seconds``.
+
+    Returns:
+        Keyword arguments for ``LocalJobConfig``.
+    """
+    fields: dict[str, Any] = {"python_executable": sys.executable}
+    if payload.get("transport") == "stdio":
+        seconds = math.ceil(float(payload["timeout_seconds"]))
+        # Upstream reads only ``hh:mm:ss``; the hours may pass 24.
+        fields["time"] = f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    return fields
+
+
 def build_config(
     payload: Mapping[str, Any], results_dir: str, examples: int, *, repo: bool = False
 ) -> dict[str, dict[str, Any]]:
@@ -970,21 +993,34 @@ def seed_randomness(seed: int) -> None:
     Upstream draws from ``random``, ``numpy.random`` and ``uuid.uuid4`` (its
     program ids, which reach the prompts).
 
+    Each ``uuid4`` call site gets its own seeded generator. Upstream 0.0.7's
+    proposal coordinator draws a task id (``async_runner.py`` line 2498)
+    before the sequential gate, so that draw can fall before or after the
+    filing of the previous version, which draws program ids on the event loop
+    (line 4086) and on the database write thread (``islands.py`` lines 617
+    and 808). One shared generator would then give the same program a
+    different id in a live run and in its replay.
+
     Args:
         seed: The run's seed.
     """
     random.seed(seed)
     if np is not None:
         np.random.seed(seed)
-    ids = random.Random(seed)
+    sources: dict[str, random.Random] = {}
 
     def uuid4() -> uuid.UUID:
-        """Draw the next seeded version-4 UUID.
+        """Draw the next seeded version-4 UUID of the calling line.
 
         Returns:
             The UUID.
         """
-        return uuid.UUID(int=ids.getrandbits(128), version=4)
+        caller = sys._getframe(1)
+        # The module name and line, not the file path: the replay may run from another folder.
+        source = f"{caller.f_globals.get('__name__')}:{caller.f_lineno}"
+        if source not in sources:
+            sources[source] = random.Random(f"{seed}:{source}")
+        return uuid.UUID(int=sources[source].getrandbits(128), version=4)
 
     uuid.uuid4 = uuid4
 
@@ -2107,7 +2143,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         ledger.install()
     runner = ShinkaEvolveRunner(
         evo_config=EvolutionConfig(**config["evolution"]),
-        job_config=LocalJobConfig(python_executable=sys.executable),
+        job_config=LocalJobConfig(**job_fields(payload)),
         db_config=DatabaseConfig(**config["database"]),
         init_program_str=shinka_bundle.encode_bundle({}) if bundle is not None else pack_program(seed),
         evaluate_str=_EVALUATE_TEMPLATE.format(queue=str(queue), timeout=timeout),
