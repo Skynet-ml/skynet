@@ -259,6 +259,9 @@ class ModelReplyNotJSONError(ValueError):
 def _nests_deeper(value: Any, levels: int) -> bool:
     """Tell whether a value nests more than a number of levels of objects and arrays, with no recursion.
 
+    The walk also enters mapping keys: the commit's ``sort_keys`` encoding compares keys, and two deep tuple keys
+    would make that comparison raise :class:`RecursionError`.
+
     Args:
         value: The value; a mapping, a list or a tuple is one level.
         levels: The most levels that the value may nest.
@@ -270,7 +273,7 @@ def _nests_deeper(value: Any, levels: int) -> bool:
     while stack:
         item, depth = stack.pop()
         if isinstance(item, dict):
-            children: Any = item.values()
+            children: Any = [*item, *item.values()]
         elif isinstance(item, list | tuple):
             children = item
         else:
@@ -301,7 +304,7 @@ def _bounded_call(call: Any) -> Any:
 def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
     """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
 
-    The walk keeps its own stack, so no depth of reply can raise :class:`RecursionError` here.
+    The walk keeps its own stack, and the encoder's :class:`RecursionError` becomes a refusal, so no reply escapes.
 
     Args:
         body: The model step body that holds the reply; it is one level of depth.
@@ -310,7 +313,8 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
     Raises:
         ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
         ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
-        ModelReplyNotJSONError: When it holds a value that is not JSON, or a lone surrogate that UTF-8 cannot hold.
+        ModelReplyNotJSONError: When it holds a value or key that is not JSON, or a lone surrogate that UTF-8 cannot
+            hold.
     """
     if _nests_deeper(body, _MAX_REPLY_DEPTH):
         raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
@@ -320,7 +324,8 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
     committed = {**body, "cost_cents": _cost_text(Decimal(0) if cost is None else cost)}
     try:
         size = len(json.dumps(committed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    except (TypeError, ValueError) as error:
+    # A key type that the walk does not enter, such as a frozenset of deep tuples, can still recurse in the sort.
+    except (TypeError, ValueError, RecursionError) as error:
         raise ModelReplyNotJSONError(f"The model reply is not UTF-8 JSON: {type(error).__name__}: {error}") from error
     if size > _MAX_REPLY_BYTES:
         raise ModelReplyTooLargeError(f"The model reply is {size} bytes, more than {_MAX_REPLY_BYTES}.")

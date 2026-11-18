@@ -266,8 +266,8 @@ class ModelReplyTooDeepError(ValueError):
 
 
 # A tool call keeps this text in place of arguments that nest too deep to read, write or commit. The text is not JSON
-# and its brackets nest past the engine loop's 100-level reply bound, so every engine's argument depth bound refuses
-# it: the engine gives that call an error result and the run goes on (SKY-817).
+# and not an object, so each engine gives that call an error result and the run goes on (SKY-817). Its brackets also
+# nest past every engine's argument depth bound (32 today) and past engine_loop._MAX_REPLY_DEPTH.
 TOO_DEEP_ARGUMENTS = "[" * 101
 
 

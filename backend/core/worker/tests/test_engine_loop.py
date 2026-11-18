@@ -1569,6 +1569,100 @@ def test_a_reply_nested_past_the_bound_outside_tool_arguments_is_a_failed_model_
     assert resumed_model.prompts == []
 
 
+def _deep_tuple_keys(levels: int) -> dict[Any, int]:
+    """Build an object whose two keys are different tuples nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested tuples in each key.
+
+    Returns:
+        ``{((...(0,)...),): 0, ((...(1,)...),): 1}``; the keys differ only at their deepest level.
+    """
+    keys: list[Any] = [(0,), (1,)]
+    for _ in range(levels - 1):
+        keys = [(key,) for key in keys]
+    return {keys[0]: 0, keys[1]: 1}
+
+
+def test_deep_tuple_keys_fail_only_their_call_or_their_reply_and_the_cost_is_billed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Deep tuple keys make the encoder's key sort recurse; they give a refusal with its cost, not a loop stop.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # 3000 levels is past Python's default recursion limit, so a sort of the two keys would raise RecursionError.
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": _deep_tuple_keys(3000)},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    assert reply.cost_cents == Decimal(1)
+
+    model.reply_calls = [{"id": "call_0", "name": _deep_tuple_keys(3000), "arguments": {}}]  # type: ignore[typeddict-item]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
+        first.call_model("improve other", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 1))
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+    assert first.remaining_cost_usd() == pytest.approx(9.97)
+
+
+class _RecursiveKey:
+    """A key whose order comparison recurses without end, as a key type that the depth walk does not enter can."""
+
+    def __lt__(self, other: object) -> bool:
+        """Compare by comparing again, which raises :class:`RecursionError`.
+
+        Args:
+            other: The other key.
+
+        Returns:
+            Never; the comparison recurses until Python stops it.
+        """
+        return self < other
+
+
+def test_a_reply_whose_key_sort_recurses_is_a_failed_model_call_with_its_cost(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A :class:`RecursionError` in the commit's key sort gives a refused reply that the lease bills.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {_RecursiveKey(): 0, _RecursiveKey(): 1}}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+
+def test_too_deep_arguments_is_no_json_and_nests_past_the_reply_depth_bound() -> None:
+    """The refused text must stay unreadable as JSON and deeper than the loop's bound, or an engine could act on it."""
+    assert TOO_DEEP_ARGUMENTS.count("[") > engine_loop._MAX_REPLY_DEPTH
+    with pytest.raises(ValueError):
+        json.loads(TOO_DEEP_ARGUMENTS)
+
+
 def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as_refused_text(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
