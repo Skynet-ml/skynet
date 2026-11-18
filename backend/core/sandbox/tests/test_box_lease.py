@@ -1666,6 +1666,60 @@ def test_a_clock_failure_in_a_release_drops_the_box_and_the_next_acquire_opens_a
         _stop(lease, ticker)
 
 
+@pytest.mark.parametrize(
+    ("release_error", "close_error", "raised"),
+    [
+        (RuntimeError("release"), BudgetReached("close"), "close"),
+        (RuntimeError("release"), RuntimeError("close"), "release"),
+        (BudgetReached("release"), RuntimeError("close"), "release"),
+        (BudgetReached("release"), BudgetReached("close"), "release"),
+    ],
+)
+def test_a_close_error_after_a_failed_healthy_release_hides_it_only_when_it_is_a_stop(
+    release_error: BaseException, close_error: BaseException, raised: str
+) -> None:
+    """A failed healthy release raises its own error over the box's close error, except under a budget stop."""
+    provider = _Provider()
+    broken: list[bool] = []
+
+    def clock() -> float:
+        """Return the fake time, or raise the release error while the test breaks the clock.
+
+        Returns:
+            The fake time.
+
+        Raises:
+            BaseException: The release error, while the clock is broken.
+        """
+        if broken:
+            raise release_error
+        return provider.clock.now
+
+    def close(box: _Box) -> None:
+        """Raise the close error.
+
+        Args:
+            box: The box.
+
+        Raises:
+            BaseException: The close error.
+        """
+        raise close_error
+
+    lease = BoxLease(provider.open, close, clock=clock, sleep=provider.clock.sleep, **_LIMITS)
+    box = lease.acquire("agent-1", [])
+    broken.append(True)
+    with pytest.raises(BaseException) as caught:
+        lease.release(box, healthy=True)
+    broken.clear()
+
+    assert caught.value is {"release": release_error, "close": close_error}[raised]
+    assert not lease._leases
+    assert not lease._idle
+    assert lease._reaper is None
+    assert lease._open[VERCEL] == 0
+
+
 def test_close_closes_an_idle_box_in_the_context_of_its_last_release() -> None:
     """close() runs each idle box close in its release's context, as the reaper does, not in the closer's."""
     provider = _Provider()

@@ -4,8 +4,8 @@
 gives the agent its warm box, and a healthy ``release`` keeps the box for the
 agent's next step. A box stays disposable: an unhealthy release, a failed
 health check, a new grant list, or a healthy release whose clock read or
-reaper start fails drops the box, and the next acquire opens a new one. The step log stays the truth, so the step re-runs from its last
-committed tree.
+reaper start fails drops the box, and the next acquire opens a new one. The
+step log stays the truth, so the step re-runs from its last committed tree.
 
 A warm box sleeps when it is idle, as a Cloudflare sandbox does after its
 ``sleepAfter`` time (default 10 minutes). An acquire holds the box, so a busy
