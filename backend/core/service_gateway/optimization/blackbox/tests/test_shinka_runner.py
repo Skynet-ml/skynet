@@ -2190,7 +2190,8 @@ def test_the_command_editor_files_the_tree_the_command_leaves_as_the_child(tmp_p
     [
         ({"error": "The [proposer] entry command failed with exit code 3."}, "exit code 3"),
         ({"files": {"src/util.py": 7}}, "malformed version"),
-        ({"files": {"../escape.py": "x"}}, ""),
+        ({"files": {"../escape.py": "x"}}, "'../escape.py' is outside the repository"),
+        ({"files": {"/abs/x": "x"}}, "'/abs/x' is outside the repository"),
         ({"files": {}}, ""),
     ],
 )
@@ -2212,6 +2213,7 @@ def test_the_command_editor_reports_a_failed_attempt_for_a_failed_or_bad_version
     assert (patch, success) == (None, False)
     assert error in str(meta["last_error_msg"])
     assert meta["last_error_msg"]
+    assert str(tmp_path) not in str(meta["last_error_msg"])
     assert not (tmp_path / "results" / "gen_1").exists()
 
 

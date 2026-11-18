@@ -2268,7 +2268,8 @@ def test_a_version_leaves_out_unchanged_seed_files_setup_output_and_large_files(
 ) -> None:
     """Keep only the text files that differ from the seed, within the size limit, and no setup output (SKY-815).
 
-    A setup output that the parent holds stays, since it came from an earlier version and not from the setup.
+    A file with a NUL byte or with bytes that are not UTF-8 is not text, so it stays out too. A setup output
+    that the parent holds stays, since it came from an earlier version and not from the setup.
 
     Args:
         owner: Alice and her budget generation.
@@ -2284,7 +2285,8 @@ def test_a_version_leaves_out_unchanged_seed_files_setup_output_and_large_files(
     options = _proposer_options(
         "printf edited > .cache.txt && printf mine > gen.txt && printf 'child\\n' > main.py"
         f" && head -c {limit} /dev/zero | tr '\\0' a > edge.txt"
-        f" && head -c {limit + 1} /dev/zero | tr '\\0' a > big.txt",
+        f" && head -c {limit + 1} /dev/zero | tr '\\0' a > big.txt"
+        " && printf 'a\\000b' > binary.dat && printf '\\377\\376' > latin.txt",
         setup=["sh", "-c", "printf built > .cache.txt && printf built > gen.txt"],
     )
     requests = shinka_evolve._Requests(

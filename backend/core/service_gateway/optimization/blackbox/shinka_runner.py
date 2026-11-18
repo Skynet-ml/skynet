@@ -1819,6 +1819,10 @@ class CommandEditor(AgentEditor):
         with self._git_lock:
             _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
         try:
+            # git check-ignore fails on a path outside the checkout, and its message names the worker's scratch
+            # folder. Refuse such paths first, with a message that names only the path.
+            for path in files:
+                checked_target(workspace, path)
             # The command's tree holds its ignored output too, such as ``.pytest_cache``. An agent session's
             # ``git add`` leaves those out, so the rules must not refuse the version for them.
             ignored = _ignored_paths(workspace, list(files))
@@ -2379,12 +2383,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if bundle is not None:
         install_repo_mode(bundle, runner)
     editor = None
-    if payload.get("shinka_command"):
-        if bundle is None:
-            raise ValueError("The [proposer] entry command needs a repository target.")
-        editor = CommandEditor(mailbox, workdir, ledger=ledger, bundle=bundle)
-        install_agent_editor(editor, runner)
-    elif payload.get("shinka_editor"):
+    if payload.get("shinka_editor"):
         editor = AgentEditor(
             payload["shinka_editor"],
             workdir,

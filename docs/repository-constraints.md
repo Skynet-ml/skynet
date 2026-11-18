@@ -150,8 +150,10 @@ U+2066 to U+2069), because they can hide what a command does.
   `setup` runs once, before the first mutation. The new version is always
   the full tree, also when ShinkaEvolve asks for a diff. The version holds
   the text files that differ from the start: the run does not keep deleted
-  files, binary files, files over 64 KB or the output of `setup`. A failed
-  command is a failed mutation, and ShinkaEvolve keeps its message.
+  files, binary files, files over 64 KB, the output of `setup`, files that
+  your `.gitignore` rules ignore, or Git metadata (a path with a `.git`
+  part). A failed command is a failed mutation, and ShinkaEvolve keeps its
+  message.
 - The command runs only in a repository checkout. AutoSaddler also starts
   reflect sessions in a plain folder, which edit no repository. The default
   proposer agent answers those sessions, without `setup`, and the box
