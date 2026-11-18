@@ -6,7 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -520,7 +520,7 @@ def test_a_metric_error_case_keeps_the_programs_mean_over_its_scored_cases(tmp_p
     assert answer["metrics"]["private"] == {"case_0": 0.5}
     assert "Case 1 has no score: the metric failed:\nKeyError: 'x'" in answer["metrics"]["text_feedback"]
     assert scorer.best is None
-    assert scorer.scored == {}
+    assert scorer.scored[2]["per_example"] == [("0", 0.5)]
 
 
 def test_a_metric_error_version_cannot_reach_stop_at_score(tmp_path: Path, monkeypatch: Any) -> None:
@@ -537,7 +537,7 @@ def test_a_metric_error_version_cannot_reach_stop_at_score(tmp_path: Path, monke
     assert answer["metrics"]["combined_score"] == 0.5
     assert not scorer.target_reached.is_set()
     assert scorer.best is None
-    assert scorer.scored == {}
+    assert scorer.failed_versions == 1
 
 
 def test_a_program_the_metric_fails_on_every_case_has_no_score(tmp_path: Path, monkeypatch: Any) -> None:
@@ -599,13 +599,19 @@ class _FailedProgramRunner(_NoProgramRunner):
             time.sleep(0.05)
 
 
-def _execute_with(tmp_path: Path, monkeypatch: Any, runner: type) -> dict[str, Any]:
-    """Run ``execute`` on one case with ``runner`` in place of upstream's runner.
+_RUN_FAILED_RESPONSE = {"score": None, "info": {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}}
+
+
+def _execute_with(
+    tmp_path: Path, monkeypatch: Any, runner: type, responses: Sequence[dict[str, Any]] = (_RUN_FAILED_RESPONSE,)
+) -> dict[str, Any]:
+    """Run ``execute`` with one case per parent response and ``runner`` in place of upstream's runner.
 
     Args:
         tmp_path: Working folder for the run.
         monkeypatch: Replaces upstream's runner and configuration classes.
         runner: The stand-in runner class.
+        responses: The parent's response for each case of the seed.
 
     Returns:
         The run's result document.
@@ -615,14 +621,16 @@ def _execute_with(tmp_path: Path, monkeypatch: Any, runner: type) -> dict[str, A
     for name in ("EvolutionConfig", "DatabaseConfig", "LocalJobConfig"):
         monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
     monkeypatch.setattr(shinka_runner.UsageLedger, "install", lambda self: None)
-    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r0"))
+    ids = iter([f"r{index}" for index in range(len(responses))])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
     (tmp_path / "rpc").mkdir()
-    failure = {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}
-    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": None, "info": failure}))
+    for index, response in enumerate(responses):
+        (tmp_path / "rpc" / f"r{index}.json").write_text(json.dumps(response))
+    train_set = [{"id": str(index)} for index in range(len(responses))]
     payload = _payload(
         nonce="testnonce",
         timeout_seconds=5.0,
-        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": [{"id": "a"}]},
+        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": train_set},
     )
     return shinka_runner.execute(payload)
 
@@ -645,6 +653,50 @@ def test_a_run_where_every_scored_version_fails_keeps_the_seed_and_says_why(
     assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
         "No version has a score: each one failed on at least one case. The run keeps the starting version."
     ]
+
+
+def test_a_run_whose_every_version_has_a_metric_error_keeps_the_seed_and_says_why(
+    tmp_path: Path, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A metric error on one case leaves the seed with no score, and the run still finishes (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capsys: Captures the framed log lines.
+    """
+    responses = [{"score": 0.5, "info": {"feedback": "fine"}}, {"score": None, "info": {"error": "KeyError: 'x'"}}]
+
+    document = _execute_with(tmp_path, monkeypatch, _FailedProgramRunner, responses)
+
+    assert "error" not in document
+    assert (document["best_candidate"], document["best_score"]) == ("Answer.", None)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
+        "No version has a score: each one failed on at least one case. The run keeps the starting version."
+    ]
+
+
+def test_a_metric_error_version_stays_in_the_version_tree_as_a_parent(tmp_path: Path, monkeypatch: Any) -> None:
+    """The lineage reporter sends a metric-error version, so its child's parent resolves (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    scorer, _ = _two_case_answer(tmp_path, monkeypatch, {"score": None, "info": {"error": "KeyError: 'x'"}})
+    scorer.scored[3] = {"candidate": "y", "score": 0.7, "per_example": [("0", 0.7), ("1", 0.7)]}
+    db_path = tmp_path / "programs.sqlite"
+    with shinka_runner.contextlib.closing(shinka_runner.sqlite3.connect(db_path)) as db:
+        db.execute("CREATE TABLE programs (id TEXT, generation INTEGER, parent_id TEXT)")
+        db.executemany("INSERT INTO programs VALUES (?, ?, ?)", [("p2", 2, None), ("p3", 3, "p2")])
+        db.commit()
+    mailbox = _Mailbox()
+
+    shinka_runner.LineageReporter(mailbox, scorer, db_path).poll()
+
+    assert [(line["candidate_id"], line["parent_id"]) for line in mailbox.lines] == [(2, None), (3, 2)]
+    assert mailbox.lines[0]["per_example"] == [("0", 0.5)]
 
 
 def test_a_run_that_scores_no_program_at_all_fails_with_an_error(

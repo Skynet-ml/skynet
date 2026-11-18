@@ -559,6 +559,8 @@ A version with a case that has no score has no score itself:
   that fails one case for every version then still lets the search rank the
   versions.
 - A metric error in the final run also gives the version no score.
+- A version with a metric error stays in the version tree with no score,
+  so its child versions keep their parent.
 - It reaches no `[outcome] target`, passes no minimum and opens no pull
   request.
 - The starting version can fail a case. Then a version that passes every

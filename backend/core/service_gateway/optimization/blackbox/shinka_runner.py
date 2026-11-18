@@ -1436,8 +1436,9 @@ class ProgramScorer:
         self.target_reached = threading.Event()
         self.scored: dict[int, dict[str, Any]] = {}
         self.best: dict[str, Any] | None = None
-        # SKY-751: programs the parent scored that failed a case. It tells a
-        # run where every version failed from one where nothing was scored.
+        # SKY-751: programs the parent scored that failed a case or hit a metric
+        # error. It tells a run where every version failed from one where
+        # nothing was scored.
         self.failed_versions = 0
         self._lock = threading.Lock()
         self._seen: set[str] = set()
@@ -1546,11 +1547,6 @@ class ProgramScorer:
                 "metrics": {"combined_score": 0.0, "text_feedback": feedback},
             }
         metrics = summarize_scores(results)
-        if unscored:
-            # The filled mean still guides parent selection, but a version with
-            # a metric error cannot become best, show a score or stop the run,
-            # as in Best-of-N and AutoSaddler (SKY-751).
-            return {"correct": True, "error": None, "metrics": metrics}
         with self._lock:
             self.scored[generation] = {
                 "candidate": value,
@@ -1560,6 +1556,13 @@ class ProgramScorer:
                 ],
                 "total_evals": self.mailbox.total_evals,
             }
+            if unscored:
+                # The version stays in the tree, so its children keep a parent;
+                # the parent shows it with no score. Its filled mean still guides
+                # parent selection, but it cannot become best or stop the run, as
+                # in Best-of-N and AutoSaddler (SKY-751).
+                self.failed_versions += 1
+                return {"correct": True, "error": None, "metrics": metrics}
             if self.best is None or metrics["combined_score"] > self.best["best_score"]:
                 self.best = {"best_candidate": value, "best_score": metrics["combined_score"], "generation": generation}
         if self.stop_at_score is not None and metrics["combined_score"] >= self.stop_at_score:
