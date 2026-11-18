@@ -573,7 +573,7 @@ def test_each_box_has_its_own_hold_and_every_box_closes(tmp_path: Path, case: st
                 scorer.score("", {"input": 2})
         else:
             result = scorer.score("", {"input": 2})
-            assert (result["score"] == 0.0) == (case == "run fails")
+            assert (result["score"] is None) == (case == "run fails")
     finally:
         scorer.close()
 
