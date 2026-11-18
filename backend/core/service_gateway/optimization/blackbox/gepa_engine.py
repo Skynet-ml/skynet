@@ -33,7 +33,7 @@ from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
 from ....sandbox.timeouts import Phase
-from ....sandbox.trees import BoxFailureError, TreeRejectedError
+from ....sandbox.trees import BoxFailureError, GrantDeniedError, TreeRejectedError
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
@@ -67,6 +67,8 @@ _FEEDBACK_RECORDS = 5
 _REJECTED_NOTE = "The command wrote a path that it may not write. Its output was discarded."
 # A block closes at a line with its own fence, so a file that holds a shorter fence can use a longer one.
 _BLOCK = re.compile(r"^(`{3,})(sh|read|ls|file)[ \t]*([^\n]*)\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
+# These errors end the run. The loop wraps its own stops in ``ScorerAbortError``; a refused grant replays the same.
+_STOP_ERRORS = (ScorerAbortError, GrantDeniedError, BudgetExhaustedError)
 
 
 class _JobLogger:
@@ -354,7 +356,7 @@ class _LoopRepoProposer:
         self.ctx = ctx
         self.seed = seed
         self.task = task
-        self.failure: ScorerAbortError | None = None
+        self.failure: Exception | None = None
         self.cost_cents = Decimal(0)
 
     @classmethod
@@ -374,24 +376,28 @@ class _LoopRepoProposer:
         return cls(ctx, ctx.repo_seed, task)
 
     def start_tree(self) -> str:
-        """Return the tree GEPA starts from: the task's seed when it is a tree of the run, else the seed tree.
+        """Return the tree GEPA starts from: the task's seed when it has one, else the run's seed tree.
 
-        Auto's continuation gives the winner's tree id as the task's seed. A run's first lane gives the run's own
-        seed, which can be empty or text. A non-empty seed is a tree id only when the run can see a tree with that
-        id. The check reads the tree store with no box and no step, and a tree id is the hash of its content, so a
-        resume makes the same choice.
+        Auto's continuation gives the winner's tree id as the task's seed. The check reads the tree store with no
+        box and no step, and a tree id is the hash of its content, so a resume makes the same choice.
 
         Returns:
-            The task's seed tree id, or the run's seed tree.
+            The task's seed tree id, or the run's seed tree when the task's seed is empty.
+
+        Raises:
+            ServiceError: When the task's seed is not empty and is not a tree that the run can see.
         """
         seed = self.task.seed_candidate
-        if isinstance(seed, str) and seed:
-            try:
-                if self.ctx.list_files(seed, "") is not None:
-                    return seed
-            except LookupError:
-                pass
-        return self.seed.tree_id
+        if seed is None or seed == "":
+            return self.seed.tree_id
+        try:
+            visible = isinstance(seed, str) and self.ctx.list_files(seed, "") is not None
+        except LookupError:
+            visible = False
+        if not visible:
+            # A silent fallback would optimize the run's seed in place of the version that the caller gave.
+            raise ServiceError("The GEPA seed is not a version of this run.")
+        return seed
 
     @property
     def total_cost(self) -> float:
@@ -414,10 +420,12 @@ class _LoopRepoProposer:
             **_: GEPA's other proposer arguments, not used.
 
         Returns:
-            The new version's tree id under the same component key; the parent when no reply wrote valid files.
+            The new version's tree id under the same component key; the parent when no reply wrote valid files
+            or a loop call failed with an error that does not stop the run.
 
         Raises:
             ScorerAbortError: When the loop stopped; the engine reads it back after GEPA returns.
+            GrantDeniedError: When the budget refused a command's grants; the engine reads it back too.
         """
         if self.failure is not None:
             raise self.failure
@@ -444,9 +452,13 @@ class _LoopRepoProposer:
                 else:
                     note = self.command(parent, blocks[0][4])
                 messages.append({"role": "user", "content": note})
-        except ScorerAbortError as error:
+        except _STOP_ERRORS as error:
             self.failure = error
             raise
+        except Exception as error:
+            # GEPA retries a failed batch from its first model call, which pays for each reply again. A loop
+            # error replays from its committed step, so keeping the parent gives the same population on a resume.
+            logger.info("GEPA proposal kept its parent after %s", type(error).__name__)
         return {key: parent}
 
     def brief(self, records: list[dict[str, Any]]) -> str:
@@ -526,7 +538,8 @@ class _LoopRepoProposer:
             paths = self.ctx.list_files(tree_id, "" if folder in ("", ".") else folder)
         except LookupError:
             paths = None
-        if paths is None:
+        # A folder whose files are all hidden gets the answer of a missing folder, so it does not show them (SKY-353).
+        if not paths:
             return f"'{folder}' is not a folder of the current version."
         return f"Files ({len(paths)}):\n" + _cut("\n".join(paths))
 
@@ -583,12 +596,17 @@ class _LoopRepoProposer:
             The reason, or ``None`` when ``path`` is no folder.
         """
         try:
-            folder = self.ctx.list_files(tree_id, path) is not None
+            paths = self.ctx.list_files(tree_id, path)
         except LookupError:
-            folder = False
+            paths = None
+        if paths is None:
+            return None
         # A file at a folder's path replaces the whole folder, with the hidden or protected files in it.
-        # Generic text: the proposer must not learn which folders hold hidden files (SKY-353).
-        return f"'{path}' may not be changed." if folder else None
+        # A folder whose files are all hidden lists as missing, so its refusal is worded as for any path
+        # outside the editable paths and does not show that it holds hidden files (SKY-353).
+        if not paths:
+            return f"'{path}' is outside the editable paths."
+        return f"'{path}' may not be changed."
 
     def path_problem(self, path: str) -> str | None:
         """Explain how writing ``path`` breaks the run's path rules.

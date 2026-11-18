@@ -21,6 +21,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetService
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.trees import TreeRejectedError
@@ -30,7 +31,7 @@ from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeEntry, TreeStore
 from core.storage.workspace_store import WorkspaceStore
 from core.worker.actors import User
-from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop, LoopStoppedError
+from core.worker.engine_loop import ROOT_AGENT_ID, EngineLoop, LoopStoppedError, ModelCallFailedError
 
 from ...budget_stop import BudgetReached
 from .. import gepa_engine as gepa_mod
@@ -1084,7 +1085,7 @@ def test_a_file_at_a_folder_that_holds_a_hidden_file_is_refused_on_a_real_loop(s
     assert proposer is not None
 
     assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
-    assert calls.prompts[1] == "The files break the editing rules: 'eval' may not be changed."
+    assert calls.prompts[1] == "The files break the editing rules: 'eval' is outside the editable paths."
     assert counter["opened"] == 0
 
 
@@ -1137,11 +1138,11 @@ def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
 
 
 def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Path) -> None:
-    """On the loop a version is a tree id, so a run with a text seed and no scorer calls left returns the seed tree."""
+    """On the loop a version is a tree id, so a run with no task seed and no scorer calls left returns the seed tree."""
     ctx = _FakeCalls([]).ctx(tmp_path)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=0)
 
-    result = GepaEngine().run(Task("text seed", cases=list(_CASES)), server, ctx)
+    result = GepaEngine().run(Task("", cases=list(_CASES)), server, ctx)
 
     assert result.best_candidate == "tree-seed"
 
@@ -1149,7 +1150,7 @@ def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Pat
 def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When GEPA stops with no saved state, a loop run returns the seed tree, not the task's text seed."""
+    """When GEPA stops with no saved state, a loop run with no task seed returns the run's seed tree."""
 
     def exhausted(**kwargs: Any) -> None:
         """Stop as the scorer cap does before GEPA saves a state.
@@ -1166,7 +1167,7 @@ def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
     ctx = _FakeCalls([]).ctx(tmp_path)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
 
-    result = GepaEngine().run(Task("text seed", cases=list(_CASES)), server, ctx)
+    result = GepaEngine().run(Task("", cases=list(_CASES)), server, ctx)
 
     assert result.best_candidate == "tree-seed"
 
@@ -1200,7 +1201,7 @@ def test_a_repository_run_starts_from_the_task_seed_when_it_is_a_tree_of_the_run
 
 
 def test_the_start_tree_is_the_task_seed_only_when_the_real_loop_can_see_it(stores: _Stores, tmp_path: Path) -> None:
-    """On a real loop, a tree id of the run is the start; empty, ``None`` and text seeds give the run's seed tree."""
+    """On a real loop, a tree id of the run is the start, empty and ``None`` give the seed tree, and text fails."""
     run = stores.user.workspace().start_run(
         _RUN_ID,
         step_log=stores.step_log,
@@ -1239,7 +1240,11 @@ def test_the_start_tree_is_the_task_seed_only_when_the_real_loop_can_see_it(stor
         return proposer.start_tree()
 
     assert start(winner) == winner
-    assert start("text seed") == seed_tree
+    # A silent fallback would optimize the run's seed in place of the version that the caller gave.
+    with pytest.raises(ServiceError, match="not a version of this run"):
+        start("text seed")
+    with pytest.raises(ServiceError, match="not a version of this run"):
+        start("0" * 64)
     assert start("") == seed_tree
     assert start(None) == seed_tree
     assert counter["opened"] == 0
@@ -1322,3 +1327,84 @@ def test_a_loop_stop_in_a_proposer_command_ends_the_proposal(tmp_path: Path) -> 
         proposer({"c": "tree-parent"}, {"c": []}, ["c"])
     assert isinstance(proposer.failure, LoopStoppedError)
     assert calls.writes == []
+
+
+def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores: _Stores, tmp_path: Path) -> None:
+    """``ls eval`` answers as for a missing folder, and a file at ``eval`` as for a path outside the editable paths."""
+    run = stores.user.workspace().start_run(
+        _RUN_ID,
+        step_log=stores.step_log,
+        execution_generation=1,
+        budget_generation=stores.budget_generation,
+        grant_list_id="grants-1",
+        chunk_cents=10,
+        lease_slices=4,
+    )
+    counter = {"open": 0, "opened": 0}
+    replies = ["```ls\neval\n```", "```ls\nnone\n```", _file("eval"), _file("docs"), "no block", "no block"]
+    calls = _FakeCalls(replies)
+    hidden = hidden_hashes(["eval/metric.py"])
+    loop = EngineLoop(
+        run,
+        engine=stores.engine,
+        trees=stores.trees,
+        candidates=_CountingSource(counter),
+        metrics=_CountingSource(counter),
+        model=calls.model,
+        model_max_cents=2,
+        run_dir=tmp_path / "loop",
+        hidden_hashes=hidden,
+    )
+    seed_tree = loop.put_files({"answer.txt": b"a\n", "eval/metric.py": b"metric"})
+    # ``eval`` is editable, so the write reaches the folder check and not the editable-path check.
+    seed = RepoSeed(seed_tree, editable_paths=("answer.txt", "eval"), hidden_hashes=hidden)
+    proposer = gepa_mod._LoopRepoProposer.bind(loop.context(repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": seed_tree}, {"c": []}, ["c"]) == {"c": seed_tree}
+    notes = calls.prompts[1:]
+    assert notes[0] == "'eval' is not a folder of the current version."
+    assert notes[0].replace("eval", "<path>") == notes[1].replace("none", "<path>")
+    assert notes[2] == "The files break the editing rules: 'eval' is outside the editable paths."
+    assert notes[2].replace("eval", "<path>") == notes[3].replace("docs", "<path>")
+    assert counter["opened"] == 0
+
+
+def test_a_failed_model_call_keeps_the_parent_and_gepa_does_not_pay_for_it_again(tmp_path: Path) -> None:
+    """A failed reply ends only its proposal, so GEPA's batch retry does not call the model for it again."""
+    calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)])
+    model_calls: list[tuple[int | None, int]] = []
+
+    def model(prompt: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+        """Fail the first reply as a loop model call does, then write a longer file each time.
+
+        Args:
+            prompt: The messages.
+            tools: Not used.
+
+        Returns:
+            The reply.
+
+        Raises:
+            ModelCallFailedError: In the first call.
+        """
+        model_calls.append((gepa_mod.current_proposal_iteration(), len(prompt)))
+        if len(model_calls) == 1:
+            raise ModelCallFailedError("TimeoutError")
+        return calls.model(prompt, tools)
+
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, call_model=model), Task(""))
+    assert proposer is not None
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert len(model_calls) == 1
+    assert proposer.failure is None
+
+    model_calls.clear()
+    server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=12)
+    result = GepaEngine().run(Task("", cases=list(_CASES)), server, calls.ctx(tmp_path, call_model=model))
+
+    # Each proposal opens with one brief; a retry of the failed one would open a second in the same iteration.
+    briefs = [iteration for iteration, length in model_calls if length == 1]
+    assert len(briefs) == len(set(briefs)) > 1
+    assert calls.writes
+    assert result.total_evals == 12
