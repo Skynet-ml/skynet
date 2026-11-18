@@ -127,8 +127,8 @@ from sqlalchemy import create_engine, delete, inspect, make_url, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-# ``python -m load_tests.scenarios.swarm_10k`` does not pass through run_all: litellm, which ``core`` can
-# import, fetches its price map over HTTPS at import unless this is set. It must come before the core imports.
+# litellm, which ``core`` can import, fetches its price map over HTTPS at import unless this is set. No caller sets
+# it, so the module sets it before the core imports, for each way that loads it (``-m``, a runner, a spawned shard).
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 from core.config import Settings
@@ -1234,7 +1234,6 @@ def run(config: SwarmConfig) -> ScenarioResult:
         # Each shard count runs once: the worker ids of a pass hold its shard count, so they stay unique.
         for shard_count in (1,) if not_compared else tuple(dict.fromkeys((1, 2, config.shards))):
             figures = run_pass(config, shard_count, Path(folder) / f"pass-{shard_count}")
-            metrics.record(status_code=200, latency_seconds=figures["seconds_to_durable"])
             passes.append(figures)
     same_step_log: bool | str = (
         f"not compared: {not_compared}" if not_compared else len({figures["digest"] for figures in passes}) == 1
@@ -1247,6 +1246,31 @@ def run(config: SwarmConfig) -> ScenarioResult:
     target_backend = config.db_url is not None and on_s3
     max_wait_ms = round(1000 * MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds, 2)
     min_steady_seconds = steady_floor_seconds(config)
+    gated_violations = []
+    if gated["commits_per_second"] < TARGET_COMMITS_PER_SECOND:
+        gated_violations.append(
+            f"{gated['shards']}-shard steady commit rate {gated['commits_per_second']}/s"
+            f" over {gated['steady_steps']} steady steps is below {TARGET_COMMITS_PER_SECOND}/s"
+        )
+    if gated["steady_seconds"] < min_steady_seconds:
+        gated_violations.append(
+            f"{gated['shards']}-shard steady part is {gated['steady_seconds']} s, shorter than"
+            f" {round(min_steady_seconds, 3)} s: give each agent more steps"
+        )
+    if gated["step_wait_ms"]["p99"] > max_wait_ms:
+        gated_violations.append(
+            f"{gated['shards']}-shard step wait p99 is {gated['step_wait_ms']['p99']} ms, above {max_wait_ms} ms"
+        )
+    if gated["commit_call_ms"]["p99"] > MAX_COMMIT_CALL_P99_MS:
+        gated_violations.append(
+            f"{gated['shards']}-shard commit call p99 is {gated['commit_call_ms']['p99']} ms,"
+            f" above {MAX_COMMIT_CALL_P99_MS} ms: the agent waits in commit"
+        )
+    for figures in passes:
+        # A pass fails when it lost a step, and the gated pass also when it misses a limit, so the metric and the
+        # gate agree.
+        failed = figures["steps_stored"] != figures["commits"] or (figures is gated and bool(gated_violations))
+        metrics.record(status_code=500 if failed else 200, latency_seconds=figures["seconds_to_durable"])
     result = metrics.finish()
     result.extras = {
         "agents": config.agents,
@@ -1283,26 +1307,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "box_load_measured": box_load(config, gated["commits_per_second"]),
         "box_load_target": box_load(config, TARGET_COMMITS_PER_SECOND),
     }
-    violations = []
-    if gated["commits_per_second"] < TARGET_COMMITS_PER_SECOND:
-        violations.append(
-            f"{gated['shards']}-shard steady commit rate {gated['commits_per_second']}/s"
-            f" over {gated['steady_steps']} steady steps is below {TARGET_COMMITS_PER_SECOND}/s"
-        )
-    if gated["steady_seconds"] < min_steady_seconds:
-        violations.append(
-            f"{gated['shards']}-shard steady part is {gated['steady_seconds']} s, shorter than"
-            f" {round(min_steady_seconds, 3)} s: give each agent more steps"
-        )
-    if gated["step_wait_ms"]["p99"] > max_wait_ms:
-        violations.append(
-            f"{gated['shards']}-shard step wait p99 is {gated['step_wait_ms']['p99']} ms, above {max_wait_ms} ms"
-        )
-    if gated["commit_call_ms"]["p99"] > MAX_COMMIT_CALL_P99_MS:
-        violations.append(
-            f"{gated['shards']}-shard commit call p99 is {gated['commit_call_ms']['p99']} ms,"
-            f" above {MAX_COMMIT_CALL_P99_MS} ms: the agent waits in commit"
-        )
+    violations = list(gated_violations)
     violations.extend(
         f"{figures['shards']}-shard pass stored {figures['steps_stored']} of {figures['commits']}"
         for figures in passes

@@ -285,7 +285,7 @@ async def _run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> li
     """Run each scenario serially and print its result as it finishes.
 
     Args:
-        names: Scenario names to run (must exist in :data:`_SCENARIOS`).
+        names: Scenario names to run; :func:`_async_main` refuses a name that is not in :data:`_SCENARIOS` first.
         api_url: Backend base URL forwarded to each scenario.
         mock_lm_url: Mock LM URL forwarded to each scenario.
 
@@ -294,12 +294,8 @@ async def _run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> li
     """
     results: list[ScenarioResult] = []
     for name in names:
-        scenario = _SCENARIOS.get(name)
-        if scenario is None:
-            print(f"[loadtest] WARNING: unknown scenario '{name}', skipping")
-            continue
         print(f"\n[loadtest] running scenario: {name}")
-        result = await scenario(api_url, mock_lm_url)
+        result = await _SCENARIOS[name](api_url, mock_lm_url)
         results.append(result)
     return results
 

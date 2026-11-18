@@ -48,9 +48,8 @@ from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-# ``python -m load_tests.scenarios.reference_shapes`` (and ``chaos_gate``, which imports this module) does not
-# pass through run_all: litellm, which ``core`` imports, fetches its price map over HTTPS at import unless this
-# is set. It must come before the core imports.
+# litellm, which ``core`` imports, fetches its price map over HTTPS at import unless this is set. No caller sets
+# it, so the module sets it before the core imports, for each way that loads it (``-m``, ``chaos_gate``, a runner).
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 from core.billing.budgets import BudgetService
@@ -1218,7 +1217,12 @@ def _replays(
     before = harness.footprint(run_id)
     generation = harness.new_generation(run_id)
     meter = BoxMeter()
-    loop, store, scorer = harness.loop(shape, run_id, generation, MockModel(refuse=True), meter, refuse=True)
+    try:
+        # A failed start closes its own step log, so it fails this run's replay only, not the chaos gate.
+        loop, store, scorer = harness.loop(shape, run_id, generation, MockModel(refuse=True), meter, refuse=True)
+    except Exception as error:
+        print(f"[loadtest] replay of {run_id} did not start: {type(error).__name__}: {error}")
+        return False
     try:
         result = FakeEngine(rounds).run(Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context())
         loop.finish()

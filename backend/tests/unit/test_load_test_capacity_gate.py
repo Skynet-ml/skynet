@@ -26,9 +26,23 @@ from core.storage.models import AgentStepModel, JobModel, StoragePackModel, Tree
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.worker.engine_loop import EngineLoop
-from load_tests import run_all
-from load_tests.lib.metrics import ScenarioMetrics
-from load_tests.scenarios import chaos_gate, reference_shapes, swarm_10k
+
+# The scenario modules set this at import and need it only then (a spawned shard sets it again). Put it back, so
+# that the other tests in this worker see the same environment in any order.
+_COST_MAP = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+from load_tests import run_all  # noqa: E402
+from load_tests.lib.metrics import ScenarioMetrics  # noqa: E402
+from load_tests.scenarios import chaos_gate, reference_shapes, swarm_10k  # noqa: E402
+
+if _COST_MAP is None:
+    os.environ.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+else:
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = _COST_MAP
+
+
+def test_importing_the_scenarios_leaves_the_cost_map_variable_as_it_was() -> None:
+    """Check that this file's scenario imports leave ``LITELLM_LOCAL_MODEL_COST_MAP`` as the worker had it."""
+    assert os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP") == _COST_MAP
 
 
 def _no_start(*args: Any, **kwargs: Any) -> None:
@@ -308,6 +322,45 @@ def test_swarm_gate_fails_when_the_layouts_are_not_compared(monkeypatch: pytest.
     """
     violations = _gate(monkeypatch, _swarm_config(shards=1))
     assert violations == ["the shard layouts were not compared: 1 shard(s): the comparison needs at least 2"]
+
+
+@pytest.mark.parametrize(
+    ("single", "sharded", "codes"),
+    [
+        ({}, {}, {200: 2}),
+        ({"steps_stored": 99_999}, {}, {200: 1, 500: 1}),
+        ({}, {"commits_per_second": 5_000.0}, {200: 1, 500: 1}),
+        ({}, {"steps_stored": 99_999}, {200: 1, 500: 1}),
+    ],
+)
+def test_swarm_metric_counts_a_failed_pass(
+    monkeypatch: pytest.MonkeyPatch, single: dict[str, Any], sharded: dict[str, Any], codes: dict[int, int]
+) -> None:
+    """Check that the metric records a failed pass as 500 and a passing pass as 200, so it agrees with the gate.
+
+    Args:
+        monkeypatch: Replaces ``run_pass``.
+        single: The figures to change on the 1-shard pass.
+        sharded: The figures to change on the 2-shard pass.
+        codes: The status codes that the metric must count.
+    """
+
+    def fake_pass(config: swarm_10k.SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
+        """Return made-up figures, with the changes on each pass.
+
+        Args:
+            config: The swarm config.
+            shard_count: The pass's shard count.
+            folder: Not used.
+
+        Returns:
+            The figures.
+        """
+        return _pass_figures(shard_count, **(sharded if shard_count > 1 else single))
+
+    monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config()))
+    assert result.status_codes == codes
 
 
 class _Process:
@@ -675,6 +728,51 @@ def test_chaos_gate_keeps_the_other_runs_when_one_loop_start_fails(monkeypatch: 
     assert [row["ok"] for row in rows] == [False, True]
     assert result.extras["runs_ok"] == 1
     assert not result.slo_passed
+
+
+def test_chaos_gate_keeps_the_other_runs_when_one_replay_start_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Check that a run whose replay start fails gives one not-ok row with a printed reason, and the gate goes on.
+
+    Args:
+        monkeypatch: Runs one shape twice, fails the replay start of the first run, and stops the chaos job.
+        capsys: Reads the printed reason.
+    """
+    real_loop = reference_shapes.Harness.loop
+
+    def loop(self: reference_shapes.Harness, shape: Any, run_id: str, *args: Any, **kwargs: Any) -> Any:
+        """Fail the first run's replay start, as a step log that does not open does; start every other loop.
+
+        Args:
+            self: The harness.
+            shape: The shape.
+            run_id: The job id.
+            *args: The other ``Harness.loop`` arguments.
+            **kwargs: The other ``Harness.loop`` keyword arguments.
+
+        Returns:
+            The loop, its step log and the step scorer.
+
+        Raises:
+            OSError: For the first run's replay.
+        """
+        if run_id == "chaos-0-0" and kwargs.get("refuse"):
+            raise OSError("step log did not open")
+        return real_loop(self, shape, run_id, *args, **kwargs)
+
+    monkeypatch.setattr(chaos_gate, "SHAPES", reference_shapes.SHAPES[:1])
+    monkeypatch.setattr(reference_shapes.Harness, "loop", loop)
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=2, rounds=1, workers=2, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    rows = result.extras["runs_detail"]
+    assert [row["ok"] for row in rows] == [False, True]
+    assert result.extras["runs_ok"] == 1
+    assert not result.slo_passed
+    assert "replay of chaos-0-0 did not start: OSError: step log did not open" in capsys.readouterr().out
 
 
 def _small_pass_config() -> swarm_10k.SwarmConfig:
