@@ -391,8 +391,10 @@ A manual hold on a change or on a promotion still stops it.
   (see "PR tests and batch CI"). A PR branch does not need a merge from
   `staging`, because the batch starts from current `staging`.
 - A PR that the batch cannot take (a conflict it cannot resolve, a CI
-  failure) leaves the batch. It waits for the next batch, with the reason
-  in the PR and in Linear.
+  failure) leaves the batch. The orchestrator moves its issue out of
+  **Ready to Merge**, removes the `ready-to-merge` label and puts the reason
+  in the PR and in Linear. The PR goes into a later batch only after a fix
+  and a new approval.
 - After GitHub confirms the batch merge, move each included issue to Done
   and attach the batch merge commit. A batch merge goes only into
   `staging`. It never goes into `main` and never touches production.
