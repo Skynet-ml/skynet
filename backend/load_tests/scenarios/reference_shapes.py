@@ -1099,72 +1099,80 @@ def run_shape(
         The run's outcome.
     """
     outcome = RunOutcome(run_id, shape.name)
-    harness.add_run(run_id, shape)
-    model = MockModel(switch, work=outcome.work)
-    generation = 1
-    started = time.monotonic()
-    if switch is not None:
-        switch.live = True
+    # A database error fails this run only, so the chaos gate still reports its other runs. A user stop is not an
+    # Exception, so it still stops the gate.
     try:
-        while outcome.result is None and outcome.error is None:
-            try:
-                loop, store, scorer = harness.loop(
-                    shape, run_id, generation, model, outcome.meter, switch, work=outcome.work
-                )
-            except Exception as error:
-                # A failed start closes its own step log. It fails this run only, not the chaos gate's other runs.
-                outcome.error = f"{type(error).__name__}: {error}"
-                break
-            try:
-                result = FakeEngine(rounds).run(
-                    Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context()
-                )
-                # The host contract (SKY-719): an engine that ends before it replays every committed step fails here.
-                loop.finish()
-            except WorkerKilledError:
-                outcome.restarts += 1
-                # The sweep moves the generation first, so the dead worker's buffered steps fail the fence at
-                # the close's flush, as if the kill lost them.
-                generation = harness.new_generation(run_id)
-                _close_quietly(None, store)
-                if outcome.restarts > max_restarts:
-                    outcome.error = f"more than {max_restarts} restarts"
-                continue
-            except Exception as error:
-                outcome.error = f"{type(error).__name__}: {error}"
-                _close_quietly(loop, store)
-                break
-            outcome.result = (str(result.best_candidate), result.best_score, result.total_evals)
-            _close_quietly(loop, store)
-    finally:
+        harness.add_run(run_id, shape)
+        model = MockModel(switch, work=outcome.work)
+        generation = 1
+        started = time.monotonic()
         if switch is not None:
-            switch.live = False
-    outcome.wall_seconds = time.monotonic() - started
-    outcome.model_calls = model.calls
-    outcome.finished = outcome.result is not None
-    steps = harness.steps(run_id)
-    outcome.steps = len(steps)
-    outcome.gapless = _gapless(steps)
-    if switch is not None:
-        for step_id, cut_generation, step in switch.cuts:
-            if harness.stored_generation(step_id) != cut_generation:
-                outcome.cuts_lost += 1
-            elif step is not None:
-                # The flusher made the step durable before the fence moved, so a redo of it is wrong work.
-                outcome.work.unlose(step)
-    outcome.repeated = outcome.work.repeated()
-    failed = switch.failed_candidates() if switch is not None else frozenset()
-    if outcome.finished:
-        outcome.correct = _correct(shape, rounds, outcome.result, failed=failed)
-        outcome.replayed = _replays(harness, shape, run_id, rounds, outcome.result)
-        if outcome.repeated:
-            outcome.error = f"a resumed worker did committed steps again: {', '.join(outcome.repeated)}"
-        elif not outcome.replayed:
-            outcome.error = "replay failed"
-        elif not outcome.correct:
-            outcome.error = f"wrong result {outcome.result}, expected {expected_result(shape, rounds, failed)}"
-    if outcome.error is None and outcome.meter.opened == 0:
-        outcome.error = "the run opened no box"
+            switch.live = True
+        try:
+            while outcome.result is None and outcome.error is None:
+                try:
+                    loop, store, scorer = harness.loop(
+                        shape, run_id, generation, model, outcome.meter, switch, work=outcome.work
+                    )
+                except Exception as error:
+                    # A failed start closes its own step log. It fails this run only, not the chaos gate's other runs.
+                    outcome.error = f"{type(error).__name__}: {error}"
+                    break
+                try:
+                    result = FakeEngine(rounds).run(
+                        Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context()
+                    )
+                    # The host contract (SKY-719): an engine that ends before it replays every committed step fails
+                    # here.
+                    loop.finish()
+                except WorkerKilledError:
+                    outcome.restarts += 1
+                    # The sweep moves the generation first, so the dead worker's buffered steps fail the fence at
+                    # the close's flush, as if the kill lost them.
+                    try:
+                        generation = harness.new_generation(run_id)
+                    finally:
+                        _close_quietly(None, store)
+                    if outcome.restarts > max_restarts:
+                        outcome.error = f"more than {max_restarts} restarts"
+                    continue
+                except Exception as error:
+                    outcome.error = f"{type(error).__name__}: {error}"
+                    _close_quietly(loop, store)
+                    break
+                outcome.result = (str(result.best_candidate), result.best_score, result.total_evals)
+                _close_quietly(loop, store)
+        finally:
+            if switch is not None:
+                switch.live = False
+        outcome.wall_seconds = time.monotonic() - started
+        outcome.model_calls = model.calls
+        outcome.finished = outcome.result is not None
+        steps = harness.steps(run_id)
+        outcome.steps = len(steps)
+        outcome.gapless = _gapless(steps)
+        if switch is not None:
+            for step_id, cut_generation, step in switch.cuts:
+                if harness.stored_generation(step_id) != cut_generation:
+                    outcome.cuts_lost += 1
+                elif step is not None:
+                    # The flusher made the step durable before the fence moved, so a redo of it is wrong work.
+                    outcome.work.unlose(step)
+        outcome.repeated = outcome.work.repeated()
+        failed = switch.failed_candidates() if switch is not None else frozenset()
+        if outcome.finished:
+            outcome.correct = _correct(shape, rounds, outcome.result, failed=failed)
+            outcome.replayed = _replays(harness, shape, run_id, rounds, outcome.result)
+            if outcome.repeated:
+                outcome.error = f"a resumed worker did committed steps again: {', '.join(outcome.repeated)}"
+            elif not outcome.replayed:
+                outcome.error = "replay failed"
+            elif not outcome.correct:
+                outcome.error = f"wrong result {outcome.result}, expected {expected_result(shape, rounds, failed)}"
+        if outcome.error is None and outcome.meter.opened == 0:
+            outcome.error = "the run opened no box"
+    except Exception as error:
+        outcome.error = f"{type(error).__name__}: {error}"
     return outcome
 
 
@@ -1214,8 +1222,12 @@ def _replays(
         Whether the replay gave the same result with no model call, no box, and no new step, pack row, tree
         object row or pack object.
     """
-    before = harness.footprint(run_id)
-    generation = harness.new_generation(run_id)
+    try:
+        before = harness.footprint(run_id)
+        generation = harness.new_generation(run_id)
+    except Exception as error:
+        print(f"[loadtest] replay of {run_id} did not start: {type(error).__name__}: {error}")
+        return False
     meter = BoxMeter()
     try:
         # A failed start closes its own step log, so it fails this run's replay only, not the chaos gate.
@@ -1232,7 +1244,11 @@ def _replays(
         return False
     _close_quietly(loop, store)
     replayed = (str(result.best_candidate), result.best_score, result.total_evals)
-    after = harness.footprint(run_id)
+    try:
+        after = harness.footprint(run_id)
+    except Exception as error:
+        print(f"[loadtest] replay of {run_id} could not read its footprint: {type(error).__name__}: {error}")
+        return False
     if after != before:
         print(f"[loadtest] replay of {run_id} stored new data: {before} -> {after}")
     return replayed == expected and meter.opened == 0 and after == before

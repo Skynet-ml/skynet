@@ -101,8 +101,11 @@ def _pass_figures(shards: int, **overrides: Any) -> dict[str, Any]:
         "steady_steps": 60_000,
         "steady_seconds": 10.0,
         "commits_per_second": 6_000.0,
+        "commits_per_second_with_drain": 5_000.0,
+        "commits_per_second_whole_pass": 5_000.0,
         "step_wait_ms": {"mean": 500.0, "p50": 500.0, "p99": 900.0, "max": 950.0},
         "commit_call_ms": {"p50": 0.05, "p99": 1.0, "max": 4.0},
+        "commit_late_ms": {"p50": 0.0, "p99": 1.0, "max": 2.0},
         "digest": "same",
     }
     figures.update(overrides)
@@ -302,6 +305,44 @@ def test_swarm_gate_fails_each_broken_limit(
     violations = _gate(monkeypatch, _swarm_config(), **sharded)
     assert len(violations) == 1
     assert text in violations[0]
+
+
+@pytest.mark.parametrize(
+    ("sharded", "text", "reported"),
+    [
+        ({"commits_per_second": 5_699.96}, "steady commit rate", ("commits_per_second", 5_700.0)),
+        (
+            {"step_wait_ms": {"mean": 900.0, "p50": 900.0, "p99": 1_000.004, "max": 1_000.004}},
+            "step wait p99",
+            ("step_wait_ms", {"mean": 900.0, "p50": 900.0, "p99": 1_000.0, "max": 1_000.0}),
+        ),
+        (
+            {"commit_call_ms": {"p50": 0.05, "p99": 5.004, "max": 5.004}},
+            "commit call p99",
+            ("commit_call_ms", {"p50": 0.05, "p99": 5.0, "max": 5.0}),
+        ),
+        ({"steady_seconds": 4.9996}, "steady part", ("steady_seconds", 5.0)),
+    ],
+)
+def test_swarm_gate_reads_the_raw_figures_and_reports_them_rounded(
+    monkeypatch: pytest.MonkeyPatch, sharded: dict[str, Any], text: str, reported: tuple[str, Any]
+) -> None:
+    """Check that a figure just past its limit fails the gate, although its rounded report value meets the limit.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and the steady floor, and sets the backend.
+        sharded: The sharded pass's figure, just past its limit.
+        text: A part of the violation text.
+        reported: The report key and its rounded value.
+    """
+    # A floor of exactly 5 s, so that 4.9996 s rounds to the floor.
+    monkeypatch.setattr(swarm_10k, "steady_floor_seconds", lambda config: 5.0)
+    monkeypatch.setattr(swarm_10k, "run_pass", lambda config, shards, folder: _pass_figures(shards, **sharded))
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config()))
+    assert len(result.slo_violations) == 1
+    assert text in result.slo_violations[0]
+    key, value = reported
+    assert result.extras["passes"][-1][key] == value
 
 
 def test_swarm_gate_fails_a_lost_step_on_the_one_shard_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -782,6 +823,140 @@ def test_chaos_gate_keeps_the_other_runs_when_one_replay_start_fails(
     assert result.extras["runs_ok"] == 1
     assert not result.slo_passed
     assert "replay of chaos-0-0 did not start: OSError: step log did not open" in capsys.readouterr().out
+
+
+def _fail_on(monkeypatch: pytest.MonkeyPatch, method: str, run_id: str) -> None:
+    """Make one ``Harness`` method raise a database error for one run, and work for the other runs.
+
+    Args:
+        monkeypatch: Replaces the method.
+        method: The ``Harness`` method name.
+        run_id: The run whose call fails.
+    """
+    real = getattr(reference_shapes.Harness, method)
+
+    def fail(self: reference_shapes.Harness, failing_run: str, *args: Any, **kwargs: Any) -> Any:
+        """Raise for the one run; call the real method for the others.
+
+        Args:
+            self: The harness.
+            failing_run: The job id.
+            *args: The other method arguments.
+            **kwargs: The other method keyword arguments.
+
+        Returns:
+            The real method's result.
+
+        Raises:
+            OperationalError: For the one run.
+        """
+        if failing_run == run_id:
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+        return real(self, failing_run, *args, **kwargs)
+
+    monkeypatch.setattr(reference_shapes.Harness, method, fail)
+
+
+@pytest.mark.parametrize("method", ["add_run", "steps"])
+def test_chaos_gate_keeps_the_other_runs_when_one_database_call_fails(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Check that a database error in one run gives one not-ok row with the error, and the gate reports the other run.
+
+    Args:
+        monkeypatch: Runs one shape twice, fails one database call of the first run, and stops the chaos job.
+        method: The ``Harness`` method that fails: before the run, or after it.
+    """
+    _fail_on(monkeypatch, method, "chaos-0-0")
+    monkeypatch.setattr(chaos_gate, "SHAPES", reference_shapes.SHAPES[:1])
+    monkeypatch.setattr(chaos_gate.ChaosJob, "run", lambda self: self._halt.wait())
+    config = chaos_gate.ChaosGateConfig(
+        runs_per_shape=2, rounds=1, workers=2, kill_interval_seconds=0.1, seed=1, model_wait_seconds=1.0
+    )
+    result = chaos_gate.run(config)
+    rows = result.extras["runs_detail"]
+    assert [row["ok"] for row in rows] == [False, True]
+    assert rows[0]["error"].startswith("OperationalError: ")
+    assert "database is locked" in rows[0]["error"]
+    assert result.extras["runs_ok"] == 1
+    assert not result.slo_passed
+
+
+def test_a_failed_generation_move_after_a_worker_kill_fails_only_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a database error in the generation move after a worker kill fails the run and closes its step log.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Fails the generation move and records each step log close.
+    """
+    closed: list[str] = []
+    real_close = StepLogStore.close
+
+    def close(self: StepLogStore) -> None:
+        """Record the close, then close the step log.
+
+        Args:
+            self: The step log.
+        """
+        closed.append(self._worker_id)
+        real_close(self)
+
+    monkeypatch.setattr(StepLogStore, "close", close)
+    _fail_on(monkeypatch, "new_generation", "kill-0")
+    outcome = _run_killed_shape(tmp_path)
+    assert outcome.restarts == 1
+    assert outcome.error is not None
+    assert outcome.error.startswith("OperationalError: ")
+    assert "kill-0-g1" in closed
+    assert not outcome.ok
+
+
+@pytest.mark.parametrize(("method", "calls"), [("footprint", 1), ("new_generation", 1), ("footprint", 2)])
+def test_replay_with_a_database_error_returns_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], method: str, calls: int
+) -> None:
+    """Check that a database error in the replay's footprint read or generation move fails the replay only.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Fails the ``calls``-th call of the method.
+        capsys: Reads the printed reason.
+        method: The ``Harness`` method that fails.
+        calls: Which call fails: the footprint is read before and after the replay.
+    """
+    real = getattr(reference_shapes.Harness, method)
+    seen: list[str] = []
+
+    def fail(self: reference_shapes.Harness, run_id: str) -> Any:
+        """Raise on the chosen call; call the real method on the others.
+
+        Args:
+            self: The harness.
+            run_id: The job id.
+
+        Returns:
+            The real method's result.
+
+        Raises:
+            OperationalError: On the chosen call.
+        """
+        seen.append(run_id)
+        if len(seen) == calls:
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+        return real(self, run_id)
+
+    shape = reference_shapes.SHAPES[0]
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        outcome = reference_shapes.run_shape(harness, shape, "replay-0", rounds=1)
+        assert outcome.ok, outcome.error
+        monkeypatch.setattr(reference_shapes.Harness, method, fail)
+        assert reference_shapes._replays(harness, shape, "replay-0", 1, outcome.result) is False
+    finally:
+        harness.close()
+    assert "replay of replay-0" in capsys.readouterr().out
 
 
 def _small_pass_config() -> swarm_10k.SwarmConfig:
@@ -1708,6 +1883,58 @@ class _NoProcess:
             ``False``.
         """
         return False
+
+
+class _StuckProcess(_NoProcess):
+    """A shard process that is still alive after its join times out, until the parent kills it."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Start alive, with no join and no kill.
+
+        Args:
+            **kwargs: Not used.
+        """
+        self.calls: list[str] = []
+        _STUCK.append(self)
+
+    def join(self, timeout: float | None = None) -> None:
+        """Record the join and its timeout.
+
+        Args:
+            timeout: The join timeout.
+        """
+        self.calls.append(f"join {timeout}")
+
+    def kill(self) -> None:
+        """Record the kill."""
+        self.calls.append("kill")
+
+    def is_alive(self) -> bool:
+        """Return that the process is alive until the kill.
+
+        Returns:
+            Whether the parent did not kill the process yet.
+        """
+        return "kill" not in self.calls
+
+
+_STUCK: list[_StuckProcess] = []
+
+
+def test_swarm_pass_kills_a_shard_that_outlives_its_join(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that the pass kills a shard process still alive after its 30 s join, then joins it again.
+
+    Args:
+        monkeypatch: Replaces the shard processes with one that does not exit, and its report.
+        tmp_path: The pass folder.
+    """
+    _STUCK.clear()
+    context = SimpleNamespace(Barrier=lambda count: None, Queue=lambda: None, Process=_StuckProcess)
+    monkeypatch.setattr(swarm_10k, "multiprocessing", SimpleNamespace(get_context=lambda method: context))
+    monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [_shard_report([1.0, 2.0], 1.0, 2.0)])
+    monkeypatch.setattr(swarm_10k, "_digest", lambda shards: ("digest", 2))
+    swarm_10k.run_pass(_small_pass_config(), 1, tmp_path)
+    assert [process.calls for process in _STUCK] == [["join 30", "kill", "join None"]]
 
 
 def test_swarm_pass_rates_survive_a_pass_with_no_time_after_the_first_round(

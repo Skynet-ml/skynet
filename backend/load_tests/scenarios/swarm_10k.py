@@ -991,7 +991,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         folder: A private, empty folder for the SQLite files and the objects.
 
     Returns:
-        The pass figures, with the step log digest.
+        The pass figures, not rounded, with the step log digest; :func:`report_figures` rounds them.
 
     Raises:
         RuntimeError: When a safety check refuses the database or the S3 settings (the URL is not local, the
@@ -1128,35 +1128,54 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         "runs_per_shard": [len(shard.runs) for shard in shards],
         "commits": len(waits),
         "steps_stored": stored,
-        "seconds_to_durable": round(last - started, 3),
-        "steady_seconds": round(steady_seconds, 3),
+        "seconds_to_durable": last - started,
+        "steady_seconds": steady_seconds,
         # A short steady part can hold few steps, so one batch at its edge moves the rate; the count shows it.
         "steady_steps": steady_steps,
-        "commits_per_second": round(steady_steps / steady_seconds, 1) if steady_seconds > 0 else 0.0,
-        "commits_per_second_with_drain": round(drain_steps / (last - steady_from), 1) if last > steady_from else 0.0,
-        "commits_per_second_whole_pass": round(len(waits) / (last - started), 1) if last > started else 0.0,
+        "commits_per_second": steady_steps / steady_seconds if steady_seconds > 0 else 0.0,
+        "commits_per_second_with_drain": drain_steps / (last - steady_from) if last > steady_from else 0.0,
+        "commits_per_second_whole_pass": len(waits) / (last - started) if last > started else 0.0,
         "step_wait_ms": {
-            "mean": round(1000 * statistics.fmean(waits), 2),
-            "p50": round(_percentile_ms(waits, 0.50), 2),
-            "p99": round(_percentile_ms(waits, 0.99), 2),
-            "max": round(_percentile_ms(waits, 1.0), 2),
+            "mean": 1000 * statistics.fmean(waits),
+            "p50": _percentile_ms(waits, 0.50),
+            "p99": _percentile_ms(waits, 0.99),
+            "max": _percentile_ms(waits, 1.0),
         },
         # How long the ``commit`` call itself took: the part of the step wait that blocks the agent.
         "commit_call_ms": {
-            "p50": round(_percentile_ms(commit_calls, 0.50), 2),
-            "p99": round(_percentile_ms(commit_calls, 0.99), 2),
-            "max": round(_percentile_ms(commit_calls, 1.0), 2),
+            "p50": _percentile_ms(commit_calls, 0.50),
+            "p99": _percentile_ms(commit_calls, 0.99),
+            "max": _percentile_ms(commit_calls, 1.0),
         },
         # How late the drivers committed the ready steps; not part of the step wait, so shown on its own.
         "commit_late_ms": {
-            "p50": round(_percentile_ms(lates, 0.50), 2),
-            "p99": round(_percentile_ms(lates, 0.99), 2),
-            "max": round(_percentile_ms(lates, 1.0), 2),
+            "p50": _percentile_ms(lates, 0.50),
+            "p99": _percentile_ms(lates, 0.99),
+            "max": _percentile_ms(lates, 1.0),
         },
         "fake_boxes_opened": sum(report["boxes_opened"] for report in reports),
         "fake_boxes_open_max_in_one_shard": max(report["boxes_open_max"] for report in reports),
         "digest": digest,
     }
+
+
+def report_figures(figures: dict[str, Any]) -> dict[str, Any]:
+    """Round a pass's figures for the report, in the same key order.
+
+    Args:
+        figures: The figures that :func:`run_pass` returns.
+
+    Returns:
+        A copy with seconds to 0.001 s, rates to 0.1/s and milliseconds to 0.01 ms.
+    """
+    rounded = dict(figures)
+    for key in ("seconds_to_durable", "steady_seconds"):
+        rounded[key] = round(figures[key], 3)
+    for key in ("commits_per_second", "commits_per_second_with_drain", "commits_per_second_whole_pass"):
+        rounded[key] = round(figures[key], 1)
+    for key in ("step_wait_ms", "commit_call_ms", "commit_late_ms"):
+        rounded[key] = {name: round(value, 2) for name, value in figures[key].items()}
+    return rounded
 
 
 def box_load(config: SwarmConfig, commits_per_second: float) -> dict[str, Any]:
@@ -1241,6 +1260,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
     two_shard_same_step_log: bool | str = (
         f"not compared: {not_compared}" if not_compared else passes[1]["digest"] == passes[0]["digest"]
     )
+    # The gate reads the raw figures: a rounded rate of 5699.96/s would show 5700.0/s and pass a 5700/s limit.
     gated = passes[-1]
     on_s3 = bool(os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip())
     target_backend = config.db_url is not None and on_s3
@@ -1306,7 +1326,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "max_commit_call_p99_ms": MAX_COMMIT_CALL_P99_MS,
         "min_steady_seconds": round(min_steady_seconds, 3),
         "gated_pass_shards": gated["shards"],
-        "passes": passes,
+        "passes": [report_figures(figures) for figures in passes],
         "same_step_log": same_step_log,
         # The 2-shard pass gates only its step log; its rate and wait are in ``passes`` for the report.
         "two_shard_same_step_log": two_shard_same_step_log,
