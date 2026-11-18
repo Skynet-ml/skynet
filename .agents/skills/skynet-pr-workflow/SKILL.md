@@ -354,16 +354,18 @@ A manual hold on a change or on a promotion still stops it.
   orchestrator must check the green batch run itself before the merge. A new
   batch commit needs a new dispatched run.
 - **No unreviewed code on the batch branch.**
-  - A CI failure or a bug: remove the PR from the batch, as "Merging into
-    staging" says. Fix it in the PR's own branch. After a new approval, the
+  - A CI failure that a PR causes, or a bug in a PR: remove that PR from the
+    batch, as "Merging into staging" says. Fix it in the PR's own branch. After a new approval, the
     PR returns to **Ready to Merge** and goes into a later batch.
   - A rebuild uses a new branch (`batch/<date>-<n+1>`) and a new batch PR.
     Close the old batch PR and delete its branch.
   - A merge conflict between PRs: the orchestrator may resolve it in the
     batch merge commit. Then the batch head needs a fresh Opus 5.5
     medium-effort review before the merge.
-- **A red batch run or a red promotion run blocks the promotion.** Fix it in
-  a new PR, which goes through the next batch. Do not promote `staging` to
+- **A red batch run or a red promotion run blocks the promotion.** A red
+  batch run that no PR in the batch causes, or a red promotion run, gets its
+  fix in a new PR, which goes through the next batch. A PR that causes a red
+  batch run leaves the batch and gets its fix in its own branch. Do not promote `staging` to
   `main` while the latest batch run or the promotion run is red.
 - Bootstrap (SKY-570): the PR that adds this flow merges the same way.
   Dispatch `ci` and `i18n` on its own branch (`gh workflow run ci.yml --ref
@@ -398,7 +400,9 @@ A manual hold on a change or on a promotion still stops it.
   fix and a new approval.
 - A CI failure that no PR in the batch causes (a flaky test, a red
   `staging`) follows section 3 (Urgent issue). The PRs stay in **Ready to
-  Merge**.
+  Merge**. The orchestrator stops the current batch: it closes the batch PR
+  and deletes the `batch/` branch. The next batch starts with the Urgent fix
+  PR, then the PRs in **Ready to Merge**.
 - After GitHub confirms the batch merge, move each included issue to Done
   and attach the batch merge commit. A batch merge goes only into
   `staging`. It never goes into `main` and never touches production.
