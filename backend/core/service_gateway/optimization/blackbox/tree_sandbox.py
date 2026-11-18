@@ -136,6 +136,9 @@ class RuntimeBoxSource:
 class RuntimeBoxLease(BoxLease[SandboxSession]):
     """Keep one warm box for each agent on the runtime of its placed provider (SKY-732)."""
 
+    # Every budget error from an idle box's settlement must stop the run, so each one wins over a box error.
+    stop_errors = _BUDGET_ERRORS
+
     def __init__(
         self,
         runtimes: Mapping[str, SandboxRuntime],
@@ -153,8 +156,9 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
             **options: The :class:`BoxLease` options, such as ``vercel_cap`` and ``keep_warm``.
 
         Raises:
-            ValueError: When the cap or the spill provider is not valid, or no
-                runtime opens the Vercel boxes or the spill provider's boxes.
+            ValueError: When the cap, the spill provider or sleep_after_seconds
+                is not valid, or no runtime opens the Vercel boxes or the
+                spill provider's boxes.
             TypeError: When keep_warm is not a bool, or a function option is not callable.
         """
         self._runtimes = runtimes
