@@ -917,6 +917,8 @@ def run_shape(
                 result = FakeEngine(rounds).run(
                     Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context()
                 )
+                # The host contract (SKY-719): an engine that ends before it replays every committed step fails here.
+                loop.finish()
             except WorkerKilledError:
                 outcome.restarts += 1
                 # The sweep moves the generation first, so the dead worker's buffered steps fail the fence at
@@ -978,6 +980,7 @@ def _replays(
     loop, store, scorer = harness.loop(shape, run_id, generation, MockModel(refuse=True), meter, refuse=True)
     try:
         result = FakeEngine(rounds).run(Task(SEED_CANDIDATE), loop.server(scorer, max_evals=rounds + 1), loop.context())
+        loop.finish()
     except (ReplayLeakError, Exception) as error:
         print(f"[loadtest] replay of {run_id} failed: {type(error).__name__}: {error}")
         _close_quietly(loop, store)

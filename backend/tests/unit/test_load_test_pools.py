@@ -506,15 +506,31 @@ def test_resume_check_finds_a_resume_that_does_committed_steps_again(
 
     Args:
         tmp_path: The folder for the harness.
-        monkeypatch: Turns the loop's replay off.
+        monkeypatch: Turns the loop's replay and its finish check off.
     """
     monkeypatch.setattr(EngineLoop, "_replayed", lambda *args, **kwargs: None)
+    # With no replay, the loop's own finish check stops the run first; this test checks the harness's own count.
+    monkeypatch.setattr(EngineLoop, "finish", lambda self: None)
     outcome = _run_killed_shape(tmp_path)
     assert {"model improve 1", "run 1", "score 1"} <= set(outcome.repeated)
     assert "run 2" not in outcome.repeated
     assert not outcome.ok
     assert outcome.error is not None
     assert outcome.error.startswith("a resumed worker did committed steps again")
+
+
+def test_finish_stops_a_resume_that_does_not_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the host's finish call fails a resumed run whose engine did not replay its committed steps.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Turns the loop's replay off.
+    """
+    monkeypatch.setattr(EngineLoop, "_replayed", lambda *args, **kwargs: None)
+    outcome = _run_killed_shape(tmp_path)
+    assert not outcome.ok
+    assert outcome.error is not None
+    assert outcome.error.startswith("StepDivergedError: The engine ended before it replayed every committed step")
 
 
 def test_failed_replay_names_its_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
