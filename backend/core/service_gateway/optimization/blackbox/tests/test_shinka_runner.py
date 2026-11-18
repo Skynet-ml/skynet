@@ -1135,3 +1135,19 @@ def test_agent_editor_runs_on_a_real_checkout_of_a_repository_version(tmp_path: 
     assert "+SCALE = 9" in patch
     assert meta["num_applied"] == 2
     assert not list((tmp_path / "agent-edits").iterdir())
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        shinka_runner._git(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert shinka_runner._git(repo, "rev-parse", "--git-dir").strip() == "."

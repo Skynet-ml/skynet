@@ -18,7 +18,9 @@ no version code at all. A run that times out, raises, returns no JSON, is
 killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
 feedback, and the metric is not called. A nonzero exit of a command entry is
 an output like any other. Neither box gets the run's secrets: only the model
-route reaches the box.
+route reaches the box. Both the ``[run]`` entry and the metric run through
+the tree sandbox session API (SKY-785), and the metric box never gets the
+candidate tree.
 
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to
@@ -561,7 +563,7 @@ class RepoScorer:
             session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
-                result = session.run(
+                result = metric.box.run(
                     f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
@@ -673,7 +675,7 @@ class RepoScorer:
                 forward(stream, data)
 
             with sandbox_log.event_scope(source="run"):
-                result = session.run(
+                result = candidate.box.run(
                     f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.

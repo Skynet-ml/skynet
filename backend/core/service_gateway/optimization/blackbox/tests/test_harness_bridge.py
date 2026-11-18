@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from .. import exec_shim, harness, harness_bridge
+from .. import exec_shim, harness, harness_bridge, repo_tree
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -2490,7 +2490,7 @@ def test_a_setup_the_reaper_cannot_start_says_so_without_a_traceback(
 
 
 def test_an_empty_untracked_folder_is_no_setup_output(tmp_path: Path) -> None:
-    """An empty folder before the setup stays out of the excludes; a folder the setup fills is excluded (SKY-753).
+    """An empty folder before the setup stays out of the excludes; only the files the setup puts in one are (SKY-753).
 
     Args:
         tmp_path: The checkout.
@@ -2511,10 +2511,11 @@ def test_an_empty_untracked_folder_is_no_setup_output(tmp_path: Path) -> None:
 
     assert status == "?? untouched/proposed.txt\n"
     exclude = set((checkout / ".git/info/exclude").read_text().splitlines())
-    assert "/out/" in exclude
+    assert "/out/x" in exclude
+    assert "/out/" not in exclude
     assert not any(line.startswith("/untouched") for line in exclude)
     record = json.loads((checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").read_text())
-    assert record["output"] == ["out/"]
+    assert record["output"] == ["out/x"]
 
 
 @pytest.mark.parametrize("in_checkout", [True, False])
@@ -2860,9 +2861,9 @@ def test_a_stop_while_the_setup_record_is_written_leaves_no_broken_record(
             The number of characters written, for any other file.
 
         Raises:
-            KeyboardInterrupt: For a file in the setup's state folder.
+            KeyboardInterrupt: For the setup's record.
         """
-        if self.parent.name == harness_bridge.SETUP_STATE:
+        if self.name == "done.json.tmp":
             self.open("w").close()
             raise KeyboardInterrupt
         return write_text(self, *args, **kwargs)
@@ -3340,3 +3341,428 @@ def test_a_restore_through_a_parent_folder_linked_inside_the_checkout_stops(tmp_
         harness_bridge.ensure_setup(command, checkout)
 
     assert list(other.iterdir()) == []
+
+
+def _git(checkout: Path, *arguments: str) -> str:
+    """Run one git command in a checkout.
+
+    Args:
+        checkout: The checkout.
+        *arguments: Arguments after ``git``.
+
+    Returns:
+        Its standard output, stripped.
+    """
+    command = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments]
+    return subprocess.run(command, cwd=checkout, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_an_undo_after_a_setup_switches_branch_puts_head_and_both_branches_back(tmp_path: Path) -> None:
+    """A reset of HEAD alone would move the other branch to the old commit and lose its own (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    branch = _git(checkout, "symbolic-ref", "HEAD")
+    head = _git(checkout, "rev-parse", "HEAD")
+    _git(checkout, "checkout", "-qb", "other")
+    (checkout / "o.txt").write_text("o")
+    _git(checkout, "add", "o.txt")
+    _git(checkout, "commit", "-qm", "o")
+    other = _git(checkout, "rev-parse", "other")
+    _git(checkout, "checkout", "-q", branch.removeprefix("refs/heads/"))
+
+    with pytest.raises(RuntimeError, match="moved HEAD"):
+        harness_bridge.ensure_setup(["git", "checkout", "-q", "other"], checkout)
+
+    assert _git(checkout, "symbolic-ref", "HEAD") == branch
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert _git(checkout, "rev-parse", "other") == other
+    assert not (checkout / "o.txt").exists()
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_an_undo_removes_a_branch_the_setup_made_and_keeps_a_detached_head(tmp_path: Path) -> None:
+    """A failed setup's new branch goes, and a detached HEAD stays detached at its commit (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    head = _git(checkout, "rev-parse", "HEAD")
+    _git(checkout, "checkout", "-q", "--detach")
+    command = ["sh", "-c", "git branch made && git checkout -q made && exit 4"]
+
+    with pytest.raises(RuntimeError, match="failed with exit code 4"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert _git(checkout, "for-each-ref", "refs/heads/made") == ""
+    assert _git(checkout, "rev-parse", "--symbolic-full-name", "HEAD") == "HEAD"
+    assert _git(checkout, "rev-parse", "HEAD") == head
+
+
+def test_an_undo_after_a_setup_rewrites_gitignore_keeps_the_old_ignored_file(tmp_path: Path) -> None:
+    """An emptied .gitignore unhides an old ignored file, which is not setup output and is not removed (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / ".gitignore").write_text("secret.env\nkeep/\n")
+    _git(checkout, "add", ".gitignore")
+    _git(checkout, "commit", "-qm", "ignore")
+    (checkout / "secret.env").write_text("KEY")
+    (checkout / "keep").mkdir()
+    (checkout / "keep" / "old").write_text("old")
+    command = ["sh", "-c", "echo > .gitignore && echo n > keep/new && exit 2"]
+
+    with pytest.raises(RuntimeError, match="failed with exit code 2"):
+        harness_bridge.ensure_setup(command, checkout)
+
+    assert (checkout / "secret.env").read_text() == "KEY"
+    assert (checkout / "keep" / "old").read_text() == "old"
+    assert not (checkout / "keep" / "new").exists()
+    assert (checkout / ".gitignore").read_text() == "secret.env\nkeep/\n"
+
+
+def test_an_undo_after_the_exclude_lines_are_written_puts_info_exclude_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after the exclude lines are added removes them, byte for byte (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Makes the write of the setup's record fail.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    exclude = checkout / ".git" / "info" / "exclude"
+    content = exclude.read_bytes()
+    write_text = Path.write_text
+
+    def fail_the_record(self: Path, *args: Any, **kwargs: Any) -> int:
+        """Fail the write of the setup's record, and write any other file.
+
+        Args:
+            self: The file to write.
+            *args: The content and other arguments of :meth:`Path.write_text`.
+            **kwargs: The keyword arguments of :meth:`Path.write_text`.
+
+        Returns:
+            The number of characters written, for any other file.
+
+        Raises:
+            OSError: For the setup's record.
+        """
+        if self.name == "done.json.tmp":
+            raise OSError("disk full")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_the_record)
+    with pytest.raises(OSError, match="disk full"):
+        harness_bridge.ensure_setup(["sh", "-c", "mkdir build && echo x > build/f"], checkout)
+
+    assert not (checkout / "build").exists()
+    assert exclude.read_bytes() == content
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+def test_the_next_session_undoes_a_killed_setup_and_runs_it_again(tmp_path: Path) -> None:
+    """A SIGTERM skips the undo, so the next session undoes the partial setup before it trusts the checkout (SKY-753).
+
+    Args:
+        tmp_path: The checkout, the bridge config, the setup's pid file and log.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("the parent version's edit")
+    pid_file = tmp_path / "setup.pid"
+    log = tmp_path / "setup.log"
+    write = (
+        f"import os; open({str(log)!r}, 'a').write('ran\\n'); os.makedirs('partial'); open('partial/f', 'w').write('p')"
+    )
+    killed = [
+        sys.executable,
+        "-c",
+        f"{write}; open('a.txt', 'a').write('!'); open({str(pid_file)!r}, 'w').write(str(os.getpid()))"
+        "; import time; time.sleep(60)",
+    ]
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "file_command": True, "setup": killed}))
+    bridge = subprocess.Popen(
+        [sys.executable, str(Path(harness_bridge.__file__).resolve()), "--print", "x"],
+        cwd=checkout,
+        env={**os.environ, "HOME": str(tmp_path / "home"), harness_bridge.CONFIG_ENV: str(config)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the setup did not start"
+            time.sleep(0.05)
+        bridge.send_signal(signal.SIGTERM)
+        assert bridge.wait(timeout=10) == 128 + signal.SIGTERM
+    finally:
+        bridge.kill()
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert (state / "started.json").exists()
+    assert (checkout / "a.txt").read_text() == "the parent version's edit!"
+
+    # The new setup fails if the partial folder is still there.
+    harness_bridge.ensure_setup([sys.executable, "-c", write], checkout)
+
+    assert log.read_text() == "ran\nran\n"
+    assert (checkout / "a.txt").read_text() == "the parent version's edit"
+    assert (checkout / "partial" / "f").read_text() == "p"
+    assert not (state / "started.json").exists()
+    assert not (state / "undo").exists()
+    assert (state / "done.json").exists()
+
+
+def _kill_during_setup(checkout: Path, command: list[str]) -> None:
+    """Run a setup in a session that dies right after it, before its undo, as a killed session does.
+
+    Args:
+        checkout: The checkout.
+        command: The setup's argument list.
+    """
+    script = (
+        "import os, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import harness_bridge as bridge\n"
+        "run = bridge.run_setup\n"
+        "def stop(*args, **kwargs):\n"
+        "    run(*args, **kwargs)\n"
+        "    os._exit(143)\n"
+        "bridge.run_setup = stop\n"
+        f"bridge.ensure_setup({command!r}, Path(sys.argv[2]))\n"
+    )
+    folder = str(Path(harness_bridge.__file__).resolve().parent)
+    assert subprocess.run([sys.executable, "-I", "-c", script, folder, str(checkout)], check=False).returncode == 143
+    assert (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["same-version", "engine-moved"])
+def test_a_later_undo_leaves_a_checkout_that_the_engine_moved_to_another_version(
+    tmp_path: Path, moved: bool, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """GEPA's reset_tree and apply_patch between sessions make the old undo wrong for the new version (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        moved: Whether the engine moves the checkout to another version before the next session.
+        capfd: Reads the bridge's note.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "a.txt").write_text("V1")
+    (checkout / "v1.txt").write_text("v1")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && echo o > out.txt"])
+    if moved:
+        _git(checkout, "reset", "--quiet", "--hard", "HEAD")
+        _git(checkout, "clean", "--quiet", "-fdx")
+        (checkout / "a.txt").write_text("V2")
+        (checkout / "v2.txt").write_text("v2")
+
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    note = "holds another version than before the stopped setup"
+    assert (note in capfd.readouterr().err) is moved
+    assert (checkout / "a.txt").read_text() == ("V2" if moved else "V1")
+    assert (checkout / "v2.txt").exists() is moved
+    assert (checkout / "v1.txt").exists() is not moved
+    assert not (checkout / "out.txt").exists()
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert not (state / "started.json").exists()
+    assert (state / "done.json").exists()
+
+
+def test_a_later_undo_leaves_a_checkout_whose_head_moved_with_the_same_index(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A move of HEAD alone, with no index write, also means another version, so the undo keeps the files (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        capfd: Reads the bridge's note.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && echo o > out.txt"])
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    started = json.loads((state / "started.json").read_text())
+    other = _git(checkout, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "other")
+    _git(checkout, "update-ref", "--no-deref", "HEAD", other)
+    # The test is only about the HEAD half of the check when the index file is still the one from before the setup.
+    assert harness_bridge._index_stamp(checkout) == started["index_stamp"]
+
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    assert "holds another version than before the stopped setup" in capfd.readouterr().err
+    assert (checkout / "a.txt").read_text() == "setup\n"
+    assert (checkout / "out.txt").read_text() == "o\n"
+    assert not (state / "started.json").exists()
+    assert (state / "done.json").exists()
+
+
+@pytest.mark.parametrize("lock_before", [False, True], ids=["left-by-setup", "there-before"])
+def test_a_later_undo_removes_only_an_index_lock_that_the_stopped_setup_left(tmp_path: Path, lock_before: bool) -> None:
+    """A setup killed inside a git command leaves index.lock, which would make every later undo fail (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        lock_before: Whether the lock file was there before the setup.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    lock = checkout / ".git" / "index.lock"
+    if lock_before:
+        lock.write_text("")
+    _kill_during_setup(checkout, ["sh", "-c", "echo setup > a.txt && touch .git/index.lock"])
+
+    if lock_before:
+        with pytest.raises(RuntimeError, match=r"git index lock .*index\.lock was there before the setup"):
+            harness_bridge.ensure_setup(["true"], checkout)
+        assert lock.exists()
+        assert (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+        return
+    harness_bridge.ensure_setup(["true"], checkout)
+
+    assert not lock.exists()
+    assert (checkout / "a.txt").read_text() == "tracked"
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_an_undo_of_many_changed_files_stays_under_the_argument_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One git argument per changed file would pass the system's argument limit in a large repository (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Makes the argument limit small.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    names = [f"file-{number:03d}-{'x' * 40}.txt" for number in range(80)]
+    for name in names:
+        (checkout / name).write_text("old")
+    _git(checkout, "add", "--all")
+    _git(checkout, "commit", "--quiet", "--no-verify", "-m", "many")
+    run = subprocess.run
+    checkouts: list[list[str]] = []
+
+    def small_limit(arguments: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        """Fail like the system does for a long argument list, and run any other command.
+
+        Args:
+            arguments: The command.
+            *args: The other arguments of :func:`subprocess.run`.
+            **kwargs: The keyword arguments of :func:`subprocess.run`.
+
+        Returns:
+            The finished command.
+
+        Raises:
+            OSError: When the arguments are longer than 1000 bytes.
+        """
+        if sum(len(argument) + 1 for argument in arguments) > 1000:
+            raise OSError(7, "Argument list too long")
+        if arguments[:4] == ["git", *harness_bridge._SAFE_GIT, "checkout"]:
+            checkouts.append(arguments)
+        return run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(harness_bridge.subprocess, "run", small_limit)
+    with pytest.raises(RuntimeError, match="changed tracked files") as failure:
+        harness_bridge.ensure_setup(["sh", "-c", "for f in file-*; do echo new > $f; done"], checkout)
+
+    assert not getattr(failure.value, "__notes__", [])
+    # One process for all the files, not one for each.
+    assert len(checkouts) == 1
+    assert all((checkout / name).read_text() == "old" for name in names)
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+
+
+@pytest.mark.parametrize("ignored", [False, True], ids=["untracked", "ignored"])
+def test_a_failed_setup_keeps_an_empty_folder_that_was_there_before(tmp_path: Path, ignored: bool) -> None:
+    """An empty folder has no old file under it, but it is not the setup's output either (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        ignored: Whether git ignores the folder.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    if ignored:
+        (checkout / ".git" / "info" / "exclude").write_text("cache/\n")
+    (checkout / "cache" / "inner").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="failed with exit code 3"):
+        harness_bridge.ensure_setup(
+            ["sh", "-c", "touch cache/x cache/inner/y && mkdir new && touch new/z && exit 3"], checkout
+        )
+
+    assert (checkout / "cache" / "inner").is_dir()
+    assert sorted(path.name for path in (checkout / "cache").rglob("*")) == ["inner"]
+    assert not (checkout / "new").exists()
+
+
+def test_a_setup_output_in_an_old_empty_folder_excludes_its_files_and_not_the_folder(tmp_path: Path) -> None:
+    """An exclude line for the whole old folder would hide what a version later writes into it (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    (checkout / "cache").mkdir()
+    (checkout / "empty").mkdir()
+
+    harness_bridge.ensure_setup(["sh", "-c", "touch cache/x && mkdir new && touch new/y"], checkout)
+
+    state = checkout / ".git" / harness_bridge.SETUP_STATE
+    assert json.loads((state / "done.json").read_text())["output"] == ["cache/x", "new/"]
+    lines = (checkout / ".git" / "info" / "exclude").read_text().splitlines()
+    assert "/cache/x" in lines
+    assert "/new/" in lines
+    assert not {"/cache/", "/empty/"} & set(lines)
+
+
+def test_the_copy_of_the_checkout_counts_toward_the_setup_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow copy before the setup uses up the limit, so the setup does not start late (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the setup's log.
+        monkeypatch: Makes the copy slow.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    log = tmp_path / "setup.log"
+    save = harness_bridge._save_checkout
+
+    def slow_save(*args: Any) -> None:
+        """Copy the checkout, and take longer than the whole time limit.
+
+        Args:
+            *args: The arguments of :func:`harness_bridge._save_checkout`.
+        """
+        save(*args)
+        time.sleep(0.6)
+
+    monkeypatch.setattr(harness_bridge, "_save_checkout", slow_save)
+    with pytest.raises(RuntimeError, match=r"no time was left within 0\.5 seconds"):
+        harness_bridge.ensure_setup([sys.executable, "-c", f"open({str(log)!r}, 'w')"], checkout, timeout_seconds=0.5)
+
+    assert not log.exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "started.json").exists()
+    assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "undo").exists()
+
+
+def test_checkout_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup undo's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    assert harness_bridge._SAFE_GIT == repo_tree.SAFE_GIT
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo)
+    monkeypatch.setattr(harness_bridge, "_SAFE_GIT", ())
+    assert harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo).strip() == "."

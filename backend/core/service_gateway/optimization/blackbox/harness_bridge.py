@@ -54,6 +54,9 @@ SETUP_TIMEOUT_SECONDS = 1_800.0
 # worktree of a checkout shares its common dir, so the setup runs once per git
 # checkout and its worktrees. Each Auto lane checkout runs it again (SKY-753).
 SETUP_STATE = "ascent-proposer-setup"
+# repo_tree.SAFE_GIT, which this lone file cannot import: the setup undo's git
+# calls refuse an implicit bare repository layout, as Skynet's other git calls do (SKY-812).
+_SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 # An exclude line is a pattern, so these characters in a setup's file name are escaped.
 _GLOB_CHARS = re.compile(r"([*?[\\])")
 # An exclude line cannot hold these: a newline starts a new pattern, and git
@@ -483,7 +486,9 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
     The upstream drivers stop a session with SIGTERM to the bridge alone.
     The setup and the harness run in their own sessions, so without this
     they would outlive a cancelled run, and the next session would start a
-    second setup in the same checkout (SKY-753).
+    second setup in the same checkout (SKY-753). The exit skips the undo of
+    a setup that has not finished; the next session does that undo from the
+    copy that :func:`ensure_setup` keeps.
 
     Args:
         signum: The signal that stops the bridge.
@@ -530,12 +535,13 @@ def _tail(file: IO[bytes]) -> str:
     return file.read().decode(errors="replace")
 
 
-def _checkout_git(arguments: list[str], checkout: Path) -> str:
+def _checkout_git(arguments: list[str], checkout: Path, stdin: bytes = b"") -> str:
     """Run one git command in a checkout and return its output.
 
     Args:
         arguments: Arguments after ``git``.
         checkout: The checkout or worktree.
+        stdin: The command's standard input.
 
     Returns:
         The command's standard output.
@@ -543,7 +549,7 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    done = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, check=False)
+    done = subprocess.run(["git", *_SAFE_GIT, *arguments], cwd=checkout, input=stdin, capture_output=True, check=False)
     # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
     stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
     if done.returncode != 0:
@@ -551,7 +557,7 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     return stdout
 
 
-def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[str]:
+def _untracked(checkout: Path, *, folders: bool, ignored: bool = False, empty: bool = False) -> set[str]:
     """List the untracked paths of a checkout, either those git ignores or those it does not.
 
     Args:
@@ -559,6 +565,7 @@ def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[s
         folders: List a folder that holds only untracked files as one path
             that ends with ``/``, in place of each file in it.
         ignored: List the ignored paths in place of the not ignored ones.
+        empty: With ``folders``, list the empty folders too.
 
     Returns:
         Checkout-relative paths.
@@ -570,17 +577,19 @@ def _untracked(checkout: Path, *, folders: bool, ignored: bool = False) -> set[s
         *(["--ignored"] if ignored else []),
         "--exclude-standard",
         # An empty folder holds no file of the version or of the setup, so it is no output either.
-        *(["--directory", "--no-empty-directory"] if folders else []),
+        *(["--directory"] if folders else []),
+        *(["--no-empty-directory"] if folders and not empty else []),
     ]
     return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
 
 
-def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) -> set[str]:
+def _setup_output(checkout: Path, before: set[str], folders: set[str], *, ignored: bool = False) -> set[str]:
     """Find the untracked paths that a setup added to a checkout.
 
     Args:
         checkout: The checkout or worktree, after the setup.
         before: Every untracked file of the same kind before the setup, one path per file.
+        folders: :func:`_old_folders` from before the setup.
         ignored: Find the paths that git ignores in place of the not ignored ones.
 
     Returns:
@@ -593,14 +602,48 @@ def _setup_output(checkout: Path, before: set[str], *, ignored: bool = False) ->
         if not path.endswith("/"):
             if path not in before:
                 added.add(path)
-        elif any(old.startswith(path) for old in before):
-            # The parent version added this folder: its files stay in the
-            # version, so only the files the setup wrote into it are excluded.
+        elif path in folders or any(old.startswith(path) for old in before):
+            # The folder was there before the setup, empty or with files of the
+            # version, so it stays: only the files the setup wrote into it are excluded.
             files = _untracked(checkout, folders=False, ignored=ignored) if files is None else files
             added |= {file for file in files if file.startswith(path)} - before
         else:
             added.add(path)
     return added
+
+
+def _old_folders(checkout: Path) -> set[str]:
+    """List the untracked folders of a checkout, ignored and empty ones included, before a setup.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Checkout-relative folder paths that end with ``/``; a folder with only untracked content is one path.
+    """
+    listed = _untracked(checkout, folders=True, empty=True) | _untracked(
+        checkout, folders=True, ignored=True, empty=True
+    )
+    return {path for path in listed if path.endswith("/")}
+
+
+def _index_stamp(checkout: Path) -> list[int] | None:
+    """Identify the current git index file of a checkout.
+
+    Git writes a new index file with a rename, so any git command that changes the index, or
+    ``git reset --hard`` even with no change, gives it a new stamp. Reading commands keep it.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The index file's inode, modification time in nanoseconds and size, or ``None`` when it has no index.
+    """
+    try:
+        status = _index_path(checkout).stat()
+    except FileNotFoundError:
+        return None
+    return [status.st_ino, status.st_mtime_ns, status.st_size]
 
 
 def _tracked_state(checkout: Path, path: str) -> str:
@@ -662,57 +705,156 @@ def _index_path(checkout: Path) -> Path:
     return index if index.is_absolute() else checkout / index
 
 
-def _save_checkout(checkout: Path, paths: Iterable[str], saved: Path) -> None:
-    """Copy the index and the version's changed files before a setup, so a failed setup can be undone.
+def _index_lock(checkout: Path) -> Path:
+    """Find the lock file that git makes beside the index while a command writes it.
 
     Args:
         checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of the lock file.
+    """
+    index = _index_path(checkout)
+    return index.with_name(index.name + ".lock")
+
+
+def _common_dir(checkout: Path) -> Path:
+    """Find the git common dir that a checkout and its worktrees share.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of the common dir.
+    """
+    common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
+    return (common if common.is_absolute() else checkout / common).resolve()
+
+
+def _branch_refs(checkout: Path) -> dict[str, str]:
+    """List every local branch of a checkout's repository with its commit.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Each full branch ref name and its commit.
+    """
+    lines = _checkout_git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"], checkout).splitlines()
+    # A ref name cannot hold a space, so the first space ends it.
+    return dict(line.split(" ", 1) for line in lines if line)
+
+
+def _save_checkout(checkout: Path, common: Path, paths: Iterable[str], saved: Path) -> None:
+    """Copy the index, ``info/exclude`` and the version's changed files before a setup, so the setup can be undone.
+
+    Args:
+        checkout: The checkout or worktree.
+        common: The git common dir.
         paths: The tracked paths the version changed and its untracked files.
         saved: An empty folder for the copy.
     """
     index = _index_path(checkout)
     if index.exists():
         shutil.copy2(index, saved / "index")
+    exclude = common / "info" / "exclude"
+    if exclude.exists():
+        (saved / "exclude").write_bytes(exclude.read_bytes())
     for path in paths:
         if os.path.lexists(checkout / path):
             _copy_path(checkout / path, saved / "files" / path, saved / "files")
 
 
-def _undo_setup(
-    checkout: Path,
-    head: str,
-    tracked: dict[str, str],
-    version_files: dict[str, str],
-    ignored_before: set[str],
-    saved: Path,
-) -> None:
-    """Put a checkout back to its state before a failed setup.
+def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, Any], *, later: bool = False) -> None:
+    """Put a repository and the checkout of a setup back to their state before a setup that did not finish.
 
     Args:
-        checkout: The checkout or worktree.
-        head: The commit of ``HEAD`` before the setup.
-        tracked: :func:`_tracked_changes` before the setup.
-        version_files: Each untracked file of the version before the setup, with its :func:`_tracked_state`.
-        ignored_before: Every ignored file before the setup.
+        checkout: The checkout of the session that runs the undo.
+        common: The git common dir.
         saved: The :func:`_save_checkout` copy from before the setup.
+        started: The record that :func:`ensure_setup` wrote before the setup: the setup's checkout, ``head``,
+            ``branch`` (``None`` when ``HEAD`` was detached), ``refs`` from :func:`_branch_refs`, ``tracked``
+            from :func:`_tracked_changes`, ``version_files`` with each untracked file of the version and its
+            :func:`_tracked_state`, ``ignored_before`` with every ignored file, ``folders_before`` from
+            :func:`_old_folders`, ``index_stamp`` from :func:`_index_stamp` and ``index_lock``, whether
+            the index lock file was there.
+        later: The undo runs in a later session, so the engine can have moved the checkout to another version.
+
+    Raises:
+        RuntimeError: When git fails, or an index lock file that was there before the setup is still there.
     """
-    if _checkout_git(["rev-parse", "HEAD"], checkout).strip() != head:
-        # Soft, so the working tree keeps the version's own changes; the loop below undoes the setup's.
-        _checkout_git(["reset", "--soft", head], checkout)
+    target = Path(started["checkout"])
+    try:
+        # A killed session can have run in another worktree of the repository, and that worktree can be gone now.
+        present = _common_dir(target) == common
+    except (RuntimeError, OSError):
+        present = False
+    # Read before the refs go back, because the restored branch would hide a move of HEAD.
+    moved = (
+        later
+        and present
+        and (
+            _checkout_git(["rev-parse", "HEAD"], target).strip() != started["head"]
+            or _index_stamp(target) != started["index_stamp"]
+        )
+    )
+    git_folder = target if present else checkout
+    refs = started["refs"]
+    current = _branch_refs(git_folder)
+    for ref in current.keys() - refs.keys():
+        _checkout_git(["update-ref", "-d", ref], git_folder)
+    for ref, commit in refs.items():
+        if current.get(ref) != commit:
+            _checkout_git(["update-ref", ref, commit], git_folder)
+    exclude = common / "info" / "exclude"
+    if (saved / "exclude").exists():
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_bytes((saved / "exclude").read_bytes())
+    elif os.path.lexists(exclude):
+        exclude.unlink()
+    if not present:
+        return
+    checkout, head, tracked = target, started["head"], started["tracked"]
+    version_files: dict[str, str] = started["version_files"]
+    if started["branch"]:
+        # The branch refs are back, so this also puts back the commit of HEAD.
+        _checkout_git(["symbolic-ref", "HEAD", started["branch"]], checkout)
+    else:
+        _checkout_git(["update-ref", "--no-deref", "HEAD", head], checkout)
+    if moved:
+        # The engine's reset_tree rewrites the index before it applies the next version; an undo now would put
+        # the old version over the new one. A setup's own git write looks the same, and its edits then stay.
+        print(
+            "claude bridge: the checkout holds another version than before the stopped setup, so its files and"
+            " index stay as they are",
+            file=sys.stderr,
+        )
+        return
+    lock = _index_lock(checkout)
+    if os.path.lexists(lock):
+        if started["index_lock"]:
+            raise RuntimeError(
+                f"The git index lock {lock} was there before the setup and is still there, so the checkout cannot"
+                " be restored. Remove that file when no git command runs in the checkout."
+            )
+        # The setup's process group is stopped, so a lock it left belongs to no running git command.
+        print(f"claude bridge: removed the git index lock {lock} that the stopped setup left", file=sys.stderr)
+        lock.unlink()
     if (saved / "index").exists():
         shutil.copy2(saved / "index", _index_path(checkout))
     # Listed after the index is back, so a file the setup untracked in its commit counts as tracked again.
     # Removed first, so a link the setup put in place of a folder is gone before the files below are restored.
-    before = set(version_files)
-    for path in _setup_output(checkout, before) | _setup_output(checkout, ignored_before, ignored=True):
+    # A path that was there before is never output: a setup that rewrites a .gitignore can unhide an old ignored file.
+    before = set(version_files) | set(started["ignored_before"])
+    folders = set(started["folders_before"])
+    for path in _setup_output(checkout, before, folders) | _setup_output(checkout, before, folders, ignored=True):
         _remove_path(checkout / path.rstrip("/"))
     changed = _setup_changes(checkout, tracked)
-    specs = [f":(literal){path}" for path in changed]
+    # Names go through a whole-tree listing and stdin, because thousands of them would pass the argument limit.
     in_head = (
-        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head, "--", *specs], checkout).split("\0"))
-        if specs
-        else set()
+        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head], checkout).split("\0")) if changed else set()
     )
+    from_head: list[str] = []
     for path in changed:
         _check_parents(checkout / path, checkout)
         if path in tracked:
@@ -721,9 +863,12 @@ def _undo_setup(
             if os.path.lexists(saved / "files" / path):
                 _copy_path(saved / "files" / path, checkout / path, checkout)
         elif path in in_head:
-            _checkout_git(["checkout", head, "--", f":(literal){path}"], checkout)
+            from_head.append(path)
         else:
             _remove_path(checkout / path)
+    if from_head:
+        specs = "".join(f":(literal){path}\0" for path in from_head).encode("utf-8", "surrogateescape")
+        _checkout_git(["checkout", head, "--pathspec-from-file=-", "--pathspec-file-nul"], checkout, specs)
     for path, content in version_files.items():
         if _tracked_state(checkout, path) != content:
             _check_parents(checkout / path, checkout)
@@ -836,9 +981,18 @@ def ensure_setup(
     included, is copied into :data:`SETUP_STATE` in the git dir, and a
     session after a reset or in a new worktree gets that copy back, without
     a second setup. What the setup adds, ignored files included, is excluded
-    from every version, like the harness files (SKY-753). Any failure after
-    the setup starts puts the checkout back as it was: ``HEAD``, the index,
-    the files of the version, and no setup output.
+    from every version, like the harness files (SKY-753).
+
+    Before the setup runs, a copy of the checkout's state and a ``started``
+    record are kept in :data:`SETUP_STATE`. A failure in this session puts
+    the repository back as it was: the branch refs, ``HEAD``, the index,
+    ``info/exclude``, the files of the version, and no setup output. A
+    session that is killed during its setup cannot do that, so the next
+    session that finds the ``started`` record and no ``done.json`` first
+    does the same undo from the kept copy, and then runs the setup again.
+    When ``HEAD`` or the index file changed since that setup started, the
+    engine moved the checkout to another version, so that undo puts back
+    only the branch refs, ``HEAD`` and ``info/exclude``.
 
     Args:
         command: The exact argument list from ``optimize.toml``.
@@ -852,10 +1006,10 @@ def ensure_setup(
             the version or moves ``HEAD``, it writes a name that no exclude
             line can hold, another session's setup holds the lock past
             ``timeout_seconds`` or fails with no time left to run it again,
-            or the setup's record is unreadable.
+            the setup's record is unreadable, or the undo of a setup that an
+            earlier session did not finish fails.
     """
-    common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
-    common = common if common.is_absolute() else checkout / common
+    common = _common_dir(checkout)
     state = common / SETUP_STATE
     state.mkdir(parents=True, exist_ok=True)
     with (state / "lock").open("a") as lock:
@@ -874,6 +1028,8 @@ def ensure_setup(
                     ) from None
                 time.sleep(0.1)
         record = state / "done.json"
+        started = state / "started.json"
+        saved = state / "undo"
         if record.exists():
             try:
                 kept = json.loads(record.read_text(encoding="utf-8"))["output"]
@@ -882,6 +1038,8 @@ def ensure_setup(
                     f"The record of the [proposer] setup command in optimize.toml ({shlex.join(command)}) at"
                     f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
                 ) from error
+            # A session killed after done.json but before its clean-up left these behind.
+            _forget_setup(started, saved)
             # The first session writes the whole copy before done.json, and nothing changes it after,
             # so later sessions copy it unlocked and do not wait in line for each other.
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -891,81 +1049,137 @@ def ensure_setup(
                 if not os.path.lexists(checkout / name):
                     _copy_path(state / "output" / name, checkout / name, checkout)
             return
+        if started.exists():
+            # A session killed during its setup skipped its undo; nothing may trust the checkout until it is done.
+            try:
+                _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")), later=True)
+            except Exception as error:
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) stopped in an earlier"
+                    f" session before it finished, and its changes could not be undone: {error!r}."
+                ) from error
+        # A copy with no started record is from a session killed before its setup ran, so nothing needs it.
+        _forget_setup(started, saved)
         # Files the parent version added are untracked too; only the setup's new paths are excluded.
         before = _untracked(checkout, folders=False)
         # ``git clean -fdx`` and a new worktree drop ignored files too, so the setup's ignored output is kept as well.
         ignored_before = _untracked(checkout, folders=False, ignored=True)
+        # A folder that was there before, even an empty one, is never setup output.
+        folders_before = _old_folders(checkout)
         version_files = {path: _tracked_state(checkout, path) for path in before}
         head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+        branch = _checkout_git(["rev-parse", "--symbolic-full-name", "HEAD"], checkout).strip()
         tracked = _tracked_changes(checkout)
+        saved.mkdir()
+        # The version's own edits are only hashed above, so a failed setup could not put them back.
+        _save_checkout(checkout, common, tracked.keys() | before, saved)
         # A waiter whose lock holder failed runs the setup itself, but only in the time its own limit has left.
+        # The copy above counts too, because a large version takes time to copy.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            _forget_setup(started, saved)
             raise RuntimeError(
                 f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
                 f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
             )
-        with tempfile.TemporaryDirectory(dir=state) as saved_name:
-            saved = Path(saved_name)
-            # The version's own edits are only hashed above, so a failed setup could not put them back.
-            _save_checkout(checkout, tracked.keys() | before, saved)
-            try:
-                run_setup(command, checkout, remaining, env)
-                moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
-                if moved != head:
-                    # A commit would hide its changes from the diff below, and enter every version.
-                    raise RuntimeError(
-                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
-                        f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
-                        " history alone."
-                    )
-                changed = _setup_changes(checkout, tracked)
-                if changed:
-                    raise RuntimeError(
-                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
-                        f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
-                        " files that git does not track."
-                    )
-                # GEPA and Best-of-N check out a parent version with its new files untracked;
-                # a change to one of them would enter every version as well.
-                rewritten = sorted(
-                    path for path, content in version_files.items() if _tracked_state(checkout, path) != content
+        start = {
+            "checkout": str(checkout.resolve()),
+            "head": head,
+            "branch": branch if branch.startswith("refs/heads/") else None,
+            "refs": _branch_refs(checkout),
+            "tracked": tracked,
+            "version_files": version_files,
+            "ignored_before": sorted(ignored_before),
+            "folders_before": sorted(folders_before),
+            # Taken after the last git command of this session, so only a later write changes it.
+            "index_stamp": _index_stamp(checkout),
+            "index_lock": os.path.lexists(_index_lock(checkout)),
+        }
+        # Written last, so a session that finds it knows the copy above is whole.
+        _write_whole(started, json.dumps(start))
+        try:
+            run_setup(command, checkout, remaining, env)
+            moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+            if moved != head:
+                # A commit would hide its changes from the diff below, and enter every version.
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
+                    f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
+                    " history alone."
                 )
-                if rewritten:
-                    raise RuntimeError(
-                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
-                        f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
-                        " Make the setup write only new files that git does not track."
-                    )
-                added = sorted(_setup_output(checkout, before))
-                ignored = _setup_output(checkout, ignored_before, ignored=True)
-                # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
-                # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
-                lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
-                kept = sorted(set(added) | ignored)
-                output = state / "output"
-                shutil.rmtree(output, ignore_errors=True)
-                for path in kept:
-                    name = path.rstrip("/")
-                    # An ignored path inside a new folder is already in that folder's copy.
-                    if not os.path.lexists(output / name):
-                        _copy_path(checkout / name, output / name, output)
-                exclude = common / "info" / "exclude"
-                exclude.parent.mkdir(parents=True, exist_ok=True)
-                known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
-                with exclude.open("a", encoding="utf-8") as stream:
-                    stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
-                # A stop between truncate and write would leave an empty record, so the record is replaced whole.
-                partial = state / "done.json.tmp"
-                partial.write_text(json.dumps({"output": kept}), encoding="utf-8")
-                partial.replace(record)
-            except BaseException as error:
-                # Any failure after the setup starts leaves the checkout as it was, so no edit becomes the baseline.
-                try:
-                    _undo_setup(checkout, head, tracked, version_files, ignored_before, saved)
-                except Exception as undo_error:
-                    error.add_note(f"The checkout could not be restored after the setup: {undo_error!r}")
-                raise
+            changed = _setup_changes(checkout, tracked)
+            if changed:
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                    f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+                    " files that git does not track."
+                )
+            # GEPA and Best-of-N check out a parent version with its new files untracked;
+            # a change to one of them would enter every version as well.
+            rewritten = sorted(
+                path for path, content in version_files.items() if _tracked_state(checkout, path) != content
+            )
+            if rewritten:
+                raise RuntimeError(
+                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
+                    f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
+                    " Make the setup write only new files that git does not track."
+                )
+            added = sorted(_setup_output(checkout, before, folders_before))
+            ignored = _setup_output(checkout, ignored_before, folders_before, ignored=True)
+            # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
+            # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
+            lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
+            kept = sorted(set(added) | ignored)
+            output = state / "output"
+            shutil.rmtree(output, ignore_errors=True)
+            for path in kept:
+                name = path.rstrip("/")
+                # An ignored path inside a new folder is already in that folder's copy.
+                if not os.path.lexists(output / name):
+                    _copy_path(checkout / name, output / name, output)
+            exclude = common / "info" / "exclude"
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+            with exclude.open("a", encoding="utf-8") as stream:
+                stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+            _write_whole(record, json.dumps({"output": kept}))
+        except BaseException as error:
+            # Any failure after the setup starts leaves the checkout as it was, so no edit becomes the baseline.
+            try:
+                _undo_setup(checkout, common, saved, start)
+                _forget_setup(started, saved)
+            except Exception as undo_error:
+                # The started record stays, so the next session tries the undo again before its setup.
+                error.add_note(f"The checkout could not be restored after the setup: {undo_error!r}")
+            raise
+        _forget_setup(started, saved)
+
+
+def _write_whole(path: Path, text: str) -> None:
+    """Replace a file whole, so a stop during the write never leaves a partial file.
+
+    Args:
+        path: The file to write.
+        text: Its new content.
+    """
+    partial = path.with_name(path.name + ".tmp")
+    partial.write_text(text, encoding="utf-8")
+    partial.replace(path)
+
+
+def _forget_setup(started: Path, saved: Path) -> None:
+    """Remove a setup's started record, and then the copy of the checkout that the undo needs.
+
+    The record goes first: a stop between the two leaves only a copy, which
+    the next session removes.
+
+    Args:
+        started: The started record.
+        saved: The :func:`_save_checkout` copy.
+    """
+    started.unlink(missing_ok=True)
+    shutil.rmtree(saved, ignore_errors=True)
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:

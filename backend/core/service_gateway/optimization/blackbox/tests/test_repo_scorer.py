@@ -77,6 +77,7 @@ from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpe
 from ..sandbox_contract import SandboxSession
 from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
+from ..tree_sandbox import BoxSession
 from .test_repo_workspace import _archive, _patch
 
 # The metric box holds no repository file, so the [run] entry prints what
@@ -213,6 +214,35 @@ def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
 
     assert scorer.score("")["score"] == pytest.approx(0.1)
     assert sorted(calls) == [("candidate", ()), ("metric", ())]
+
+
+def test_the_run_entry_and_the_metric_run_through_the_tree_sandbox_session(
+    scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``[run]`` entry runs as root in the candidate box; the metric runs without root in its own box (SKY-785)."""
+    scorer, _, _ = scored
+    calls: list[tuple[str, bool, bool]] = []
+    run = BoxSession.run
+
+    def recorded(self: BoxSession, command: str, **options: Any) -> Any:
+        """Record the box's role marker, the root flag and the output sink, then run the command.
+
+        Args:
+            self: The session.
+            command: The command line.
+            **options: The run's options.
+
+        Returns:
+            The command's result.
+        """
+        role = "candidate" if "candidate" in command else "metric"
+        calls.append((role, options.get("sudo", False), options.get("on_output") is not None))
+        return run(self, command, **options)
+
+    monkeypatch.setattr(BoxSession, "run", recorded)
+
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert sorted(calls) == [("candidate", True, True), ("metric", False, True)]
 
 
 class _ParkLog:

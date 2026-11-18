@@ -308,7 +308,7 @@ def _git_output(cwd: Path, *arguments: str, env: Mapping[str, str] | None = None
         UnicodeDecodeError: When the output is not UTF-8.
     """
     result = subprocess.run(
-        ["git", "--literal-pathspecs", *_GIT_IDENTITY, *arguments],
+        ["git", "--literal-pathspecs", *repo_tree.SAFE_GIT, *_GIT_IDENTITY, *arguments],
         cwd=cwd,
         env=None if env is None else dict(env),
         capture_output=True,
