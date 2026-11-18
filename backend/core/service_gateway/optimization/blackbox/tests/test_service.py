@@ -1988,7 +1988,14 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
     monkeypatch: pytest.MonkeyPatch,
     fake_native_proposers: list[tuple[str, EngineContext]],
 ) -> None:
-    """The snapshot's ``file_proposer`` and ``proposer_setup`` reach ``NativeOptions.repo`` (SKY-753)."""
+    """The snapshot's ``file_proposer`` and ``proposer_setup`` reach ``NativeOptions.repo`` (SKY-753).
+
+    Args:
+        fake_lm: Fake reflection model for the run.
+        tmp_path: Log folder for the run.
+        monkeypatch: Native runtime switch and the options capture.
+        fake_native_proposers: Fake native proposers, so no engine starts.
+    """
     built: list[dict[str, Any]] = []
 
     def capture(**options: Any) -> NativeOptions:

@@ -2110,3 +2110,65 @@ def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) ->
 
     assert filled.stdout.strip() == "k"
     assert exact.stdout.strip() == harness_bridge.KEY_TOKEN
+
+
+def test_a_finished_setup_stops_the_processes_it_left_in_the_background(tmp_path: Path) -> None:
+    """A setup that exits with a daemon still running leaves nothing behind beside the sessions (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the child's pid file.
+    """
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+    )
+
+    harness_bridge.run_setup([sys.executable, "-c", script], tmp_path)
+
+    child = int(pid_file.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("The setup's background process still runs.")
+
+
+def test_the_setups_files_in_a_folder_of_the_parent_version_stay_out_of_the_version(tmp_path: Path) -> None:
+    """A setup that writes into an untracked folder the parent version added excludes only its own files (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "a.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    (checkout / "out").mkdir()
+    (checkout / "out/parent.txt").write_text("from the parent version")
+    command = [
+        sys.executable,
+        "-c",
+        "open('out/cache.bin', 'w'); __import__('os').makedirs('build'); open('build/x', 'w')",
+    ]
+
+    harness_bridge.ensure_setup(command, checkout)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert status == "?? out/parent.txt\n"
+    exclude = (checkout / ".git/info/exclude").read_text().splitlines()
+    assert {"/build/", "/out/cache.bin"} <= set(exclude)

@@ -319,7 +319,12 @@ def test_an_empty_proposer_network_passes_the_gate(tmp_path: Path, place: str) -
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_proposer_entry_and_setup_pass_the_gate(tmp_path: Path, place: str) -> None:
-    """Staging runs the file's proposer command as the custom proposer, so both keys are enforced (SKY-753)."""
+    """Staging runs the file's proposer command as the custom proposer, so both keys are enforced (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        place: Where the run's sandboxes run.
+    """
     raw = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "agent.js"]\n'
 
     assert {"proposer.entry", "proposer.setup"} <= repo_gate._ENFORCED_EVERYWHERE

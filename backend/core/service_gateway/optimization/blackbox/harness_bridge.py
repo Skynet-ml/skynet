@@ -406,6 +406,10 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
             os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
         raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.") from None
+    # A process the setup left in the background (a watcher, a server) must not
+    # run beside the proposer sessions, so the group stops after a finished setup too.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
     if process.returncode != 0:
         detail = (stderr or stdout).strip()[-2000:]
         raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
@@ -430,17 +434,46 @@ def _checkout_git(arguments: list[str], checkout: Path) -> str:
     return done.stdout
 
 
-def _untracked(checkout: Path) -> set[str]:
-    """List the untracked, not ignored files and folders of a checkout.
+def _untracked(checkout: Path, *, folders: bool) -> set[str]:
+    """List the untracked, not ignored paths of a checkout.
 
     Args:
         checkout: The checkout or worktree.
+        folders: List a folder that holds only untracked files as one path
+            that ends with ``/``, in place of each file in it.
 
     Returns:
-        Checkout-relative paths; a folder that holds only untracked files ends with ``/``.
+        Checkout-relative paths.
     """
-    output = _checkout_git(["ls-files", "-z", "--others", "--exclude-standard", "--directory"], checkout)
-    return {path for path in output.split("\0") if path}
+    arguments = ["ls-files", "-z", "--others", "--exclude-standard", *(["--directory"] if folders else [])]
+    return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
+
+
+def _setup_output(checkout: Path, before: set[str]) -> set[str]:
+    """Find the untracked paths that a setup added to a checkout.
+
+    Args:
+        checkout: The checkout or worktree, after the setup.
+        before: Every untracked file before the setup, one path per file.
+
+    Returns:
+        The new files, and the new folders as one path each, so a large
+        install folder gives one exclude line.
+    """
+    added: set[str] = set()
+    files: set[str] | None = None
+    for path in _untracked(checkout, folders=True):
+        if not path.endswith("/"):
+            if path not in before:
+                added.add(path)
+        elif any(old.startswith(path) for old in before):
+            # The parent version added this folder: its files stay in the
+            # version, so only the files the setup wrote into it are excluded.
+            files = _untracked(checkout, folders=False) if files is None else files
+            added |= {file for file in files if file.startswith(path)} - before
+        else:
+            added.add(path)
+    return added
 
 
 def ensure_setup(command: list[str], checkout: Path) -> None:
@@ -461,9 +494,9 @@ def ensure_setup(command: list[str], checkout: Path) -> None:
     if marker.exists():
         return
     # Files the parent version added are untracked too; only the setup's new paths are excluded.
-    before = _untracked(checkout)
+    before = _untracked(checkout, folders=False)
     run_setup(command, checkout)
-    added = sorted((_untracked(checkout) - before) | {SETUP_MARKER})
+    added = sorted(_setup_output(checkout, before) | {SETUP_MARKER})
     exclude = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
     exclude = (exclude if exclude.is_absolute() else checkout / exclude) / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -1897,9 +1930,6 @@ def main(argv: list[str]) -> int:
     session_id = args.session_id or resumed or uuid.uuid4().hex
     model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
     workspace = Path.cwd()
-    # The contract file's command always runs in the repository checkout,
-    # also where the engine works in its own lab folder (SKY-753).
-    work_dir = Path(proposer["workdir"]) if proposer.get("workdir") else workspace
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
@@ -1916,7 +1946,7 @@ def main(argv: list[str]) -> int:
     max_cost = float(args.max_budget_usd) if args.max_budget_usd else None
     outcome = run_session(
         proposer,
-        workspace=work_dir,
+        workspace=workspace,
         prompt=prompt,
         model=model,
         session_dir=session_dir,

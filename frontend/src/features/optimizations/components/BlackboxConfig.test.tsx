@@ -99,10 +99,12 @@ void describe("runProposerLabel", () => {
         environment: { outcome: { target: null }, proposer_entry: ["node", "agent/run.js"] },
       },
     } as never;
-    const label = runProposerLabel({ max_tool_calls: 5 }, fromFile);
+    const html = renderToStaticMarkup(<>{runProposerLabel({ max_tool_calls: 5 }, fromFile)}</>);
     // The UI catalog does not load under jiti, so the row text is its key, not "Codex".
-    assert.match(label ?? "", /submit\.blackbox\.review\.proposer_file/);
-    assert.notEqual(label, runProposerLabel({ max_tool_calls: 5 }, {}));
+    assert.match(html, /submit\.blackbox\.review\.proposer_file/);
+    // The command is isolated left-to-right text, so RTL text around it cannot reorder its punctuation.
+    assert.match(html, /<bdi dir="ltr">node agent\/run\.js<\/bdi>/);
+    assert.notEqual(html, renderToStaticMarkup(<>{runProposerLabel({ max_tool_calls: 5 }, {})}</>));
     assert.equal(runProposerLabel({ harness: "pi" }, fromFile), runProposerLabel({ harness: "pi" }, {}));
   });
 });

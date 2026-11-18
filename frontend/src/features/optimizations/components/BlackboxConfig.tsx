@@ -121,7 +121,7 @@ function yesNo(v: boolean): string {
     : msg("auto.features.optimizations.components.configtab.literal.15");
 }
 
-type ConfigRow = { label: ReactNode; value: string; icon: ReactNode };
+type ConfigRow = { label: ReactNode; value: ReactNode; icon: ReactNode };
 
 function MiniGrid({ rows }: { rows: ConfigRow[] }) {
   if (rows.length === 0) return null;
@@ -150,17 +150,32 @@ export function runProposerHarness(
   return target.repo && !target.repo.environment ? null : "codex";
 }
 
-/** The proposer row's text: the contract file's command when the run uses it, else the harness name. */
+// Marks where the command goes in the translated row text.
+const COMMAND_SLOT = "\u0000";
+
+/**
+ * The proposer row's text: the contract file's command when the run uses it,
+ * else the harness name. The command is left-to-right text, so in Hebrew a
+ * command such as `./run.sh --fast` keeps its punctuation in order.
+ */
 export function runProposerLabel(
   proposer: Partial<BlackboxProposer> | null,
   target: Partial<BlackboxTarget>,
-): string | null {
+): ReactNode {
   const harness = runProposerHarness(proposer, target);
   if (!proposer || !harness) return null;
   const entry = target.repo?.environment?.proposer_entry;
-  return entry && !proposer.harness
-    ? formatMsg("submit.blackbox.review.proposer_file", { command: entry.join(" ") })
-    : harnessLabel(harness);
+  if (!entry || proposer.harness) return harnessLabel(harness);
+  const [before, ...after] = formatMsg("submit.blackbox.review.proposer_file", {
+    command: COMMAND_SLOT,
+  }).split(COMMAND_SLOT);
+  return (
+    <>
+      {before}
+      <bdi dir="ltr">{entry.join(" ")}</bdi>
+      {after.join("")}
+    </>
+  );
 }
 
 /**

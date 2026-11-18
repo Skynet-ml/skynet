@@ -61,7 +61,14 @@ from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
-from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE, BLACKBOX_HARNESS_CUSTOM, HOST_CLI_AUTO_KEY
+from ..models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CUSTOM,
+    FILE_PROPOSER_REFUSED_ENGINES,
+    HOST_CLI_AUTO_KEY,
+)
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
@@ -430,7 +437,7 @@ def stage_repository(
         if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
             raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
         if environment.proposer_entry is not None:
-            environment = _without_shinka(environment, result.get("strategy") or {})
+            environment = _without_refused_engines(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -582,11 +589,21 @@ def stage_repository(
     )
 
 
-def _without_shinka(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
-    """Refuse a ShinkaEvolve run with ``[proposer] entry``, and say Auto leaves its lane out.
+# The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
+_FILE_PROPOSER_REFUSALS = {
+    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
+}
+
+
+def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
+    """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
 
     ShinkaEvolve writes versions with its own editor and never runs the file's
-    command (SKY-753).
+    command. AutoResearch and Meta-Harness call the proposer from their lab
+    folder and read their own protocol files there, so the files the command
+    changes do not become their versions (SKY-753; Gilad, 2026-11-18).
 
     Args:
         environment: The run's rules, with the file's proposer command.
@@ -596,13 +613,14 @@ def _without_shinka(environment: RepoEnvironment, strategy: Mapping[str, Any]) -
         The environment, with a note for an Auto run.
 
     Raises:
-        ConstraintsError: When the run is a single ShinkaEvolve run.
+        ConstraintsError: When the run is a single run of a refused engine.
     """
     if strategy.get("mode", "auto") == "single":
-        if strategy.get("engine") == BLACKBOX_ENGINE_SHINKA_EVOLVE:
+        engine = strategy.get("engine")
+        if engine in FILE_PROPOSER_REFUSED_ENGINES:
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: ShinkaEvolve never runs the [proposer] entry command. Remove [proposer]"
-                " entry, or choose another engine.",
+                f"{CONSTRAINTS_FILE}: {_FILE_PROPOSER_REFUSALS[engine]} Remove [proposer] entry, or choose another"
+                " engine.",
                 section="proposer",
                 key="entry",
             )
@@ -611,8 +629,8 @@ def _without_shinka(environment: RepoEnvironment, strategy: Mapping[str, Any]) -
         environment,
         notes=(
             *environment.notes,
-            "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
-            " contract file.",
+            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+            " proposer command in the contract file.",
         ),
     )
 

@@ -311,8 +311,8 @@ class RepoConstraints:
     # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
     proposer_entry: tuple[str, ...] | None = None
     proposer_setup: tuple[str, ...] | None = None
-    # The repository files that entry names; read_constraints fills them, and the file proposer protects them.
-    proposer_entry_files: tuple[str, ...] = ()
+    # The repository files that entry and setup name; read_constraints fills them, and the file proposer protects them.
+    proposer_command_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
@@ -1623,25 +1623,26 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
     constraints = _load_mcp_files(parse_constraints(raw, require_version=require_version), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
     constraints = _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
-    return _load_entry_files(constraints, archive)
+    return _load_command_files(constraints, archive)
 
 
-def _load_entry_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
-    """Find the repository files that ``[proposer] entry`` names, such as ``agent/run.js``.
+def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Find the repository files that ``[proposer] entry`` and ``setup`` name, such as ``agent/run.js``.
 
     Args:
         constraints: The parsed proposal.
         archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
 
     Returns:
-        The proposal with ``proposer_entry_files`` filled, unchanged without an entry.
+        The proposal with ``proposer_command_files`` filled, unchanged without an entry.
     """
     if constraints.proposer_entry is None:
         return constraints
     with tarfile.open(archive, "r:gz") as packed:
         files = {str(PurePosixPath(member.name)) for member in packed.getmembers() if member.isfile()}
-    named = (posixpath.normpath(part) for part in constraints.proposer_entry if not part.startswith("/"))
-    return replace(constraints, proposer_entry_files=tuple(dict.fromkeys(path for path in named if path in files)))
+    parts = (*constraints.proposer_entry, *(constraints.proposer_setup or ()))
+    named = (posixpath.normpath(part) for part in parts if not part.startswith("/"))
+    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(path for path in named if path in files)))
 
 
 def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
@@ -2197,8 +2198,8 @@ def effective_environment(
             )
         editable = constraints.editable_paths
     use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
-    # A version must not rewrite the proposer command that writes the next versions.
-    entry_files = constraints.proposer_entry_files if use_file_proposer else ()
+    # A version must not rewrite the proposer command, or the setup it runs, that writes the next versions.
+    command_files = constraints.proposer_command_files if use_file_proposer else ()
     protected = tuple(
         dict.fromkeys(
             (
@@ -2206,7 +2207,7 @@ def effective_environment(
                 *constraints.rule_files,
                 *constraints.mcp_files,
                 *constraints.protected_paths,
-                *entry_files,
+                *command_files,
             )
         )
     )

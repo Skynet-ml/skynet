@@ -37,6 +37,8 @@ from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, Repo
 from core.exceptions import ServiceError
 from core.i18n_keys import I18nKey
 from core.models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
@@ -397,6 +399,10 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
 
     The run is protected, as every hosted run is: its bootstrap installs
     nothing, so the setup reaches the guest through the repository payload.
+
+    Args:
+        tmp_path: The checkout and the session folder.
+        monkeypatch: Pytest fixture for the fake fetch and the relay key.
     """
     files = {
         "optimize.toml": (
@@ -426,8 +432,8 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     assert proposer.install_command is None
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
-        "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
-        " contract file.",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
     ]
     # The launch as native_runtime builds it for a protected run.
     launch = build_launch(
@@ -465,7 +471,11 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
 
 
 def test_a_failing_files_setup_stops_the_run_with_its_command(tmp_path: Path) -> None:
-    """A setup that exits with an error names the file's command and its output."""
+    """A setup that exits with an error names the file's command and its output.
+
+    Args:
+        tmp_path: The checkout the setup runs in.
+    """
     command = [sys.executable, "-c", "import sys; sys.exit('no lockfile')"]
 
     with pytest.raises(RuntimeError, match=r"\[proposer\] setup command in optimize.toml .* exit code 1: no lockfile"):
@@ -473,7 +483,11 @@ def test_a_failing_files_setup_stops_the_run_with_its_command(tmp_path: Path) ->
 
 
 def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A request that names a proposer keeps it, and the run record notes the replacement."""
+    """A request that names a proposer keeps it, and the run record notes the replacement.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
     files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
     payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
 
@@ -508,21 +522,39 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
 _ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
-def test_a_single_shinka_evolve_run_with_a_files_proposer_fails_the_setup_check(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("engine", "message"),
+    [
+        (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
+        (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
+        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve never runs the [proposer] entry command."),
+    ],
+)
+def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(
+    engine: str, message: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ShinkaEvolve never runs ``[proposer] entry``, so a single ShinkaEvolve run names the key (SKY-753)."""
-    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}}
+    """A single run of a refused engine names ``[proposer] entry`` and the engine (SKY-753).
 
-    with pytest.raises(ConstraintsError, match="ShinkaEvolve never runs the \\[proposer\\] entry command") as caught:
+    Args:
+        engine: An engine that cannot use the file's proposer command.
+        message: The reason the setup check gives for it.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}}
+
+    with pytest.raises(ConstraintsError, match=re.escape(message)) as caught:
         _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     assert (caught.value.section, caught.value.key) == ("proposer", "entry")
 
 
-def test_an_auto_run_with_a_files_proposer_notes_that_it_leaves_out_shinka_evolve(
+def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An Auto run uses the file's command, and its record says why it has no ShinkaEvolve lane (SKY-753)."""
+    """An Auto run uses the file's command, and its record says why it has fewer lanes (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
     payload = {**_payload("c" * 40), "strategy": {"mode": "auto"}}
 
     staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
@@ -531,13 +563,17 @@ def test_an_auto_run_with_a_files_proposer_notes_that_it_leaves_out_shinka_evolv
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run uses the proposer command in the contract file: node agent.js",
-        "Auto leaves out the ShinkaEvolve lane, because ShinkaEvolve never runs the proposer command in the"
-        " contract file.",
+        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+        " proposer command in the contract file.",
     ]
 
 
 def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A filled-in host CLI is not the run's own proposer, and the staged proposer drops it (SKY-753)."""
+    """A filled-in host CLI is not the run's own proposer, and the staged proposer drops it (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
     proposer = BlackboxProposer()
     proposer.host_cli = "codex"
     proposer.model_fields_set.discard("host_cli")
@@ -555,7 +591,11 @@ def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypat
 
 
 def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A host CLI in the request, with no marker, is the run's own proposer (SKY-753)."""
+    """A host CLI in the request, with no marker, is the run's own proposer (SKY-753).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
     payload = {**_payload("c" * 40), "proposer": {"host_cli": "codex"}}
 
     staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
@@ -566,7 +606,11 @@ def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: p
 
 
 def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A custom command cannot load the relay's MCP servers yet, so the setup check names the cause."""
+    """A custom command cannot load the relay's MCP servers yet, so the setup check names the cause.
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
     files = {
         "optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n',
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',

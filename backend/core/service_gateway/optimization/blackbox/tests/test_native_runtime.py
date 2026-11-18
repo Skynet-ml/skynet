@@ -687,10 +687,8 @@ def test_a_files_proposer_runs_its_setup_where_its_command_runs_before_each_sess
     assert harness_bridge.SETUP_MARKER not in first + second
 
 
-def test_a_files_proposer_runs_in_the_checkout_when_the_engine_calls_it_from_a_lab_folder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AutoResearch and Meta-Harness call ``claude`` from their lab folder; the file's command still runs in the checkout.
+def test_a_files_proposer_whose_setup_fails_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed ``[proposer] setup`` fails the proposer session, so GEPA stops the run with the command (SKY-753).
 
     Args:
         tmp_path: Artifact destination and guest folder.
@@ -711,22 +709,51 @@ def test_a_files_proposer_runs_in_the_checkout_when_the_engine_calls_it_from_a_l
             "editable_paths": ["."],
             "readonly_paths": [],
             "file_proposer": True,
-            "proposer_setup": [sys.executable, "-c", _FILE_SETUP, str(log)],
+            "proposer_setup": [sys.executable, "-c", "import sys; sys.exit('no lockfile')"],
         },
     )
-    run_native_engine("autoresearch", Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
     checkout = _guest_checkout(tmp_path, monkeypatch, json.loads(session.files["native_input.json"]))
-    lab = tmp_path / "lab"
-    lab.mkdir()
-    (lab / "repo").symlink_to(checkout)
-
-    outcome = native_engines.run_proposer(
-        "Improve it.", work_dir=lab, log_dir=tmp_path / "logs", name="iter1", model="openai/task", session_id="s1"
+    proposer = native_engines.AgentProposer(
+        model="openai/task",
+        checkout=checkout,
+        editable_paths=["."],
+        readonly_paths=[],
+        log_dir=tmp_path / "logs",
+        max_token_cost=None,
     )
 
-    assert not outcome.is_error, outcome.stderr_tail
-    assert log.read_text().splitlines() == [f"setup {checkout}", f"agent {checkout} True"]
-    assert not (lab / "setup-out").exists()
+    with pytest.raises(native_engines.ProposerFailedError, match=r"(?s)\[proposer\] setup command.*no lockfile"):
+        proposer({"repo": ""}, {}, ["repo"])
+    assert not log.exists()
+    assert proposer.failure is not None
+
+
+def test_a_files_proposer_keeps_a_placeholder_in_its_command_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The box gets the file's ``entry`` exactly: ``{model}`` is not filled in as for a custom harness (SKY-753).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture and gateway stop.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="custom", run_command="node agent.js {model}"),
+        budget_route={"url": "https://gateway.example/v1", "token": "scoped"},
+        repo={"chunks": [], "editable_paths": ["."], "readonly_paths": [], "file_proposer": True},
+    )
+
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    document = json.loads(session.files["native_input.json"])
+    assert document["proposer"]["run_command"] == "node agent.js {model}"
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
