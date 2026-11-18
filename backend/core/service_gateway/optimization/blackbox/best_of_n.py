@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import math
+import posixpath
+import re
+from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from gepa.oa.config import OptimizeAnythingConfig
@@ -11,13 +15,17 @@ from gepa.oa.engines.best_of_n import BestOfNEngine as UpstreamBestOfN
 from ....exceptions import ServiceError
 from ..budget_stop import BudgetReached
 from .feedback import emit_candidate
+from .harness_bridge import hashed_kind
 from .native_runtime import run_native_engine
-from .protocol import EngineContext, EvalServer, Result, Task
+from .protocol import EngineContext, EvalServer, RepoSeed, Result, Task
 from .upstream import local_result, reflection_endpoint, upstream_server
 
 # Top train samples re-scored on the validation split; each costs one scorer
 # run per validation case, so the cap keeps sampling the bulk of the budget.
 _MAX_FINALISTS = 3
+# The file blocks and notices that a repository brief shows the model; upstream
+# sends the brief in every sample's prompt, so the cap bounds each model call.
+_BRIEF_MAX_BYTES = 64_000
 
 
 class _SampleStream:
@@ -104,10 +112,20 @@ class BestOfNEngine:
         """
         if not task.str_mode:
             raise ServiceError("Best-of-N supports text starting points only.")
-        if ctx.native_options is not None and ctx.native_options.repo is not None:
-            # A repository sample is a patch a coding agent writes in the native
-            # runtime's checkout; upstream's text sampler cannot edit a checkout.
+        if (
+            ctx.native_options is not None
+            and ctx.native_options.repo is not None
+            and (ctx.repo_seed is None or ctx.read_file is None or ctx.list_files is None)
+        ):
             return run_native_engine("best_of_n_repo", task, server, ctx)
+        # SKY-721: on the worker engine loop a repository run samples here
+        # too, so each sample is one model step with no box open, and only
+        # the scorer's commands open boxes. Its candidate is the patch text.
+        # Until the cutover (SKY-728), production builds no loop context, so a
+        # repository run without it keeps the native coding-agent engine.
+        if ctx.repo_seed is not None and ctx.read_file is not None and ctx.list_files is not None:
+            brief = _repository_brief(ctx.repo_seed, ctx.read_file, ctx.list_files)
+            task = replace(task, background="\n\n".join(part for part in (task.background, brief) if part))
         finalists = _validation_finalists(task, server)
         sampling = server.lane(server.remaining - finalists * len(task.valset))
         upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
@@ -153,6 +171,92 @@ class BestOfNEngine:
         if finalists:
             return _select_on_validation(task, server, sampling, adapted, finalists)
         return adapted
+
+
+def _repository_brief(
+    seed: RepoSeed,
+    read_file: Callable[[str, str], bytes | None],
+    list_files: Callable[[str, str], list[str] | None],
+) -> str:
+    """Brief the model on the repository: the candidate's form, the path rules and the editable files.
+
+    Upstream's prompt is fixed, so the brief goes in the task's background,
+    which upstream sends unchanged in every sample's prompt. The files come
+    from the seed tree with no box. The worker host leaves the run's hidden
+    paths out of both readers, so the brief never sees a hidden file.
+
+    Args:
+        seed: The run's repository seed tree and path rules.
+        read_file: Reads one file of a tree; ``None`` for a hidden, folder or missing path.
+        list_files: Lists the files under a folder of a tree, sorted; ``None`` when the path is not a folder.
+
+    Returns:
+        The brief text.
+    """
+    # The seed contract: the engine never learns a hidden name (E61), so the
+    # path rules leave out each hidden path and each path inside a hidden folder.
+    editable_paths = [path for path in map(posixpath.normpath, seed.editable_paths) if _visible(seed, path)]
+    fixed = [
+        path
+        for path in map(posixpath.normpath, (*seed.readonly_paths, *seed.constrained_paths))
+        if _visible(seed, path)
+    ]
+    editable = ", ".join("the whole repository" if path == "." else f"`{path}`" for path in editable_paths)
+    lines = [
+        "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
+        "repository root; an empty diff keeps the repository as it is.",
+        f"You may change: {editable or 'nothing'}.",
+    ]
+    if fixed:
+        lines.append("Do not change: " + ", ".join(f"`{path}`" for path in fixed) + ".")
+    shown: dict[str, None] = {}
+    for path in editable_paths:
+        for name in list_files(seed.tree_id, path) or [path]:
+            if not any(name == other or name.startswith(f"{other}/") for other in fixed):
+                shown[name] = None
+    names = list(shown)
+    room = _BRIEF_MAX_BYTES
+    for index, path in enumerate(names):
+        # Notices cost room too, so a repository of many skipped files still
+        # gives a bounded brief, and no file is read once the room is spent.
+        if room <= 0:
+            lines.append(f"{len(names) - index} more files are not shown.")
+            break
+        data = read_file(seed.tree_id, path)
+        if data is None:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        # A NUL byte is valid UTF-8, but it marks a binary file.
+        if text is None or "\x00" in text:
+            notice = f"`{path}` is not text, so it is not shown."
+        else:
+            # CommonMark: a fence longer than any backtick run in the text cannot close early.
+            fence = "`" * max(3, 1 + max(map(len, re.findall("`+", text)), default=0))
+            block = "\n".join([f"Current content of `{path}`:", fence, text, fence])
+            if len(block.encode()) <= room:
+                room -= len(block.encode())
+                lines.append(block)
+                continue
+            notice = f"`{path}` is not shown: the brief has no room for it."
+        room -= len(notice.encode())
+        lines.append(notice)
+    return "\n".join(lines)
+
+
+def _visible(seed: RepoSeed, path: str) -> bool:
+    """Return whether a normalized path is neither hidden nor inside a hidden folder.
+
+    Args:
+        seed: The run's repository seed, with its hidden-path hashes.
+        path: The normalized repository-relative path.
+
+    Returns:
+        ``True`` when the brief may name the path.
+    """
+    return hashed_kind(seed.hidden_hashes, path) is None
 
 
 def _validation_finalists(task: Task, server: EvalServer) -> int:

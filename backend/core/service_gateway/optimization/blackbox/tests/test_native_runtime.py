@@ -599,6 +599,8 @@ def test_best_of_n_hands_a_repository_run_to_the_native_runtime(
     monkeypatch.setattr(best_of_n, "run_native_engine", fake_native)
     ctx = _context(tmp_path, FakeRuntime(FakeSession()))
     ctx.native_options = replace(ctx.native_options, repo={"chunks": [], "editable_paths": ["."], "readonly_paths": []})
+    # Production's context until the cutover (SKY-728): no engine loop seed or file readers.
+    ctx.repo_seed = ctx.read_file = ctx.list_files = None
     result = best_of_n.BestOfNEngine().run(Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
     assert calls == ["best_of_n_repo"]
     assert result.best_score == 1.0
