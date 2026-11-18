@@ -44,6 +44,10 @@ monotonic clock:
   the time that the step log adds to each agent step. The pause between
   steps is not in it. How late a driver starts the ``commit`` of a ready
   step is reported on its own;
+- the agent commit call: the time that the ``commit`` call itself takes,
+  from its start until it returns. With the pipelined commit, ``commit``
+  only buffers the step and returns, and the agent waits for durability
+  only when it asks for it. So the commit call must stay near 0 ms;
 - the box load that the swarm puts on Vercel: box starts per minute and
   concurrent boxes, for a fresh box per step and for one pooled box per
   agent, against the Vercel caps. These figures are only reported, never
@@ -60,7 +64,8 @@ The gate passes when the sharded pass commits at least
 steady part is at least ``steady_floor_seconds`` long, and its
 step wait p99 is at most ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows: one
 window for the batch to close, and one for the pack write and the database
-commit. The sharded layout is the design, so the 1-shard pass is the
+commit. Its commit call p99 must also be at most ``MAX_COMMIT_CALL_P99_MS``.
+The sharded layout is the design, so the 1-shard pass is the
 reference for the step log and its rate and wait are only reported. Real
 steps also wait for models and boxes, so a real swarm commits fewer steps
 per second. The gate shows only that the step log is not the limit at this
@@ -140,6 +145,11 @@ TARGET_COMMITS_PER_SECOND = 5_700
 OFFERED_LOAD_MARGIN = 1.05
 # One window for the batch to close, and one more for the pack write and the database commit.
 MAX_STEP_WAIT_P99_WINDOWS = 2
+# The pipelined ``commit`` only takes the store lock, encodes the body and buffers it: microseconds. 5 ms is one
+# Python thread switch interval (``sys.getswitchinterval()``), for a driver that loses the GIL to another driver or
+# to the flusher in the call. A ``commit`` that waited for durability would take up to a flush window (500 ms by
+# default), 100 times this limit, so a p99 under it shows that no agent waits for durability in ``commit``.
+MAX_COMMIT_CALL_P99_MS = 5.0
 DURABLE_TIMEOUT_SECONDS = 300
 # The code defaults, not ``settings``: the swarm must not take its flush knobs from ``backend/.env``.
 DEFAULT_FLUSH_WINDOW_SECONDS = Settings.model_fields["step_log_flush_window_seconds"].default
@@ -479,7 +489,7 @@ def _now() -> float:
 
 def _commit_step(
     run_id: str, agent_id: str, seq: int, store: StepLogStore, boxes: FakeBoxProvider
-) -> tuple[str, float]:
+) -> tuple[str, float, float]:
     """Commit one step of one agent; a command step first opens a box and puts its tree object.
 
     Args:
@@ -490,7 +500,7 @@ def _commit_step(
         boxes: The fake box provider.
 
     Returns:
-        The step id and the start of ``commit``.
+        The step id, the start of ``commit`` and the moment ``commit`` returned.
     """
     tree_id = None
     if seq % 2:
@@ -513,7 +523,7 @@ def _commit_step(
         body=body,
         tree_id=tree_id,
     )
-    return step_id, started
+    return step_id, started, _now()
 
 
 def driver_count(agent_count: int) -> int:
@@ -611,7 +621,7 @@ def _drive_or_stop(
     boxes: FakeBoxProvider,
     origin: float,
     stop: threading.Event,
-) -> list[list[tuple[float, float, float]]]:
+) -> list[list[tuple[float, float, float, float]]]:
     """Run ``_drive`` and set ``stop`` when it fails, so the shard's other drivers return soon.
 
     ``pool.map`` gives the results in submit order, so without this a failed driver would wait for every
@@ -642,7 +652,7 @@ def _drive(
     boxes: FakeBoxProvider,
     origin: float,
     stop: threading.Event,
-) -> list[list[tuple[float, float, float]]]:
+) -> list[list[tuple[float, float, float, float]]]:
     """Run every step of a group of agents on one thread, each agent at the target pace.
 
     Each agent's step ``k`` is ready at ``origin`` plus its start offset plus ``k`` step intervals, or when
@@ -660,26 +670,26 @@ def _drive(
             next turn.
 
     Returns:
-        For each agent, and for each seq, the moment the step was ready, the start of ``commit`` and the
-        moment the thread saw the step durable; only the steps up to a stop.
+        For each agent, and for each seq, the moment the step was ready, the start of ``commit``, the moment
+        ``commit`` returned and the moment the thread saw the step durable; only the steps up to a stop.
 
     Raises:
         RuntimeError: When a step failed the fence, or the step log closed before the step was durable.
         TimeoutError: When a step is not durable in ``DURABLE_TIMEOUT_SECONDS``.
     """
     interval = step_interval(config.agents)
-    steps: list[list[tuple[float, float, float]]] = [[] for _ in agents]
+    steps: list[list[tuple[float, float, float, float]]] = [[] for _ in agents]
     starts = [origin + start_offset(*agent, interval) for agent in agents]
     due = [(start, index, 0) for index, start in enumerate(starts)]
     heapq.heapify(due)
-    in_flight: deque[tuple[int, int, str, float, float, Any]] = deque()
+    in_flight: deque[tuple[int, int, str, float, float, float, Any]] = deque()
     while (due or in_flight) and not stop.is_set():
         while due and due[0][0] <= _now():
             ready, index, seq = heapq.heappop(due)
-            step_id, started = _commit_step(*agents[index], seq, store, boxes)
-            in_flight.append((index, seq, step_id, ready, started, _waiter(store, step_id)))
+            step_id, started, committed = _commit_step(*agents[index], seq, store, boxes)
+            in_flight.append((index, seq, step_id, ready, started, committed, _waiter(store, step_id)))
         while in_flight:
-            index, seq, step_id, ready, started, waiter = in_flight[0]
+            index, seq, step_id, ready, started, committed, waiter = in_flight[0]
             if waiter is None:
                 store.durable(step_id, 1, timeout=DURABLE_TIMEOUT_SECONDS)
             elif not waiter.is_set():
@@ -690,14 +700,14 @@ def _drive(
                 raise RuntimeError(f"step {step_id} did not land")
             in_flight.popleft()
             finished = _now()
-            steps[index].append((ready, started, finished))
+            steps[index].append((ready, started, committed, finished))
             if seq + 1 < config.steps_per_agent:
                 # The pace keeps to the agent's own schedule: a late step does not push back the later ones.
                 heapq.heappush(due, (max(starts[index] + (seq + 1) * interval, finished), index, seq + 1))
         # Each wait ends within 1 s, so the thread sees a stop soon also with a long step interval.
         if in_flight:
             # Wake for the next ready step even when the oldest step is not durable yet.
-            in_flight[0][5].wait(min(1.0, max(0.0, due[0][0] - _now())) if due else 1.0)
+            in_flight[0][6].wait(min(1.0, max(0.0, due[0][0] - _now())) if due else 1.0)
         elif due:
             stop.wait(min(1.0, max(0.0, due[0][0] - _now())))
     return steps
@@ -818,11 +828,12 @@ def _shard_process(
             {
                 "worker_id": shard["worker_id"],
                 "started": started,
-                "waits": [finished - begun for steps in done for _, begun, finished in steps],
-                "lates": [begun - ready for steps in done for ready, begun, _ in steps],
-                "times": [finished for steps in done for _, _, finished in steps],
-                "first_round_durable": max(steps[0][2] for steps in done),
-                "first_agent_done": min(steps[-1][2] for steps in done),
+                "waits": [finished - begun for steps in done for _, begun, _, finished in steps],
+                "lates": [begun - ready for steps in done for ready, begun, _, _ in steps],
+                "commit_calls": [committed - begun for steps in done for _, begun, committed, _ in steps],
+                "times": [finished for steps in done for _, _, _, finished in steps],
+                "first_round_durable": max(steps[0][3] for steps in done),
+                "first_agent_done": min(steps[-1][3] for steps in done),
                 "boxes_opened": boxes.opened,
                 "boxes_open_max": boxes.open_max,
             }
@@ -895,12 +906,14 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
     shards: list[Shard] = []
     # The reset writes the swarm's job rows before the shard joins ``shards``; the cleanup follows the reset.
     reset_engine: Engine | None = None
+    # Each engine joins this list before its checks, so a failed check still closes its pool. A dispose writes nothing.
+    engines: list[Engine] = []
     reports: list[dict[str, Any]] = []
     # Spawn, not fork: a forked child would inherit the parent's engines and threads.
     context = multiprocessing.get_context("spawn")
     processes: list[Any] = []
-    # A cleanup error must not hide the error that stopped the pass.
-    failed = True
+    # A cleanup error must not hide the error that stopped the pass; it goes on that error as a note.
+    pass_error: BaseException | None = None
     try:
         for index in range(shard_count):
             shard_folder = folder / f"shard-{index}"
@@ -908,6 +921,7 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             # A Postgres shard shares the server, as the step log's run shards share one database cluster.
             url = config.db_url or f"sqlite:///{shard_folder / 'db.sqlite'}"
             engine = create_engine(url, connect_args={"timeout": 60} if url.startswith("sqlite") else {})
+            engines.append(engine)
             if config.db_url is not None:
                 _check_server_addr(engine)
                 _check_throwaway(engine)
@@ -952,7 +966,9 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         if errors:
             raise RuntimeError("a shard process failed:\n" + "\n".join(errors))
         digest, stored = _digest(shards)
-        failed = False
+    except BaseException as error:
+        pass_error = error
+        raise
     finally:
         for process in processes:
             process.join(timeout=30)
@@ -963,24 +979,30 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         cleanup_error: Exception | None = None
         # Only a database that passed every check gets a reset. The pass's rows point at packs that the cleanup
         # deletes, and a later worker's orphan sweep must not take its running jobs.
-        if reset_engine is not None:
-            try:
-                with Session(reset_engine) as session:
-                    _delete_swarm_rows(session)
-                    session.commit()
-            except Exception as error:
-                cleanup_error = error
-        for shard in shards:
-            try:
-                _delete_packs(shard)
-            except Exception as error:
-                cleanup_error = cleanup_error or error
-            finally:
-                shard.engine.dispose()
-        if cleanup_error is not None and not failed:
-            raise cleanup_error
+        try:
+            if reset_engine is not None:
+                try:
+                    with Session(reset_engine) as session:
+                        _delete_swarm_rows(session)
+                        session.commit()
+                except Exception as error:
+                    cleanup_error = error
+            for shard in shards:
+                try:
+                    _delete_packs(shard)
+                except Exception as error:
+                    cleanup_error = cleanup_error or error
+        finally:
+            for engine in engines:
+                engine.dispose()
+        if cleanup_error is not None:
+            if pass_error is None:
+                raise cleanup_error
+            # The operator must know that swarm rows or packs can be left behind, also when the pass failed first.
+            pass_error.add_note(f"the swarm cleanup also failed, so swarm rows or packs can be left: {cleanup_error!r}")
     waits = [wait for report in reports for wait in report["waits"]]
     lates = [late for report in reports for late in report["lates"]]
+    commit_calls = [call for report in reports for call in report["commit_calls"]]
     times = [moment for report in reports for moment in report["times"]]
     started = min(report["started"] for report in reports)
     # The agents start at their offsets; the steady part starts once the first step of every agent is durable.
@@ -1009,6 +1031,12 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
             "p50": round(_percentile_ms(waits, 0.50), 2),
             "p99": round(_percentile_ms(waits, 0.99), 2),
             "max": round(_percentile_ms(waits, 1.0), 2),
+        },
+        # How long the ``commit`` call itself took: the part of the step wait that blocks the agent.
+        "commit_call_ms": {
+            "p50": round(_percentile_ms(commit_calls, 0.50), 2),
+            "p99": round(_percentile_ms(commit_calls, 0.99), 2),
+            "max": round(_percentile_ms(commit_calls, 1.0), 2),
         },
         # How late the drivers committed the ready steps; not part of the step wait, so shown on its own.
         "commit_late_ms": {
@@ -1065,7 +1093,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
     Returns:
         The scenario result; ``slo_passed`` needs, on the sharded pass, the target steady commit rate over a
         steady part of at least ``steady_floor_seconds``, a step wait p99 of at most
-        ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, and the same step log on both layouts.
+        ``MAX_STEP_WAIT_P99_WINDOWS`` flush windows, a commit call p99 of at most ``MAX_COMMIT_CALL_P99_MS``, and
+        the same step log on both layouts.
 
     Raises:
         ValueError: When there is no agent, an agent commits fewer than ``MIN_STEPS_PER_AGENT`` steps, or the
@@ -1118,6 +1147,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "target_commits_per_second": TARGET_COMMITS_PER_SECOND,
         "offered_commits_per_second": round(TARGET_COMMITS_PER_SECOND * OFFERED_LOAD_MARGIN, 1),
         "max_step_wait_p99_ms": max_wait_ms,
+        "max_commit_call_p99_ms": MAX_COMMIT_CALL_P99_MS,
         "min_steady_seconds": round(min_steady_seconds, 3),
         "gated_pass_shards": gated["shards"],
         "passes": passes,
@@ -1148,6 +1178,11 @@ def run(config: SwarmConfig) -> ScenarioResult:
     if gated["step_wait_ms"]["p99"] > max_wait_ms:
         violations.append(
             f"{gated['shards']}-shard step wait p99 is {gated['step_wait_ms']['p99']} ms, above {max_wait_ms} ms"
+        )
+    if gated["commit_call_ms"]["p99"] > MAX_COMMIT_CALL_P99_MS:
+        violations.append(
+            f"{gated['shards']}-shard commit call p99 is {gated['commit_call_ms']['p99']} ms,"
+            f" above {MAX_COMMIT_CALL_P99_MS} ms: the agent waits in commit"
         )
     violations.extend(
         f"{figures['shards']}-shard pass stored {figures['steps_stored']} of {figures['commits']}"
