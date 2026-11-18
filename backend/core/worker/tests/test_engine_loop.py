@@ -48,6 +48,7 @@ from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRu
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSession
 from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
+from core.storage import step_log_store
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import SEQ_MAX, StepLogStore, step_id_for
@@ -1558,6 +1559,47 @@ def test_a_reply_larger_than_the_bound_is_a_failed_model_call_with_its_cost(
     assert live.value.cost_cents == Decimal(1)
     model.reply_calls = None
     assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+
+def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply whose committed JSON is exactly ``_MAX_REPLY_BYTES`` commits; one byte less of bound fails it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to see the checked body and to set the bound.
+    """
+    bodies: list[dict[str, Any]] = []
+    check = engine_loop._check_reply
+
+    def record(body: dict[str, Any]) -> None:
+        """Keep the body, then check it as the loop does.
+
+        Args:
+            body: The model step body.
+        """
+        bodies.append(body)
+        check(body)
+
+    monkeypatch.setattr(engine_loop, "_check_reply", record)
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    reply = first.call_model("improve seed", _TOOLS)
+    size = len(step_log_store._encode_body(bodies[0]))
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size)
+    assert first.call_model("improve seed", _TOOLS) == reply
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size - 1)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooLargeError"):
+        first.call_model("improve seed", _TOOLS)
 
 
 @pytest.mark.parametrize(
