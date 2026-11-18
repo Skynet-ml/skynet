@@ -314,8 +314,8 @@ def register_lifecycle_routes(
 
         now = datetime.now(UTC).isoformat()
         # The pre-check above proved a running run with a checkpoint. A recovery
-        # sweep can requeue it to pending since; the pause still wins, because the
-        # closed admission would fail the worker's claim of it (SKY-814).
+        # sweep can requeue it to pending since; the pause still wins, because a
+        # worker would claim it and then fail on the closed admission (SKY-814).
         if not _set_terminal_if_active(
             job_store,
             optimization_id,
