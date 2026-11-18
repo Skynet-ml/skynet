@@ -87,8 +87,9 @@ metric lives with the judge.
 
 `entry` names the command that proposes each new version. `setup` names a
 command that prepares the repository for it. Write each one as a list of strings, for
-example `["node", "agent/my-agent.js"]`. A plain string, an empty list or an
-empty part fails the setup check, and the message names the key.
+example `["node", "agent/my-agent.js"]`. A plain string, an empty list, an
+empty part or a part with a control character fails the setup check, and the
+message names the key.
 
 - The run's own proposer wins. When the run request names a proposer, the
   run ignores `entry` and `setup`, and the run record shows the note "The
@@ -565,9 +566,10 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A `[proposer] entry` or `setup` that is not a list of non-empty strings,
-  or that contains `__APP_API_KEY__` or `__SKYNET_API_KEY__`. A `setup`
-  without `entry`. An `entry` together with `[proposer] mcp`. An `entry` in a
-  single AutoResearch, Meta-Harness or ShinkaEvolve run.
+  or a part with a control character, or that contains `__APP_API_KEY__` or
+  `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
+  `[proposer] mcp`. An `entry` in a single AutoResearch, Meta-Harness or
+  ShinkaEvolve run.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
