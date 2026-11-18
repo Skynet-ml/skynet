@@ -580,10 +580,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             The file bytes, keyed by path inside the lab, with a ``.keep`` marker in each empty folder.
         """
         ranking = self._ranking()
-        # Every archived candidate has a full score. A score that is not finite ranks last, so a NaN cannot break
-        # the sort; the id order breaks a tie.
+        # The id order breaks a tie.
         order = {
-            f"archive/{cid}{self.suffix}": (score if math.isfinite(score := ranking[candidate]) else -math.inf, place)
+            f"archive/{cid}{self.suffix}": (ranking[candidate], place)
             for place, (candidate, cid) in enumerate(self._ids.items())
         }
         paths = {
@@ -654,8 +653,6 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         except UnicodeDecodeError:
             return json.dumps({"error": f"{_echo(path)} is not UTF-8 text."}, ensure_ascii=False)
         marker = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER}, ensure_ascii=False)
-        if server.budget.remaining <= 0:
-            return marker
         budget = server.budget
         try:
             if not server.task.has_dataset:
@@ -710,8 +707,11 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 len(name.encode("utf-8", "surrogateescape")) > _MAX_CARRY_NAME_BYTES for name in path.split("/")
             ):
                 continue
+            # The cap is the room left under the total cap, so a file that cannot fit never loads.
             try:
-                content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+                content = self._ctx.read_file(
+                    tree, path, min(native_engines.MAX_CANDIDATE_BYTES, _MAX_CARRY_BYTES - total)
+                )
             except FileTooLargeError:
                 content = None
             local = self.work_dir / path

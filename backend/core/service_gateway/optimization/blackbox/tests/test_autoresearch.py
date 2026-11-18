@@ -916,6 +916,11 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     )
 
 
+def test_the_archive_cap_is_64_mib() -> None:
+    """The lab tree carries at most 64 MiB of archived candidates."""
+    assert ar_mod._MAX_ARCHIVE_BYTES == 64 * 2**20
+
+
 @pytest.mark.parametrize(
     ("options", "field"),
     [
@@ -1611,8 +1616,8 @@ def test_the_lab_tree_carries_the_best_archived_candidates_up_to_the_archive_cap
     (worker.work_dir / "archive" / "index.tsv").write_text("id\tscore\tround\n", encoding="utf-8")
     (worker.work_dir / "notebook.md").write_text("notes", encoding="utf-8")
     # In order of the walk: c005 (11 bytes, past the cap alone), the 3.0 tie newest first: c006 (at 4), c004 (at
-    # 8), c002 (past the cap), then c001 (at 10) and last c003, whose score is not finite (past the cap).
-    for text, score in [("aa", 1.0), ("bbbb", 3.0), ("cc", math.nan), ("dddd", 3.0), ("e" * 11, 9.0), ("ffff", 3.0)]:
+    # 8), c002 (past the cap), then c001 (at 10) and last c003, a crash at -inf (past the cap).
+    for text, score in [("aa", 1.0), ("bbbb", 3.0), ("cc", -math.inf), ("dddd", 3.0), ("e" * 11, 9.0), ("ffff", 3.0)]:
         worker._observe(native_engines.Observation(text, score, {}, {}, True, 1))
     reads: list[str] = []
     read_bytes = Path.read_bytes
@@ -1640,6 +1645,55 @@ def test_the_lab_tree_carries_the_best_archived_candidates_up_to_the_archive_cap
     assert sorted(reads) == sorted(files)
     # The worker's own archive stays complete.
     assert len(list((worker.work_dir / "archive").glob("c*.txt"))) == 6
+
+
+def test_the_carried_lab_reads_each_file_with_at_most_the_bytes_left_under_the_total_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read after the total cap is spent asks for at most the bytes left, so a file that cannot fit never loads.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 10)
+    monkeypatch.setattr(ar_mod, "_MAX_CARRY_BYTES", 15)
+    tree = {"work/a": b"a" * 10, "work/b": b"b" * 4, "work/c": b"c" * 3}
+    reads: list[tuple[str, int | None]] = []
+
+    def read_file(tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
+        """Read a fake tree file, and record the cap of the read.
+
+        Args:
+            tree_id: Not used.
+            path: The file path.
+            max_bytes: The cap of the read.
+
+        Returns:
+            The file bytes, or ``None`` when the file is not in the tree.
+
+        Raises:
+            FileTooLargeError: When the file is longer than the cap.
+        """
+        del tree_id
+        reads.append((path, max_bytes))
+        data = tree.get(path)
+        if data is not None and max_bytes is not None and len(data) > max_bytes:
+            raise FileTooLargeError(path, len(data), max_bytes)
+        return data
+
+    config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(tmp_path), engine_config={"model": ""})
+    ctx = EngineContext(
+        reflection_lm=str, run_dir=str(tmp_path), read_file=read_file, list_files=lambda tree_id, path: sorted(tree)
+    )
+    worker = ar_mod._WorkerAutoResearch(config, ctx, max_tool_calls=100)
+    (worker.work_dir / "work").mkdir(parents=True, exist_ok=True)
+
+    worker._pull("tree")
+
+    # The notebook is missing; a (10) fits, b (4) fits the 5 bytes left, c (3) is past the 1 byte left.
+    assert reads == [("notebook.md", 10), ("work/a", 10), ("work/b", 5), ("work/c", 1)]
+    assert sorted(path.name for path in (worker.work_dir / "work").iterdir()) == ["a", "b"]
 
 
 def test_a_run_writes_a_lab_tree_with_the_archive_under_its_cap(
